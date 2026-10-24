@@ -8,6 +8,7 @@ import {
   extractHostname,
   isBrowserEnvironment,
   matchesFilter,
+  matchesFilterPhase,
   matchesHostPattern,
   mergeHeaders,
   mergeObservedHeaders,
@@ -1182,37 +1183,25 @@ describe('matchesHostPattern', () => {
 
 describe('matchesFilter', () => {
   test('returns true when no filter fields are set', () => {
-    expect(
-      matchesFilter({}, { status: 200, method: 'GET' }, 'initial', 'request'),
-    ).toBe(true);
+    expect(matchesFilter({}, { status: 200, method: 'GET' }, 'request')).toBe(
+      true,
+    );
   });
 
   test('statusCodes — matches included status', () => {
     expect(
-      matchesFilter(
-        { statusCodes: [401, 403] },
-        { status: 401 },
-        'initial',
-        'request',
-      ),
+      matchesFilter({ statusCodes: [401, 403] }, { status: 401 }, 'request'),
     ).toBe(true);
   });
 
   test('statusCodes — rejects excluded status', () => {
     expect(
-      matchesFilter(
-        { statusCodes: [401] },
-        { status: 200 },
-        'initial',
-        'request',
-      ),
+      matchesFilter({ statusCodes: [401] }, { status: 200 }, 'request'),
     ).toBe(false);
   });
 
   test('statusCodes — skipped when context.status is absent', () => {
-    expect(
-      matchesFilter({ statusCodes: [401] }, {}, 'initial', 'request'),
-    ).toBe(true);
+    expect(matchesFilter({ statusCodes: [401] }, {}, 'request')).toBe(true);
   });
 
   test('methods — matches included method', () => {
@@ -1220,7 +1209,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { methods: ['POST', 'PUT'] },
         { method: 'POST' },
-        'initial',
         'request',
       ),
     ).toBe(true);
@@ -1228,22 +1216,12 @@ describe('matchesFilter', () => {
 
   test('methods — rejects excluded method', () => {
     expect(
-      matchesFilter(
-        { methods: ['POST'] },
-        { method: 'GET' },
-        'initial',
-        'request',
-      ),
+      matchesFilter({ methods: ['POST'] }, { method: 'GET' }, 'request'),
     ).toBe(false);
   });
 
-  test('methods — skipped for an observer without a method, refused for an interceptor', () => {
-    expect(matchesFilter({ methods: ['POST'] }, {}, 'final', 'response')).toBe(
-      true,
-    );
-    expect(matchesFilter({ methods: ['POST'] }, {}, 'initial', 'request')).toBe(
-      false,
-    );
+  test('methods — skipped without a method', () => {
+    expect(matchesFilter({ methods: ['POST'] }, {}, 'response')).toBe(true);
   });
 
   test('contentTypes — matches included parsed content type', () => {
@@ -1251,7 +1229,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { contentTypes: ['json'] },
         { contentType: 'json' },
-        'final',
         'response',
       ),
     ).toBe(true);
@@ -1262,7 +1239,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { contentTypes: ['text'] },
         { contentType: 'json' },
-        'final',
         'response',
       ),
     ).toBe(false);
@@ -1273,7 +1249,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { contentTypeHeaders: ['application/json'] },
         { contentTypeHeader: 'application/json; charset=utf-8' },
-        'final',
         'response',
       ),
     ).toBe(true);
@@ -1284,7 +1259,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { contentTypeHeaders: ['image/*'] },
         { contentTypeHeader: 'image/png' },
-        'final',
         'response',
       ),
     ).toBe(true);
@@ -1295,7 +1269,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { contentTypeHeaders: ['video/mp4'] },
         { contentTypeHeader: 'image/png' },
-        'final',
         'response',
       ),
     ).toBe(false);
@@ -1306,7 +1279,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { hosts: ['api.example.com'] },
         { requestURL: 'https://api.example.com/path' },
-        'initial',
         'request',
       ),
     ).toBe(true);
@@ -1317,19 +1289,15 @@ describe('matchesFilter', () => {
       matchesFilter(
         { hosts: ['api.example.com'] },
         { requestURL: 'https://other.com/path' },
-        'initial',
         'request',
       ),
     ).toBe(false);
   });
 
-  test('hosts — skipped for an observer without a URL, refused for an interceptor', () => {
-    expect(
-      matchesFilter({ hosts: ['api.example.com'] }, {}, 'final', 'response'),
-    ).toBe(true);
-    expect(
-      matchesFilter({ hosts: ['api.example.com'] }, {}, 'initial', 'request'),
-    ).toBe(false);
+  test('hosts — skipped without a URL', () => {
+    expect(matchesFilter({ hosts: ['api.example.com'] }, {}, 'response')).toBe(
+      true,
+    );
   });
 
   test('hosts — wildcard matches subdomain', () => {
@@ -1337,7 +1305,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { hosts: ['*.example.com'] },
         { requestURL: 'https://api.example.com/path' },
-        'initial',
         'request',
       ),
     ).toBe(true);
@@ -1348,7 +1315,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { schemes: ['https'] },
         { requestURL: 'https://api.example.com/path' },
-        'initial',
         'request',
       ),
     ).toBe(true);
@@ -1359,7 +1325,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { schemes: ['https'] },
         { requestURL: 'http://api.example.com/path' },
-        'initial',
         'request',
       ),
     ).toBe(false);
@@ -1370,19 +1335,13 @@ describe('matchesFilter', () => {
       matchesFilter(
         { schemes: ['http'] },
         { requestURL: 'http://api.example.com/path' },
-        'initial',
         'request',
       ),
     ).toBe(true);
   });
 
-  test('schemes — skipped for an observer without a URL, refused for an interceptor', () => {
-    expect(matchesFilter({ schemes: ['https'] }, {}, 'final', 'response')).toBe(
-      true,
-    );
-    expect(
-      matchesFilter({ schemes: ['https'] }, {}, 'initial', 'request'),
-    ).toBe(false);
+  test('schemes — skipped without a URL', () => {
+    expect(matchesFilter({ schemes: ['https'] }, {}, 'response')).toBe(true);
   });
 
   test('schemes — non-absolute requestURL is a non-match (no throw)', () => {
@@ -1390,7 +1349,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { schemes: ['https'] },
         { requestURL: '/api/users' },
-        'initial',
         'request',
       ),
     ).toBe(false);
@@ -1401,7 +1359,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { schemes: ['https'], hosts: ['*.example.com'] },
         { requestURL: 'https://api.example.com/path' },
-        'initial',
         'request',
       ),
     ).toBe(true);
@@ -1412,7 +1369,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { schemes: ['https'], hosts: ['*.example.com'] },
         { requestURL: 'http://api.example.com/path' },
-        'initial',
         'request',
       ),
     ).toBe(false);
@@ -1423,7 +1379,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['error'] },
         { body: { error: 'bad', code: 42 } },
-        'final',
         'response',
       ),
     ).toBe(true);
@@ -1434,16 +1389,15 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['error'] },
         { body: { ok: true } },
-        'final',
         'response',
       ),
     ).toBe(false);
   });
 
   test('bodyContainsKeys — returns false when body is absent', () => {
-    expect(
-      matchesFilter({ bodyContainsKeys: ['error'] }, {}, 'final', 'response'),
-    ).toBe(false);
+    expect(matchesFilter({ bodyContainsKeys: ['error'] }, {}, 'response')).toBe(
+      false,
+    );
   });
 
   test('bodyContainsKeys — returns false when body is a root array', () => {
@@ -1451,7 +1405,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['error'] },
         { body: ['a', 'b'] },
-        'final',
         'response',
       ),
     ).toBe(false);
@@ -1462,7 +1415,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['error'] },
         { body: 'hello' },
-        'final',
         'response',
       ),
     ).toBe(false);
@@ -1473,7 +1425,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['results'] },
         { body: { results: [1, 2, 3] } },
-        'final',
         'response',
       ),
     ).toBe(true);
@@ -1484,7 +1435,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['data.foo'] },
         { body: { data: { foo: 1 } } },
-        'final',
         'response',
       ),
     ).toBe(true);
@@ -1495,7 +1445,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['data.results'] },
         { body: { data: { results: [] } } },
-        'final',
         'response',
       ),
     ).toBe(true);
@@ -1506,7 +1455,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['data.bar'] },
         { body: { data: { foo: 1 } } },
-        'final',
         'response',
       ),
     ).toBe(false);
@@ -1517,7 +1465,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['data.0.name'] },
         { body: { data: [{ name: 'x' }] } },
-        'final',
         'response',
       ),
     ).toBe(false);
@@ -1528,7 +1475,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { bodyContainsKeys: ['error'] },
         { body: { error: 'bad' } },
-        'final',
         'error',
       ),
     ).toBe(true);
@@ -1539,7 +1485,6 @@ describe('matchesFilter', () => {
       matchesFilter(
         { statusCodes: [200], methods: ['POST'] },
         { status: 200, method: 'GET' },
-        'initial',
         'request',
       ),
     ).toBe(false);
@@ -1550,75 +1495,29 @@ describe('matchesFilter', () => {
       matchesFilter(
         { statusCodes: [200], methods: ['GET'] },
         { status: 200, method: 'GET' },
-        'initial',
         'request',
       ),
     ).toBe(true);
   });
+});
 
-  test('phases — omitted phases do not gate matching', () => {
-    expect(matchesFilter({}, {}, 'initial', 'request')).toBe(true);
-    expect(matchesFilter({}, {}, 'retry', 'request')).toBe(true);
-    expect(matchesFilter({}, {}, 'redirect', 'response')).toBe(true);
+describe('matchesFilterPhase', () => {
+  test('omitted phases do not gate matching', () => {
+    expect(matchesFilterPhase(undefined, 'initial')).toBe(true);
+    expect(matchesFilterPhase(undefined, 'retry')).toBe(true);
+    expect(matchesFilterPhase(undefined, 'redirect')).toBe(true);
   });
 
-  test('phases — empty phases do not gate matching', () => {
-    expect(matchesFilter({ phases: [] }, {}, 'initial', 'request')).toBe(true);
-    expect(matchesFilter({ phases: [] }, {}, 'retry', 'request')).toBe(true);
-    expect(matchesFilter({ phases: [] }, {}, 'final', 'error')).toBe(true);
+  test('empty phases do not gate matching', () => {
+    expect(matchesFilterPhase([], 'initial')).toBe(true);
+    expect(matchesFilterPhase([], 'retry')).toBe(true);
+    expect(matchesFilterPhase([], 'final')).toBe(true);
   });
 
-  test('phases — list is OR: match if current event type is included', () => {
-    expect(
-      matchesFilter(
-        { phases: ['retry', 'redirect'] },
-        {},
-        'initial',
-        'request',
-      ),
-    ).toBe(false);
-
-    expect(
-      matchesFilter({ phases: ['retry', 'redirect'] }, {}, 'retry', 'request'),
-    ).toBe(true);
-
-    expect(
-      matchesFilter(
-        { phases: ['retry', 'redirect'] },
-        {},
-        'redirect',
-        'request',
-      ),
-    ).toBe(true);
-  });
-
-  test('phases — combined with other filters', () => {
-    expect(
-      matchesFilter(
-        { phases: ['initial'], methods: ['POST'] },
-        { method: 'POST' },
-        'initial',
-        'request',
-      ),
-    ).toBe(true);
-
-    expect(
-      matchesFilter(
-        { phases: ['initial'], methods: ['POST'] },
-        { method: 'GET' },
-        'initial',
-        'request',
-      ),
-    ).toBe(false);
-
-    expect(
-      matchesFilter(
-        { phases: ['initial'], methods: ['POST'] },
-        { method: 'POST' },
-        'retry',
-        'request',
-      ),
-    ).toBe(false);
+  test('list is OR: match if current event type is included', () => {
+    expect(matchesFilterPhase(['retry', 'redirect'], 'initial')).toBe(false);
+    expect(matchesFilterPhase(['retry', 'redirect'], 'retry')).toBe(true);
+    expect(matchesFilterPhase(['retry', 'redirect'], 'redirect')).toBe(true);
   });
 });
 

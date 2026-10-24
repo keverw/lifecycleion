@@ -1,5 +1,9 @@
 import { asciiUppercase } from '../internal/http-method';
-import { deleteHeader, requestHeaderPairs } from '../internal/header-utils';
+import {
+  deleteHeader,
+  describeRefusedHeader,
+  requestHeaderPairs,
+} from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { concatChunks } from '../internal/concat-chunks';
 import {
@@ -16,10 +20,7 @@ import {
 import {
   extractFetchHeaders,
   derivedRedirectFields,
-  isAbsoluteWebURL,
-  resolveBrowserInitialURL,
-  resolveBrowserRequestURL,
-  stripCrossOriginURLCredentials,
+  resolveBrowserDispatchURL,
 } from '../utils';
 import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
@@ -61,43 +62,19 @@ export class FetchAdapter implements HTTPAdapter {
       initialURL,
     } = readAdapterRequestFields(request);
     // A relative URL is resolved as `fetch` resolves it, against the document's base URL
-    // or the worker's `location` (see `resolveBrowserRequestURL`). One with no base to
-    // resolve it against (this adapter driven directly outside a browser), or that is not
-    // a URL, is refused below.
-    const resolvedURL = resolveBrowserRequestURL(requestURL);
-    // Credentials are withheld from the resolved URL, not the one written: `//u:p@host/x`
-    // on an `http:` page is an `http:` URL, another origin than an `https:` initial URL.
-    // A root- or protocol-relative initial URL is resolved the same way, so `/start` names
-    // the page's origin; any other relative one, or one that does not resolve, fails
-    // closed (see `resolveBrowserInitialURL`). The URL sent, checked below, and what a `Location`
-    // resolves against.
-    const dispatchedURL =
-      resolvedURL === undefined
-        ? undefined
-        : stripCrossOriginURLCredentials(
-            resolvedURL,
-            resolveBrowserInitialURL(initialURL),
-          );
+    // or the worker's `location`, with credentials withheld for another origin than the
+    // initial URL's; one that does not resolve, or is not http(s), is refused as the
+    // non-retryable `adapter_error` it is (see `resolveBrowserDispatchURL`). Unresolved,
+    // `fetch` threw an invalid URL error retried as a network failure to no end. The URL
+    // sent, and what a `Location` resolves against.
+    const dispatchedURL = resolveBrowserDispatchURL(
+      requestURL,
+      initialURL,
+      'FetchAdapter',
+    );
 
-    // Refused as NodeAdapter refuses it, as the non-retryable `adapter_error` it is: the
-    // same URL fails the same way on every attempt. Unresolved, `fetch` threw an invalid
-    // URL error retried as a network failure to no end; any other scheme was fetched - a
-    // `file:` URL read off the local disk where the runtime's `fetch` reads one. The
-    // client always sends an absolute http(s) URL.
-    if (dispatchedURL === undefined) {
-      throw nonRetryableAdapterErrorFrom(
-        new TypeError(
-          'FetchAdapter request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)',
-        ),
-      );
-    }
-
-    if (!isAbsoluteWebURL(dispatchedURL)) {
-      throw nonRetryableAdapterErrorFrom(
-        new TypeError(
-          `FetchAdapter sends http: and https: URLs only (got ${dispatchedURL.slice(0, dispatchedURL.indexOf(':') + 1)})`,
-        ),
-      );
+    if (typeof dispatchedURL !== 'string') {
+      throw dispatchedURL;
     }
 
     // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
@@ -114,24 +91,34 @@ export class FetchAdapter implements HTTPAdapter {
     // way.
     //
     // Only where it can be: a runtime with `Request` - a test setup that polyfills only
-    // `fetch` has none.
+    // `fetch` has none. There the headers are still checked, by `Headers` where it exists,
+    // so a value it refuses is not retried either.
     //
-    // The headers it is built with are kept for `fetch` below, so they are materialized
-    // once; where it is not built, `fetch` materializes them inside its own `try`.
-    let fetchHeaders: HeadersInit | undefined;
+    // Refused in its own words, and without the runtime's error: that quotes what it
+    // refused - Bun a header value, Node a URL with its userinfo and query - and a
+    // carrier's message and `cause` reach logs.
+    //
+    // The headers are materialized once, here, and kept for `fetch` below.
+    let fetchHeaders: HeadersInit;
+    try {
+      fetchHeaders = materializeFetchHeaders(headers);
+      if (typeof Request !== 'function' && typeof Headers === 'function') {
+        new Headers(fetchHeaders);
+      }
+    } catch {
+      throw refusedRequestBuild(headers);
+    }
 
     if (typeof Request === 'function') {
       let builtMethod: string;
       try {
-        fetchHeaders = materializeFetchHeaders(headers);
         builtMethod = new Request(dispatchedURL, {
           method,
           headers: fetchHeaders,
           redirect: 'manual',
         }).method;
-      } catch (error) {
-        // On a carrier: the throw may be the caller's own, from a header value.
-        throw nonRetryableAdapterErrorFrom(error);
+      } catch {
+        throw refusedRequestBuild(headers);
       }
 
       // A runtime that rewrites the method - Bun's fetch reads one it does not know as
@@ -162,7 +149,7 @@ export class FetchAdapter implements HTTPAdapter {
     try {
       response = await fetch(dispatchedURL, {
         method,
-        headers: fetchHeaders ?? materializeFetchHeaders(headers),
+        headers: fetchHeaders,
         body: body as BodyInit | null,
         signal: signal ?? null,
         redirect: 'manual',
@@ -514,6 +501,52 @@ function materializeFetchHeaders(
   }
 
   return materialized;
+}
+
+/**
+ * The non-retryable refusal of a request the runtime will not build, naming what it refused
+ * by kind: the first header `Headers` will not take - its name, never its value - or else
+ * the URL or method.
+ */
+function refusedRequestBuild(
+  headers: Record<string, string | string[]>,
+): Error {
+  return nonRetryableAdapterErrorFrom(
+    new TypeError(
+      `FetchAdapter request could not be built: the runtime refused ${describeFetchRefusal(headers)}`,
+    ),
+  );
+}
+
+function describeFetchRefusal(
+  headers: Record<string, string | string[]>,
+): string {
+  if (typeof Headers !== 'function') {
+    return 'its URL, method or headers';
+  }
+
+  for (const [name, value] of requestHeaderPairs(headers)) {
+    try {
+      new Headers().append(name, value);
+    } catch {
+      return describeRefusedHeader(
+        name,
+        isHeaderNameAccepted(name) ? 'value' : 'name',
+      );
+    }
+  }
+
+  return 'its URL or method';
+}
+
+/** Whether `Headers` takes `name` with a plain value: if so, it was the value it refused. */
+function isHeaderNameAccepted(name: string): boolean {
+  try {
+    new Headers().append(name, 'x');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

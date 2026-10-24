@@ -56,6 +56,7 @@ import {
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   deleteHeader,
+  describeRefusedHeader,
   lowerCaseHeaderName,
   materializeRequestHeaders,
 } from '../internal/header-utils';
@@ -495,12 +496,15 @@ export class NodeAdapter implements HTTPAdapter {
     const isDecompressing = this._config.decompress !== false;
 
     // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
-    // URL fails the same way on every attempt.
+    // URL fails the same way on every attempt. In its own words, without the parser's
+    // error, which carries the whole URL as its `input` - userinfo and query with it.
     let parsedURL: URL;
     try {
       parsedURL = new URL(request.requestURL);
-    } catch (error) {
-      throw nonRetryableAdapterErrorFrom(error);
+    } catch {
+      throw nonRetryableAdapterErrorFrom(
+        new TypeError('NodeAdapter request URL is not a valid absolute URL'),
+      );
     }
 
     // Refused, not sent: any other scheme went out as plaintext HTTP - a `wss://` URL to
@@ -528,6 +532,25 @@ export class NodeAdapter implements HTTPAdapter {
     const httpModule = isHTTPS ? https : http;
 
     const requestHeaders = materializeRequestHeaders(request.headers);
+
+    // Checked here, by Node's own rules, so a header `http.request` would refuse is
+    // refused in this adapter's words: Node's error quotes the name - text pasted in whole
+    // as one, `Authorization: Bearer …` - and a carrier's message and `cause` reach logs.
+    // Non-retryable, as the same headers fail the same way on every attempt.
+    for (const [name, value] of Object.entries(requestHeaders)) {
+      let part: 'name' | 'value' = 'name';
+      try {
+        http.validateHeaderName(name);
+        part = 'value';
+        http.validateHeaderValue(name, value);
+      } catch {
+        throw nonRetryableAdapterErrorFrom(
+          new TypeError(
+            `NodeAdapter refused ${describeRefusedHeader(name, part)}`,
+          ),
+        );
+      }
+    }
 
     // Asked for as `fetch` asks for it, and decoded as it decodes (see
     // `createResponseBodySource`); a caller's own `Accept-Encoding` stands - `identity`

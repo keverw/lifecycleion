@@ -15,10 +15,10 @@ import {
 /**
  * Every list a filter can carry besides `methods`: the type each entry must have and, for
  * a list of fixed names, the names allowed (`phases` is allowed per registry, since each
- * kind of callback is reached in its own phases). `matchesFilter` tests membership with
- * `includes`/`some`, so a string in place of a list would match by substring -
- * `phases: 'initial,retry'` matching both - and a name no request can have would match
- * nothing, silently.
+ * kind of callback is reached in its own phases). `matchesFilter` and `matchesFilterPhase`
+ * test membership with `includes`/`some`, so a string in place of a list would match by
+ * substring - `phases: 'initial,retry'` matching both - and a name no request can have
+ * would match nothing, silently.
  */
 const FILTER_LISTS: Record<
   string,
@@ -83,7 +83,7 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
       normalizedEntry !== '' &&
       normalizeDomain(parsed) !== normalizedEntry
     ) {
-      return `is read by the URL parser as ${JSON.stringify(parsed)}, which is what a request's hostname will be; give that form`;
+      return "is read by the URL parser as another hostname, which is what a request's hostname will be; give the form the URL parser reads";
     }
     return normalizedEntry === '' || parsed === undefined
       ? "is not a hostname the matcher can read (it reads host names: letters, digits, '_' and inner hyphens), so it can never match"
@@ -240,10 +240,12 @@ function copyFilterLists(
         `${label} filter ${field} is empty; omit it to match every request`,
       );
     }
-    for (const entry of list) {
+    for (const [index, entry] of list.entries()) {
+      // Named by its place in the list, never its text.
+      const entryName = `${label} filter ${field}[${String(index)}]`;
       if (typeof entry !== rule.entryType) {
         throw new TypeError(
-          `${label} filter ${field} must contain only ${rule.entryType}s (got ${entry === null ? 'null' : typeof entry})`,
+          `${entryName} must be a ${rule.entryType} (got ${entry === null ? 'null' : typeof entry})`,
         );
       }
       const problem =
@@ -251,13 +253,11 @@ function copyFilterLists(
           ? rule.check?.(entry)
           : rule.checkNumber?.(entry as number);
       if (problem !== undefined) {
-        throw new TypeError(
-          `${label} filter ${field} entry ${JSON.stringify(entry)} ${problem}`,
-        );
+        throw new TypeError(`${entryName} ${problem}`);
       }
       if (allowed && !allowed.includes(entry as string)) {
         throw new TypeError(
-          `${label} filter ${field} has ${JSON.stringify(entry)}, which is not one of ${allowed.map((name) => `'${name}'`).join(', ')}`,
+          `${entryName} is not one of ${allowed.map((name) => `'${name}'`).join(', ')}`,
         );
       }
     }

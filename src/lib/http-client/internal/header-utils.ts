@@ -99,6 +99,30 @@ export function isBrowserRestrictedHeader(
   return false;
 }
 
+/** RFC 9110's `token`: the characters a header name is made of. */
+const HEADER_NAME_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/** Whether `name` is an RFC 9110 token, as every transport requires a header name to be. */
+function isHeaderNameToken(name: string): boolean {
+  return HEADER_NAME_TOKEN.test(name);
+}
+
+/**
+ * The part of a header a runtime refused, for a refusal message: `the value of header
+ * 'name'` or `the name of header 'name'`, or `a header name` whenever the name is not a
+ * token - text pasted in whole as a name, `Authorization: Bearer …`, is written nowhere.
+ * Never the value: a runtime's own message quotes it, which is why an adapter writes its
+ * own.
+ */
+export function describeRefusedHeader(
+  name: string,
+  part: 'name' | 'value',
+): string {
+  return isHeaderNameToken(name)
+    ? `the ${part} of header '${name}'`
+    : 'a header name';
+}
+
 /**
  * Throws if any of the given headers are browser-restricted.
  * Used by `HTTPClient` in a browser runtime to fail fast during development; an adapter

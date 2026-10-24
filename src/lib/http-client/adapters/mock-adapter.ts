@@ -883,18 +883,23 @@ function parseCookieHeader(
 function cookiesToSetCookieHeaders(
   cookies: Record<string, string | MockCookieOptions | null>,
 ): string[] {
-  return Object.entries(cookies).map(([name, value]) => {
+  return Object.entries(cookies).map(([name, value], index) => {
     // A `;` or `=` in a name, or a `;` in a value or attribute, would rewrite the line -
     // `abc; Domain=other.test` sets a Domain the route never asked for. A route mistake.
-    assertCookieText(name, 'name', /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/);
+    // A name refused is named by its position: it may itself be the text pasted wrong.
+    assertCookieText(
+      name,
+      `name at position ${String(index)}`,
+      /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/,
+    );
     if (typeof value === 'string') {
-      assertCookieText(value, 'value');
+      assertCookieText(value, `"${name}" value`);
     } else if (value !== null) {
-      assertCookieText(String(value.value), 'value');
+      assertCookieText(String(value.value), `"${name}" value`);
       for (const attribute of ['path', 'domain'] as const) {
         const text = value[attribute];
         if (text !== undefined) {
-          assertCookieText(text, attribute);
+          assertCookieText(text, `"${name}" ${attribute}`);
         }
       }
       // The two typed attributes, held to their types: a string in either was written
@@ -1305,7 +1310,7 @@ function assertCookieText(text: string, part: string, pattern?: RegExp): void {
   const isUnsafe = /[;\u0000-\u001f\u007f\u0100-\uffff]/.test(text);
   if (isUnsafe || (pattern !== undefined && !pattern.test(text))) {
     throw new TypeError(
-      `MockAdapter cookie ${part} ${JSON.stringify(text)} cannot be written into a Set-Cookie line`,
+      `MockAdapter cookie ${part} cannot be written into a Set-Cookie line`,
     );
   }
 }

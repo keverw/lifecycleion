@@ -767,13 +767,13 @@ export class CookieJar {
     const [host, scope] = args as unknown[];
     if (typeof host !== 'string' || host.trim() === '') {
       throw new TypeError(
-        `CookieJar.clear() host must be a non-empty string (got ${describeValue(host)})`,
+        `CookieJar.clear() host must be a non-empty string (got ${typeof host === 'string' ? 'an empty string' : describeValue(host)})`,
       );
     }
 
     if (scope !== 'hostname' && scope !== 'domain') {
       throw new TypeError(
-        `CookieJar.clear() scope must be 'hostname' or 'domain' (got ${describeValue(scope)})`,
+        `CookieJar.clear() scope must be 'hostname' or 'domain' (got ${typeof scope === 'string' ? 'an unknown scope' : describeValue(scope)})`,
       );
     }
 

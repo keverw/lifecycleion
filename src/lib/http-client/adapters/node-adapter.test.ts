@@ -33,6 +33,7 @@ import type {
   WritableLike,
 } from '../types';
 import { startTestServer } from '../test-helpers/test-server';
+import { errorText } from '../test-helpers/error-text';
 import type { TestServer } from '../test-helpers/test-server';
 import {
   startTlsTestServer,
@@ -1241,6 +1242,57 @@ describe('NodeAdapter streamResponse factory failures', () => {
 });
 
 describe('NodeAdapter.send() — unit branches without server', () => {
+  test("PR review round 43: a header http.request would refuse is refused in the adapter's words, without Node's error", async () => {
+    const secret = 'secret-token';
+    const requestSpy = spyOn(http, 'request');
+    try {
+      for (const [headers, message] of [
+        [
+          { [`Authorization: Bearer ${secret}`]: 'x' },
+          'NodeAdapter refused a header name',
+        ],
+        [
+          { authorization: `Bearer ${secret}\nx` },
+          "NodeAdapter refused the value of header 'authorization'",
+        ],
+      ] as const) {
+        const client = new HTTPClient({
+          adapter: new NodeAdapter(),
+          baseURL: 'http://api.test',
+        });
+        const builder = client.get('/x', { headers });
+        await builder.send();
+
+        expect(builder.error?.code).toBe('adapter_error');
+        expect(builder.error?.cause?.message).toBe(message);
+        expect(errorText(builder.error)).not.toContain(secret);
+      }
+      expect(requestSpy).not.toHaveBeenCalled();
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test("PR review round 43: a malformed URL is refused without the parser's error, which carries the whole URL", async () => {
+    const secret = 'secret-token';
+    const outcome = await new NodeAdapter()
+      .send({
+        requestURL: `http://user:${secret}@exa mple.test/x?token=${secret}`,
+        method: 'GET',
+        headers: {},
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(String(outcome?.message)).toBe(
+      'NodeAdapter request URL is not a valid absolute URL',
+    );
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(errorText(outcome)).not.toContain(secret);
+  });
+
   test('materializes repeated Cookie headers before calling http.request', async () => {
     const req = new MockClientRequest();
     let capturedOptions: http.RequestOptions | undefined;

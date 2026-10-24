@@ -17,6 +17,7 @@ import {
   STREAM_ABORT_HEADERS_KEY,
 } from '../consts';
 import type { AdapterRequest } from '../types';
+import { errorText } from '../test-helpers/error-text';
 
 let server: TestServer;
 const decoder = new TextDecoder();
@@ -607,6 +608,107 @@ describe('FetchAdapter', () => {
 
       expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
       expect(events).toEqual([]);
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test("PR review round 43: a request the runtime refuses to build is reported without the runtime's error, which quotes the value", async () => {
+    const secret = 'secret-token';
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+    const send = (request: Partial<AdapterRequest>) =>
+      new FetchAdapter()
+        .send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+          ...request,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+    // This runtime's own refusal: Bun quotes a header value it will not take.
+    const header = await send({
+      headers: { authorization: `Bearer ${secret}\u0000x` },
+    });
+    expect(String(header?.message)).toBe(
+      "FetchAdapter request could not be built: the runtime refused the value of header 'authorization'",
+    );
+    expect(header?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(errorText(header)).not.toContain(secret);
+
+    // A name that is not a token - a whole header line pasted in as one - is not written.
+    const name = await send({
+      headers: { [`Authorization: Bearer ${secret}`]: 'x' },
+    });
+    expect(String(name?.message)).toBe(
+      'FetchAdapter request could not be built: the runtime refused a header name',
+    );
+    expect(errorText(name)).not.toContain(secret);
+
+    // Node's refusal of a URL with credentials, which quotes the URL.
+    const OriginalRequest = globalThis.Request;
+    globalThis.Request = class {
+      constructor(url: string) {
+        throw Object.assign(
+          new TypeError(
+            `Request cannot be constructed from a URL that includes credentials: ${url}`,
+          ),
+          { input: url },
+        );
+      }
+    } as unknown as typeof Request;
+    try {
+      const url = await send({
+        requestURL: `https://user:${secret}@api.test/x?token=${secret}`,
+      });
+      expect(String(url?.message)).toBe(
+        'FetchAdapter request could not be built: the runtime refused its URL or method',
+      );
+      expect(errorText(url)).not.toContain(secret);
+    } finally {
+      globalThis.Request = OriginalRequest;
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test("PR review round 43: without a global Request, a header Headers refuses is refused before fetch, without the runtime's error", async () => {
+    const secret = 'secret-token';
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+    const OriginalRequest = globalThis.Request;
+    delete (globalThis as Record<string, unknown>).Request;
+    try {
+      // A repeated header is appended to a `Headers`; a single one checked by one.
+      for (const headers of [
+        { authorization: ['Bearer a', `Bearer ${secret}\u0000x`] },
+        { authorization: `Bearer ${secret}\u0000x` },
+      ]) {
+        const outcome = await new FetchAdapter()
+          .send({ requestURL: 'https://api.test/x', method: 'GET', headers })
+          .then(
+            () => undefined,
+            (error: unknown) => error as Record<PropertyKey, unknown>,
+          );
+
+        expect(String(outcome?.message)).toBe(
+          "FetchAdapter request could not be built: the runtime refused the value of header 'authorization'",
+        );
+        expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+        expect(errorText(outcome)).not.toContain(secret);
+      }
+    } finally {
+      globalThis.Request = OriginalRequest;
     }
 
     expect(calls).toBe(0);

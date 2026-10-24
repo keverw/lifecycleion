@@ -2,7 +2,7 @@ import {
   safeHandleCallbackAndWait,
   reportCallbackError,
 } from '../safe-handle-callback';
-import { matchesFilter, scalarHeader } from './utils';
+import { matchesFilter, matchesFilterPhase, scalarHeader } from './utils';
 import {
   CallbackRegistry,
   copyCallbackPhase,
@@ -54,6 +54,7 @@ export class ResponseObserverManager extends CallbackRegistry<
         'ResponseObserver',
         observers,
         (filter) =>
+          matchesFilterPhase(filter?.phases, phase.type) &&
           matchesFilter(
             filter ?? {},
             {
@@ -64,7 +65,6 @@ export class ResponseObserverManager extends CallbackRegistry<
               contentType: response.contentType,
               contentTypeHeader: scalarHeader(response.headers, 'content-type'),
             },
-            phase.type,
             'response',
           ),
         () => [response, request, copyCallbackPhase(phase)],
@@ -101,13 +101,13 @@ export class ErrorObserverManager extends CallbackRegistry<
         'ErrorObserver',
         observers,
         (filter) =>
+          matchesFilterPhase(filter?.phases, phase.type) &&
           matchesFilter(
             filter ?? {},
             {
               method: request.method,
               requestURL: request.requestURL,
             },
-            phase.type,
             'error',
           ),
         () => [error, request, copyCallbackPhase(phase)],

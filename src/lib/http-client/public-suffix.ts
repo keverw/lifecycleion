@@ -59,10 +59,17 @@ function toLabels(hostname: string): string[] {
  * going somewhere it should not, months later. Every other refusal in this file is a
  * response to a remote server and has to keep the process running.
  */
-function normalizeSuffix(entry: unknown, listName: string): string {
+function normalizeSuffix(
+  entry: unknown,
+  listName: string,
+  index: number,
+): string {
+  // Named by its place in the list, never its text, as every refusal here is.
+  const entryName = `publicSuffixes.${listName}[${String(index)}]`;
+
   if (typeof entry !== 'string') {
     throw new TypeError(
-      `publicSuffixes.${listName} must hold strings; received ${typeof entry}`,
+      `${entryName} must be a string (got ${entry === null ? 'null' : typeof entry})`,
     );
   }
 
@@ -74,28 +81,22 @@ function normalizeSuffix(entry: unknown, listName: string): string {
     : stripped.toLowerCase();
 
   if (normalized === '') {
-    throw new TypeError(
-      `publicSuffixes.${listName} must not hold empty suffixes`,
-    );
+    throw new TypeError(`${entryName} is empty`);
   }
 
   if (normalized.includes('*')) {
     throw new TypeError(
-      `publicSuffixes.${listName} does not support wildcards; list '${entry}' as a plain suffix`,
+      `${entryName} is a wildcard, which publicSuffixes does not support; list it as a plain suffix`,
     );
   }
 
   if (normalized.length > 253) {
-    throw new TypeError(
-      `publicSuffixes.${listName} entry '${entry}' is longer than a hostname`,
-    );
+    throw new TypeError(`${entryName} is longer than a hostname`);
   }
 
   for (const label of normalized.split('.')) {
     if (label === '') {
-      throw new TypeError(
-        `publicSuffixes.${listName} entry '${entry}' has an empty label`,
-      );
+      throw new TypeError(`${entryName} has an empty label`);
     }
 
     // Overrides are hostname suffixes, not URLs or arbitrary match strings. Keeping the
@@ -105,9 +106,7 @@ function normalizeSuffix(entry: unknown, listName: string): string {
     // hyphens, an edge hyphen included, so a `my_net` the jar keeps cookies for can be
     // declared a suffix to isolate its tenants.
     if (label.length > 63 || !/^[a-z0-9_-]+$/.test(label)) {
-      throw new TypeError(
-        `publicSuffixes.${listName} entry '${entry}' is not a valid hostname suffix`,
-      );
+      throw new TypeError(`${entryName} is not a valid hostname suffix`);
     }
   }
 
@@ -117,18 +116,19 @@ function normalizeSuffix(entry: unknown, listName: string): string {
   // could never take effect.
   if (endsInANumber(normalized.split('.').at(-1) ?? '')) {
     throw new TypeError(
-      `publicSuffixes.${listName} entry '${entry}' ends in a number, so no request host can match it (an IP address is never a public suffix)`,
+      `${entryName} ends in a number, so no request host can match it (an IP address is never a public suffix)`,
     );
   }
 
   return normalized;
 }
 
+/** A list's suffixes normalized, index for index, so a refusal can name an entry's place. */
 function normalizeList(
   entries: readonly string[] | undefined,
   listName: string,
-): ReadonlySet<string> {
-  const result = new Set<string>();
+): string[] {
+  const result: string[] = [];
 
   if (entries === undefined) {
     return result;
@@ -138,8 +138,8 @@ function normalizeList(
     throw new TypeError(`publicSuffixes.${listName} must be an array`);
   }
 
-  for (const entry of entries) {
-    result.add(normalizeSuffix(entry, listName));
+  for (const [index, entry] of entries.entries()) {
+    result.push(normalizeSuffix(entry, listName, index));
   }
 
   return result;
@@ -188,14 +188,16 @@ export class PublicSuffixResolver {
       }
     }
 
-    this.added = normalizeList(overrides?.add, 'add');
-    this.removed = normalizeList(overrides?.remove, 'remove');
+    const added = normalizeList(overrides?.add, 'add');
+    const removed = normalizeList(overrides?.remove, 'remove');
+    this.added = new Set(added);
+    this.removed = new Set(removed);
 
-    for (const suffix of this.added) {
-      for (const removed of this.removed) {
-        if (suffix === removed || suffix.endsWith(`.${removed}`)) {
+    for (const [addIndex, suffix] of added.entries()) {
+      for (const [removeIndex, removedSuffix] of removed.entries()) {
+        if (suffix === removedSuffix || suffix.endsWith(`.${removedSuffix}`)) {
           throw new TypeError(
-            `publicSuffixes cannot add '${suffix}' beneath removed suffix '${removed}'; shared cookies conflict with tenant isolation`,
+            `publicSuffixes.add[${String(addIndex)}] is, or is beneath, publicSuffixes.remove[${String(removeIndex)}]; shared cookies conflict with tenant isolation`,
           );
         }
       }

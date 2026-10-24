@@ -10,6 +10,7 @@ import {
   XHR_BROWSER_TIMEOUT_FLAG,
 } from '../consts';
 import { HTTPClient } from '../http-client';
+import { errorText } from '../test-helpers/error-text';
 
 // ---------------------------------------------------------------------------
 // Fake XMLHttpRequest
@@ -2575,6 +2576,78 @@ describe('XHRAdapter', () => {
     expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     expect(FakeXHR.instances[0]?.sentBody).toBeNull();
     expect(events).toEqual([]);
+  });
+});
+
+describe('XHRAdapter - PR review round 43', () => {
+  test("PR review round 43: a header or method the runtime refuses is reported without the runtime's error, which quotes the value", async () => {
+    const secret = 'secret-token';
+    // As Chrome refuses one, its message quoting what it refused.
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
+      FakeXHR
+    ) {
+      public override open(method: string, url: string) {
+        if (method !== 'GET') {
+          throw new DOMException(
+            `Failed to execute 'open' on 'XMLHttpRequest': '${method}' is not a valid HTTP method.`,
+            'SyntaxError',
+          );
+        }
+        super.open(method, url);
+      }
+
+      public override setRequestHeader(name: string, value: string) {
+        if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
+          throw new DOMException(
+            `Failed to execute 'setRequestHeader' on 'XMLHttpRequest': '${name}' is not a valid HTTP header field name.`,
+            'SyntaxError',
+          );
+        }
+        if (value.includes('\n')) {
+          throw new DOMException(
+            `Failed to execute 'setRequestHeader' on 'XMLHttpRequest': '${value}' is not a valid HTTP header field value.`,
+            'SyntaxError',
+          );
+        }
+        super.setRequestHeader(name, value);
+      }
+    };
+    const send = (request: Partial<AdapterRequest>) =>
+      new XHRAdapter()
+        .send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+          ...request,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+    const header = await send({
+      headers: { authorization: `Bearer ${secret}\nx` },
+    });
+    expect(String(header?.message)).toBe(
+      "XHRAdapter refused the value of header 'authorization'",
+    );
+    expect(header?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(errorText(header)).not.toContain(secret);
+
+    // A name that is not a token - a whole header line pasted in as one - is not written.
+    const name = await send({
+      headers: { [`Authorization: Bearer ${secret}`]: 'x' },
+    });
+    expect(String(name?.message)).toBe('XHRAdapter refused a header name');
+    expect(name?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(errorText(name)).not.toContain(secret);
+
+    const method = await send({ method: `X-${secret}` });
+    expect(String(method?.message)).toBe(
+      'XHRAdapter could not open the request: the runtime refused its method or URL',
+    );
+    expect(method?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(errorText(method)).not.toContain(secret);
   });
 });
 

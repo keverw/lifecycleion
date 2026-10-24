@@ -4738,7 +4738,9 @@ describe('HTTPClient — redirect', () => {
 
     expect(res.isFailed).toBe(true);
     expect(builder.error?.code).toBe('request_setup_error');
-    expect(builder.error?.cause?.message).toContain('file:///etc/passwd');
+    // Named by its scheme; the path stays out of the message.
+    expect(builder.error?.cause?.message).toContain('(got file:)');
+    expect(builder.error?.cause?.message).not.toContain('/etc/passwd');
   });
 
   test('a redirect interceptor still sees a non-http(s) Location and can rescue it', async () => {

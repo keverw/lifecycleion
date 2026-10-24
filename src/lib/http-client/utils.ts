@@ -8,6 +8,7 @@ import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { readUnknownMember } from '../internal/read-member';
+import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
 import {
   lowerCaseHeaderName,
   presentHeaderValue,
@@ -462,9 +463,69 @@ export function resolveBrowserInitialURL(
     // Relative: resolved below only when it names an origin.
   }
 
-  return initialURL.startsWith('/')
-    ? (resolveBrowserRequestURL(initialURL) ?? initialURL)
-    : initialURL;
+  if (!initialURL.startsWith('/')) {
+    return initialURL;
+  }
+
+  // Not absolute - it failed to parse above - so only the page can resolve it.
+  const base = getBrowserResolutionBase();
+
+  if (base === undefined) {
+    return initialURL;
+  }
+
+  try {
+    return new URL(initialURL, base).href;
+  } catch {
+    return initialURL;
+  }
+}
+
+/**
+ * The URL a browser adapter sends `requestURL` to, or the non-retryable error it is refused
+ * with - `adapterName` naming the adapter in its message. Resolved as the browser resolves
+ * it (see {@link resolveBrowserRequestURL}), with credentials withheld from the resolved
+ * URL, not the one written: `//u:p@host/x` on an `http:` page is an `http:` URL, another
+ * origin than an `https:` initial URL. A root- or protocol-relative initial URL is resolved
+ * the same way, so `/start` names the page's origin; any other relative one, or one that
+ * does not resolve, fails closed (see {@link resolveBrowserInitialURL}).
+ *
+ * Refused as NodeAdapter refuses it, as the non-retryable `adapter_error` it is: the same
+ * URL fails the same way on every attempt. A relative URL with no base to resolve it
+ * against (an adapter driven directly outside a browser), or one that is not a URL, cannot
+ * be sent, nor compared with where an answer came from; any other scheme than http(s) was
+ * loaded where the runtime loads one - a `file:` URL read off the local disk. The client
+ * always sends an absolute http(s) URL.
+ */
+export function resolveBrowserDispatchURL(
+  requestURL: string,
+  initialURL: string | undefined,
+  adapterName: 'FetchAdapter' | 'XHRAdapter',
+): string | Error {
+  const resolvedURL = resolveBrowserRequestURL(requestURL);
+
+  if (resolvedURL === undefined) {
+    return nonRetryableAdapterErrorFrom(
+      new TypeError(
+        `${adapterName} request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)`,
+      ),
+    );
+  }
+
+  const dispatchedURL = stripCrossOriginURLCredentials(
+    resolvedURL,
+    resolveBrowserInitialURL(initialURL),
+  );
+
+  if (!isAbsoluteWebURL(dispatchedURL)) {
+    return nonRetryableAdapterErrorFrom(
+      new TypeError(
+        `${adapterName} sends http: and https: URLs only (got ${dispatchedURL.slice(0, dispatchedURL.indexOf(':') + 1)})`,
+      ),
+    );
+  }
+
+  return dispatchedURL;
 }
 
 /**
@@ -539,7 +600,7 @@ export function describeInvalidHTTPMethod(
     return 'is empty';
   }
   if (!HTTP_METHOD_TOKEN.test(candidate)) {
-    return `is not a valid HTTP method name (got ${JSON.stringify(candidate)})`;
+    return 'is not a valid HTTP method name (got a string with characters an HTTP token does not allow)';
   }
   // CONNECT asks for a tunnel rather than a response, which no adapter here handles:
   // NodeAdapter would wait on it until the attempt timed out, or forever.
@@ -576,12 +637,15 @@ export function normalizeFilterMethods(
   // hole is read as the `undefined` it is, and refused.
   const entries = [...(methods as unknown[])];
   const normalized: HTTPMethod[] = [];
-  for (const entry of entries) {
+  for (const [index, entry] of entries.entries()) {
     // Held to the rule a request's method is, so an entry no request can have - `''`,
-    // `'GET, POST'` - is refused rather than registered to match nothing.
+    // `'GET, POST'` - is refused rather than registered to match nothing. Named by its
+    // place in the list, as every other filter list's entries are.
     const problem = describeInvalidHTTPMethod(entry);
     if (problem !== undefined) {
-      throw new TypeError(`${label} filter method ${problem}`);
+      throw new TypeError(
+        `${label} filter methods[${String(index)}] ${problem}`,
+      );
     }
     normalized.push(normalizeStandardMethod(entry as string));
   }
@@ -1486,8 +1550,9 @@ function matchesContentTypePattern(
 
 /**
  * Whether a filter's `phases` reach `phaseType`: no list, or an empty one, reaches every
- * phase. The part of {@link matchesFilter} that reads only the filter, never the request,
- * so the interceptor chain can ask it before it copies the request the rest reads.
+ * phase. Asked before {@link matchesFilter}, which reads the request and leaves `phases`
+ * to this: it reads only the filter, so the interceptor chain asks it before it copies the
+ * request the rest reads, and an observer the phase never reaches reads nothing.
  */
 export function matchesFilterPhase(
   phases: readonly RequestPhaseName[] | undefined,
@@ -1497,29 +1562,29 @@ export function matchesFilterPhase(
 }
 
 /**
- * Tests whether a request context matches an interceptor/observer filter.
+ * Tests whether a request context matches an interceptor/observer filter, its `phases`
+ * aside: those are {@link matchesFilterPhase}'s, asked first.
  *
  * Each filter field is optional — omitting it skips that check entirely.
  * All specified fields must match for the function to return true.
  * Within each field, values are matched with OR logic (any one match is sufficient).
  *
- * - `phases`: **OR** allowlist on `phaseType` ({@link RequestPhaseName}). Skipped when
- *   `filter.phases` is omitted or empty.
+ * An interceptor's context always has a `requestURL` and a `method`: it is the request
+ * the client built, or an earlier interceptor's result as `snapshotInterceptedRequest`
+ * copied it, which refuses one without them. An observer's may lack either.
+ *
  * - `statusCodes`: skipped if `context.status` is absent.
- * - `methods`: skipped if `context.method` is absent for an observer; for an interceptor
- *   (`kind === 'request'`) a missing method matches nothing.
+ * - `methods`: skipped if `context.method` is absent.
  * - `hosts`: supports exact hostnames and wildcard patterns. `*.example.com` matches
  *   exactly one subdomain label; `**.example.com` matches any depth. Neither matches the
  *   apex — list it explicitly. PSL tail guard prevents `*.com`-style patterns. `*` is a
  *   global wildcard that matches any hostname a URL can carry. Skipped if
- *   `context.requestURL` is absent for an observer; for an interceptor a missing URL
- *   matches nothing.
+ *   `context.requestURL` is absent.
  * - `schemes`: `'http'` or `'https'`. `requestURL` is absolute whenever the
  *   request could be resolved before dispatch. For `MockAdapter`, path-only
  *   requests without a client `baseURL` are materialized as `http://localhost/...`;
  *   browser adapters fall back to `window.location`, and the Node adapter requires
- *   absolute URLs. Skipped only when `requestURL` is absent for an observer; for an
- *   interceptor a missing URL matches nothing.
+ *   absolute URLs. Skipped only when `requestURL` is absent.
  * - `bodyContainsKeys`: supports dot paths (e.g. `data.results`). Each segment in
  *   the path must resolve to a plain object for traversal to continue — the final
  *   value can be anything (array, string, null, etc). Array indexing is not supported.
@@ -1534,11 +1599,10 @@ export function matchesFilter(
     /** `hosts` read by {@link readHostPattern}, index for index, when it was registered. */
     hostPatterns?: readonly HostPattern[];
     schemes?: ('http' | 'https')[];
-    phases?: RequestPhaseName[];
     contentTypes?: ContentType[];
     contentTypeHeaders?: string[];
   },
-  requestContext: {
+  context: {
     status?: number;
     method?: string;
     body?: unknown;
@@ -1546,26 +1610,8 @@ export function matchesFilter(
     contentType?: ContentType;
     contentTypeHeader?: string;
   },
-  phaseType: RequestPhaseName,
   kind: 'request' | 'response' | 'error',
 ): boolean {
-  // An interceptor's context is the previous interceptor's result, and one that dropped
-  // its `requestURL` or `method` had no host or method to skip the filter over: missing,
-  // it matches nothing, as an unreadable one does - a host-scoped interceptor adding a
-  // token does not run for a request whose host it cannot see, which a later one could
-  // still point anywhere.
-  const context =
-    kind === 'request'
-      ? {
-          ...requestContext,
-          requestURL: requestContext.requestURL ?? '',
-          method: requestContext.method ?? '',
-        }
-      : requestContext;
-  if (!matchesFilterPhase(filter.phases, phaseType)) {
-    return false;
-  }
-
   if (filter.statusCodes && context.status !== undefined) {
     if (!filter.statusCodes.includes(context.status)) {
       return false;
@@ -1575,10 +1621,10 @@ export function matchesFilter(
   // Checked whenever the filter names methods and the context has one, an empty one
   // included: `''` matches no method rather than skipping the filter.
   if (filter.methods && context.method !== undefined) {
-    // Compared as the request is sent: an earlier interceptor's `'post'` is `POST`. A
-    // method that is not a string matches nothing here; the snapshot after the chain
-    // refuses it with its own error.
-    // The filter's own entries were normalized when it was registered.
+    // Compared as the request is sent: a `'post'` is `POST`. The filter's own entries
+    // were normalized when it was registered. A method that is not a string matches
+    // nothing: an observer's request is shared with the observers before it, and one
+    // may have rewritten it.
     const candidate: unknown = context.method;
     if (
       typeof candidate !== 'string' ||

@@ -1,4 +1,5 @@
 import {
+  describeRefusedHeader,
   requestHeaderPairs,
   lowerCaseHeaderName,
 } from '../internal/header-utils';
@@ -23,12 +24,9 @@ import type {
 } from '../types';
 import {
   derivedRedirectFields,
-  isAbsoluteWebURL,
   keepFirstJoinedLocation,
-  resolveBrowserInitialURL,
-  resolveBrowserRequestURL,
+  resolveBrowserDispatchURL,
   stripURLCredentials,
-  stripCrossOriginURLCredentials,
 } from '../utils';
 
 /**
@@ -66,25 +64,16 @@ export class XHRAdapter implements HTTPAdapter {
       initialURL,
     } = readAdapterRequestFields(request);
     // Resolved once, as the browser resolves it - against the document's base URL, or the
-    // worker's `location` - and that one absolute URL is what is opened, what
-    // `didBrowserFollowRedirect` compares `responseURL` with, and what a `Location`
-    // resolves against. `undefined` for a relative URL with no base to resolve it against
-    // (this adapter driven directly outside a browser), or one that is not a URL: refused
-    // below.
-    //
-    // Credentials are withheld from the resolved URL, not the one written: `//u:p@host/x`
-    // on an `http:` page is an `http:` URL, another origin than an `https:` initial URL.
-    // A root- or protocol-relative initial URL is resolved the same way, so `/start` names
-    // the page's origin; any other relative one, or one that does not resolve, fails
-    // closed (see `resolveBrowserInitialURL`).
-    const resolvedURL = resolveBrowserRequestURL(requestURL);
-    const answeredURL =
-      resolvedURL === undefined
-        ? undefined
-        : stripCrossOriginURLCredentials(
-            resolvedURL,
-            resolveBrowserInitialURL(initialURL),
-          );
+    // worker's `location` - with credentials withheld for another origin than the initial
+    // URL's, and that one absolute URL is what is opened, what `didBrowserFollowRedirect`
+    // compares `responseURL` with, and what a `Location` resolves against. One that does
+    // not resolve, or is not http(s), is the non-retryable error it is refused with below
+    // (see `resolveBrowserDispatchURL`).
+    const answeredURL = resolveBrowserDispatchURL(
+      requestURL,
+      initialURL,
+      'XHRAdapter',
+    );
 
     return await new Promise((resolve, reject) => {
       // Refused the same way on every attempt - a method or header value `open` or
@@ -95,27 +84,12 @@ export class XHRAdapter implements HTTPAdapter {
         reject(nonRetryableAdapterErrorFrom(error));
       };
 
-      // Refused as NodeAdapter refuses a URL it cannot parse: whether an answer came from
-      // where the request was sent cannot be told without an absolute URL to compare
-      // `responseURL` with, and the same URL fails the same way on every attempt. The
-      // client always sends an absolute one.
-      if (answeredURL === undefined) {
-        refuse(
-          new TypeError(
-            'XHRAdapter request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)',
-          ),
-        );
-        return;
-      }
-
-      // Any other scheme is refused as NodeAdapter refuses it: XHR opened a `file:` or
-      // `data:` URL where the runtime would load one.
-      if (!isAbsoluteWebURL(answeredURL)) {
-        refuse(
-          new TypeError(
-            `XHRAdapter sends http: and https: URLs only (got ${answeredURL.slice(0, answeredURL.indexOf(':') + 1)})`,
-          ),
-        );
+      // Refused as NodeAdapter refuses a URL it cannot parse or of another scheme:
+      // whether an answer came from where the request was sent cannot be told without an
+      // absolute URL to compare `responseURL` with, and XHR opened a `file:` or `data:`
+      // URL where the runtime would load one.
+      if (typeof answeredURL !== 'string') {
+        refuse(answeredURL);
         return;
       }
 
@@ -128,9 +102,20 @@ export class XHRAdapter implements HTTPAdapter {
         | undefined;
 
       try {
+        // Refused in its own words, and without the runtime's error, as a header below is:
+        // a browser's quotes the method it refused.
+        try {
+          xhr.open(method, answeredURL);
+        } catch {
+          refuse(
+            new TypeError(
+              'XHRAdapter could not open the request: the runtime refused its method or URL',
+            ),
+          );
+          return;
+        }
         // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,
         // consistent with how FetchAdapter and NodeAdapter deliver body bytes.
-        xhr.open(method, answeredURL);
         xhr.responseType = 'arraybuffer';
 
         // Timeout is managed by the client via the abort signal — the client's
@@ -152,8 +137,21 @@ export class XHRAdapter implements HTTPAdapter {
         // Except `cookie`, set once as NodeAdapter sends it - every spelling and item
         // joined with `; `: where XHR runs outside a browser (React Native, a test shim)
         // it is sent, and `, ` read as one cookie.
+        //
+        // A header refused is named, never its value, and the runtime's error is not kept:
+        // Chrome's `DOMException` quotes the value - a token, in an `authorization`. A
+        // browser refuses a name only when it is not a token, so with one it was the value.
         for (const [name, value] of requestHeaderPairs(headers)) {
-          xhr.setRequestHeader(name, value);
+          try {
+            xhr.setRequestHeader(name, value);
+          } catch {
+            refuse(
+              new TypeError(
+                `XHRAdapter refused ${describeRefusedHeader(name, 'value')}`,
+              ),
+            );
+            return;
+          }
         }
       } catch (error) {
         refuse(error);

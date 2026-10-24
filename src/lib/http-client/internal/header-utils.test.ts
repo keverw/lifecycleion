@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   assertNoBrowserRestrictedHeaders,
+  describeRefusedHeader,
   isBrowserRestrictedHeader,
   materializeRequestHeaders,
 } from './header-utils';
@@ -134,5 +135,25 @@ describe('materializeRequestHeaders', () => {
     ).toEqual({
       accept: 'application/json, text/plain',
     });
+  });
+});
+
+describe('describeRefusedHeader', () => {
+  test('PR review round 43: names a token header and the part refused, and never a name that is not a token', () => {
+    expect(describeRefusedHeader('Authorization', 'value')).toBe(
+      "the value of header 'Authorization'",
+    );
+    expect(describeRefusedHeader('x-trace', 'name')).toBe(
+      "the name of header 'x-trace'",
+    );
+    for (const name of [
+      'Authorization: Bearer secret-token',
+      'a b',
+      '',
+      'x\n',
+    ]) {
+      expect(describeRefusedHeader(name, 'value')).toBe('a header name');
+      expect(describeRefusedHeader(name, 'name')).toBe('a header name');
+    }
   });
 });

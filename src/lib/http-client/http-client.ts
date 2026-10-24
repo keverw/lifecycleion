@@ -544,7 +544,7 @@ export class BaseHTTPClient {
     // read as `'all'` and listed every client's requests.
     if (scope !== 'own' && scope !== 'all') {
       throw new TypeError(
-        `HTTPClient.listRequests() scope must be 'own' or 'all' (got ${describeValue(scope)})`,
+        `HTTPClient.listRequests() scope must be 'own' or 'all' (got ${typeof scope === 'string' ? 'an unknown scope' : describeValue(scope)})`,
       );
     }
 
@@ -615,7 +615,7 @@ export class BaseHTTPClient {
       defaultHeadersStrategy !== 'merge'
     ) {
       throw new TypeError(
-        `HTTPClient sub-client defaultHeadersStrategy must be 'replace' or 'merge' (got ${JSON.stringify(defaultHeadersStrategy)})`,
+        `HTTPClient sub-client defaultHeadersStrategy must be 'replace' or 'merge' (got ${typeof defaultHeadersStrategy === 'string' ? 'an unknown strategy' : describeValue(defaultHeadersStrategy)})`,
       );
     }
     assertOptionalHeaderRecord(
@@ -906,7 +906,7 @@ export class BaseHTTPClient {
         // must fail here as a request_setup_error rather than reaching the adapter.
         if (!isAbsoluteWebURL(url)) {
           throw new Error(
-            `[HTTPClient] Request URL could not be resolved to an absolute http(s) URL: "${url}". ` +
+            `[HTTPClient] Request URL could not be resolved to an absolute http(s) URL. ` +
               `Set a baseURL with an http(s) scheme or pass an absolute URL.`,
           );
         }
@@ -1745,8 +1745,19 @@ export class BaseHTTPClient {
               });
 
               errorCode = 'request_setup_error';
+              // Named by its scheme alone, as the adapters name a URL they refuse: an
+              // OAuth redirect to an app's own scheme carries its authorization code in
+              // the rest, and the response reports the target in full.
+              let locationScheme: string | undefined;
+              try {
+                locationScheme = new URL(redirectInterceptURL).protocol;
+              } catch {
+                // Not a URL on its own: said so, without quoting it.
+              }
               adapterCause = new Error(
-                `[HTTPClient] Redirect Location could not be resolved to an absolute http(s) URL: "${redirectInterceptURL}".`,
+                locationScheme === undefined
+                  ? '[HTTPClient] Redirect Location could not be resolved to an absolute URL.'
+                  : `[HTTPClient] Redirect Location could not be resolved to an absolute http(s) URL (got ${locationScheme}).`,
               );
 
               break;
@@ -4372,7 +4383,7 @@ export class BaseHTTPClient {
     }
 
     // None for a parent with nothing registered: its chain would hand back the request
-    // unread, and the flag below would have a sub-client copy it for nothing.
+    // unread.
     const parentChain =
       parentManager === undefined || parentManager.isEmpty
         ? undefined
@@ -4386,10 +4397,17 @@ export class BaseHTTPClient {
       redirectHistory: [...context.redirectHistory],
     };
 
+    // Whether the parent's chain called any interceptor's function this phase: with none
+    // called, its result is `request` itself, untouched.
+    let didParentCallInterceptor = false;
+
     if (parentChain) {
       current = await parentChain(request, phase, chainContext, {
         isCancelled,
         onCopyFailure,
+        onInterceptorCalled: () => {
+          didParentCallInterceptor = true;
+        },
       });
 
       if (isInterceptorCancel(current) || isCancelled()) {
@@ -4398,14 +4416,15 @@ export class BaseHTTPClient {
     }
 
     return {
-      // The parent's result is copied before an interceptor here reads it whenever the
-      // parent has interceptors, whether or not one ran: one that redefined `requestURL`
-      // on the request it was handed and returned that same object handed back the
-      // request itself, which identity cannot tell from one no interceptor touched. A
-      // request the client built copies to an equal one, so copying it is harmless.
+      // The parent's result is copied before an interceptor here reads it whenever one of
+      // the parent's interceptors was called, whatever it returned: one that redefined
+      // `requestURL` on the request it was handed and returned that same object handed
+      // back the request itself, which identity cannot tell from one no interceptor
+      // touched. With none called - every one filtered out, or registered for other
+      // phases - it is the request the client built, with nothing to copy.
       result: await ownChain(current, phase, chainContext, {
         isCancelled,
-        isInterceptorResult: parentChain !== undefined,
+        isInterceptorResult: didParentCallInterceptor,
         onCopyFailure,
       }),
       isIntercepted: true,
@@ -4788,7 +4807,7 @@ export class BaseHTTPClient {
     }
 
     throw new Error(
-      `[HTTPClient] Interceptor rewrote requestURL to a value that could not be resolved to an absolute http(s) URL: "${requestURL}".`,
+      '[HTTPClient] Interceptor rewrote requestURL to a value that could not be resolved to an absolute http(s) URL.',
     );
   }
 }

@@ -70,6 +70,12 @@ export interface InterceptorChainOptions {
    * phase reports from it as it does when its own copy of the chain's result fails.
    */
   onCopyFailure?: (request: InterceptedRequest) => void;
+  /**
+   * Called as an interceptor's function is about to be called, so a caller can tell a
+   * result some interceptor was handed the request for - and may have rewritten in place
+   * - from the request it passed, untouched.
+   */
+  onInterceptorCalled?: () => void;
 }
 
 async function runInterceptors(
@@ -83,6 +89,7 @@ async function runInterceptors(
     isCancelled,
     isInterceptorResult = false,
     onCopyFailure,
+    onInterceptorCalled,
   }: InterceptorChainOptions,
 ): Promise<InterceptedRequest | InterceptorCancel> {
   let current = request;
@@ -96,9 +103,10 @@ async function runInterceptors(
       return current;
     }
 
-    // Asked first, as it reads only the filter: an interceptor this phase never reaches
-    // (one registered for `retry` alone, in the initial phase) reads no request, so it
-    // takes no copy - and cannot change how a result that fails to copy is reported.
+    // Asked first, and only here - `matchesFilter` leaves `phases` to it - as it reads only
+    // the filter: an interceptor this phase never reaches (one registered for `retry`
+    // alone, in the initial phase) reads no request, so it takes no copy - and cannot
+    // change how a result that fails to copy is reported.
     if (!matchesFilterPhase(filter?.phases, phase.type)) {
       continue;
     }
@@ -129,12 +137,13 @@ async function runInterceptors(
           requestURL: current.requestURL,
           body: current.body,
         },
-        phase.type,
         'request',
       )
     ) {
       continue;
     }
+
+    onInterceptorCalled?.();
 
     // Adopted, not awaited as it is: an interceptor is caller code, and one returning
     // a native promise with its own `constructor` and a no-op `then` would hang the

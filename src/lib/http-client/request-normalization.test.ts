@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import vm from 'node:vm';
 import * as http from 'node:http';
 import * as zlib from 'node:zlib';
@@ -19,6 +19,7 @@ import {
   reportedRedirectTarget,
   stripCrossOriginURLCredentials,
 } from './utils';
+import * as httpUtils from './utils';
 import { deepClone } from '../deep-clone';
 import {
   ADAPTER_ERROR_CARRIER_KEY,
@@ -376,9 +377,9 @@ test('an empty method is refused, and matches no method filter', () => {
   expect(() => client.request('', '/x')).toThrow(
     'HTTPClient request method is empty',
   );
-  expect(
-    matchesFilter({ methods: ['GET'] }, { method: '' }, 'initial', 'request'),
-  ).toBe(false);
+  expect(matchesFilter({ methods: ['GET'] }, { method: '' }, 'request')).toBe(
+    false,
+  );
 });
 
 test("a refused interceptor request's unset header is left out of what error observers see", async () => {
@@ -455,7 +456,7 @@ test('a method that is not a valid HTTP method name is refused before dispatch',
   await client.get('/x').send();
 
   expect(messages).toEqual([
-    '[HTTPClient] Interceptor returned a request whose method is not a valid HTTP method name (got "GET\\r\\n").',
+    '[HTTPClient] Interceptor returned a request whose method is not a valid HTTP method name (got a string with characters an HTTP token does not allow).',
   ]);
   expect(adapter.requests).toHaveLength(0);
 });
@@ -476,7 +477,7 @@ test('a filter whose methods is not an array of strings is refused when register
   expect(() =>
     client.addErrorObserver(() => undefined, { methods: [42] as never }),
   ).toThrow(
-    'HTTPClient error observer filter method is not a string (got number)',
+    'HTTPClient error observer filter methods[0] is not a string (got number)',
   );
 });
 
@@ -523,7 +524,7 @@ test('a filter method that no request can have is refused when registered', () =
       client.addRequestInterceptor((request) => request, {
         methods: [entry as HTTPMethod],
       }),
-    ).toThrow(`HTTPClient request interceptor filter method ${problem}`);
+    ).toThrow(`HTTPClient request interceptor filter methods[0] ${problem}`);
   }
 });
 
@@ -755,7 +756,7 @@ test('a filter list that is not an array of the right entries is refused when re
       statusCodes: ['200'] as never,
     }),
   ).toThrow(
-    'HTTPClient response observer filter statusCodes must contain only numbers (got string)',
+    'HTTPClient response observer filter statusCodes[0] must be a number (got string)',
   );
   expect(() =>
     client.addErrorObserver(() => undefined, 'final' as never),
@@ -842,21 +843,23 @@ test('a filter naming a phase, scheme or content type that cannot occur is refus
       phases: ['final' as never],
     }),
   ).toThrow(
-    `HTTPClient request interceptor filter phases has "final", which is not one of 'initial', 'retry', 'redirect'`,
+    `HTTPClient request interceptor filter phases[0] is not one of 'initial', 'retry', 'redirect'`,
   );
   expect(() =>
     client.addErrorObserver(() => undefined, { phases: ['redirect' as never] }),
-  ).toThrow('HTTPClient error observer filter phases has "redirect"');
+  ).toThrow('HTTPClient error observer filter phases[0] is not one of');
   expect(() =>
     client.addRequestInterceptor((request) => request, {
       schemes: ['HTTPS' as never],
     }),
-  ).toThrow('HTTPClient request interceptor filter schemes has "HTTPS"');
+  ).toThrow('HTTPClient request interceptor filter schemes[0] is not one of');
   expect(() =>
     client.addResponseObserver(() => undefined, {
       contentTypes: ['xml' as never],
     }),
-  ).toThrow('HTTPClient response observer filter contentTypes has "xml"');
+  ).toThrow(
+    'HTTPClient response observer filter contentTypes[0] is not one of',
+  );
 });
 
 test('a filter field that kind of callback cannot use is refused when registered', () => {
@@ -1034,7 +1037,7 @@ test('userAgent and a sub-client defaultHeadersStrategy are checked at construct
   expect(() =>
     client.createSubClient({ defaultHeadersStrategy: 'MERGE' as never }),
   ).toThrow(
-    `HTTPClient sub-client defaultHeadersStrategy must be 'replace' or 'merge' (got "MERGE")`,
+    `HTTPClient sub-client defaultHeadersStrategy must be 'replace' or 'merge' (got an unknown strategy)`,
   );
 });
 
@@ -2084,9 +2087,9 @@ test('an error whose request URL could not be read matches no hosts or schemes f
 
   expect(builder.error?.code).toBe('interceptor_error');
   expect(seen).toEqual([]);
-  expect(
-    matchesFilter({ hosts: ['*'] }, { requestURL: '' }, 'final', 'error'),
-  ).toBe(false);
+  expect(matchesFilter({ hosts: ['*'] }, { requestURL: '' }, 'error')).toBe(
+    false,
+  );
 });
 
 test('a 3xx with no Location on the last allowed hop is the final response, not a redirect_loop', async () => {
@@ -3446,14 +3449,33 @@ test('round 63: transport refusals are not retried, Mock honours a 0% cancel, a 
   expect(jarBuilder.error?.cause?.message).not.toMatch(/Cookie jar/);
 });
 
-test('round 64: a missing URL matches no host, methods are copied, bodyContainsKeys needs a plain object', () => {
-  // An interceptor whose context lost its requestURL does not pass a hosts filter.
-  expect(
-    matchesFilter({ hosts: ['api.example.com'] }, {}, 'initial', 'request'),
-  ).toBe(false);
-  expect(matchesFilter({ methods: ['GET'] }, {}, 'initial', 'request')).toBe(
-    false,
-  );
+test('round 64: a missing URL matches no host, methods are copied, bodyContainsKeys needs a plain object', async () => {
+  // An interceptor result that lost its requestURL or method reaches no later filter: the
+  // copy taken before the filter reads it refuses it.
+  for (const dropped of ['requestURL', 'method'] as const) {
+    const guarded: string[] = [];
+    const dropping = new HTTPClient({
+      adapter: new RecordingAdapter(200),
+      baseURL: 'https://api.example.com',
+    });
+    dropping.addRequestInterceptor((request) => ({
+      ...request,
+      [dropped]: undefined,
+    }));
+    dropping.addRequestInterceptor(
+      (request) => {
+        guarded.push(request.requestURL);
+        return request;
+      },
+      dropped === 'requestURL'
+        ? { hosts: ['api.example.com'] }
+        : { methods: ['GET'] },
+    );
+    const builder = dropping.get('/x');
+    await builder.send();
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(guarded).toEqual([]);
+  }
 
   // A methods list's own map is not called; a hole is refused.
   const client = new HTTPClient();
@@ -3473,7 +3495,6 @@ test('round 64: a missing URL matches no host, methods are copied, bodyContainsK
     matchesFilter(
       { bodyContainsKeys: ['0'] },
       { body: new Uint8Array([1, 2, 3]) },
-      'final',
       'response',
     ),
   ).toBe(false);
@@ -3481,7 +3502,6 @@ test('round 64: a missing URL matches no host, methods are copied, bodyContainsK
     matchesFilter(
       { bodyContainsKeys: ['0'] },
       { body: { 0: 'x' } },
-      'final',
       'response',
     ),
   ).toBe(true);
@@ -7544,21 +7564,11 @@ test('round 140 review 9: an error after a held end does not overtake it', async
 test('round 140 review 9: a hosts list changed in place is matched as it now reads', () => {
   const filter = { hosts: ['a.com'] };
   expect(
-    matchesFilter(
-      filter,
-      { requestURL: 'https://a.com/' },
-      'final',
-      'response',
-    ),
+    matchesFilter(filter, { requestURL: 'https://a.com/' }, 'response'),
   ).toBe(true);
   filter.hosts[0] = 'b.com';
   expect(
-    matchesFilter(
-      filter,
-      { requestURL: 'https://b.com/' },
-      'final',
-      'response',
-    ),
+    matchesFilter(filter, { requestURL: 'https://b.com/' }, 'response'),
   ).toBe(true);
 });
 
@@ -7709,16 +7719,11 @@ test('a registered host filter reads each pattern once and answers as the unregi
       expect([
         pattern,
         host,
-        matchesFilter(
-          { hosts: [pattern], hostPatterns },
-          context,
-          'final',
-          'response',
-        ),
+        matchesFilter({ hosts: [pattern], hostPatterns }, context, 'response'),
       ]).toEqual([
         pattern,
         host,
-        matchesFilter({ hosts: [pattern] }, context, 'final', 'response'),
+        matchesFilter({ hosts: [pattern] }, context, 'response'),
       ]);
     }
   }
@@ -7759,7 +7764,6 @@ test('a host filter registered on a client matches what the unregistered matcher
       matchesFilter(
         { hosts: filter },
         { requestURL: `https://${host}/` },
-        'final',
         'response',
       ),
     );
@@ -10622,3 +10626,260 @@ for (const phaseName of ['retry', 'redirect'] as const) {
     ).toEqual(alone);
   });
 }
+
+test('PR review round 43: a header string passed where a header object belongs is not written into the error', () => {
+  const headers = 'Authorization: Bearer secret-token' as unknown as Record<
+    string,
+    string
+  >;
+  const caught: unknown[] = [];
+
+  for (const build of [
+    () => new HTTPClient({ defaultHeaders: headers }),
+    () => new HTTPClient().get('/x', { headers }),
+    () => new CookieJar().processResponseHeaders(headers, 'https://a.test/'),
+  ]) {
+    try {
+      build();
+    } catch (error) {
+      caught.push(error);
+    }
+  }
+
+  expect(caught).toHaveLength(3);
+
+  for (const error of caught) {
+    expect(error).toBeInstanceOf(TypeError);
+    expect((error as TypeError).message).toEndWith('(got string)');
+    expect((error as TypeError).message).not.toContain('secret-token');
+  }
+});
+
+test("PR review round 43: a parent whose interceptors are not called in a phase leaves the sub-client's chain the request uncopied", async () => {
+  // A copy is taken through `snapshotInterceptedRequest`, which checks the method with
+  // `describeInvalidHTTPMethod`: counted from the moment the request is sent, nothing
+  // else calls it before the sub-client's interceptor runs.
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => Promise.resolve({ status: 204, headers: {}, body: null }),
+  };
+  const copiesBeforeOwnInterceptor = async (
+    registerOnParent: (parent: HTTPClient) => void,
+  ): Promise<number> => {
+    const parent = new HTTPClient({ adapter, baseURL: 'https://a.test' });
+    registerOnParent(parent);
+    const child = parent.createSubClient();
+    let copies = -1;
+    const methodCheck = spyOn(httpUtils, 'describeInvalidHTTPMethod');
+    try {
+      child.addRequestInterceptor((request) => {
+        copies = methodCheck.mock.calls.length;
+        return request;
+      });
+      const builder = child.get('/x');
+      methodCheck.mockClear();
+      await builder.send();
+    } finally {
+      methodCheck.mockRestore();
+    }
+
+    return copies;
+  };
+
+  // Registered for retries only, or for another host: neither is called for this request.
+  expect(
+    await copiesBeforeOwnInterceptor((parent) => {
+      parent.addRequestInterceptor((request) => request, {
+        phases: ['retry'],
+      });
+    }),
+  ).toBe(0);
+  expect(
+    await copiesBeforeOwnInterceptor((parent) => {
+      parent.addRequestInterceptor((request) => request, {
+        hosts: ['b.test'],
+      });
+    }),
+  ).toBe(0);
+  // One that is called hands on its result, copied before the sub-client's chain reads it.
+  expect(
+    await copiesBeforeOwnInterceptor((parent) => {
+      parent.addRequestInterceptor((request) => request);
+    }),
+  ).toBe(1);
+});
+
+test('PR review round 43: a refused method, strategy, URL, redirect Location, suffix, filter entry or cookie value is not written into the error', async () => {
+  const secret = 'secret-token';
+  const messages: string[] = [];
+  const caught = (run: () => unknown): void => {
+    try {
+      run();
+    } catch (error) {
+      messages.push(String((error as Error).message));
+    }
+  };
+
+  // Refused when built or registered.
+  caught(() => new HTTPClient().request(`GET\r\nX-Token: ${secret}`, '/x'));
+  caught(() =>
+    new HTTPClient().createSubClient({
+      defaultHeadersStrategy: secret as never,
+    }),
+  );
+  caught(() => new CookieJar({ publicSuffixes: { add: [`*.${secret}`] } }));
+  caught(() => new CookieJar({ publicSuffixes: { add: [`${secret}..com`] } }));
+  caught(
+    () =>
+      new CookieJar({
+        publicSuffixes: { add: [`a.${secret}.com`], remove: [`${secret}.com`] },
+      }),
+  );
+  caught(() =>
+    new HTTPClient().addRequestInterceptor((request) => request, {
+      hosts: [`${secret}.test/path`],
+    }),
+  );
+  caught(() =>
+    new HTTPClient().addRequestInterceptor((request) => request, {
+      schemes: [secret as never],
+    }),
+  );
+  expect(messages).toHaveLength(7);
+
+  // Refused when sent: a URL with no base, an interceptor's rewrite, a route's cookie.
+  const noBase = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  const unresolved = noBase.get(`/x?token=${secret}`);
+  await unresolved.send();
+  messages.push(String(unresolved.error?.cause?.message));
+
+  const rewriting = new HTTPClient({
+    adapter: new RecordingAdapter(200),
+    baseURL: 'https://a.test',
+  });
+  rewriting.addRequestInterceptor((request) => ({
+    ...request,
+    requestURL: `/x?token=${secret}`,
+  }));
+  const rewritten = rewriting.get('/x');
+  await rewritten.send();
+  messages.push(String(rewritten.error?.cause?.message));
+
+  const adapter = new MockAdapter();
+  adapter.routes.get('/login', () => ({
+    status: 200,
+    cookies: { session: `${secret}; Domain=other.test` },
+  }));
+  const cookieRoute = new HTTPClient({ adapter, baseURL: 'http://mock.test' });
+  const withCookie = cookieRoute.get('/login');
+  await withCookie.send();
+  messages.push(String(withCookie.error?.cause?.message));
+
+  // A redirect to an app's own scheme, its authorization code in the query; and one
+  // whose Location is not a URL at all.
+  for (const location of [
+    `myapp://callback?code=${secret}`,
+    `http://[${secret}`,
+  ]) {
+    const redirecting = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () =>
+          Promise.resolve({ status: 302, headers: { location }, body: null }),
+      },
+      baseURL: 'https://a.test',
+      followRedirects: true,
+    });
+    const redirected = redirecting.get('/start');
+    await redirected.send();
+    messages.push(String(redirected.error?.cause?.message));
+  }
+  expect(messages.at(-2)).toContain('(got myapp:)');
+
+  expect(messages).toHaveLength(12);
+  for (const message of messages) {
+    expect(message).not.toBe('undefined');
+    expect(message).not.toContain(secret);
+  }
+});
+
+test('PR review round 43: a refusal names the entry or the kind of value it refused', () => {
+  const thrown = (run: () => unknown): string => {
+    try {
+      run();
+    } catch (error) {
+      return String((error as Error).message);
+    }
+    return 'nothing thrown';
+  };
+  const jar = new CookieJar();
+
+  expect(thrown(() => jar.clear('  ', 'hostname'))).toBe(
+    'CookieJar.clear() host must be a non-empty string (got an empty string)',
+  );
+  expect(thrown(() => jar.clear('a.test', 'Domain' as never))).toBe(
+    "CookieJar.clear() scope must be 'hostname' or 'domain' (got an unknown scope)",
+  );
+  expect(
+    thrown(() => new HTTPClient().listRequests({ scope: 'mine' as never })),
+  ).toBe(
+    "HTTPClient.listRequests() scope must be 'own' or 'all' (got an unknown scope)",
+  );
+  expect(
+    thrown(
+      () =>
+        new CookieJar({
+          publicSuffixes: {
+            add: ['ok.test', 'a.shared.test'],
+            remove: ['other.test', 'shared.test'],
+          },
+        }),
+    ),
+  ).toBe(
+    'publicSuffixes.add[1] is, or is beneath, publicSuffixes.remove[1]; shared cookies conflict with tenant isolation',
+  );
+  expect(
+    thrown(
+      () => new CookieJar({ publicSuffixes: { add: ['ok.test', 5 as never] } }),
+    ),
+  ).toBe('publicSuffixes.add[1] must be a string (got number)');
+  expect(
+    thrown(
+      () => new CookieJar({ publicSuffixes: { remove: ['ok.test', '.'] } }),
+    ),
+  ).toBe('publicSuffixes.remove[1] is empty');
+  expect(
+    thrown(() =>
+      new HTTPClient().addRequestInterceptor((request) => request, {
+        methods: ['GET', 'GET, POST'],
+      }),
+    ),
+  ).toBe(
+    'HTTPClient request interceptor filter methods[1] is not a valid HTTP method name (got a string with characters an HTTP token does not allow)',
+  );
+  expect(
+    thrown(() =>
+      new HTTPClient().addRequestInterceptor((request) => request, {
+        hosts: ['a.test', 7 as never],
+      }),
+    ),
+  ).toBe(
+    'HTTPClient request interceptor filter hosts[1] must be a string (got number)',
+  );
+});
+
+test('PR review round 43: a MockAdapter route cookie name that cannot be written is named by its position', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/login', () => ({
+    status: 200,
+    cookies: { theme: 'dark', 'session; Domain=other.test': 'x' },
+  }));
+  const builder = new HTTPClient({ adapter, baseURL: 'http://mock.test' }).get(
+    '/login',
+  );
+  await builder.send();
+
+  expect(builder.error?.cause?.message).toBe(
+    'MockAdapter cookie name at position 1 cannot be written into a Set-Cookie line',
+  );
+});
