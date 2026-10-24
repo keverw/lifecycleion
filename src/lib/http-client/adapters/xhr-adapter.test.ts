@@ -2427,6 +2427,79 @@ describe('XHRAdapter', () => {
       }
     }
   });
+
+  test('PR review round 41: a URL that is not http(s) is refused as non-retryable before it is opened', async () => {
+    for (const requestURL of [
+      'file:///etc/hosts',
+      'data:text/plain,hi',
+      'blob:https://app.test/0b2c',
+      'ftp://files.test/x',
+    ]) {
+      FakeXHR.instances = [];
+
+      const outcome = await new XHRAdapter()
+        .send({ requestURL, method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as unknown as Error).message).toBe(
+        `XHRAdapter sends http: and https: URLs only (got ${requestURL.slice(0, requestURL.indexOf(':') + 1)})`,
+      );
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      // Neither opened nor sent.
+      expect(FakeXHR.instances[0]?.openArgs ?? null).toBeNull();
+      expect(FakeXHR.instances[0]?.sentBody ?? null).toBeNull();
+    }
+  });
+
+  test('PR review round 41: a relative initial URL is resolved against the page before credentials are judged', async () => {
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+    const openedURL = async (
+      requestURL: string,
+      initialURL: string,
+    ): Promise<string | undefined> => {
+      const promise = new XHRAdapter().send({
+        requestURL,
+        initialURL,
+        method: 'GET',
+        headers: {},
+      });
+      lastXHR.status = 204;
+      lastXHR.responseURL = requestURL.replace('u:p@', '');
+      lastXHR.simulateLoad();
+      await promise;
+      return lastXHR.openArgs?.url;
+    };
+
+    try {
+      (globalThis as Record<string, unknown>).document = {
+        baseURI: 'https://api.test/page',
+      };
+      // `/start` on this page is `https://api.test/start`: same origin, kept.
+      expect(await openedURL('https://u:p@api.test/x', '/start')).toBe(
+        'https://u:p@api.test/x',
+      );
+      // Another origin than the page's: withheld.
+      expect(await openedURL('https://u:p@evil.test/x', '/start')).toBe(
+        'https://evil.test/x',
+      );
+
+      // No base: the initial URL cannot be resolved, so it still fails closed.
+      delete (globalThis as Record<string, unknown>).document;
+      expect(await openedURL('https://u:p@api.test/x', '/start')).toBe(
+        'https://api.test/x',
+      );
+    } finally {
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
+  });
 });
 
 describe('XHRAdapter - round 58', () => {

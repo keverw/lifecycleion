@@ -285,6 +285,13 @@ export class BaseHTTPClient {
     HTTPClientConfig & { timeout: number; maxResponseBytes: number };
 
   protected _adapter: NonNullable<HTTPClientConfig['adapter']>;
+  /**
+   * The adapter's `getType()`, read once, when the client is built: the type the config
+   * was checked against is the one every request reads, and `adapterType` reports. A
+   * custom adapter whose `getType` answers differently on each call could otherwise pass
+   * the check as one type and dispatch as another, or disagree with itself mid-request.
+   */
+  protected readonly _adapterType: AdapterType;
   protected _tracker: RequestTracker;
   protected _parentClient: BaseHTTPClient | null;
   protected _isBrowserRuntime: boolean;
@@ -311,10 +318,11 @@ export class BaseHTTPClient {
 
     this._clientID = generateID('ulid');
     this._adapter = snapshot.adapter ?? new FetchAdapter();
+    this._adapterType = this._adapter.getType();
     this._isBrowserRuntime = isBrowserEnvironment();
     assertSupportedAdapterRuntimeAndConfig(
       snapshot,
-      this._adapter.getType(),
+      this._adapterType,
       this._isBrowserRuntime,
     );
     this._tracker = internal.tracker ?? new RequestTracker();
@@ -362,7 +370,7 @@ export class BaseHTTPClient {
   }
 
   public get adapterType(): AdapterType {
-    return this._adapter.getType();
+    return this._adapterType;
   }
 
   // --- Interceptors ---
@@ -657,7 +665,7 @@ export class BaseHTTPClient {
     // Other non-HTTP absolute-like inputs still fail validation later.
     const effectiveBaseURL =
       this._config.baseURL ??
-      (this._adapter.getType() === 'mock'
+      (this._adapterType === 'mock'
         ? !/^[a-z][a-z0-9+\-.]*:/i.test(path)
           ? MOCK_ADAPTER_DEFAULT_BASE_URL
           : undefined
@@ -700,7 +708,7 @@ export class BaseHTTPClient {
       baseHeaders[DEFAULT_REQUEST_ID_HEADER] = requestID;
     }
 
-    const adapterType = this._adapter.getType();
+    const adapterType = this._adapterType;
 
     if (
       this._config.userAgent &&
@@ -738,7 +746,7 @@ export class BaseHTTPClient {
         requestID,
         wasCancelled: true,
         wasTimeout: false,
-        adapterType: this._adapter.getType(),
+        adapterType: this._adapterType,
         initialURL: interceptedRequest.requestURL,
         requestURL: interceptedRequest.requestURL,
         redirectHistory: [],
@@ -871,9 +879,9 @@ export class BaseHTTPClient {
         // streamResponse is NodeAdapter-only. Validate it inside the normal
         // request setup flow so builder/error observer state is updated the same
         // way as every other request_setup_error.
-        if (options.streamResponse && this._adapter.getType() !== 'node') {
+        if (options.streamResponse && this._adapterType !== 'node') {
           throw new Error(
-            `[HTTPClient] .streamResponse() requires NodeAdapter. Current adapter: ${this._adapter.getType()}`,
+            `[HTTPClient] .streamResponse() requires NodeAdapter. Current adapter: ${this._adapterType}`,
           );
         }
 
@@ -957,7 +965,7 @@ export class BaseHTTPClient {
             requestID,
             wasCancelled: isCancelled,
             wasTimeout: false,
-            adapterType: this._adapter.getType(),
+            adapterType: this._adapterType,
             initialURL: url,
             // The interceptor's request may be what failed - a `requestURL` getter
             // that throws - so its URL is read best-effort, falling back to the
@@ -1039,7 +1047,7 @@ export class BaseHTTPClient {
             requestID,
             wasCancelled: true,
             wasTimeout: false,
-            adapterType: this._adapter.getType(),
+            adapterType: this._adapterType,
             initialURL: url,
             requestURL: url,
             redirectHistory: [],
@@ -1230,7 +1238,7 @@ export class BaseHTTPClient {
               // reclassify the error code on whether the body happened to
               // finish. See docs/http-client.md.
               wasTimeout: false,
-              adapterType: this._adapter.getType(),
+              adapterType: this._adapterType,
               initialURL: initialRequestURL,
               requestURL: attemptResult.sentRequest.requestURL,
               redirectHistory,
@@ -1274,7 +1282,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
@@ -1304,7 +1312,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
@@ -1406,7 +1414,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: true,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: hopFromURL,
                 redirectHistory,
@@ -1431,7 +1439,7 @@ export class BaseHTTPClient {
               requestID,
               wasCancelled: false,
               wasTimeout: false,
-              adapterType: this._adapter.getType(),
+              adapterType: this._adapterType,
               initialURL: initialRequestURL,
               requestURL: attemptResult.sentRequest.requestURL,
               redirectHistory,
@@ -1458,7 +1466,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: true,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: hopFromURL,
                 redirectHistory,
@@ -1542,7 +1550,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: redirectURL,
                 redirectHistory: nextRedirectHistory,
@@ -1620,7 +1628,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 // The interceptor's request may be what failed; see the initial phase.
                 requestURL: readStringMember(
@@ -1675,7 +1683,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: true,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: cancelledRequestURL,
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
@@ -1703,7 +1711,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: redirectInterceptURL,
                 redirectHistory: nextRedirectHistory,
@@ -1755,7 +1763,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: redirectInterceptURL,
                 redirectHistory: nextRedirectHistory,
@@ -1815,7 +1823,7 @@ export class BaseHTTPClient {
                   }
                 } else {
                   reportUploadSettleDeadline(
-                    this._adapter.getType(),
+                    this._adapterType,
                     timeout,
                     'redirect',
                   );
@@ -1835,7 +1843,7 @@ export class BaseHTTPClient {
                   requestID,
                   wasCancelled: wait === 'cancelled',
                   wasTimeout: wait === 'deadline',
-                  adapterType: this._adapter.getType(),
+                  adapterType: this._adapterType,
                   initialURL: initialRequestURL,
                   requestURL: redirectedRequestURL,
                   redirectHistory,
@@ -1858,7 +1866,7 @@ export class BaseHTTPClient {
             requestID,
             wasCancelled,
             wasTimeout,
-            adapterType: this._adapter.getType(),
+            adapterType: this._adapterType,
             initialURL: initialRequestURL,
             requestURL: attemptResult.sentRequest.requestURL,
             redirectHistory,
@@ -1907,7 +1915,7 @@ export class BaseHTTPClient {
             requestID,
             wasCancelled: isCancelled,
             wasTimeout: false,
-            adapterType: this._adapter.getType(),
+            adapterType: this._adapterType,
             initialURL: initialRequestURL,
             requestURL:
               currentInterceptedRequest?.requestURL ?? initialRequestURL,
@@ -1964,7 +1972,7 @@ export class BaseHTTPClient {
           requestID,
           wasCancelled: true,
           wasTimeout: false,
-          adapterType: this._adapter.getType(),
+          adapterType: this._adapterType,
           initialURL: initialRequestURL,
           requestURL: response.requestURL,
           // The response's own: a hop that failed after it was recorded carries it.
@@ -3081,7 +3089,7 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapter.getType(),
+                adapterType: this._adapterType,
                 initialURL,
                 requestURL: sentRequest.requestURL,
                 redirectHistory,
@@ -3156,11 +3164,7 @@ export class BaseHTTPClient {
                   : undefined;
 
               if (wait === 'deadline') {
-                reportUploadSettleDeadline(
-                  this._adapter.getType(),
-                  timeout,
-                  'retry',
-                );
+                reportUploadSettleDeadline(this._adapterType, timeout, 'retry');
                 abortAttempt();
               }
 
@@ -3780,7 +3784,7 @@ export class BaseHTTPClient {
               requestID,
               wasCancelled: false,
               wasTimeout: didTimeoutThisAttempt,
-              adapterType: this._adapter.getType(),
+              adapterType: this._adapterType,
               initialURL,
               requestURL: sentRequest.requestURL,
               redirectHistory,
@@ -3838,11 +3842,7 @@ export class BaseHTTPClient {
                   : undefined;
 
               if (wait === 'deadline') {
-                reportUploadSettleDeadline(
-                  this._adapter.getType(),
-                  timeout,
-                  'retry',
-                );
+                reportUploadSettleDeadline(this._adapterType, timeout, 'retry');
                 abortAttempt();
               }
 
@@ -4691,7 +4691,7 @@ export class BaseHTTPClient {
   private _assertRequestIsSupported(request: InterceptedRequest): void {
     assertSupportedRequestBody(request.body);
 
-    const adapterType = this._adapter.getType();
+    const adapterType = this._adapterType;
     const adapterName =
       adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter';
     if (

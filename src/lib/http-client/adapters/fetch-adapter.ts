@@ -16,6 +16,7 @@ import {
 import {
   extractFetchHeaders,
   derivedRedirectFields,
+  isAbsoluteWebURL,
   resolveBrowserRequestURL,
   stripCrossOriginURLCredentials,
 } from '../utils';
@@ -58,19 +59,48 @@ export class FetchAdapter implements HTTPAdapter {
       requestURL,
       initialURL,
     } = readAdapterRequestFields(request);
-    // A relative URL is resolved as `fetch` resolves it, where there is a base to resolve
-    // it against (see `resolveBrowserRequestURL`); elsewhere `fetch` resolves it, or
-    // refuses it, as it always did.
+    // A relative URL is resolved as `fetch` resolves it, against the document's base URL
+    // or the worker's `location` (see `resolveBrowserRequestURL`). One with no base to
+    // resolve it against (this adapter driven directly outside a browser), or that is not
+    // a URL, is refused below.
     const resolvedURL = resolveBrowserRequestURL(requestURL);
     // Credentials are withheld from the resolved URL, not the one written: `//u:p@host/x`
     // on an `http:` page is an `http:` URL, another origin than an `https:` initial URL.
-    // The URL sent, checked below, and what a `Location` resolves against, so a relative
-    // one (this adapter driven directly under a global `location`) still reports where a
-    // redirect pointed.
-    const dispatchedURL = stripCrossOriginURLCredentials(
-      resolvedURL ?? requestURL,
-      initialURL,
-    );
+    // The initial URL is resolved the same way, so a relative one names the page's origin
+    // rather than failing closed and withholding same-origin credentials; one that does not
+    // resolve still fails closed. The URL sent, checked below, and what a `Location`
+    // resolves against.
+    const dispatchedURL =
+      resolvedURL === undefined
+        ? undefined
+        : stripCrossOriginURLCredentials(
+            resolvedURL,
+            initialURL === undefined
+              ? undefined
+              : (resolveBrowserRequestURL(initialURL) ?? initialURL),
+          );
+
+    // Refused as NodeAdapter refuses it, as the non-retryable `adapter_error` it is: the
+    // same URL fails the same way on every attempt. Unresolved, `fetch` threw an invalid
+    // URL error retried as a network failure to no end; any other scheme was fetched - a
+    // `file:` URL read off the local disk where the runtime's `fetch` reads one. The
+    // client always sends an absolute http(s) URL.
+    if (dispatchedURL === undefined) {
+      throw nonRetryableAdapterErrorFrom(
+        new TypeError(
+          'FetchAdapter request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)',
+        ),
+      );
+    }
+
+    if (!isAbsoluteWebURL(dispatchedURL)) {
+      throw nonRetryableAdapterErrorFrom(
+        new TypeError(
+          `FetchAdapter sends http: and https: URLs only (got ${dispatchedURL.slice(0, dispatchedURL.indexOf(':') + 1)})`,
+        ),
+      );
+    }
+
     // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
     // browsers refuse to send one, and Node's undici, given one that disagrees with the
     // body, waited for bytes that never came until the attempt timed out - on every retry.
@@ -83,27 +113,22 @@ export class FetchAdapter implements HTTPAdapter {
     // Checked before it is sent, so a request fetch refuses to build - Node's fetch refuses
     // a URL carrying credentials, on every attempt - fails once as the non-retryable
     // `adapter_error` it is, rather than as a network error retried to no end. Built
-    // without the body or signal, which `fetch` below takes, so nothing is consumed.
+    // without the body or signal, which `fetch` below takes, so nothing is consumed. A
+    // header value or method `fetch` refuses came back as its `TypeError`, retried the same
+    // way.
     //
-    // Only where it can be: a URL that resolves (see `resolveBrowserRequestURL`), and a
-    // runtime with `Request` - a test setup that polyfills only `fetch` has none.
+    // Only where it can be: a runtime with `Request` - a test setup that polyfills only
+    // `fetch` has none.
     //
     // The headers it is built with are kept for `fetch` below, so they are materialized
     // once; where it is not built, `fetch` materializes them inside its own `try`.
     let fetchHeaders: HeadersInit | undefined;
 
-    // A relative URL is checked too, once resolved: unchecked, a header value or method
-    // `fetch` refuses came back as its `TypeError`, retried as a network failure to no end.
-    // Gated on the URL dispatched, not on `resolvedURL`: with no base, a network-path form
-    // carrying credentials cross-origin to `initialURL` (`\\u:p@host/x`) is stripped into
-    // an absolute URL that `fetch` sends, and is checked as one.
-    const probeURL = resolveBrowserRequestURL(dispatchedURL);
-
-    if (probeURL !== undefined && typeof Request === 'function') {
+    if (typeof Request === 'function') {
       let builtMethod: string;
       try {
         fetchHeaders = materializeFetchHeaders(headers);
-        builtMethod = new Request(probeURL, {
+        builtMethod = new Request(dispatchedURL, {
           method,
           headers: fetchHeaders,
           redirect: 'manual',

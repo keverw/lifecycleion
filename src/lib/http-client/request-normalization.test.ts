@@ -10288,3 +10288,22 @@ test("PR review round 38: detectedRedirectURL does not report the request URL's 
   expect(response.detectedRedirectURL).toBe('https://a.test/next');
   expect(builder.error?.detectedRedirectURL).toBe('https://a.test/next');
 });
+
+test('PR review round 41: the adapter type is read once, as the config was checked against it', async () => {
+  // A custom adapter whose `getType` answers `node` once, then `xhr`: a client that read
+  // it again per request ran a request as two adapter types at once.
+  let typeReads = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => (typeReads++ === 0 ? 'node' : 'xhr'),
+    send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'https://a.test' });
+
+  const first = await client.get('/one').send();
+  const second = await client.get('/two').send();
+
+  expect(typeReads).toBe(1);
+  expect(client.adapterType).toBe('node');
+  expect(first.adapterType).toBe('node');
+  expect(second.adapterType).toBe('node');
+});

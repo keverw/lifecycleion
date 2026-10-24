@@ -1958,6 +1958,42 @@ describe('MockAdapter transportError', () => {
     expect(attempts).toBe(1);
     expect(res.status).toBe(495);
   });
+
+  test('PR review round 41: each transportError field is read once', async () => {
+    const adapter = new MockAdapter();
+    const reads = { status: 0, isRetryable: 0, wasDefinitelyNotSent: 0 };
+
+    adapter.routes.get('/tls', () => ({
+      status: 200,
+      transportError: {
+        // `495` to the first read, then a status no adapter may report.
+        get status() {
+          return reads.status++ === 0 ? 495 : 1000;
+        },
+        get isRetryable() {
+          return reads.isRetryable++ === 0 ? false : undefined;
+        },
+        get wasDefinitelyNotSent() {
+          return reads.wasDefinitelyNotSent++ === 0 ? true : undefined;
+        },
+      },
+    }));
+
+    const response = await adapter.send({
+      requestURL: 'http://api.test/tls',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.status).toBe(495);
+    expect(response.isRetryable).toBe(false);
+    expect(response.wasDefinitelyNotSent).toBe(true);
+    expect(reads).toEqual({
+      status: 1,
+      isRetryable: 1,
+      wasDefinitelyNotSent: 1,
+    });
+  });
 });
 
 describe('retrySuppressedReason', () => {

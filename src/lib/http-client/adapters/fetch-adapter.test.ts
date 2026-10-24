@@ -302,6 +302,7 @@ describe('FetchAdapter', () => {
   test('withholds userinfo from a protocol-relative cross-origin URL', async () => {
     let capturedURL = '';
 
+    (globalThis as any).document = { baseURI: 'https://api.example.test/page' };
     (globalThis as any).fetch = (url: string) => {
       capturedURL = url;
       return Promise.resolve(new Response(null, { status: 204 }));
@@ -314,7 +315,7 @@ describe('FetchAdapter', () => {
       headers: {},
     });
 
-    expect(capturedURL).toBe('//evil.test/collect');
+    expect(capturedURL).toBe('https://evil.test/collect');
   });
 
   test('PR review round 40: userinfo is withheld from a protocol-relative URL that resolves to another origin', async () => {
@@ -381,9 +382,10 @@ describe('FetchAdapter', () => {
     }
   });
 
-  test('PR review round 40: a network-path URL stripped into an absolute one with no base is checked before it is sent', async () => {
-    // No `document` or `location`: nothing resolves the URL against a page, yet the
-    // cross-origin credentials are stripped into an absolute `https://evil.test/x`.
+  test('PR review round 40: a network-path URL with no base is refused, not stripped into an absolute one and sent', async () => {
+    // No `document` or `location`: nothing resolves the URL against a page, so it is
+    // refused as a relative URL with no base, not sent as one stripped against the initial
+    // URL into an absolute `https://evil.test/x`.
     expect((globalThis as any).document).toBeUndefined();
     expect((globalThis as any).location).toBeUndefined();
 
@@ -398,7 +400,7 @@ describe('FetchAdapter', () => {
         requestURL: '\\\\u:p@evil.test/x',
         initialURL: 'https://api.test/',
         method: 'GET',
-        headers: { 'x-a': 'a\u0000b' },
+        headers: {},
       })
       .then(
         () => undefined,
@@ -406,8 +408,118 @@ describe('FetchAdapter', () => {
       );
 
     expect(outcome).toBeInstanceOf(Error);
+    expect(String(outcome?.message)).toContain(
+      'could not be resolved to an absolute URL',
+    );
     expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     expect(calls).toBe(0);
+  });
+
+  test('PR review round 41: a URL that is not http(s) is refused as non-retryable before it is fetched', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response('127.0.0.1 localhost'));
+    };
+
+    for (const requestURL of [
+      'file:///etc/hosts',
+      'data:text/plain,hi',
+      'blob:https://app.test/0b2c',
+      'ftp://files.test/x',
+    ]) {
+      const outcome = await new FetchAdapter()
+        .send({ requestURL, method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as unknown as Error).message).toBe(
+        `FetchAdapter sends http: and https: URLs only (got ${requestURL.slice(0, requestURL.indexOf(':') + 1)})`,
+      );
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test('PR review round 41: a relative URL with no base to resolve it against is refused as non-retryable', async () => {
+    // No `document` or `location`: nothing to resolve the URL against.
+    expect((globalThis as any).document).toBeUndefined();
+    expect((globalThis as any).location).toBeUndefined();
+
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    for (const requestURL of [
+      '/relative',
+      '//h.test/x',
+      'api/x',
+      'not a url',
+    ]) {
+      const outcome = await new FetchAdapter()
+        .send({ requestURL, method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as unknown as Error).message).toBe(
+        'FetchAdapter request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)',
+      );
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test('PR review round 41: a relative initial URL is resolved against the page before credentials are judged', async () => {
+    let capturedURL = '';
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    // Bun's `Request` takes a URL with credentials; Node's refuses one, which is not what
+    // this test is about.
+    const originalRequest = globalThis.Request;
+    delete (globalThis as { Request?: unknown }).Request;
+
+    const sentURL = async (requestURL: string): Promise<string> => {
+      await new FetchAdapter().send({
+        requestURL,
+        initialURL: '/start',
+        method: 'GET',
+        headers: {},
+      });
+      return capturedURL;
+    };
+
+    try {
+      (globalThis as any).document = { baseURI: 'https://api.test/page' };
+      // `/start` on this page is `https://api.test/start`: same origin, kept.
+      expect(await sentURL('https://u:p@api.test/x')).toBe(
+        'https://u:p@api.test/x',
+      );
+      // Another origin than the page's: withheld.
+      expect(await sentURL('https://u:p@evil.test/x')).toBe(
+        'https://evil.test/x',
+      );
+
+      // No base: the initial URL cannot be resolved, so it still fails closed.
+      delete (globalThis as any).document;
+      expect(await sentURL('https://u:p@api.test/x')).toBe(
+        'https://api.test/x',
+      );
+    } finally {
+      globalThis.Request = originalRequest;
+    }
   });
 
   test('materializes repeated request headers with Headers.append', async () => {

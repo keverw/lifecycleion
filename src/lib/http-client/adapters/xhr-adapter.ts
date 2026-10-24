@@ -23,6 +23,7 @@ import type {
 } from '../types';
 import {
   derivedRedirectFields,
+  isAbsoluteWebURL,
   keepFirstJoinedLocation,
   resolveBrowserRequestURL,
   stripURLCredentials,
@@ -72,11 +73,19 @@ export class XHRAdapter implements HTTPAdapter {
     //
     // Credentials are withheld from the resolved URL, not the one written: `//u:p@host/x`
     // on an `http:` page is an `http:` URL, another origin than an `https:` initial URL.
+    // The initial URL is resolved the same way, so a relative one names the page's origin
+    // rather than failing closed and withholding same-origin credentials; one that does not
+    // resolve still fails closed.
     const resolvedURL = resolveBrowserRequestURL(requestURL);
     const answeredURL =
       resolvedURL === undefined
         ? undefined
-        : stripCrossOriginURLCredentials(resolvedURL, initialURL);
+        : stripCrossOriginURLCredentials(
+            resolvedURL,
+            initialURL === undefined
+              ? undefined
+              : (resolveBrowserRequestURL(initialURL) ?? initialURL),
+          );
 
     return await new Promise((resolve, reject) => {
       // Refused the same way on every attempt - a method or header value `open` or
@@ -95,6 +104,17 @@ export class XHRAdapter implements HTTPAdapter {
         refuse(
           new TypeError(
             'XHRAdapter request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)',
+          ),
+        );
+        return;
+      }
+
+      // Any other scheme is refused as NodeAdapter refuses it: XHR opened a `file:` or
+      // `data:` URL where the runtime would load one.
+      if (!isAbsoluteWebURL(answeredURL)) {
+        refuse(
+          new TypeError(
+            `XHRAdapter sends http: and https: URLs only (got ${answeredURL.slice(0, answeredURL.indexOf(':') + 1)})`,
           ),
         );
         return;

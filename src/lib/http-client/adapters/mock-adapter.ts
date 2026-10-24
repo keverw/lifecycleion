@@ -552,35 +552,36 @@ export class MockAdapter implements HTTPAdapter {
       // Held to the rule the client holds an adapter's status to - an integer from 0 to
       // 999 - here, as the route's mistake: unchecked, it was refused later as the
       // adapter's.
-      asRouteMistake(() => {
-        const status: unknown = options.status;
+      //
+      // Each field read once, as the answer's own are (see `snapshotMockResponse`): a
+      // `status` getter that answered `495` to the check and `1000` to the response
+      // passed one and sent another.
+      const status = asRouteMistake(() => {
+        const value: unknown = options.status;
         if (
-          status !== undefined &&
-          (typeof status !== 'number' ||
-            !Number.isInteger(status) ||
-            status < 0 ||
-            status > 999)
+          value !== undefined &&
+          (typeof value !== 'number' ||
+            !Number.isInteger(value) ||
+            value < 0 ||
+            value > 999)
         ) {
           throw new TypeError(
-            `MockAdapter route returned transportError status ${typeof status === 'number' ? String(status) : typeof status}; it is an integer from 0 to 999`,
+            `MockAdapter route returned transportError status ${typeof value === 'number' ? String(value) : typeof value}; it is an integer from 0 to 999`,
           );
         }
+        return value;
       });
+      const { isRetryable, wasDefinitelyNotSent, message } = options;
 
       return {
-        status: options.status ?? 0,
+        status: status ?? 0,
         isTransportError: true,
-        ...(options.isRetryable !== undefined
-          ? { isRetryable: options.isRetryable }
-          : {}),
-        ...(options.wasDefinitelyNotSent !== undefined
-          ? { wasDefinitelyNotSent: options.wasDefinitelyNotSent }
-          : {}),
+        ...(isRetryable !== undefined ? { isRetryable } : {}),
+        ...(wasDefinitelyNotSent !== undefined ? { wasDefinitelyNotSent } : {}),
         headers: {},
         body: null,
         errorCause: new Error(
-          options.message ??
-            'Mock transport error (MockResponse.transportError)',
+          message ?? 'Mock transport error (MockResponse.transportError)',
         ),
       };
     }
