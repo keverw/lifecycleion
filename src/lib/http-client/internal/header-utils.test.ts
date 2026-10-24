@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
   assertNoBrowserRestrictedHeaders,
+  describeRefusedHeader,
   isBrowserRestrictedHeader,
-  isJSONContentType,
+  materializeRequestHeaders,
 } from './header-utils';
 
 describe('isBrowserRestrictedHeader', () => {
@@ -115,29 +116,51 @@ describe('assertNoBrowserRestrictedHeaders', () => {
   });
 });
 
-describe('isJSONContentType', () => {
-  test('returns true for application/json', () => {
-    expect(isJSONContentType('application/json')).toBe(true);
+describe('materializeRequestHeaders', () => {
+  test('joins repeated Cookie headers with RFC cookie delimiters', () => {
+    expect(
+      materializeRequestHeaders({
+        cookie: ['session=abc123', 'theme=dark'],
+      }),
+    ).toEqual({
+      cookie: 'session=abc123; theme=dark',
+    });
   });
 
-  test('returns true for application/json with charset', () => {
-    expect(isJSONContentType('application/json; charset=utf-8')).toBe(true);
+  test('joins non-cookie arrays with comma delimiters', () => {
+    expect(
+      materializeRequestHeaders({
+        accept: ['application/json', 'text/plain'],
+      }),
+    ).toEqual({
+      accept: 'application/json, text/plain',
+    });
+  });
+});
+
+describe('describeRefusedHeader', () => {
+  test('PR review round 43: names a token header and the part refused, and never a name that is not a token', () => {
+    expect(describeRefusedHeader('Authorization', 'value')).toBe(
+      "the value of header 'Authorization'",
+    );
+    expect(describeRefusedHeader('x-trace', 'name')).toBe(
+      "the name of header 'x-trace'",
+    );
+    for (const name of [
+      'Authorization: Bearer secret-token',
+      'a b',
+      '',
+      'x\n',
+    ]) {
+      expect(describeRefusedHeader(name, 'value')).toBe('a header name');
+      expect(describeRefusedHeader(name, 'name')).toBe('a header name');
+    }
   });
 
-  test('returns true for +json vendor types', () => {
-    expect(isJSONContentType('application/vnd.api+json')).toBe(true);
-  });
-
-  test('returns false for non-JSON types', () => {
-    expect(isJSONContentType('text/plain')).toBe(false);
-    expect(isJSONContentType('application/xml')).toBe(false);
-  });
-
-  test('returns false for undefined', () => {
-    expect(isJSONContentType(undefined)).toBe(false);
-  });
-
-  test('is case-insensitive', () => {
-    expect(isJSONContentType('Application/JSON')).toBe(true);
+  test('PR review round 44: names a token header without a part when the part refused is unknown', () => {
+    expect(describeRefusedHeader('x-trace', 'header')).toBe("header 'x-trace'");
+    expect(
+      describeRefusedHeader('Authorization: Bearer secret-token', 'header'),
+    ).toBe('a header name');
   });
 });

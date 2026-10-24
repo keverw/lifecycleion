@@ -65,6 +65,11 @@ const DATA_VIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   'byteLength',
 )?.get;
 
+const DATA_VIEW_BUFFER = Object.getOwnPropertyDescriptor(
+  DataView.prototype,
+  'buffer',
+)?.get;
+
 const ARRAY_BUFFER_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   ArrayBuffer.prototype,
   'byteLength',
@@ -135,9 +140,89 @@ function callByteLengthGetter(
  * that forty megabytes and two bytes should not read the same.
  */
 export function isArrayBufferLike(value: object): boolean {
+  return arrayBufferKindOf(value) !== undefined;
+}
+
+/**
+ * Which kind of buffer `value` is - `ArrayBuffer` or `SharedArrayBuffer` - told by its
+ * internal slot through the intrinsic getters, so from any realm; `undefined` for
+ * anything else. A detached `ArrayBuffer` is still one (its `byteLength` reads `0`).
+ */
+export function arrayBufferKindOf(
+  value: object,
+): 'ArrayBuffer' | 'SharedArrayBuffer' | undefined {
+  if (callByteLengthGetter(ARRAY_BUFFER_BYTE_LENGTH, value) !== null) {
+    return 'ArrayBuffer';
+  }
+
+  if (callByteLengthGetter(SHARED_ARRAY_BUFFER_BYTE_LENGTH, value) !== null) {
+    return 'SharedArrayBuffer';
+  }
+
+  return undefined;
+}
+
+/**
+ * Whether `value` presents as bytes by its prototype chain - a typed array, `DataView` or
+ * buffer, from any realm, or a `Proxy` over one - read off each prototype's own data
+ * (a typed array prototype's `BYTES_PER_ELEMENT`, a `DataView`'s or buffer's
+ * `Symbol.toStringTag`) rather than by `instanceof`, which only knows this realm. For a
+ * value {@link readBinaryByteLength} cannot measure, to tell bytes it must refuse from a
+ * value that is not bytes at all. A prototype chain that throws answers no.
+ */
+export function presentsAsBinary(value: object): boolean {
+  return someInPrototypeChain(
+    value,
+    (prototype) =>
+      Object.getOwnPropertyDescriptor(prototype, 'BYTES_PER_ELEMENT') !==
+        undefined || isBinaryTag(ownToStringTag(prototype), true),
+  );
+}
+
+/**
+ * Whether `value`'s prototype chain holds a buffer's own prototype - an `ArrayBuffer` or
+ * `SharedArrayBuffer`, from any realm - told by its `Symbol.toStringTag`, read off the
+ * prototypes so a `Proxy`'s `get` trap is not run. A chain that throws answers no.
+ */
+export function hasBufferTagInChain(value: object): boolean {
+  return someInPrototypeChain(value, (prototype) =>
+    isBinaryTag(ownToStringTag(prototype), false),
+  );
+}
+
+/** Whether `matches` holds for some prototype in `value`'s chain; `false` if it throws. */
+function someInPrototypeChain(
+  value: object,
+  matches: (prototype: object) => boolean,
+): boolean {
+  try {
+    for (
+      let prototype = Object.getPrototypeOf(value) as object | null;
+      prototype !== null;
+      prototype = Object.getPrototypeOf(prototype) as object | null
+    ) {
+      if (matches(prototype)) {
+        return true;
+      }
+    }
+  } catch {
+    // A hostile chain: not bytes as far as can be told.
+  }
+
+  return false;
+}
+
+/** A prototype's own `Symbol.toStringTag`, as a plain value; getters are not run. */
+function ownToStringTag(prototype: object): unknown {
+  return Object.getOwnPropertyDescriptor(prototype, Symbol.toStringTag)?.value;
+}
+
+/** A buffer's tag, or - with `isViewIncluded` - a `DataView`'s. */
+function isBinaryTag(tag: unknown, isViewIncluded: boolean): boolean {
   return (
-    callByteLengthGetter(ARRAY_BUFFER_BYTE_LENGTH, value) !== null ||
-    callByteLengthGetter(SHARED_ARRAY_BUFFER_BYTE_LENGTH, value) !== null
+    tag === 'ArrayBuffer' ||
+    tag === 'SharedArrayBuffer' ||
+    (isViewIncluded && tag === 'DataView')
   );
 }
 
@@ -150,10 +235,11 @@ export function isArrayBufferLike(value: object): boolean {
  * nothing. A subclass that under-reports would otherwise be handed the slow path it just
  * claimed not to need - which is the one case a size check exists to catch.
  *
- * `null` - a foreign-realm view neither getter recognizes, a detached buffer, a host
+ * `null` - a value no getter recognizes (a `Proxy`, which has no internal slots), a host
  * without one of the intrinsics - means "no usable measurement", and every caller reads
  * that as "assume it does not fit", the way every other bound here fails closed on a
- * measurement it could not take.
+ * measurement it could not take. A detached buffer, or a view over one, measures `0`:
+ * the getters read it as empty, which is what it holds.
  */
 export function readBinaryByteLength(value: object): number | null {
   for (const getter of [
@@ -169,5 +255,26 @@ export function readBinaryByteLength(value: object): number | null {
     }
   }
 
+  // A `DataView` over a detached buffer, or one a resizable buffer shrank out from under:
+  // its `byteLength` getter throws where a typed array's reads `0`, so it is told by its
+  // `buffer` getter, which does not, and measures `0` as such a typed array does.
+  if (isDataViewBrand(value)) {
+    return 0;
+  }
+
   return null;
+}
+
+/** Whether `value` is a `DataView`, told by an intrinsic getter that never throws for one. */
+function isDataViewBrand(value: object): boolean {
+  if (DATA_VIEW_BUFFER === undefined) {
+    return false;
+  }
+
+  try {
+    DATA_VIEW_BUFFER.call(value);
+    return true;
+  } catch {
+    return false;
+  }
 }

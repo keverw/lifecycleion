@@ -1,6 +1,22 @@
+import { asciiUppercase } from '../internal/http-method';
+import {
+  defineHiddenTags,
+  makeAbortError,
+  markNonRetryableAdapterError,
+  nonRetryableAdapterErrorFrom,
+} from '../internal/adapter-error';
+import { concatChunks } from '../internal/concat-chunks';
+import {
+  isSignalAborted,
+  isSignalAbortedQuietly,
+  readAdapterRequestFields,
+} from '../internal/request-fields';
+import type { AdapterRequestFields } from '../internal/request-fields';
+import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
+import { observeRejection } from '../../internal/promise-reactions';
 import * as http from 'node:http';
-import { guardProgressCallback } from '../internal/progress';
 import * as https from 'node:https';
+import * as tls from 'node:tls';
 import { urlToHttpOptions } from 'node:url';
 import type {
   HTTPAdapter,
@@ -12,10 +28,13 @@ import type {
   StreamResponseCancel,
 } from '../types';
 import {
+  EFFECTIVE_REQUEST_HEADERS_KEY,
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
-  REDIRECT_STATUS_CODES,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_HEADERS_KEY,
+  STREAM_ABORT_STATUS_KEY,
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
 } from '../consts';
@@ -24,16 +43,35 @@ import {
   serializeMultipartFormData,
 } from '../internal/multipart';
 import { writeRequestBodyChunked } from '../internal/request-body-writer';
+import {
+  ACCEPTED_CONTENT_ENCODINGS,
+  createResponseBodySource,
+  type ResponseBodySource,
+} from '../internal/response-decoding';
+import {
+  hasResponseBody,
+  makeResponseTooLargeError,
+  parseContentLength,
+} from '../internal/response-limit';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
-  materializeNodeRequestHeaders,
-  normalizeNodeRequestHeaders,
-} from './node-adapter-utils';
-import { resolveDetectedRedirectURL } from '../utils';
+  deleteHeader,
+  describeRefusedHeader,
+  lowerCaseHeaderName,
+  materializeRequestHeaders,
+} from '../internal/header-utils';
+import {
+  derivedRedirectFields,
+  isCrossOrigin,
+  mergeObservedHeaders,
+} from '../utils';
+import { defineEntry } from '../../internal/define-entry';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
 // original value retained on cause for consumers of the normalized error.
 import { toError as normalizeError, describeError } from '../../to-error';
+import { reportCallbackError } from '../../safe-handle-callback';
+import { guardAbortListeners } from '../../internal/guarded-abort-signal';
 import { reportToHost } from '../../internal/report-to-host';
 import { readUnknownMember as readObjectMember } from '../../internal/read-member';
 
@@ -62,8 +100,8 @@ import { readUnknownMember as readObjectMember } from '../../internal/read-membe
 // steadily into `process.stdout` or a pooled sink would otherwise restart it forever. The
 // ceiling is per absorber, not per writable and not per process - a request settling after
 // it attaches a *fresh* absorber with a fresh ceiling - so continuous traffic does keep a
-// listener on the sink continuously, while no single request's closure is pinned to the
-// caller's stream for longer than the ceiling.
+// listener on the sink continuously, while no single absorber stays on the caller's
+// stream for longer than the ceiling.
 //
 // An error arriving past all of that is the caller's to handle, which is the ordinary
 // contract for a stream they own. Documented for them under "Writing your own
@@ -76,8 +114,9 @@ import { readUnknownMember as readObjectMember } from '../../internal/read-membe
  * that eventually says something. This bounds it for one that does not: a writable handed
  * to `streamResponse` is the caller's, and `process.stdout` or a pooled sink neither errors
  * nor closes. Without a ceiling the absorber outlives the request by the life of the
- * process, swallowing the caller's own later errors and pinning the request scope it closes
- * over.
+ * process, taking over the caller's own later errors: absorbed so they never surface as
+ * the unhandled `'error'` the caller's own handling would see, and reported on the host
+ * channel long after the request they no longer belong to.
  *
  * A second is far past the poll-phase delay this exists to cover - `fs.WriteStream` closes
  * its descriptor asynchronously and emits after it - and far short of forever.
@@ -93,9 +132,9 @@ const PENDING_WRITABLE_ERROR_WINDOW_MS = 1000;
  * without a ceiling, though, that is a deadline that never arrives: `cleanup` asks on every
  * settle of every request, so a caller streaming steadily into `process.stdout` or a pooled
  * sink - the very writables that never error and never close - pushes it out forever, and
- * the absorber stays for the life of the process swallowing the caller's own first genuine
- * error and pinning the *first* request's scope with it. That is the hazard the window
- * exists for, reached by extension rather than by never bounding it at all.
+ * the absorber stays for the life of the process, taking over the caller's own first
+ * genuine error. That is the hazard the window exists for, reached by extension rather
+ * than by never bounding it at all.
  *
  * Counted from when the absorber was attached, so it bounds one listener's whole life
  * rather than any one request's share of it. Five windows: enough that an ordinary burst of
@@ -106,8 +145,8 @@ const PENDING_WRITABLE_ERROR_WINDOW_MS = 1000;
  * cap has expired attaches a *fresh* one - it must, or it would settle with no `'error'`
  * listener at all - so a caller failing continuously into one long-lived sink does keep a
  * listener on it continuously. That is the same coverage a continuous stream of requests
- * gets anyway, and it is the closure behind it, not the listener, that this bounds: no
- * single request's scope is pinned to the writable for longer than this.
+ * gets anyway, and it is each absorber, not the listener coverage, that this bounds: no
+ * single absorber stays on the writable for longer than this.
  */
 const MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS =
   PENDING_WRITABLE_ERROR_WINDOW_MS * 5;
@@ -141,13 +180,6 @@ interface PendingWritableErrorEntry {
   readonly extend: () => boolean;
 }
 
-/**
- * The absorber currently attached to a writable, if any.
- *
- * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
- * to several concurrent requests: a per-request absorber let a dozen simultaneous write
- * failures attach a dozen listeners inside one turn. See `absorbPendingWritableError`.
- */
 /**
  * Writable errors a request has already handed to its caller, so the absorber does not
  * report them a second time.
@@ -183,6 +215,74 @@ function claimWritableError(error: unknown): void {
   }
 }
 
+/**
+ * Report a writable `'error'` that reached one of this adapter's late listeners - the
+ * pending-error absorber, or the permanent fan-out with no request registered behind it -
+ * through the host error reporter, unless a request already handed it to its caller.
+ *
+ * Both listeners exist to keep the event from being an uncaught exception, and both run
+ * after the request that owned the writable has answered, so the error has nowhere else
+ * to go. Absorbing it is the job; dropping it without a trace is not. Never throws: this
+ * runs inside an `'error'` listener, where a throw is the uncaught exception being
+ * prevented.
+ */
+function reportUnclaimedWritableError(error: unknown): void {
+  // Decided a turn later, not now. Whether this error has a home depends on listener
+  // order, and that order is not this function's to control: one absorber covers
+  // every request sharing a writable, so a sibling's absorber can already be attached
+  // when a later request registers its own `onWritableError` - and `EventEmitter`
+  // then runs the absorber first, before the listener that would have claimed the
+  // error. Asking after the emit has finished lets every listener have its say, and
+  // the answer is the same for the ordinary case where the claim came first.
+  const reportIfUnclaimed = (): void => {
+    let wasDelivered = false;
+
+    try {
+      wasDelivered =
+        typeof error === 'object' &&
+        error !== null &&
+        deliveredWritableErrors.delete(error);
+    } catch {
+      // Unreadable as a key; treated as undelivered, so it is reported rather than
+      // lost.
+    }
+
+    if (wasDelivered) {
+      return;
+    }
+
+    try {
+      const failure = normalizeError(
+        error ??
+          new Error(
+            'A writable passed to streamResponse emitted an error after the request settled',
+          ),
+      );
+
+      // Rendered for the console rung, as every other `reportToHost` call in this file is.
+      reportToHost(failure, () => describeError(failure));
+    } catch {
+      // Nothing left to report with; the event is still absorbed either way.
+    }
+  };
+
+  try {
+    // Keep this turn referenced so Node cannot exit before reporting the error.
+    setImmediate(reportIfUnclaimed);
+  } catch {
+    // No way to schedule it, so the question is answered now. Reporting an error the
+    // caller also received is the safe direction; losing one silently is not.
+    reportIfUnclaimed();
+  }
+}
+
+/**
+ * The absorber currently attached to a writable, if any.
+ *
+ * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
+ * to several concurrent requests: a per-request absorber let a dozen simultaneous write
+ * failures attach a dozen listeners inside one turn. See `absorbPendingWritableError`.
+ */
 const pendingWritableErrorAbsorbers = new WeakMap<
   WritableLike,
   PendingWritableErrorEntry
@@ -215,11 +315,11 @@ export interface NodeAdapterConfig {
 
   /**
    * Mutual TLS credentials. When set on an https: request, the adapter
-   * presents the client certificate to the server. Cert errors return
-   * status 495 (non-standard but widely understood for client cert failure)
-   * rather than throwing. The client treats 495 as a transport-level failure,
-   * so it resolves through the failed/error path instead of response observers
-   * and is NOT retryable.
+   * presents the client certificate to the server. A server rejecting the
+   * certificate is reported however the runtime reports it: some runtimes give a
+   * certificate alert, classified as status 495 (not retried), and others only a
+   * closed or reset connection, which is status 0 and retried as any transport
+   * failure is. `mtls.ca` adds to `ca`.
    */
   mtls?: {
     cert: string | Buffer;
@@ -259,8 +359,11 @@ export interface NodeAdapterConfig {
    * concatenated CRLs — the format Apache's `SSLCARevocationFile`, nginx's
    * `ssl_crl` and HAProxy's `crl-file` all expect, and what `openssl ca
    * -gencrl` output is usually assembled into — is split into the array Node
-   * requires. A single CRL, a DER `Buffer`, or an array you built yourself is
-   * passed through untouched.
+   * requires, as is each string or binary element of an array. Only PEM is
+   * read: Node's `tls` does not read DER CRLs, so DER bytes - or a value with
+   * no complete CRL block at all - are refused when the adapter is constructed.
+   * Binary data may be any `ArrayBuffer` view: one CRL block is passed on as a `Buffer`,
+   * several are split into one latin1 string each.
    *
    * The split exists because Node reads only the FIRST CRL of a concatenated
    * string and silently ignores the rest, unlike `ca`, which reads every
@@ -279,7 +382,19 @@ export interface NodeAdapterConfig {
    * Both failures are fail-closed, so a stale CRL never silently stops
    * enforcing — but both can take out healthy connections.
    */
-  crl?: string | Buffer | Array<string | Buffer>;
+  crl?: string | ArrayBufferView | Array<string | ArrayBufferView>;
+
+  /**
+   * Whether a compressed response is decoded before it is handed over, as `fetch`
+   * decodes it. Defaults to `true`: `Accept-Encoding: gzip, deflate, br` is sent (`br`
+   * over https only; `identity` on a `Range` request) unless the request sets its own,
+   * and a `gzip` / `deflate` / `br` / `zstd` body is decoded.
+   *
+   * `false` hands over every body exactly as it arrived - to save a server's `.gz` as
+   * sent, say - and sends no `Accept-Encoding` of its own (a request's own still goes
+   * out). `maxResponseBytes` then counts the bytes as received.
+   */
+  decompress?: boolean;
 
   /**
    * Set to false to accept self-signed certificates in dev/test environments.
@@ -299,8 +414,21 @@ export class NodeAdapter implements HTTPAdapter {
     // Reject malformed initial configuration before it can enter request retries.
     // Still normalize per request below so callers can refresh their revocation list.
     if (config.crl !== undefined) {
-      normalizeCRL(config.crl);
+      normalizeCRL(config.crl, this);
     }
+    assertTrustAnchors(config.ca, 'ca');
+    assertTrustAnchors(config.mtls?.ca, 'mtls.ca');
+
+    const candidateDecompress: unknown = config.decompress;
+    if (
+      candidateDecompress !== undefined &&
+      typeof candidateDecompress !== 'boolean'
+    ) {
+      throw new TypeError(
+        `NodeAdapter decompress must be a boolean (got ${candidateDecompress === null ? 'null' : typeof candidateDecompress})`,
+      );
+    }
+
     this._config = config;
   }
 
@@ -308,41 +436,171 @@ export class NodeAdapter implements HTTPAdapter {
     return 'node';
   }
 
-  public async send(request: AdapterRequest): Promise<AdapterResponse> {
+  public async send(adapterRequest: AdapterRequest): Promise<AdapterResponse> {
+    // Every member read once, here, where a getter that throws rejects this send. Read
+    // later, from an emitter or `AbortSignal` callback, the same throw would be an
+    // uncaught exception and the send would never settle. See `snapshotAdapterRequest`.
+    // The fields every adapter reads, by the rules they share (see
+    // `readAdapterRequestFields`), and this adapter's own on a carrier as those are.
+    const fields = readAdapterRequestFields(adapterRequest);
+    let request: AdapterRequest;
+    try {
+      request = snapshotAdapterRequest(adapterRequest, fields);
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+    dropBodilessContentLength(request);
+
+    // This adapter frames every body itself with a `Content-Length`. A caller's
+    // `Transfer-Encoding` went out beside it - both on one message, which RFC 9112 6.1
+    // forbids a sender to do: strict servers answer 400, and a lenient proxy chain can
+    // read the two framings differently (request smuggling). Refused, as undici refuses
+    // it, and not retried: every attempt carries the same header.
+    //
+    // Nor a protocol switch: an `Upgrade` header or a `CONNECT` request is answered with a
+    // socket handed over through `'upgrade'` / `'connect'`, not a response, and this
+    // adapter reads responses - such a request never settled, or settled as a timeout
+    // standing in for the `101` the server sent.
+    //
+    // Nor `Expect`: Node sends the headers at once for one, so the `Content-Length` the
+    // adapter sets afterwards threw on a request with a body (a string body as an
+    // `adapter_error`, a `FormData` one as a transport failure, retried and failing the
+    // same each time), and a bodiless one went out chunked rather than with no length -
+    // and RFC 9110 has no `100-continue` on a request without content anyway.
+    for (const name of Object.keys(request.headers)) {
+      const refusalMessage = REFUSED_REQUEST_HEADERS.get(
+        lowerCaseHeaderName(name),
+      );
+      if (refusalMessage !== undefined) {
+        const refusal = new TypeError(refusalMessage);
+        markNonRetryableAdapterError(refusal);
+        throw refusal;
+      }
+    }
+
+    if (asciiUppercase(request.method) === 'CONNECT') {
+      const refusal = new TypeError(
+        'NodeAdapter does not open tunnels; a CONNECT request is not supported',
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
+
     // Guarded once, at the boundary, so every call site below is covered - including the
     // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
-    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
-    // change whether a request succeeded; a throwing callback used to propagate out and be
-    // classified as a transport failure. See `guardProgressCallback`.
-    const guardedUploadProgress = guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    );
-    const guardedDownloadProgress = guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    );
+    // `serializeMultipartFormData`. See `readAdapterRequestFields`.
+    // `maxResponseBytes`: the most a buffered body may hold, decoded.
+    const { guardedUploadProgress, guardedDownloadProgress, maxResponseBytes } =
+      fields;
+    // Read once per request, as the rest of the config is: see `decompress`.
+    const isDecompressing = this._config.decompress !== false;
 
-    const parsedURL = new URL(request.requestURL);
-    const urlOptions = urlToHttpOptions(parsedURL);
+    // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
+    // URL fails the same way on every attempt. In its own words, without the parser's
+    // error, which carries the whole URL as its `input` - userinfo and query with it.
+    let parsedURL: URL;
+    try {
+      parsedURL = new URL(request.requestURL);
+    } catch {
+      throw nonRetryableAdapterErrorFrom(
+        new TypeError('NodeAdapter request URL is not a valid absolute URL'),
+      );
+    }
+
+    // Refused, not sent: any other scheme went out as plaintext HTTP - a `wss://` URL to
+    // port 80, its userinfo as Basic auth. `HTTPClient` checks this first; a caller
+    // driving the adapter directly did not.
+    if (parsedURL.protocol !== 'http:' && parsedURL.protocol !== 'https:') {
+      throw nonRetryableAdapterErrorFrom(
+        new TypeError(
+          `NodeAdapter sends http: and https: URLs only (got ${parsedURL.protocol})`,
+        ),
+      );
+    }
+
+    // `urlToHttpOptions` percent-decodes the userinfo, and a malformed escape
+    // (`a%E0:b@`) throws a `URIError` that reads the same on every attempt: tagged
+    // non-retryable, as the other setup throws are, rather than retried.
+    let urlOptions: ReturnType<typeof urlToHttpOptions>;
+    try {
+      urlOptions = urlToHttpOptions(parsedURL);
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+
     const isHTTPS = parsedURL.protocol === 'https:';
     const httpModule = isHTTPS ? https : http;
 
+    const requestHeaders = materializeRequestHeaders(request.headers);
+
+    // Checked here, by Node's own rules, so a header `http.request` would refuse is
+    // refused in this adapter's words: Node's error quotes the name - text pasted in whole
+    // as one, `Authorization: Bearer …` - and a carrier's message and `cause` reach logs.
+    // Non-retryable, as the same headers fail the same way on every attempt.
+    for (const [name, value] of Object.entries(requestHeaders)) {
+      let part: 'name' | 'value' = 'name';
+      try {
+        http.validateHeaderName(name);
+        part = 'value';
+        http.validateHeaderValue(name, value);
+      } catch {
+        throw nonRetryableAdapterErrorFrom(
+          new TypeError(
+            `NodeAdapter refused ${describeRefusedHeader(name, part)}`,
+          ),
+        );
+      }
+    }
+
+    // Asked for as `fetch` asks for it, and decoded as it decodes (see
+    // `createResponseBodySource`); a caller's own `Accept-Encoding` stands - `identity`
+    // to ask for none. A `Range` request asks for `identity`, as the Fetch standard has it
+    // (undici and browsers send it): the range is of the bytes as stored, and a server
+    // that serves ranges of a precompressed file answered with a slice of a gzip stream
+    // that cannot be decoded. `br` only over https, as undici and browsers offer it.
+    const headerNames = Object.keys(requestHeaders).map((name) =>
+      lowerCaseHeaderName(name),
+    );
+    if (isDecompressing && !headerNames.includes('accept-encoding')) {
+      requestHeaders['accept-encoding'] = headerNames.includes('range')
+        ? 'identity'
+        : isHTTPS
+          ? ACCEPTED_CONTENT_ENCODINGS
+          : 'gzip, deflate';
+    }
+
     const options: http.RequestOptions = {
       method: request.method,
-      headers: materializeNodeRequestHeaders(request.headers),
+      headers: requestHeaders,
       // Timeout is managed by the client via abort signal — the adapter does
       // not impose its own timeout so the client retains full control.
     };
 
-    // Whether this attempt is a redirect hop to an origin the caller never named. Asked
-    // here rather than only inside the `https:` branch below, because `socketPath` is the
-    // other piece of caller-configured *reach* a `Location` header must not be able to
-    // retarget - and unlike TLS identity it applies to plain `http:` too.
-    const isCrossOriginHop = isCrossOriginRedirectHop(
-      request.initialURL,
-      parsedURL,
-    );
+    // Whether this attempt is a redirect hop to an origin the caller never named.
+    //
+    // Three things are scoped by it: the TLS identity (`servername`, `mtls.cert` /
+    // `mtls.key`), the configured `socketPath`, and Basic credentials taken from a request
+    // URL's `user:pass@`. All three are addressed to an origin the caller chose, and a
+    // `Location` header is the remote server's choice. Asked here rather than only inside
+    // the `https:` branch below, because `socketPath` and the credentials apply to plain
+    // `http:` too.
+    //
+    // `servername` and `mtls.cert` / `mtls.key` are the caller's TLS *identity*: the name
+    // it meant to talk to and the certificate it authenticates with. Applied to every
+    // `https:` request, they followed a `Location` header wherever it pointed - a
+    // cross-origin redirect had the adapter present the caller's client certificate to,
+    // and send the configured SNI to, a host the caller never named and the remote server
+    // chose. The client passes `initialURL` so a hop can be told from the request that
+    // started it; the identity is withheld when the origin (scheme, host and port)
+    // differs.
+    //
+    // Absent `initialURL` - the adapter driven directly - is the request itself, so the
+    // identity applies as it always did. An `initialURL` that cannot be parsed is treated
+    // as cross-origin (`isCrossOrigin`): it cannot be shown to be the same origin, and
+    // failing closed withholds an identity rather than presenting one.
+    const isCrossOriginHop =
+      request.initialURL !== undefined &&
+      isCrossOrigin(request.initialURL, parsedURL);
 
     // `user:pass@` from the request URL, as Basic credentials on the wire.
     //
@@ -389,11 +647,31 @@ export class NodeAdapter implements HTTPAdapter {
       // configured *trust* (`ca`, `mtls.ca`, `crl`, `rejectUnauthorized`) still applies
       // there - it says which servers to believe, and that is the caller's rule for every
       // connection this adapter opens. The configured *identity* does not, and neither
-      // does `socketPath` above: see `isCrossOriginRedirectHop`.
+      // does `socketPath` above: see `isCrossOriginHop`.
 
-      // custom CA trust store
-      if (this._config.ca) {
-        httpsOptions.ca = this._config.ca;
+      // custom CA trust store. An empty one is refused rather than skipped: skipped, it
+      // fell back to the public roots - a client meant to trust one private CA, whose
+      // loader came back empty, then trusted every public one.
+      const trustedCA = this._config.ca;
+      const mtlsCA = this._config.mtls?.ca;
+      assertTrustAnchors(trustedCA, 'ca');
+      assertTrustAnchors(mtlsCA, 'mtls.ca');
+      // `mtls.ca` adds to `ca` rather than replacing it, so a client that trusts a partner
+      // CA through `ca` keeps it when it also configures mTLS.
+      const anchors = [
+        ...(trustedCA === undefined
+          ? []
+          : Array.isArray(trustedCA)
+            ? trustedCA
+            : [trustedCA]),
+        ...(mtlsCA === undefined
+          ? []
+          : Array.isArray(mtlsCA)
+            ? mtlsCA
+            : [mtlsCA]),
+      ];
+      if (anchors.length > 0) {
+        httpsOptions.ca = anchors.length === 1 ? anchors[0] : anchors;
       }
 
       // SNI hostname — required when dialing by IP with a DNS-named cert. Withheld on a
@@ -419,15 +697,27 @@ export class NodeAdapter implements HTTPAdapter {
           httpsOptions.key = this._config.mtls.key;
         }
 
-        if (this._config.mtls.ca) {
-          httpsOptions.ca = this._config.mtls.ca;
-        }
-
         httpsOptions.rejectUnauthorized = true;
       }
 
-      if (this._config.crl !== undefined) {
-        httpsOptions.crl = normalizeCRL(this._config.crl);
+      // Read once, outside the `try`: only the validation of the value read is terminal.
+      const crl = this._config.crl;
+
+      if (crl !== undefined) {
+        try {
+          httpsOptions.crl = normalizeCRL(crl, this);
+        } catch (error) {
+          // A refreshed value that fails validation is configuration, not transport:
+          // retrying would read the same bad value again, and a network error would hide
+          // what is wrong. Terminal, as the constructor's own check is. Only this
+          // adapter's own refusal is: a throw from caller code read while normalizing
+          // keeps its usual retryable adapter-error behavior, and its error is not tagged.
+          if (crlValidationErrors.has(error as Error)) {
+            markNonRetryableAdapterError(error);
+          }
+
+          throw error;
+        }
       }
 
       if (this._config.rejectUnauthorized === false) {
@@ -438,15 +728,25 @@ export class NodeAdapter implements HTTPAdapter {
     }
 
     /**
-     * The request body's outcome, held out here rather than inside the executor.
+     * How the request body ended, for a response that is resolved before it does.
      *
-     * Out here because a `Promise` executor rejects on a *synchronous* throw as well as
-     * through `reject`, and that path touches none of the executor's own handlers:
-     * `httpModule.request` validates headers and the path synchronously
-     * (`ERR_INVALID_HTTP_TOKEN`, `ERR_UNESCAPED_CHARACTERS`), `Buffer.from` can raise a
-     * `RangeError` on a huge body, and `req.setHeader` can throw - all after the outcome
-     * promise has been opened. Reached from here, `settleRequestBodyForThrow` below is the
-     * one choke point every rejection passes through, whatever raised it.
+     * Carried on the response as {@link AdapterResponse.requestBodySettled} and never
+     * waited for: the response is the server's real answer and is delivered as soon as
+     * it is complete, which is usually before the upload it answered over has finished.
+     * Waiting for the writer instead is what this must not do - it turned a `413` that
+     * stopped reading into a network error with the server's explanation dropped, and
+     * let an abort during the wait discard a response that had already arrived in full.
+     *
+     * Resolves, never rejects: a caller that ignores it must not be handed an unhandled
+     * rejection for an upload it never asked about.
+     *
+     * Held out here rather than inside the executor because a `Promise` executor rejects
+     * on a *synchronous* throw as well as through `reject`, and that path touches none of
+     * the executor's own handlers: `httpModule.request` validates headers and the path
+     * synchronously (`ERR_INVALID_HTTP_TOKEN`, `ERR_UNESCAPED_CHARACTERS`), `Buffer.from`
+     * can raise a `RangeError` on a huge body, and `req.setHeader` can throw - all after
+     * the outcome promise has been opened. Reached from here, `settleRequestBodyForThrow`
+     * below is the one choke point every rejection passes through, whatever raised it.
      */
     const upload: {
       outcome: Promise<Error | undefined> | null;
@@ -548,1189 +848,1595 @@ export class NodeAdapter implements HTTPAdapter {
       return error;
     };
 
-    return new Promise<AdapterResponse>((resolve, reject) => {
-      let activeResponseStream:
-        | {
-            status: number;
-            headers: Record<string, string | string[]>;
-            writable: WritableLike;
-          }
-        | undefined;
-      let activeBufferedResponse:
-        | {
-            status: number;
-            headers: Record<string, string | string[]>;
-          }
-        | undefined;
-      let isStreamFactoryPending = false;
-      let abortStreamSetup: (() => void) | undefined;
-
-      /**
-       * Settle a socket failure that lands while a `streamResponse` factory is setting up.
-       *
-       * The one window where "the response side always settles on its own" is not true.
-       * `res`'s own `'error'`, `'aborted'` and `'close'` handlers are installed by
-       * `streamResponseBody`, which does not run until the factory has resolved, so a
-       * socket reset during an `await`ed factory reached nothing: the request `'error'`
-       * handler stood down on {@link didReceiveResponse}, `res` had no listeners to see it,
-       * and the adapter promise never settled - the caller hung until its own signal.
-       *
-       * Set only for the duration of that await, and cleared the moment the factory
-       * returns; from there `streamResponseBody`'s handlers have it. Aborting the stream
-       * signal is what lets the factory's own cleanup listeners run, and the
-       * `streamAbort.signal.aborted` check after the await then destroys a writable that
-       * arrived too late.
-       */
-      let failStreamSetupOnSocketError: ((error: Error) => void) | undefined;
-
-      /**
-       * Whether the server has already answered.
-       *
-       * A body write that fails after this is not the failure worth reporting. A server is
-       * free to send a complete early response - a 413 or a 401 with `Connection: close` -
-       * while the body is still uploading, and tearing that socket down is how it says so.
-       * The writers then reject (the chunk truly was not accepted), and the `catch`
-       * handlers below used to answer that with `req.destroy()` and a synthetic
-       * `status: 0, isTransportError: true`, racing the real response to `resolve`: the
-       * caller got a fabricated transport error instead of the server's actual status,
-       * and the destroy tore down the connection the response was still arriving on.
-       * With a response in hand the response path is the one that gets to answer.
-       */
-      let didReceiveResponse = false;
-
-      /**
-       * Whether the response has finished arriving.
-       *
-       * Distinct from {@link didReceiveResponse}, which says only that the headers came
-       * back. Tearing the request down while the body is still coming in is what the
-       * early-response handling exists to prevent, so the one place that may destroy an
-       * unfinished request is a write failure *after* this - by which point the response
-       * has been read and the socket has nothing left to deliver.
-       */
-      let didResponseClose = false;
-
-      /**
-       * Whether a body writer is still running.
-       *
-       * An early response does not mean the server stopped reading: with request buffering
-       * disabled - nginx `proxy_request_buffering off`, or an endpoint that acks a
-       * streaming upload as soon as it has what it needs - the answer arrives while the
-       * upload is still going and the server goes on consuming it. Destroying the request
-       * there truncates a body the client was still writing, against a `Content-Length`
-       * already on the wire, and the caller is handed the early status as a clean success.
-       *
-       * So a writer that is still going is left to finish: it ends the request itself on
-       * success, and on failure the `catch` below destroys what is left. Nothing is leaked
-       * either way, which is what the destroy was added for.
-       */
-      let isWritingBody = false;
-
-      /** The most recent `loaded` any upload-progress report carried. */
-      let uploadedBytesSeen = 0;
-
-      /**
-       * When the body writer last parked on its *source* - a `Blob.stream()` read still
-       * outstanding - or `undefined` while it is not. Set by the multipart writer through
-       * `onSourceWait`; see {@link watchForStalledUpload}.
-       */
-      let sourceWaitSince: number | undefined;
-
-      /** Whether a post-response write failure has already been reported and scheduled. */
-      let didReportWriteErrorAfterResponse = false;
-
-      /**
-       * Destroy an upload the server has stopped reading, once the response is in.
-       *
-       * The two cases an early response splits into look identical from here for the first
-       * instant. A proxy that answers `413` and stops reading leaves the write parked under
-       * backpressure that will never drain, and `req.end()` only ever runs on the write
-       * path's success - so without this the socket is held, unfinished and unusable, until
-       * the server's own timeout. An endpoint that acks a streaming upload early and *goes
-       * on consuming it* looks the same at the moment the answer lands, and destroying it
-       * there truncates a body against a `Content-Length` already on the wire.
-       *
-       * Progress is what tells them apart: the first makes none, the second keeps making it.
-       * So the upload is given {@link UPLOAD_STALL_GRACE_MS} to move, re-armed for as long
-       * as it does, and destroyed the first time it does not. That grace is what decides
-       * how slow a receiver may be before it is mistaken for one that has stopped; see the
-       * constant.
-       *
-       * Progress is bytes the socket accepted, and a writer parked on its *source* makes
-       * none either: a multipart `File` on a slow or contended disk can leave
-       * `Blob.stream()`'s `read()` outstanding for longer than the grace, with the socket
-       * perfectly willing. That used to be destroyed as a stall too - a healthy upload the
-       * server had already acked, cut short over a slow read. The writer now says when it
-       * is waiting on the source, and that wait is given {@link UPLOAD_SOURCE_STALL_GRACE_MS}
-       * instead: long, because a disk read that has not answered in a minute is stuck rather
-       * than slow, and bounded, because a source that never answers is the parked writer
-       * the hang below was fixed for.
-       */
-      const watchForStalledUpload = (): void => {
-        let bytesAtLastTick = uploadedBytesSeen;
-
-        const tick = (): void => {
-          if (!isWritingBody || req.writableEnded || req.destroyed) {
-            return;
-          }
-
-          if (
-            uploadedBytesSeen === bytesAtLastTick &&
-            sourceWaitSince !== undefined &&
-            Date.now() - sourceWaitSince < UPLOAD_SOURCE_STALL_GRACE_MS
-          ) {
-            // Not the socket's fault. Watched on, so a source that never answers is still
-            // caught below once its own grace runs out.
-            arm();
-
-            return;
-          }
-
-          if (uploadedBytesSeen === bytesAtLastTick) {
-            // Answered here, as `reportWriteErrorAfterResponse` answers it, and for the
-            // same reason: the destroy below is not guaranteed to reach the writer. A
-            // writer parked inside `Blob.stream()`'s `read()` has no pending `req.write`
-            // to reject, so it never returns to run `endBodyWrite`, and
-            // `await response.requestBodySettled` waited forever on an upload this
-            // watchdog had already given up on. Settled first, so a `destroy()` that
-            // throws cannot leave the caller waiting - which also makes this the answer
-            // the caller sees: `settleBodyOutcome` is first-call-wins, so a writer that
-            // does notice the destroy and reports its own `EPIPE` afterwards is recorded
-            // nowhere. That is the trade this makes deliberately. An upload the watchdog
-            // reached had made no progress for a full grace window, so "stalled after the
-            // response arrived" is the failure worth reporting, and the alternative -
-            // waiting for a writer that may never return - is the hang this closes.
-            const stalled = new Error(
-              sourceWaitSince === undefined
-                ? 'Request body upload stalled after the response arrived'
-                : 'Request body source stopped answering after the response arrived',
-            );
-
-            settleBodyOutcome(stalled);
-
-            // On the host's `'error'` channel too, as `reportWriteErrorAfterResponse`
-            // puts every other late upload failure there: the docs promise that a
-            // failure after the response is reported whether or not anyone awaits
-            // `requestBodySettled`, and this one - the watchdog cutting an upload short
-            // seconds after a clean `2xx` was read - is the example they give. It was the
-            // one late failure that settled the promise and said nothing else, so a
-            // caller who never awaited it heard nothing. Rendered for the console rung
-            // for the reason given there. After the settle, so a report that throws
-            // cannot leave the caller waiting; before the destroy, so a writer that
-            // notices the teardown and reports its own `EPIPE` finds the one-shot
-            // already taken and does not put a second line on the channel for the same
-            // upload. The one-shot is honoured in the other direction too: a write
-            // failure reported from the request's `'error'` handler settles the outcome
-            // but leaves `isWritingBody` set on purpose (see `settleBodyOutcome`), and
-            // hands the request to a grace deadline of its own rather than destroying
-            // it, so this tick still runs and would otherwise say "stalled" over an
-            // upload already reported as reset. The settle and the destroy still happen
-            // here: the first is a no-op the second time, the second is the teardown
-            // that deadline was going to do anyway.
-            if (!didReportWriteErrorAfterResponse) {
-              didReportWriteErrorAfterResponse = true;
-
-              try {
-                reportToHost(stalled, () => describeError(stalled));
-              } catch {
-                // Nothing left to report with; the outcome is already settled.
-              }
+    let requestForCleanup: http.ClientRequest | undefined;
+    const operation = new Promise<AdapterResponse>((resolve, reject) => {
+      // A synchronous throw from setting the request up - Node's own validation of a
+      // header value (`ERR_INVALID_CHAR`) or of the method, a body `Buffer.from` refuses -
+      // comes before anything is sent and fails the same way every time: tagged
+      // non-retryable here, as FetchAdapter tags `fetch`'s refusal to build the request,
+      // rather than retried as a transport failure.
+      try {
+        let activeResponseStream:
+          | {
+              status: number;
+              headers: Record<string, string | string[]>;
+              writable: WritableLike;
+              /** Fire the factory's stream signal, so its cleanup listeners run. */
+              abortStream: () => void;
             }
+          | undefined;
+        let activeBufferedResponse:
+          | {
+              status: number;
+              headers: Record<string, string | string[]>;
+            }
+          | undefined;
+        /**
+         * A `streamResponse` factory that is still setting up its sink, or `undefined`
+         * outside that await. Set a microtask before the factory is called (it is not
+         * called if the request ends in that microtask) and cleared the moment it returns
+         * or throws; from there `streamResponseBody`'s handlers have the response.
+         */
+        let pendingStreamSetup:
+          | {
+              /** Fire the factory's stream signal, so its cleanup listeners run. */
+              abort: () => void;
 
-            // Quietly, because this one runs from a timer. Every other `req.destroy()`
-            // here is inside the request's own promise chain, where a throw is rejected
-            // into it. This one has no such home: a socket already gone can answer
-            // `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes, and a throw out of a
-            // timer callback is the uncaught exception the rest of this file's absorbers
-            // exist to prevent - taking the process down over a teardown that had already
-            // happened.
-            destroyRequestQuietly(req);
+              /** The answer the factory was called for, carried on a setup failure. */
+              status: number;
+              headers: Record<string, string | string[]>;
 
-            return;
-          }
+              /**
+               * Whether the factory has been called. Not until a microtask after the setup
+               * begins, and an abort before that is the response's, not the factory's.
+               */
+              didCallFactory: boolean;
 
-          bytesAtLastTick = uploadedBytesSeen;
-          arm();
+              /**
+               * Settle a socket failure that lands during the setup.
+               *
+               * The one window where "the response side always settles on its own" is not
+               * true. `res`'s own `'error'`, `'aborted'` and `'close'` handlers are
+               * installed by `streamResponseBody`, which does not run until the factory has
+               * resolved, so a socket reset during an `await`ed factory reached nothing:
+               * the request `'error'` handler stood down on {@link didReceiveResponse},
+               * `res` had no listeners to see it, and the adapter promise never settled -
+               * the caller hung until its own signal.
+               *
+               * One-shot: cleared on its first call, while the setup itself stays pending.
+               * Aborting the stream signal is what lets the factory's own cleanup listeners
+               * run, and the `streamAbort.signal.aborted` check after the await then
+               * destroys a writable that arrived too late.
+               */
+              failOnSocketError: ((error: Error) => void) | undefined;
+
+              /**
+               * Whether the response has arrived in full. A socket failure after that -
+               * an upload reset by a server that answered and closed - leaves a complete
+               * body to stream once the factory resolves, as `'close'` during the setup
+               * does.
+               */
+              isResponseComplete: () => boolean;
+            }
+          | undefined;
+
+        /**
+         * Whether the server has already answered.
+         *
+         * A body write that fails after this is not the failure worth reporting. A server is
+         * free to send a complete early response - a 413 or a 401 with `Connection: close` -
+         * while the body is still uploading, and tearing that socket down is how it says so.
+         * The writers then reject (the chunk truly was not accepted), and the `catch`
+         * handlers below used to answer that with `req.destroy()` and a synthetic
+         * `status: 0, isTransportError: true`, racing the real response to `resolve`: the
+         * caller got a fabricated transport error instead of the server's actual status,
+         * and the destroy tore down the connection the response was still arriving on.
+         * With a response in hand the response path is the one that gets to answer.
+         */
+        let didReceiveResponse = false;
+
+        /**
+         * Whether the response has finished arriving.
+         *
+         * Distinct from {@link didReceiveResponse}, which says only that the headers came
+         * back. Tearing the request down while the body is still coming in is what the
+         * early-response handling exists to prevent, so the one place that may destroy an
+         * unfinished request is a write failure *after* this - by which point the response
+         * has been read and the socket has nothing left to deliver.
+         */
+        let didResponseClose = false;
+        /** The response, once it has arrived; see `reportWriteErrorAfterResponse`. */
+        let receivedResponse: http.IncomingMessage | undefined;
+        /**
+         * Lets go of a decoded response body - its decoders and the response under it - when
+         * the request no longer wants it: a cancel, a timeout, a teardown. Without it, a small
+         * compressed body that had arrived whole went on inflating after the request settled.
+         */
+        let releaseResponseBody: (() => void) | undefined;
+
+        /**
+         * Whether a body writer is still running.
+         *
+         * An early response does not mean the server stopped reading: with request buffering
+         * disabled - nginx `proxy_request_buffering off`, or an endpoint that acks a
+         * streaming upload as soon as it has what it needs - the answer arrives while the
+         * upload is still going and the server goes on consuming it. Destroying the request
+         * there truncates a body the client was still writing, against a `Content-Length`
+         * already on the wire, and the caller is handed the early status as a clean success.
+         *
+         * So a writer that is still going is left to finish: it ends the request itself on
+         * success, and on failure the `catch` below destroys what is left. Nothing is leaked
+         * either way, which is what the destroy was added for.
+         */
+        let isWritingBody = false;
+
+        /** The most recent `loaded` any upload-progress report carried. */
+        let uploadedBytesSeen = 0;
+
+        /**
+         * When the body writer last parked on its *source* - a `Blob.stream()` read still
+         * outstanding - or `undefined` while it is not. Set by the multipart writer through
+         * `onSourceWait`; see {@link watchForStalledUpload}.
+         */
+        let sourceWaitSince: number | undefined;
+
+        /** Whether a post-response write failure has already been reported and scheduled. */
+        let didReportWriteErrorAfterResponse = false;
+        /**
+         * Set when this adapter destroyed the request itself after the response arrived -
+         * a stream factory that cancelled, threw or failed, a stream error - so the upload
+         * failure that teardown causes is not reported to the host as a transport failure.
+         */
+        let didTearDownAfterResponse = false;
+        const tearDownAfterResponse = (): void => {
+          didTearDownAfterResponse = true;
+          releaseResponseBody?.();
+          destroyRequestQuietly(req);
         };
 
-        const arm = (): void => {
-          const timer = setTimeout(tick, UPLOAD_STALL_GRACE_MS);
+        /**
+         * Destroy an upload the server has stopped reading, once the response is in.
+         *
+         * The two cases an early response splits into look identical from here for the first
+         * instant. A proxy that answers `413` and stops reading leaves the write parked under
+         * backpressure that will never drain, and `req.end()` only ever runs on the write
+         * path's success - so without this the socket is held, unfinished and unusable, until
+         * the server's own timeout. An endpoint that acks a streaming upload early and *goes
+         * on consuming it* looks the same at the moment the answer lands, and destroying it
+         * there truncates a body against a `Content-Length` already on the wire.
+         *
+         * Progress is what tells them apart: the first makes none, the second keeps making it.
+         * So the upload is given {@link UPLOAD_STALL_GRACE_MS} to move, re-armed for as long
+         * as it does, and destroyed the first time it does not. That grace is what decides
+         * how slow a receiver may be before it is mistaken for one that has stopped; see the
+         * constant.
+         *
+         * Progress is bytes the socket accepted, and a writer parked on its *source* makes
+         * none either: a multipart `File` on a slow or contended disk can leave
+         * `Blob.stream()`'s `read()` outstanding for longer than the grace, with the socket
+         * perfectly willing. That used to be destroyed as a stall too - a healthy upload the
+         * server had already acked, cut short over a slow read. The writer now says when it
+         * is waiting on the source, and that wait is given {@link UPLOAD_SOURCE_STALL_GRACE_MS}
+         * instead: long, because a disk read that has not answered in a minute is stuck rather
+         * than slow, and bounded, because a source that never answers is the parked writer
+         * the hang below was fixed for.
+         */
+        const watchForStalledUpload = (): void => {
+          let bytesAtLastTick = uploadedBytesSeen;
 
-          // Never a reason for the process to stay up: the response has already been
-          // delivered by the time this is armed.
-          timer.unref?.();
-        };
-
-        arm();
-      };
-
-      /**
-       * How the request body ended, for a response that is resolved before it does.
-       *
-       * Carried on the response as {@link AdapterResponse.requestBodySettled} and never
-       * waited for: the response is the server's real answer and is delivered as soon as
-       * it is complete, which is usually before the upload it answered over has finished.
-       * Waiting for the writer instead is what this must not do - it turned a `413` that
-       * stopped reading into a network error with the server's explanation dropped, and
-       * let an abort during the wait discard a response that had already arrived in full.
-       *
-       * Resolves, never rejects: a caller that ignores it must not be handed an unhandled
-       * rejection for an upload it never asked about.
-       */
-
-      /**
-       * Open the outcome promise, so it exists from the moment the request has a body.
-       *
-       * Opened here rather than at the first write, which is where it used to be created:
-       * the write branches are the last thing in this executor, so everything that can
-       * throw before them - a signal that was already aborted, a `streamResponse` factory
-       * that refused - threw with no promise to tag, `HTTPClient` omitted the field, and
-       * `await` answered `undefined`, the documented value for a body that went out in
-       * full. Nothing had gone out at all.
-       *
-       * Idempotent: the two write branches still announce themselves through
-       * {@link beginBodyWrite}, and the promise they find is the one already handed to
-       * whatever has since been resolved or thrown.
-       */
-      const openBodyOutcome = (): void => {
-        if (upload.outcome) {
-          return;
-        }
-
-        upload.outcome = new Promise<Error | undefined>((settle) => {
-          upload.settle = settle;
-        });
-      };
-
-      /**
-       * A writer is running. Distinct from having a body: `isWritingBody` is what tells
-       * the response-close handler to leave an upload alone rather than destroying it
-       * mid-write, and that is only true once a writer actually exists.
-       */
-      const beginBodyWrite = (): void => {
-        isWritingBody = true;
-        openBodyOutcome();
-      };
-
-      /**
-       * Answer `requestBodySettled` and nothing else.
-       *
-       * Split from {@link endBodyWrite} because one caller must settle the promise
-       * *without* declaring the writer finished: a write error that lands after the
-       * response has arrived is reported and left to the grace deadline, and
-       * `isWritingBody` still gates the response-close handler's choice between the
-       * stall watchdog and an immediate `destroy`. Flipping it there would have changed
-       * that teardown as a side effect of answering the caller.
-       *
-       * Idempotent through `settleBodyWrite`, which is cleared on the first call: a
-       * promise resolves once, and the second settle would be silently dropped anyway.
-       */
-      const settleBodyOutcome = (failure?: unknown): void => {
-        const settle = upload.settle;
-
-        upload.settle = null;
-        settle?.(failure === undefined ? undefined : normalizeError(failure));
-
-        // The upload side of the "both settled" condition; see `releaseAbortListeners`.
-        releaseAbortListeners();
-      };
-
-      /**
-       * The writer is done, one way or the other.
-       *
-       * Idempotent through `settleBodyWrite`, which is cleared on the first call: a
-       * promise resolves once, and the second settle would be silently dropped anyway.
-       */
-      const endBodyWrite = (failure?: unknown): void => {
-        isWritingBody = false;
-        settleBodyOutcome(failure);
-      };
-
-      /**
-       * Resolve with an adapter response, carrying the upload outcome on every one.
-       *
-       * {@link AdapterResponse.requestBodySettled} is documented as present on every
-       * bodied request, and attaching it at the individual `resolve` sites only put it
-       * on the two that succeeded. The responses that most need it are the other ones:
-       * an early-ack `200` whose *response* body then fails resolves through
-       * `isStreamError`, and that is exactly the shape where the writer was still
-       * running and its failure is the only record of a body that never went out.
-       * `await undefined` is `undefined`, so omitting it there reported a clean upload.
-       *
-       * Spread first so a caller that passes its own value still wins.
-       */
-      const settleResponse = (
-        response: Omit<AdapterResponse, 'effectiveRequestHeaders'>,
-      ): void => {
-        resolveAdapterResponse(
-          resolve,
-          req,
-          request.requestURL,
-          request.headers,
-          {
-            ...(upload.outcome ? { requestBodySettled: upload.outcome } : {}),
-            ...response,
-          },
-        );
-
-        // After the resolve, so nothing here can stand between the caller and its
-        // response. The response side of the "both settled" condition; see
-        // `releaseAbortListeners`.
-        didSettleRequest = true;
-        releaseAbortListeners();
-      };
-
-      /**
-       * Reject with the upload outcome attached, the mirror of {@link settleResponse}.
-       *
-       * Every throw raised by this adapter's own handlers goes through here for the same
-       * reason every resolve goes through `settleResponse`: `requestBodySettled` is
-       * documented as present on every bodied request, and the paths that throw are the
-       * ones where it carries the most - a cancel or a timeout tears the request down
-       * mid-upload, and the writer's failure is then the only record that the body never
-       * went out. With the promise stranded in this closure, `HTTPClient` built its
-       * response without the field, and `await undefined` reported a clean upload for a
-       * body that was cut off.
-       *
-       * A synchronous throw out of this executor cannot reach here - it never runs another
-       * handler - so the work itself lives in `settleRequestBodyForThrow`, which the
-       * enclosing `catch` shares.
-       */
-      const failRequest = (error: Error): void => {
-        reject(settleRequestBodyForThrow(error));
-      };
-
-      // Every bodied request has its outcome from here on, whichever branch below writes
-      // it and whatever throws before they run. The condition mirrors the write branches
-      // at the end of this executor; the `else` there is the genuinely bodiless request,
-      // which has no upload to report and correctly carries no field.
-      if (
-        request.body instanceof FormData ||
-        typeof request.body === 'string' ||
-        request.body instanceof Uint8Array
-      ) {
-        openBodyOutcome();
-      }
-
-      /**
-       * A body write that failed after the server had already answered.
-       *
-       * Not fabricated into a transport error - the response path answers with the real
-       * status, which is the whole point of {@link didReceiveResponse} - but not dropped
-       * either. The writers raise more than socket teardown: `serializeMultipartFormData`
-       * throws when a `File` yields fewer bytes than its `Blob.size`, which is a body that
-       * went out short of its `Content-Length` with no transport failure anywhere, and
-       * returning here left that on nothing - not the response, not `errorCause`, not the
-       * global channel - while the caller read the status as a clean success.
-       *
-       * Reported here rather than carried on the response: the response is the server's
-       * real answer, and the client treats any `isTransportError` as a network failure -
-       * body dropped, `isNetworkError` set - so a `413` that stopped reading mid-upload
-       * would reach the caller as a connection error with its explanation thrown away.
-       * That is the outcome `didReceiveResponse` exists to prevent.
-       */
-      const reportWriteErrorAfterResponse = (error: unknown): void => {
-        // Once per request, because a single upload-side socket failure arrives twice: the
-        // writer's own per-write `req.once('error', ...)` rejects with it, and this
-        // request's `'error'` handler is handed the same error a tick later. Both then
-        // rendered the same failure onto the host's `'error'` channel and armed a grace
-        // deadline of their own, so one reset read as two and the request carried two
-        // pending destroys. The body is over after the first, and everything below is
-        // about ending a request that has already been given up on.
-        if (didReportWriteErrorAfterResponse) {
-          return;
-        }
-
-        didReportWriteErrorAfterResponse = true;
-
-        const failure = normalizeError(error);
-
-        // This body is over, so answer `requestBodySettled` now rather than leaving it to
-        // the writer. Nothing below settles it: the request is reported and then handed to
-        // the grace deadline, and a writer blocked in `Blob.stream()`'s `read()` never
-        // returns to notice - `await response.requestBodySettled` then hung for the whole
-        // grace window on an upload that was already dead. Settled before the report, so a
-        // failure in reporting cannot leave the caller waiting.
-        settleBodyOutcome(failure);
-
-        try {
-          // Rendered for the console rung, the convention every other `reportToHost` caller
-          // follows. Without it that rung is handed the raw `Error`, and a process with no
-          // `'error'` listener printed `stack`, `cause` and whatever they carry - a request
-          // URL and its query string among them - in the clear, which is the one thing the
-          // rendered line exists to avoid. The listener still gets the `Error` itself, so a
-          // consumer's own redaction settings are unaffected.
-          reportToHost(failure, () => describeError(failure));
-        } catch {
-          // Nothing left to report with; the response still carries the real status.
-        }
-
-        // Only once the response is fully in. See `didResponseClose`.
-        if (didResponseClose) {
-          destroyUnfinishedRequestQuietly(req);
-
-          return;
-        }
-
-        // The response has *not* closed, and now nothing will finish this request: the
-        // writer is gone, so `req.end()` will never run, and a failure that did not also
-        // kill the socket - a `Blob` that yields fewer bytes than its `size`, which
-        // destroys nothing - leaves the request neither ended nor destroyed. Against an
-        // endpoint that answers while it is still reading, the server waits for the rest of
-        // a `Content-Length` that will never arrive, `res` never closes, and nothing settles
-        // this promise at all: the caller hangs until its own signal fires, and the adapter
-        // imposes no timeout of its own by design.
-        //
-        // Given the same grace the stall watchdog gives an upload, and for the same reason:
-        // a response still streaming in on that socket is worth waiting for, and one that
-        // has not finished by then is waiting on a body that is never coming. Tearing it
-        // down settles the promise through the response path's own error handling.
-        try {
-          const deadline = setTimeout(() => {
-            if (didResponseClose) {
+          const tick = (): void => {
+            if (!isWritingBody || req.writableEnded || req.destroyed) {
               return;
             }
 
-            destroyUnfinishedRequestQuietly(req);
-          }, UPLOAD_STALL_GRACE_MS);
+            if (
+              uploadedBytesSeen === bytesAtLastTick &&
+              sourceWaitSince !== undefined &&
+              performance.now() - sourceWaitSince < UPLOAD_SOURCE_STALL_GRACE_MS
+            ) {
+              // Not the socket's fault. Watched on, so a source that never answers is still
+              // caught below once its own grace runs out.
+              arm();
 
-          // Never a reason for the process to stay up, exactly as the stall watchdog's
-          // timer is not.
-          deadline.unref?.();
-        } catch {
-          // No way to schedule it, so the request is torn down now rather than left to
-          // hang. A response mid-flight is the lesser loss of the two.
-          destroyUnfinishedRequestQuietly(req);
-        }
-      };
-
-      // Deduplication guard — Node's upload path can reach 100% from multiple
-      // sources (final drain callback and the upload-complete signal). Once
-      // 100% is reported any further calls are dropped.
-      let didFireUpload100 = false;
-
-      const reportUploadProgress = (event: AdapterProgressEvent): void => {
-        // Tracked before the dedupe gate, so the stall watchdog sees every report the
-        // writers make rather than only the ones the caller is told about.
-        uploadedBytesSeen = event.loaded;
-
-        if (didFireUpload100) {
-          return;
-        }
-
-        if (event.progress === 1) {
-          didFireUpload100 = true;
-        }
-
-        guardedUploadProgress?.(event);
-      };
-
-      // 0% upload progress before any bytes leave the process
-      reportUploadProgress({ loaded: 0, total: 0, progress: 0 });
-
-      // The http callback is typed as (res: IncomingMessage) => void, so we
-      // cannot make it async directly. We use a void IIFE that routes any
-      // unhandled rejections back to the outer promise's reject.
-      const req = httpModule.request(options, (res) => {
-        didReceiveResponse = true;
-
-        // A body write that fails after the response arrived is answered by the response
-        // path (see `didReceiveResponse`), which deliberately does not tear the request
-        // down - the response may still be streaming in on that socket. But `req.end()`
-        // only ever runs on the write path's success, so nothing else finishes this
-        // request either: with keep-alive the socket is held, unfinished and unusable,
-        // until the server's own timeout - one leaked descriptor per early response.
-        // Once the response has been consumed the request has no further use, so an
-        // unfinished one is destroyed here, where it can no longer cut a response short.
-        res.on('close', () => {
-          didResponseClose = true;
-
-          if (req.writableEnded) {
-            return;
-          }
-
-          // A writer still running is left alone while it is getting anywhere; see
-          // `watchForStalledUpload`. It ends the request when it finishes, and
-          // `reportWriteErrorAfterResponse` destroys it if it fails.
-          if (isWritingBody) {
-            watchForStalledUpload();
-
-            return;
-          }
-
-          destroyRequestQuietly(req);
-        });
-
-        void (async () => {
-          const status = res.statusCode ?? 0;
-          const headers = normalizeResponseHeaders(res.headers);
-
-          // --- Response streaming (NodeAdapter-only feature) ---
-          //
-          // Only offered on HTTP 200 responses. All other statuses bypass the
-          // factory and return a normal buffered response. This prevents:
-          //   1. Accidentally streaming error bodies (you'd lose the error detail)
-          //   2. The mistake of buffering a large 200 into memory when you forgot
-          //      to check the status — factory null = cancel, not buffer
-          if (request.streamResponse && status === 200) {
-            // Per-attempt abort controller for the stream context signal. This is
-            // separate from the top-level request signal so we can fire it on local
-            // write failures (disk full, etc.) without aborting the request itself —
-            // the factory's cleanup listener fires, and we resolve with isStreamError.
-            const streamAbort = new AbortController();
-
-            // Propagate external cancellation (user abort, timeout) into the
-            // factory's signal so cleanup listeners fire in all terminal cases.
-            // Tracked so it comes off once the request has settled; see
-            // `releaseAbortListeners`.
-            if (request.signal) {
-              const signal = request.signal;
-
-              if (signal.aborted) {
-                streamAbort.abort();
-              }
-
-              const relayAbortToStream = (): void => {
-                streamAbort.abort();
-              };
-
-              signal.addEventListener('abort', relayAbortToStream, {
-                once: true,
-              });
-              abortListenerRemovers.push(() => {
-                signal.removeEventListener('abort', relayAbortToStream);
-              });
+              return;
             }
 
-            let writable: WritableLike | null | StreamResponseCancel;
-            const setupFailed = (error: Error): void => {
-              failStreamSetupOnSocketError?.(error);
-            };
-            const setupClosed = (): void => {
-              if (!res.complete) {
-                setupFailed(
-                  makeResponseStreamError(
-                    'Response stream closed during setup',
-                  ),
-                );
+            if (uploadedBytesSeen === bytesAtLastTick) {
+              // Answered here, as `reportWriteErrorAfterResponse` answers it, and for the
+              // same reason: the destroy below is not guaranteed to reach the writer. A
+              // writer parked inside `Blob.stream()`'s `read()` has no pending `req.write`
+              // to reject, so it never returns to run `endBodyWrite`, and
+              // `await response.requestBodySettled` waited forever on an upload this
+              // watchdog had already given up on. Settled first, so a `destroy()` that
+              // throws cannot leave the caller waiting - which also makes this the answer
+              // the caller sees: `settleBodyOutcome` is first-call-wins, so a writer that
+              // does notice the destroy and reports its own `EPIPE` afterwards is recorded
+              // nowhere. That is the trade this makes deliberately. An upload the watchdog
+              // reached had made no progress for a full grace window, so "stalled after the
+              // response arrived" is the failure worth reporting, and the alternative -
+              // waiting for a writer that may never return - is the hang this closes.
+              const stalled = new Error(
+                sourceWaitSince === undefined
+                  ? 'Request body upload stalled after the response arrived'
+                  : 'Request body source stopped answering after the response arrived',
+              );
+
+              settleBodyOutcome(stalled);
+
+              // On the host's `'error'` channel too, as `reportWriteErrorAfterResponse`
+              // puts every other late upload failure there: the docs promise that a
+              // failure after the response is reported whether or not anyone awaits
+              // `requestBodySettled`, and this one - the watchdog cutting an upload short
+              // seconds after a clean `2xx` was read - is the example they give. It was the
+              // one late failure that settled the promise and said nothing else, so a
+              // caller who never awaited it heard nothing. Rendered for the console rung
+              // for the reason given there. After the settle, so a report that throws
+              // cannot leave the caller waiting; before the destroy, so a writer that
+              // notices the teardown and reports its own `EPIPE` finds the one-shot
+              // already taken and does not put a second line on the channel for the same
+              // upload. The one-shot is honoured in the other direction too: a write
+              // failure reported from the request's `'error'` handler settles the outcome
+              // but leaves `isWritingBody` set on purpose (see `settleBodyOutcome`), and
+              // hands the request to a grace deadline of its own rather than destroying
+              // it, so this tick still runs and would otherwise say "stalled" over an
+              // upload already reported as reset. The settle and the destroy still happen
+              // here: the first is a no-op the second time, the second is the teardown
+              // that deadline was going to do anyway.
+              if (!didReportWriteErrorAfterResponse) {
+                didReportWriteErrorAfterResponse = true;
+
+                try {
+                  reportToHost(stalled, () => describeError(stalled));
+                } catch {
+                  // Nothing left to report with; the outcome is already settled.
+                }
               }
-            };
+
+              // Quietly, because this one runs from a timer. Every other `req.destroy()`
+              // here is inside the request's own promise chain, where a throw is rejected
+              // into it. This one has no such home: a socket already gone can answer
+              // `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes, and a throw out of a
+              // timer callback is the uncaught exception the rest of this file's absorbers
+              // exist to prevent - taking the process down over a teardown that had already
+              // happened.
+              destroyRequestQuietly(req);
+
+              return;
+            }
+
+            bytesAtLastTick = uploadedBytesSeen;
+            arm();
+          };
+
+          const arm = (): void => {
+            const timer = setTimeout(tick, UPLOAD_STALL_GRACE_MS);
+
+            // Never a reason for the process to stay up: the response has already been
+            // delivered by the time this is armed.
+            timer.unref?.();
+          };
+
+          arm();
+        };
+
+        /**
+         * Open the outcome promise, so it exists from the moment the request has a body.
+         *
+         * Opened here rather than at the first write, which is where it used to be created:
+         * the write branches are the last thing in this executor, so everything that can
+         * throw before them - a signal that was already aborted, a `streamResponse` factory
+         * that refused - threw with no promise to tag, `HTTPClient` omitted the field, and
+         * `await` answered `undefined`, the documented value for a body that went out in
+         * full. Nothing had gone out at all.
+         *
+         * Idempotent: the two write branches still announce themselves through
+         * {@link beginBodyWrite}, and the promise they find is the one already handed to
+         * whatever has since been resolved or thrown.
+         */
+        const openBodyOutcome = (): void => {
+          if (upload.outcome) {
+            return;
+          }
+
+          upload.outcome = new Promise<Error | undefined>((settle) => {
+            upload.settle = settle;
+          });
+        };
+
+        /**
+         * A writer is running. Distinct from having a body: `isWritingBody` is what tells
+         * the response-close handler to leave an upload alone rather than destroying it
+         * mid-write, and that is only true once a writer actually exists.
+         */
+        const beginBodyWrite = (): void => {
+          isWritingBody = true;
+          openBodyOutcome();
+        };
+
+        /**
+         * Answer `requestBodySettled` and nothing else.
+         *
+         * Split from {@link endBodyWrite} because one caller must settle the promise
+         * *without* declaring the writer finished: a write error that lands after the
+         * response has arrived is reported and left to the grace deadline, and
+         * `isWritingBody` still gates the response-close handler's choice between the
+         * stall watchdog and an immediate `destroy`. Flipping it there would have changed
+         * that teardown as a side effect of answering the caller.
+         *
+         * Idempotent through `upload.settle`, which is cleared on the first call: a
+         * promise resolves once, and the second settle would be silently dropped anyway.
+         */
+        const settleBodyOutcome = (failure?: unknown): void => {
+          const settle = upload.settle;
+
+          upload.settle = null;
+          settle?.(failure === undefined ? undefined : normalizeError(failure));
+
+          // The upload side of the "both settled" condition; see `releaseAbortListeners`.
+          releaseAbortListeners();
+        };
+
+        /**
+         * The writer is done, one way or the other. Idempotent, as
+         * {@link settleBodyOutcome} is.
+         */
+        const endBodyWrite = (failure?: unknown): void => {
+          isWritingBody = false;
+          settleBodyOutcome(failure);
+        };
+
+        /**
+         * Resolve with an adapter response, carrying the upload outcome on every one.
+         *
+         * {@link AdapterResponse.requestBodySettled} is documented as present on every
+         * bodied request, and attaching it at the individual `resolve` sites only put it
+         * on the two that succeeded. The responses that most need it are the other ones:
+         * an early-ack `200` whose *response* body then fails resolves through
+         * `isStreamError`, and that is exactly the shape where the writer was still
+         * running and its failure is the only record of a body that never went out.
+         * `await undefined` is `undefined`, so omitting it there reported a clean upload.
+         *
+         * Spread first so a caller that passes its own value still wins.
+         */
+        const settleResponse = (
+          response: Omit<AdapterResponse, 'effectiveRequestHeaders'>,
+        ): void => {
+          resolveAdapterResponse(
+            resolve,
+            req,
+            request.requestURL,
+            request.headers,
+            {
+              ...(upload.outcome ? { requestBodySettled: upload.outcome } : {}),
+              ...response,
+            },
+          );
+
+          // After the resolve, so nothing here can stand between the caller and its
+          // response. The response side of the "both settled" condition; see
+          // `releaseAbortListeners`.
+          didSettleRequest = true;
+          releaseAbortListeners();
+        };
+
+        /**
+         * Reject with the upload outcome attached, the mirror of {@link settleResponse}.
+         *
+         * Every throw raised by this adapter's own handlers goes through here for the same
+         * reason every resolve goes through `settleResponse`: `requestBodySettled` is
+         * documented as present on every bodied request, and the paths that throw are the
+         * ones where it carries the most - a cancel or a timeout tears the request down
+         * mid-upload, and the writer's failure is then the only record that the body never
+         * went out. With the promise stranded in this closure, `HTTPClient` built its
+         * response without the field, and `await undefined` reported a clean upload for a
+         * body that was cut off.
+         *
+         * A synchronous throw out of this executor cannot reach here - it never runs another
+         * handler - so the work itself lives in `settleRequestBodyForThrow`, which the
+         * enclosing `catch` shares.
+         */
+        const failRequest = (error: Error): void => {
+          reject(settleRequestBodyForThrow(error));
+        };
+
+        /**
+         * Whether the caller's signal has aborted, read guarded: a read that throws counts
+         * as "not aborted".
+         *
+         * The signal is the caller's, and one that is not a native `AbortSignal` can refuse
+         * the read. Both readers run where a throw escapes - `req.on('error')` as an emitter
+         * listener, the write task's failure handler as caller-unobserved recovery - so the
+         * read is guarded once, here. Both readers hold a real failure of their own - the
+         * socket's error, or the body write's - and a refusal read as "not aborted" lets
+         * that failure answer the request and `requestBodySettled`, where the getter's
+         * error would have discarded it. A real abort still reaches the request through
+         * its own listener, and once a response has arrived what follows - a pending stream
+         * setup's `failOnSocketError`, the write failure reported by
+         * `reportWriteErrorAfterResponse` - still runs.
+         */
+        const readIsAborted = (): boolean =>
+          isSignalAbortedQuietly(request.signal);
+
+        const observeTaskFailure = (
+          task: Promise<void>,
+          onFailure: (error: unknown) => void,
+        ): void => {
+          observeRejection(task, (error: unknown) => {
+            // Taken before the handler runs, because the handler may answer the request
+            // itself before it throws, and `reject` is first-call-wins: which of the two
+            // failures reached the caller decides what is left to report.
+            const wasAnswered = didSettleRequest;
 
             try {
-              isStreamFactoryPending = true;
-              abortStreamSetup = () => streamAbort.abort();
-              failStreamSetupOnSocketError = (error: Error): void => {
-                failStreamSetupOnSocketError = undefined;
-                streamAbort.abort();
-                // Guarded, because this one runs from inside `req.on('error', ...)`.
-                // Every other destroy on this path is in the request's own promise chain,
-                // where a throw is rejected into it; a throw out of an event handler is the
-                // uncaught exception the rest of this file's absorbers exist to prevent -
-                // and a socket already gone can answer `ERR_SOCKET_CLOSED` from `destroy()`
-                // on some runtimes, which is precisely the state this is reached in.
-                destroyRequestQuietly(req);
+              onFailure(error);
+            } catch (error_) {
+              // Recovery also reads caller-owned values.
+              const failure = normalizeError(error_);
+
+              if (!wasAnswered) {
+                // The request was still open when the task failed, so it is failing now and
+                // is torn down as the handler meant to. Answered first, before a teardown
+                // that can throw.
+                const didHandlerAnswer = didSettleRequest;
+
+                failRequest(failure);
+
+                try {
+                  destroyRequestQuietly(req);
+                } catch {
+                  // A patched request can even refuse its destroyed-state read.
+                }
+
+                // Delivered: the caller has the recovery failure, so it is not reported on
+                // the host channel as well. Only when the handler had already answered with
+                // the task's own error did `failure` go nowhere, and only then is it said.
+                if (didHandlerAnswer) {
+                  reportCallbackError(
+                    'NodeAdapter task failure handler',
+                    failure,
+                  );
+                }
+
+                return;
+              }
+
+              // Already answered - an early-ack response resolved while the body was still
+              // going out, or a response delivered before its task's tail threw - so a
+              // reject would be a no-op and the host channel is the only place either
+              // failure can go.
+              reportCallbackError(
+                'NodeAdapter task failure handler',
+                new AggregateError(
+                  [error, failure],
+                  'Task failed and its recovery handler also failed',
+                ),
+              );
+
+              // And no blanket teardown: an answered request may still be uploading to a
+              // server that is reading it, or streaming its response in, and destroying it
+              // here cut both short. Once a response has arrived its `'close'` handler owns
+              // that decision, and hands a writer still running to the stall watchdog. A
+              // request answered without one has nothing left in flight to protect.
+              if (!didReceiveResponse) {
+                try {
+                  destroyRequestQuietly(req);
+                } catch {
+                  // A patched request can even refuse its destroyed-state read.
+                }
+              }
+            }
+          });
+        };
+
+        // Every bodied request has its outcome from here on, whichever branch below writes
+        // it and whatever throws before they run. The condition mirrors the write branches
+        // at the end of this executor; the `else` there is the genuinely bodiless request,
+        // which has no upload to report and correctly carries no field.
+        const classifiedBody = classifyRequestBody(request.body);
+        if (classifiedBody !== undefined) {
+          openBodyOutcome();
+        }
+
+        /**
+         * A body write that failed after the server had already answered.
+         *
+         * Not fabricated into a transport error - the response path answers with the real
+         * status, which is the whole point of {@link didReceiveResponse} - but not dropped
+         * either. The writers raise more than socket teardown: `serializeMultipartFormData`
+         * throws when a `File` yields fewer bytes than its `Blob.size`, which is a body that
+         * went out short of its `Content-Length` with no transport failure anywhere, and
+         * returning here left that on nothing - not the response, not `errorCause`, not the
+         * global channel - while the caller read the status as a clean success.
+         *
+         * Reported here rather than carried on the response: the response is the server's
+         * real answer, and the client treats any `isTransportError` as a network failure -
+         * body dropped, `isNetworkError` set - so a `413` that stopped reading mid-upload
+         * would reach the caller as a connection error with its explanation thrown away.
+         * That is the outcome `didReceiveResponse` exists to prevent.
+         */
+        const reportWriteErrorAfterResponse = (error: unknown): void => {
+          // Once per request, because a single upload-side socket failure arrives twice: the
+          // writer's own per-write `req.once('error', ...)` rejects with it, and this
+          // request's `'error'` handler is handed the same error a tick later. Both then
+          // rendered the same failure onto the host's `'error'` channel and armed a grace
+          // deadline of their own, so one reset read as two and the request carried two
+          // pending destroys. The body is over after the first, and everything below is
+          // about ending a request that has already been given up on.
+          if (didReportWriteErrorAfterResponse) {
+            return;
+          }
+
+          didReportWriteErrorAfterResponse = true;
+
+          const failure = normalizeError(error);
+
+          // The adapter's own teardown caused this failure, and the request is already
+          // destroyed and answered: only the upload outcome is left to settle.
+          if (didTearDownAfterResponse) {
+            settleBodyOutcome(failure);
+
+            return;
+          }
+
+          // This body is over, so answer `requestBodySettled` now rather than leaving it to
+          // the writer. Nothing below settles it: the request is reported and then handed to
+          // the grace deadline, and a writer blocked in `Blob.stream()`'s `read()` never
+          // returns to notice - `await response.requestBodySettled` then hung for the whole
+          // grace window on an upload that was already dead. Settled before the report, so a
+          // failure in reporting cannot leave the caller waiting.
+          settleBodyOutcome(failure);
+
+          try {
+            // Rendered for the console rung, the convention every other `reportToHost` caller
+            // follows. Without it that rung is handed the raw `Error`, and a process with no
+            // `'error'` listener printed `stack`, `cause` and whatever they carry - a request
+            // URL and its query string among them - in the clear, which is the one thing the
+            // rendered line exists to avoid. The listener still gets the `Error` itself, so a
+            // consumer's own redaction settings are unaffected.
+            reportToHost(failure, () => describeError(failure));
+          } catch {
+            // Nothing left to report with; the response still carries the real status.
+          }
+
+          // Only once the response is fully in. See `didResponseClose`.
+          if (didResponseClose) {
+            destroyUnfinishedRequestQuietly(req);
+
+            return;
+          }
+
+          // The response has *not* closed, and now nothing will finish this request: the
+          // writer is gone, so `req.end()` will never run, and a failure that did not also
+          // kill the socket - a `Blob` that yields fewer bytes than its `size`, which
+          // destroys nothing - leaves the request neither ended nor destroyed. Against an
+          // endpoint that answers while it is still reading, the server waits for the rest of
+          // a `Content-Length` that will never arrive, `res` never closes, and nothing settles
+          // this promise at all: the caller hangs until its own signal fires, and the adapter
+          // imposes no timeout of its own by design.
+          //
+          // Given the same grace the stall watchdog gives an upload, and for the same reason:
+          // a response still streaming in on that socket is worth waiting for, and one that
+          // has not finished by then is waiting on a body that is never coming. Tearing it
+          // down settles the promise through the response path's own error handling.
+          //
+          // Not while the response is behind its own consumer, though - fully arrived, paused
+          // under a slow sink's backpressure, or buffered for a stream factory still opening
+          // its sink. Destroying the request then dumps the bytes that have not been read
+          // yet: a download cut short and reported as a success, or a factory left waiting
+          // on a response that has already ended. That response is not waiting on the body;
+          // its `'close'` destroys the request once it has been consumed, so the deadline
+          // only looks again later.
+          const isResponseBehindItsConsumer = (): boolean =>
+            receivedResponse !== undefined &&
+            (receivedResponse.complete ||
+              receivedResponse.isPaused() ||
+              receivedResponse.readableLength > 0);
+          const armDeadline = (): void => {
+            const deadline = setTimeout(() => {
+              if (didResponseClose) {
+                return;
+              }
+
+              if (isResponseBehindItsConsumer()) {
+                armDeadline();
+
+                return;
+              }
+
+              destroyUnfinishedRequestQuietly(req);
+            }, UPLOAD_STALL_GRACE_MS);
+
+            // Never a reason for the process to stay up, exactly as the stall watchdog's
+            // timer is not.
+            deadline.unref?.();
+          };
+
+          try {
+            armDeadline();
+          } catch {
+            // No way to schedule it, so the request is torn down now rather than left to
+            // hang. A response mid-flight is the lesser loss of the two.
+            destroyUnfinishedRequestQuietly(req);
+          }
+        };
+
+        // Deduplication guard — Node's upload path can reach 100% from multiple
+        // sources (final drain callback and the upload-complete signal). Once
+        // 100% is reported any further calls are dropped.
+        let didFireUpload100 = false;
+
+        const reportUploadProgress = (event: AdapterProgressEvent): void => {
+          // Tracked before the dedupe gate, so the stall watchdog sees every report the
+          // writers make rather than only the ones the caller is told about.
+          uploadedBytesSeen = event.loaded;
+
+          if (didFireUpload100) {
+            return;
+          }
+
+          if (event.progress === 1) {
+            didFireUpload100 = true;
+          }
+
+          guardedUploadProgress?.(event);
+        };
+
+        // 0% upload progress before any bytes leave the process
+        reportUploadProgress({ loaded: 0, total: 0, progress: 0 });
+
+        // The http callback is typed as (res: IncomingMessage) => void, so we
+        // cannot make it async directly. We use a void IIFE that routes any
+        // unhandled rejections back to the outer promise's reject.
+        const req = (requestForCleanup = httpModule.request(options, (res) => {
+          didReceiveResponse = true;
+          receivedResponse = res;
+
+          // A body write that fails after the response arrived is answered by the response
+          // path (see `didReceiveResponse`), which deliberately does not tear the request
+          // down - the response may still be streaming in on that socket. But `req.end()`
+          // only ever runs on the write path's success, so nothing else finishes this
+          // request either: with keep-alive the socket is held, unfinished and unusable,
+          // until the server's own timeout - one leaked descriptor per early response.
+          // Once the response has been consumed the request has no further use, so an
+          // unfinished one is destroyed here, where it can no longer cut a response short.
+          res.on('close', () => {
+            didResponseClose = true;
+
+            if (req.writableEnded) {
+              return;
+            }
+
+            // A writer still running is left alone while it is getting anywhere; see
+            // `watchForStalledUpload`. It ends the request when it finishes, and
+            // `reportWriteErrorAfterResponse` destroys it if it fails.
+            if (isWritingBody) {
+              watchForStalledUpload();
+
+              return;
+            }
+
+            destroyRequestQuietly(req);
+          });
+
+          // The stream signal's trigger, once a `streamResponse` factory is in play, so the
+          // failure handler below can reach it from outside the task that created it.
+          let abortResponseStream: (() => void) | undefined;
+
+          const responseTask = (async () => {
+            const status = res.statusCode ?? 0;
+            const headers = normalizeResponseHeaders(res.headers);
+            // A `HEAD` answer, a `204` / `205` / `304` and an informational status carry
+            // no body: none to decode, measure or hand over.
+            const hasBody = hasResponseBody(request.method, status);
+            // The body as `fetch` would hand it over: decoded when the server compressed
+            // it. Headers are reported as received, `Content-Encoding` included, as
+            // `fetch` reports them.
+            const {
+              source: body,
+              isDecoded,
+              release,
+            } = createResponseBodySource(
+              res,
+              // With `decompress: false`, no coding is decoded: the body as it arrived.
+              isDecompressing && hasBody
+                ? headers['content-encoding']
+                : undefined,
+            );
+            releaseResponseBody = release;
+
+            // --- Response streaming (NodeAdapter-only feature) ---
+            //
+            // Only offered on HTTP 200 responses that carry a body - a `HEAD` answer
+            // has none, and a factory called for it opened (or truncated) a sink for
+            // nothing. All others bypass the factory and return a normal buffered
+            // response. This prevents:
+            //   1. Accidentally streaming error bodies (you'd lose the error detail)
+            //   2. The mistake of buffering a large 200 into memory when you forgot
+            //      to check the status — factory null = cancel, not buffer
+            if (request.streamResponse && status === 200 && hasBody) {
+              // Per-attempt abort controller for the stream context signal. This is
+              // separate from the top-level request signal so we can fire it on local
+              // write failures (disk full, etc.) without aborting the request itself —
+              // the factory's cleanup listener fires, and we resolve with isStreamError.
+              //
+              // Guarded before the factory sees it: the factory's `'abort'` listeners run
+              // inside `abortStream()`, and on an ordinary signal one that throws is an
+              // uncaught exception rather than an error this adapter can catch. The guard
+              // reports it on the host `'error'` channel and runs the listeners after it.
+              const streamAbort = new AbortController();
+
+              guardAbortListeners(
+                streamAbort.signal,
+                'NodeAdapter streamResponse abort listener',
+              );
+
+              const abortStream = (): void => {
+                streamAbort.abort(undefined);
+              };
+
+              abortResponseStream = abortStream;
+
+              // Propagate external cancellation (user abort, timeout) into the
+              // factory's signal. While the factory is setting up or its writable is
+              // streaming, the request's own abort listener fires the signal itself: it
+              // settles the request, which takes this relay off within the same abort
+              // dispatch. Tracked so it comes off once the request has settled; see
+              // `releaseAbortListeners`.
+              if (request.signal) {
+                const signal = request.signal;
+
+                // Already cancelled: the request's own abort listener has settled it, so
+                // the factory is not asked to open a sink nothing will write to.
+                if (readIsAborted()) {
+                  abortStream();
+                  return;
+                }
+
+                const relayAbortToStream = (): void => {
+                  abortStream();
+                };
+
+                signal.addEventListener('abort', relayAbortToStream, {
+                  once: true,
+                });
+                abortListenerRemovers.push(() => {
+                  signal.removeEventListener('abort', relayAbortToStream);
+                });
+              }
+
+              let writable: WritableLike | null | StreamResponseCancel;
+              // Whether the factory's return is a cancel, decided once: a `cancel` getter
+              // that answers differently on a later read cannot carry a non-sink past the
+              // shape check below and into `streamResponseBody`.
+              let isCancelReturn = false;
+              // A decoding failure found while the factory set up its sink is the body's
+              // own error, held for the reader that never attached; the raw response's
+              // close that follows reported it as a generic one, the cause dropped.
+              let stopWatchingDecodeFailure: (() => void) | undefined;
+              const setupFailed = (error: Error): void => {
+                pendingStreamSetup?.failOnSocketError?.(
+                  body.heldError?.() ?? error,
+                );
+              };
+              const setupClosed = (): void => {
+                if (!res.complete || body.heldError?.() !== undefined) {
+                  setupFailed(
+                    makeResponseStreamError(
+                      'Response stream closed during setup',
+                    ),
+                  );
+                }
+              };
+
+              try {
+                const setup: NonNullable<typeof pendingStreamSetup> = {
+                  abort: abortStream,
+                  status,
+                  headers,
+                  didCallFactory: false,
+                  isResponseComplete: () => res.complete,
+                  failOnSocketError: (error: Error): void => {
+                    setup.failOnSocketError = undefined;
+                    abortStream();
+                    // Guarded, because this one runs from inside `req.on('error', ...)`.
+                    // Every other destroy on this path is in the request's own promise
+                    // chain, where a throw is rejected into it; a throw out of an event
+                    // handler is the uncaught exception the rest of this file's absorbers
+                    // exist to prevent - and a socket already gone can answer
+                    // `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes, which is
+                    // precisely the state this is reached in.
+                    tearDownAfterResponse();
+                    settleResponse({
+                      status,
+                      headers,
+                      body: null,
+                      isStreamError: true,
+                      streamErrorCode: 'stream_response_error',
+                      errorCause: error,
+                    });
+                  },
+                };
+
+                pendingStreamSetup = setup;
+                // Response-side termination may never emit a request-side error.
+                // Listen before awaiting caller code so a stalled factory cannot hide it.
+                res.once('error', setupFailed);
+                res.once('aborted', setupClosed);
+                res.once('close', setupClosed);
+                // And the decoded body's own failure: a corrupt body that finished
+                // arriving fails in decoding after the raw response's last event, so
+                // setup heard of it from nothing and an async factory waited until the
+                // timeout - or for ever with none.
+                stopWatchingDecodeFailure = body.onFailure?.(setupFailed);
+                // Called from a microtask, not from the response event's own turn: a sink
+                // the factory fails before handing it over - `destroy(error)`, sync or
+                // before an async factory's first `await` - emits that error on a
+                // `nextTick`, and Node and Bun run those only once the microtasks queued
+                // ahead of them are done. From here, the continuation that attaches this
+                // request's listener is one of them; from the event's own turn the error
+                // went first, to no listener at all - an uncaught exception.
+                await Promise.resolve(undefined);
+                // Cancelled, timed out, or the response failed meanwhile: the factory is
+                // not asked for a sink nothing will write to.
+                if (streamAbort.signal.aborted) {
+                  return;
+                }
+                setup.didCallFactory = true;
+                const returned = request.streamResponse(
+                  {
+                    status: 200,
+                    headers,
+                    url: request.requestURL,
+                    attempt: request.attemptNumber ?? 1,
+                    requestID: request.requestID ?? '',
+                  },
+                  { signal: streamAbort.signal },
+                );
+                const pending = adoptResult(returned);
+                if (pending instanceof UnreadableReturn) {
+                  // Match await's rejection reason, as RetryRunner does: the factory's
+                  // own error, not the wrapper describing it, becomes the setup failure
+                  // the caller sees on `error.cause`.
+                  throw pending.cause;
+                }
+                if (pending !== undefined) {
+                  writable = (await pending).value as
+                    WritableLike | null | StreamResponseCancel;
+                } else {
+                  // Not adopted again, and no turn added: the one before the call above
+                  // is a sync factory's handoff, so its listeners attach in that turn.
+                  writable = returned as
+                    WritableLike | null | StreamResponseCancel;
+                }
+
+                // A factory that forgot its `return` hands back `undefined`, which is neither
+                // a cancel nor a sink. Refused here, as a setup failure of the factory's own,
+                // rather than let through to `streamResponseBody`: there its first use would
+                // throw inside a promise executor and reach the caller as a retryable error,
+                // calling the factory again on every attempt, each leaving its connection
+                // open. The same goes for an object that is neither a cancel object nor
+                // something with callable `write` and `end` - `{}`, or `{ cancel: false }` -
+                // which would get as far as the first `write` and settle as a
+                // `stream_write_error` on a 200, blaming the sink for the factory's mistake.
+                isCancelReturn =
+                  writable !== null && isStreamResponseCancel(writable);
+                if (
+                  writable !== null &&
+                  !isCancelReturn &&
+                  !isWritableShaped(writable)
+                ) {
+                  throw new TypeError(
+                    'streamResponse factory must return a writable, null, or ' +
+                      `{ cancel: true }, but returned ${describeFactoryReturn(writable)}`,
+                  );
+                }
+              } catch (error) {
+                // Cleared here as well as in `finally`, ahead of the teardown: aborting the
+                // stream signal runs the factory's listeners, and an abort they raise on
+                // the request's own signal is not one that landed mid-setup.
+                pendingStreamSetup = undefined;
+                // Factory threw — non-retryable setup error, equivalent to an
+                // interceptor throw. Abort the stream signal so any partial cleanup
+                // listeners run, destroy the request, and propagate as a setup failure.
+                abortStream();
+                tearDownAfterResponse();
+                failRequest(
+                  markStreamFactoryError(error, req, request.headers, {
+                    status,
+                    headers,
+                  }),
+                );
+                return;
+              } finally {
+                pendingStreamSetup = undefined;
+                res.removeListener('error', setupFailed);
+                res.removeListener('aborted', setupClosed);
+                res.removeListener('close', setupClosed);
+                stopWatchingDecodeFailure?.();
+              }
+
+              // The request may have been cancelled, timed out or lost its socket while
+              // an async factory was still setting up its sink. In that case the outer
+              // promise has already settled through the abort listener or the setup's
+              // `failOnSocketError`; close the newly created writable and stop here. This
+              // is the one exit between the factory returning and `streamResponseBody`
+              // attaching its listeners that holds a writable - the others hold `null`, a
+              // cancel object, or nothing - so it is the one that must cover the
+              // writable's `'error'` itself: see `discardUnstreamedWritable`.
+              if (streamAbort.signal.aborted) {
+                if (writable && !isCancelReturn) {
+                  discardUnstreamedWritable(writable as WritableLike);
+                }
+
+                return;
+              }
+
+              if (writable === null || isCancelReturn) {
+                // Factory declined to stream — user-initiated cancel. Fire the stream
+                // signal so any cleanup listeners wired in the factory run, then throw
+                // AbortError so the client's cancel path takes over (isCancelled: true).
+                const cancelReason =
+                  writable !== null
+                    ? readObjectMember(writable, 'reason')
+                    : undefined;
+
+                abortStream();
+                tearDownAfterResponse();
+                const abortErr = makeAbortError(
+                  'Request cancelled by streamResponse factory',
+                );
+                Object.assign(abortErr, {
+                  [STREAM_FACTORY_CANCEL_KEY]: cancelReason ?? true,
+                });
+                // The answer it declined, so its `Set-Cookie` is still stored.
+                defineHiddenTags(abortErr, {
+                  [STREAM_ABORT_STATUS_KEY]: status,
+                  [STREAM_ABORT_HEADERS_KEY]: headers,
+                });
+                failRequest(abortErr);
+                return;
+              }
+
+              // A sink from here on: neither `null` nor a cancel, and checked for shape.
+              const sink = writable as WritableLike;
+
+              activeResponseStream = {
+                status,
+                headers,
+                writable: sink,
+                abortStream,
+              };
+
+              const totalBytes = declaredBodyLength(headers, isDecoded) ?? 0;
+
+              // Pipe the response into the caller's writable. Extracted to a
+              // module-level function to keep callback nesting within ESLint's
+              // max-nested-callbacks limit. Returns true on success, or the
+              // writable error when the local sink fails (disk full, etc.).
+              const streamResult = await streamResponseBody(
+                body,
+                sink,
+                totalBytes,
+                guardedDownloadProgress,
+              );
+
+              if (streamResult === true) {
+                activeResponseStream = undefined;
+                settleResponse({
+                  status,
+                  headers,
+                  body: null,
+                  isStreamed: true,
+                });
+              } else {
+                activeResponseStream = undefined;
+                // Body streaming failure after headers (disk full, writable
+                // destroyed, upstream socket reset, etc.)
+                //
+                // The server already returned a real 200 response, so retries are no
+                // longer safe: the caller's sink may already contain partial bytes.
+                // We therefore preserve the real HTTP status and resolve with
+                // isStreamError rather than throwing/retrying.
+                //   - The stream signal fires so factory cleanup listeners run
+                //   - Non-retryable once streaming has started
+                abortStream();
+                destroyWritableQuietly(sink);
+                tearDownAfterResponse();
                 settleResponse({
                   status,
                   headers,
                   body: null,
                   isStreamError: true,
-                  streamErrorCode: 'stream_response_error',
-                  errorCause: error,
+                  streamErrorCode: streamResult.code,
+                  errorCause: streamResult.cause,
                 });
-              };
-              // Response-side termination may never emit a request-side error.
-              // Listen before awaiting caller code so a stalled factory cannot hide it.
-              res.once('error', setupFailed);
-              res.once('aborted', setupClosed);
-              res.once('close', setupClosed);
-              writable = await request.streamResponse(
-                {
-                  status: 200,
-                  headers,
-                  url: request.requestURL,
-                  attempt: request.attemptNumber ?? 1,
-                  requestID: request.requestID ?? '',
-                },
-                { signal: streamAbort.signal },
-              );
-            } catch (error) {
-              isStreamFactoryPending = false;
-              failStreamSetupOnSocketError = undefined;
-              // Factory threw — non-retryable setup error, equivalent to an
-              // interceptor throw. Abort the stream signal so any partial cleanup
-              // listeners run, destroy the request, and propagate as a setup failure.
-              streamAbort.abort();
-              destroyRequestQuietly(req);
-              failRequest(markStreamFactoryError(error, req, request.headers));
-              return;
-            } finally {
-              abortStreamSetup = undefined;
-              res.removeListener('error', setupFailed);
-              res.removeListener('aborted', setupClosed);
-              res.removeListener('close', setupClosed);
-            }
-            isStreamFactoryPending = false;
-            failStreamSetupOnSocketError = undefined;
-
-            // The request may have been cancelled or timed out while an async
-            // factory was still setting up its sink. In that case the outer
-            // promise has already settled through the abort listener; make a
-            // best effort to close the newly created writable and stop here.
-            if (streamAbort.signal.aborted) {
-              if (writable && !isStreamResponseCancel(writable)) {
-                // `destroyWritableQuietly`, as the two sibling cleanup sites already use.
-                // A bare `destroy()` is caller code: a throw from it lands in the IIFE's
-                // `.catch` below, which calls `reject` on a promise the abort listener has
-                // already settled - a no-op - so the cleanup silently did not happen.
-                destroyWritableQuietly(writable);
               }
 
               return;
             }
 
-            if (writable === null || isStreamResponseCancel(writable)) {
-              // Factory declined to stream — user-initiated cancel. Fire the stream
-              // signal so any cleanup listeners wired in the factory run, then throw
-              // AbortError so the client's cancel path takes over (isCancelled: true).
-              const cancelReason =
-                writable !== null
-                  ? readObjectMember(writable, 'reason')
-                  : undefined;
+            // --- Normal buffered response ---
 
-              streamAbort.abort();
-              destroyRequestQuietly(req);
-              const abortErr = new Error(
-                'Request cancelled by streamResponse factory',
-              );
-              abortErr.name = 'AbortError';
-              Object.assign(abortErr, {
-                [STREAM_FACTORY_CANCEL_KEY]: cancelReason ?? true,
-              });
-              failRequest(abortErr);
-              return;
-            }
-
-            activeResponseStream = {
-              status,
-              headers,
-              writable,
-            };
-
-            const totalBytes =
-              parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
-
-            // Pipe the response into the caller's writable. Extracted to a
-            // module-level function to keep callback nesting within ESLint's
-            // max-nested-callbacks limit. Returns true on success, or the
-            // writable error when the local sink fails (disk full, etc.).
-            const streamResult = await streamResponseBody(
-              res,
-              writable,
-              totalBytes,
-              guardedDownloadProgress,
-            );
-
-            if (streamResult === true) {
-              activeResponseStream = undefined;
-              settleResponse({
-                status,
-                headers,
-                body: null,
-                isStreamed: true,
-              });
-            } else {
-              activeResponseStream = undefined;
-              // Body streaming failure after headers (disk full, writable
-              // destroyed, upstream socket reset, etc.)
-              //
-              // The server already returned a real 200 response, so retries are no
-              // longer safe: the caller's sink may already contain partial bytes.
-              // We therefore preserve the real HTTP status and resolve with
-              // isStreamError rather than throwing/retrying.
-              //   - The stream signal fires so factory cleanup listeners run
-              //   - Non-retryable once streaming has started
-              streamAbort.abort();
-              destroyWritableQuietly(writable);
-              destroyRequestQuietly(req);
+            // A body too large to hold fails as a stream error with the real status:
+            // the server answered, and what failed is taking delivery of what it sent.
+            // The response is torn down - its socket, and any decoder still inflating it -
+            // so the rest of the body is neither read nor decoded into nothing.
+            const refuseTooLargeBody = (): void => {
+              activeBufferedResponse = undefined;
+              tearDownAfterResponse();
               settleResponse({
                 status,
                 headers,
                 body: null,
                 isStreamError: true,
-                streamErrorCode: streamResult.code,
-                errorCause: streamResult.cause,
+                streamErrorCode: 'response_too_large',
+                // `streamResponse` is only offered where it would help: a factory is
+                // called for a `200` alone, so any other status is buffered whatever the
+                // request asked for.
+                errorCause: makeResponseTooLargeError(
+                  maxResponseBytes,
+                  status === 200,
+                ),
               });
+            };
+
+            // Refused before a byte is read when the body says up front that it is over
+            // the limit, and the progress total below - read once, for both.
+            const declaredLength = declaredBodyLength(headers, isDecoded);
+
+            if (
+              hasBody &&
+              declaredLength !== undefined &&
+              declaredLength > maxResponseBytes
+            ) {
+              refuseTooLargeBody();
+              return;
             }
 
-            return;
-          }
+            activeBufferedResponse = {
+              status,
+              headers,
+            };
+            const chunks: Buffer[] = [];
+            let loadedBytes = 0;
 
-          // --- Normal buffered response ---
-          activeBufferedResponse = {
-            status,
-            headers,
-          };
-          const chunks: Buffer[] = [];
-          let loadedBytes = 0;
+            // Deduplication guard — when Content-Length is known and the last
+            // `data` chunk fills the body exactly, progress: 1 fires there.
+            // The `end` event fires unconditionally afterward, so skip the
+            // completion event if the last chunk already reported 100%.
+            let didFireDownload100 = false;
 
-          // Deduplication guard — when Content-Length is known and the last
-          // `data` chunk fills the body exactly, progress: 1 fires there.
-          // The `end` event fires unconditionally afterward, so skip the
-          // completion event if the last chunk already reported 100%.
-          let didFireDownload100 = false;
+            const totalBytes = declaredLength ?? 0;
 
-          const totalBytes =
-            parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
+            body.on('data', (chunk: Buffer) => {
+              // Nothing kept, or reported, for a response the request no longer has.
+              if (activeBufferedResponse === undefined) {
+                return;
+              }
 
-          res.on('data', (chunk: Buffer) => {
-            chunks.push(chunk);
-            loadedBytes += chunk.length;
+              loadedBytes += chunk.length;
 
-            // progress: -1 when Content-Length is absent (chunked transfer,
-            // compressed response, etc.) — callers treat -1 as "length unknown".
-            const progress = totalBytes > 0 ? loadedBytes / totalBytes : -1;
+              // Counted before the chunk is kept, so a body over the limit is never held
+              // whole: what was gathered is dropped with it.
+              if (loadedBytes > maxResponseBytes) {
+                chunks.length = 0;
+                refuseTooLargeBody();
+                return;
+              }
 
-            // Track whether the final chunk already closed out 100% so the
-            // `end` handler can skip a duplicate event.
-            if (progress === 1) {
-              didFireDownload100 = true;
-            }
+              chunks.push(chunk);
 
-            guardedDownloadProgress?.({
-              loaded: loadedBytes,
-              // When total is unknown fall back to loaded so the event always
-              // has a sensible non-zero total.
-              total: totalBytes > 0 ? totalBytes : loadedBytes,
-              progress,
-            });
-          });
+              // progress: -1 when Content-Length is absent (chunked transfer,
+              // compressed response, etc.) — callers treat -1 as "length unknown".
+              const progress = totalBytes > 0 ? loadedBytes / totalBytes : -1;
 
-          res.on('end', () => {
-            activeBufferedResponse = undefined;
+              // Track whether the final chunk already closed out 100% so the
+              // `end` handler can skip a duplicate event.
+              if (progress === 1) {
+                didFireDownload100 = true;
+              }
 
-            // Final 100% download event — skipped when the last `data` chunk
-            // already reported it (Content-Length known, body filled exactly).
-            if (!didFireDownload100) {
               guardedDownloadProgress?.({
                 loaded: loadedBytes,
-                total: loadedBytes,
-                progress: 1,
+                // When total is unknown fall back to loaded so the event always
+                // has a sensible non-zero total.
+                total: totalBytes > 0 ? totalBytes : loadedBytes,
+                progress,
               });
-            }
-
-            const body =
-              chunks.length > 0 ? new Uint8Array(Buffer.concat(chunks)) : null;
-
-            settleResponse({
-              status,
-              headers,
-              body,
             });
-          });
 
-          res.on('error', (err: Error) => {
-            if (!activeBufferedResponse) {
-              return;
-            }
+            body.on('end', () => {
+              // Nothing for a response the request no longer has: a cancel or timeout that
+              // landed after the last chunk already failed it, and Node still emits `'end'`.
+              if (activeBufferedResponse === undefined) {
+                return;
+              }
 
-            activeBufferedResponse = undefined;
-            settleResponse({
-              status,
-              headers,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: makeResponseStreamError('Response stream error', err),
+              // Final 100% download event — skipped when the last `data` chunk
+              // already reported it (Content-Length known, body filled exactly).
+              // Sent while the response is still the active one, as the `data` handler's
+              // is: a cancel from it then fails the request with the answer's status and
+              // headers, so its `Set-Cookie` is stored whether or not a Content-Length
+              // let the 100% event fire from a chunk.
+              if (!didFireDownload100) {
+                guardedDownloadProgress?.({
+                  loaded: loadedBytes,
+                  total: loadedBytes,
+                  progress: 1,
+                });
+              }
+
+              activeBufferedResponse = undefined;
+
+              settleResponse({
+                status,
+                headers,
+                // Copied once, into a fresh array: `Buffer.concat` and a copy of its
+                // result held the body twice over.
+                // Empty bytes for a body that arrived empty, as FetchAdapter and
+                // XHRAdapter hand one over; `null` for an answer with no body (`HEAD`,
+                // `204`, `205`, `304`), as they hand that over.
+                body: hasBody ? concatChunks(chunks, loadedBytes) : null,
+              });
             });
-          });
 
-          res.on('aborted', () => {
-            if (!activeBufferedResponse) {
-              return;
-            }
+            // The body failed after the headers arrived: resolve with the real status as
+            // a stream error. The first of `'error'`, `'aborted'` and `'close'` answers.
+            const settleBufferedStreamError = (
+              message: string,
+              cause?: Error,
+            ): void => {
+              if (!activeBufferedResponse) {
+                return;
+              }
 
-            activeBufferedResponse = undefined;
-            settleResponse({
-              status,
-              headers,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: makeResponseStreamError('Response stream aborted'),
+              activeBufferedResponse = undefined;
+              settleResponse({
+                status,
+                headers,
+                body: null,
+                isStreamError: true,
+                streamErrorCode: 'stream_response_error',
+                errorCause: makeResponseStreamError(message, cause),
+              });
+            };
+
+            body.on('error', (err: Error) => {
+              settleBufferedStreamError('Response stream error', err);
             });
-          });
 
-          res.on('close', () => {
-            if (!activeBufferedResponse) {
-              return;
-            }
+            body.on('aborted', () => {
+              settleBufferedStreamError('Response stream aborted');
+            });
 
-            activeBufferedResponse = undefined;
-            settleResponse({
-              status,
-              headers,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: makeResponseStreamError(
+            body.on('close', () => {
+              settleBufferedStreamError(
                 'Response stream closed before completion',
-              ),
+              );
             });
+          })();
+          observeTaskFailure(responseTask, (error: unknown) => {
+            // Already answered, so the host channel is the only place the failure can go.
+            // Checked before `failRequest`, whose reject is then a no-op but which would
+            // still settle the upload with this error and take off the abort listener an
+            // early-ack upload still needs. The response's `'close'` handler owns
+            // teardown, as it does in `observeTaskFailure`'s recovery, and firing the
+            // factory's signal now would run its abort cleanup over a stream that
+            // completed.
+            if (didSettleRequest) {
+              reportCallbackError('NodeAdapter response task', error);
+
+              return;
+            }
+
+            failRequest(normalizeError(error));
+
+            // Every exit the task means to take tears down what it opened. This one - a
+            // throw out of code with no `catch` of its own - tears them down here, so the
+            // socket is not left open and the factory's cleanup listeners run. Torn down
+            // after the reject, so neither can stand in for the failure.
+            abortResponseStream?.();
+            tearDownAfterResponse();
           });
-        })().catch((error: unknown) => {
-          failRequest(normalizeError(error));
-        });
-      });
+        }));
 
-      // Network / transport errors (DNS failure, connection refused, cert errors)
-      req.on('error', (error) => {
-        // Abort signal fired before network error — priorities the abort path
-        if (request.signal?.aborted) {
-          const abortErr = new Error('Request aborted');
-          abortErr.name = 'AbortError';
-          failRequest(abortErr);
-          return;
-        }
+        // A socket handed over instead of a response - a `101` the server sent unasked, a
+        // tunnel - is not one this adapter can read. Unhandled, Node destroyed it and
+        // emitted neither `'response'` nor `'error'`, so the request never settled.
+        const onSocketHandover = (
+          _response: unknown,
+          socket: { destroy?: () => void } | undefined,
+        ): void => {
+          try {
+            socket?.destroy?.();
+          } catch {
+            // The failure below is what the caller needs to see.
+          }
+          const refusal = new TypeError(
+            'NodeAdapter received a protocol switch it cannot read',
+          );
+          markNonRetryableAdapterError(refusal);
+          failRequest(refusal);
+        };
+        req.on('upgrade', onSocketHandover);
+        req.on('connect', onSocketHandover);
 
-        // The server has already answered, so the response path is the one that gets to
-        // answer - the same rule the write-path `catch` handlers follow, reached from the
-        // other entry point. An upload-side `EPIPE` / `ECONNRESET` fires *both*: those
-        // handlers stood down on `didReceiveResponse` while this one went on resolving a
-        // fabricated `{ status: 0, isTransportError: true }`, and `resolve` is
-        // first-call-wins - so whenever that error landed before the response body was
-        // fully in, a real `413` with a truncated body was replaced by a transport error,
-        // its status and the server's explanation thrown away. Measured against a server
-        // that answers `413` and then resets mid-upload: `status: 0`, `read ECONNRESET`.
-        //
-        // The response side always settles on its own - `'end'`, or the `'error'`,
-        // `'aborted'` and `'close'` handlers that answer with the real status and
-        // `isStreamError` - so standing down here cannot leave the promise hanging.
-        // Reported rather than dropped, and the request torn down once the response has
-        // been consumed: see `reportWriteErrorAfterResponse`.
-        if (didReceiveResponse) {
-          // Except in the one window where the response side has nobody listening yet:
-          // see `failStreamSetupOnSocketError`.
-          if (failStreamSetupOnSocketError) {
-            failStreamSetupOnSocketError(normalizeError(error));
+        // Network / transport errors (DNS failure, connection refused, cert errors)
+        req.on('error', (error) => {
+          // Abort signal fired before network error — priorities the abort path. Read
+          // guarded: this runs as an emitter listener, where a throw is an uncaught
+          // exception and the request never settles. See `readIsAborted`.
+          if (readIsAborted()) {
+            const abortErr = makeAbortError();
+            failRequest(abortErr);
+            return;
+          }
+
+          // The server has already answered, so the response path is the one that gets to
+          // answer - the same rule the write-path `catch` handlers follow, reached from the
+          // other entry point. An upload-side `EPIPE` / `ECONNRESET` fires *both*: those
+          // handlers stood down on `didReceiveResponse` while this one went on resolving a
+          // fabricated `{ status: 0, isTransportError: true }`, and `resolve` is
+          // first-call-wins - so whenever that error landed before the response body was
+          // fully in, a real `413` with a truncated body was replaced by a transport error,
+          // its status and the server's explanation thrown away. Measured against a server
+          // that answers `413` and then resets mid-upload: `status: 0`, `read ECONNRESET`.
+          //
+          // The response side always settles on its own - `'end'`, or the `'error'`,
+          // `'aborted'` and `'close'` handlers that answer with the real status and
+          // `isStreamError` - so standing down here cannot leave the promise hanging.
+          // Reported rather than dropped, and the request torn down once the response has
+          // been consumed: see `reportWriteErrorAfterResponse`.
+          if (didReceiveResponse) {
+            // Except in the one window where the response side has nobody listening yet:
+            // see `pendingStreamSetup`.
+            if (
+              pendingStreamSetup?.failOnSocketError &&
+              !pendingStreamSetup.isResponseComplete()
+            ) {
+              pendingStreamSetup.failOnSocketError(normalizeError(error));
+
+              return;
+            }
+
+            // Only a request whose body writer is still unfinished can have a body write to
+            // report. Without this, an ordinary interrupted download - a bodiless GET whose
+            // connection resets mid-response, already answered correctly by the `res`
+            // handlers with the real status and `isStreamError` - was also rendered onto the
+            // global `'error'` channel and armed a grace deadline for a writer that never
+            // existed.
+            //
+            // `upload.settle`, not `upload.outcome`: the outcome promise is opened for every
+            // bodied request and stays set for the life of it, so a POST whose body went out
+            // in full and was `end()`-ed, then cut short by a reset while the response was
+            // still arriving, hit the same false positive this guard exists to prevent - and
+            // burned the one-shot `didReportWriteErrorAfterResponse` on a writer that had
+            // already finished. `settle` is cleared the moment the writer settles, so it
+            // reads as exactly "a body write is still outstanding".
+            if (upload.settle !== null) {
+              reportWriteErrorAfterResponse(error);
+            }
 
             return;
           }
 
-          // Only a request whose body writer is still unfinished can have a body write to
-          // report. Without this, an ordinary interrupted download - a bodiless GET whose
-          // connection resets mid-response, already answered correctly by the `res`
-          // handlers with the real status and `isStreamError` - was also rendered onto the
-          // global `'error'` channel and armed a grace deadline for a writer that never
-          // existed.
+          // The body writer is over too, for the reason `reportWriteErrorAfterResponse`
+          // settles it: the request is failing and about to be torn down, and a writer
+          // parked inside `Blob.stream()`'s `read()` has no pending `req.write` to reject,
+          // so it never returns to run `endBodyWrite`. Nothing else would answer here - the
+          // stall watchdog is armed only from the response's `'close'`, which a request that
+          // never got a response does not reach - so `await response.requestBodySettled`
+          // waited forever, and the client's own `settleUploadBeforeNextDispatch` waited
+          // with it: a retryable `PUT` whose socket reset mid-upload hung instead of
+          // retrying. First-call-wins, so a writer that does notice the teardown and reports
+          // its own `EPIPE` afterwards changes nothing.
           //
-          // `upload.settle`, not `upload.outcome`: the outcome promise is opened for every
-          // bodied request and stays set for the life of it, so a POST whose body went out
-          // in full and was `end()`-ed, then cut short by a reset while the response was
-          // still arriving, hit the same false positive this guard exists to prevent - and
-          // burned the one-shot `didReportWriteErrorAfterResponse` on a writer that had
-          // already finished. `settle` is cleared the moment the writer settles, so it
-          // reads as exactly "a body write is still outstanding".
+          // `isWritingBody` is deliberately left as it is: this answers the caller and does
+          // not claim the writer has stopped.
           if (upload.settle !== null) {
-            reportWriteErrorAfterResponse(error);
+            settleBodyOutcome(error);
           }
 
-          return;
-        }
+          // TLS certificate errors → 495. This is non-standard but widely
+          // understood for client cert / server cert validation failures. We
+          // preserve the diagnostic 495 status, but still flag it as a transport
+          // failure so the client routes it through the failed/error path and
+          // never retries it.
+          if (isTLSCertificateError(error)) {
+            settleResponse({
+              status: 495,
+              isTransportError: true,
+              isRetryable: false,
+              headers: {},
+              body: null,
+              errorCause: error,
+            });
+            return;
+          }
 
-        // The body writer is over too, for the reason `reportWriteErrorAfterResponse`
-        // settles it: the request is failing and about to be torn down, and a writer
-        // parked inside `Blob.stream()`'s `read()` has no pending `req.write` to reject,
-        // so it never returns to run `endBodyWrite`. Nothing else would answer here - the
-        // stall watchdog is armed only from the response's `'close'`, which a request that
-        // never got a response does not reach - so `await response.requestBodySettled`
-        // waited forever, and the client's own `settleUploadBeforeNextDispatch` waited
-        // with it: a retryable `PUT` whose socket reset mid-upload hung instead of
-        // retrying. First-call-wins, so a writer that does notice the teardown and reports
-        // its own `EPIPE` afterwards changes nothing.
-        //
-        // `isWritingBody` is deliberately left as it is: this answers the caller and does
-        // not claim the writer has stopped.
-        if (upload.settle !== null) {
-          settleBodyOutcome(error);
-        }
+          // Only `wasDefinitelyNotSent` is claimed here, and only the transport
+          // error code can supply it. No `isRetryable: false` alongside: that flag
+          // blocks every method, so it would stop retrying an idempotent PUT after
+          // an ordinary socket error and override retryNonIdempotentMethods.
+          // Whether a partly-sent request may be replayed is the client's method
+          // rule to answer, and withholding the proof is what answers it.
+          //
+          // A body-byte count cannot supply it in either direction: an empty-body
+          // POST writes headers and nothing else, and the counter tracks bytes
+          // handed to the stream rather than bytes on the wire. The error code is
+          // also the only signal that behaves the same on Node and Bun, where
+          // `socket.bytesWritten` and `socket.connecting` are unreliable.
+          //
+          // Set only when proven, never as `false` — absence means "not known", so
+          // an explicit `false` would read as proof of delivery.
+          const wasDefinitelyNotSent = isPreConnectionError(error);
 
-        // TLS certificate errors → 495. This is non-standard but widely
-        // understood for client cert / server cert validation failures. We
-        // preserve the diagnostic 495 status, but still flag it as a transport
-        // failure so the client routes it through the failed/error path and
-        // never retries it.
-        if (isTLSCertificateError(error)) {
+          // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
           settleResponse({
-            status: 495,
+            status: 0,
             isTransportError: true,
-            isRetryable: false,
+            ...(wasDefinitelyNotSent ? { wasDefinitelyNotSent: true } : {}),
             headers: {},
             body: null,
             errorCause: error,
           });
-          return;
-        }
-
-        // Only `wasDefinitelyNotSent` is claimed here, and only the transport
-        // error code can supply it. No `isRetryable: false` alongside: that flag
-        // blocks every method, so it would stop retrying an idempotent PUT after
-        // an ordinary socket error and override retryNonIdempotentMethods.
-        // Whether a partly-sent request may be replayed is the client's method
-        // rule to answer, and withholding the proof is what answers it.
-        //
-        // A body-byte count cannot supply it in either direction: an empty-body
-        // POST writes headers and nothing else, and the counter tracks bytes
-        // handed to the stream rather than bytes on the wire. The error code is
-        // also the only signal that behaves the same on Node and Bun, where
-        // `socket.bytesWritten` and `socket.connecting` are unreliable.
-        //
-        // Set only when proven, never as `false` — absence means "not known", so
-        // an explicit `false` would read as proof of delivery.
-        const wasDefinitelyNotSent = isPreConnectionError(error);
-
-        // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
-        settleResponse({
-          status: 0,
-          isTransportError: true,
-          ...(wasDefinitelyNotSent ? { wasDefinitelyNotSent: true } : {}),
-          headers: {},
-          body: null,
-          errorCause: error,
         });
-      });
 
-      // Wire abort signal — destroy the underlying socket when fired.
-      // Reject immediately rather than waiting for the 'error' event; some
-      // runtimes (e.g. Bun) do not emit 'error' on req.destroy(), so waiting
-      // leaves the promise unsettled. Promise resolution is idempotent, so any
-      // subsequent error event is a safe no-op.
-      if (request.signal) {
-        if (request.signal.aborted) {
-          // Signal already aborted before we even started (e.g., pre-cancelled builder)
-          destroyRequestQuietly(req);
-          const abortErr = new Error('Request aborted');
-          abortErr.name = 'AbortError';
-          failRequest(abortErr);
-          return;
+        // Wire abort signal — destroy the underlying socket when fired.
+        // Reject immediately rather than waiting for the 'error' event; some
+        // runtimes (e.g. Bun) do not emit 'error' on req.destroy(), so waiting
+        // leaves the promise unsettled. Promise resolution is idempotent, so any
+        // subsequent error event is a safe no-op.
+        if (request.signal) {
+          // By the rule every reader of the caller's signal shares: exactly `true`, and a
+          // getter that throws refused on a carrier (see `isSignalAborted`).
+          if (isSignalAborted(request.signal)) {
+            // Signal already aborted before we even started (e.g., pre-cancelled builder)
+            destroyRequestQuietly(req);
+            const abortErr = makeAbortError();
+            failRequest(abortErr);
+            return;
+          }
+
+          const signal = request.signal;
+
+          const onAbort = (): void => {
+            // Settlement removes the relay listener during this same abort dispatch.
+            // Notify a pending factory first, while its cleanup still has ownership.
+            pendingStreamSetup?.abort();
+            // Nothing more is decoded for a request that was cancelled or timed out.
+            releaseResponseBody?.();
+            if (activeResponseStream) {
+              const { status, headers, writable, abortStream } =
+                activeResponseStream;
+              activeResponseStream = undefined;
+              destroyWritableQuietly(writable);
+              // Fired here rather than left to the relay, for the reason the pending
+              // factory is notified above: `failRequest` takes the relay off within this
+              // dispatch. Waiting for `streamResponseBody` to report back instead would
+              // hang on a destroyed writable that never calls its `end` callback, and the
+              // factory's cleanup would never run.
+              abortStream();
+              // Guarded, as its writable sibling one line up already is, and for the
+              // reason the stall watchdog's destroy is: this whole listener runs from an
+              // `AbortSignal` event, where a throw is an uncaught exception rather than a
+              // rejection into this request's promise - and a socket torn down by the same
+              // abort can answer `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes.
+              destroyRequestQuietly(req);
+              failRequest(
+                makeResponseStreamAbortError(
+                  req,
+                  request.headers,
+                  status,
+                  headers,
+                ),
+              );
+              return;
+            }
+
+            // An answer whose body is buffering, or whose stream setup has not called
+            // its factory yet: an abort of the response either way - not a failure of a
+            // factory that never ran.
+            const unreadAnswer =
+              activeBufferedResponse ??
+              (pendingStreamSetup?.didCallFactory === false
+                ? pendingStreamSetup
+                : undefined);
+            if (unreadAnswer !== undefined) {
+              const { status, headers } = unreadAnswer;
+              const isBuffering = unreadAnswer === activeBufferedResponse;
+              activeBufferedResponse = undefined;
+              destroyRequestQuietly(req);
+              failRequest(
+                makeResponseStreamAbortError(
+                  req,
+                  request.headers,
+                  status,
+                  headers,
+                  isBuffering
+                    ? undefined
+                    : 'Request aborted before the streamResponse factory was called',
+                ),
+              );
+              return;
+            }
+
+            if (pendingStreamSetup) {
+              const { status, headers } = pendingStreamSetup;
+              destroyRequestQuietly(req);
+              const abortErr = makeAbortError(
+                'Request aborted during streamResponse setup',
+              );
+              failRequest(
+                markStreamFactoryError(abortErr, req, request.headers, {
+                  status,
+                  headers,
+                }),
+              );
+              return;
+            }
+
+            destroyRequestQuietly(req);
+            const abortErr = makeAbortError();
+            failRequest(abortErr);
+          };
+
+          signal.addEventListener('abort', onAbort, { once: true });
+          abortListenerRemovers.push(() => {
+            signal.removeEventListener('abort', onAbort);
+          });
         }
 
-        const signal = request.signal;
+        const onBodyWriteFailure = (error: unknown): void => {
+          endBodyWrite(error);
 
-        const onAbort = (): void => {
-          // Settlement removes the relay listener during this same abort dispatch.
-          // Notify a pending factory first, while its cleanup still has ownership.
-          abortStreamSetup?.();
-          if (activeResponseStream) {
-            const { status, headers, writable } = activeResponseStream;
-            activeResponseStream = undefined;
-            destroyWritableQuietly(writable);
-            // Guarded, as its writable sibling one line up already is, and for the
-            // reason the stall watchdog's destroy is: this whole listener runs from an
-            // `AbortSignal` event, where a throw is an uncaught exception rather than a
-            // rejection into this request's promise - and a socket torn down by the same
-            // abort can answer `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes.
+          // The abort path first, the same priority `req.on('error')` gives it: a
+          // caller tearing its own request down - or a per-attempt timeout doing it -
+          // parks the writer's rejection here too, and against an endpoint that answers
+          // early (a `413`, a redirect, an early `2xx`) `didReceiveResponse` is already
+          // true, so every cancelled upload put a spurious transport failure on the
+          // host's global `'error'` channel for a teardown that was asked for. The
+          // outcome is settled above either way; `failRequest` is first-call-wins, so
+          // the abort listener's own answer stands where it got there first.
+          //
+          // Read guarded, as `req.on('error')` reads it, so the write failure is reported
+          // below rather than escaping to `observeTaskFailure`. See `readIsAborted`.
+          if (readIsAborted()) {
             destroyRequestQuietly(req);
 
-            const error = new Error(
-              'Request aborted during response streaming',
-            );
-            error.name = 'AbortError';
-            failRequest(
-              markResponseStreamAbortError(
-                error,
-                req,
-                request.headers,
-                status,
-                headers,
-              ),
-            );
+            const abortErr = makeAbortError();
+            failRequest(abortErr);
+
             return;
           }
 
-          if (activeBufferedResponse) {
-            const { status, headers } = activeBufferedResponse;
-            activeBufferedResponse = undefined;
-            destroyRequestQuietly(req);
+          // See `didReceiveResponse`: the server has already answered, so the
+          // write failing is how that answer arrived, not a transport failure
+          // to report over it. The response path resolves with the real status.
+          // Said rather than dropped, and the leftovers cleaned up: see
+          // `reportWriteErrorAfterResponse`.
+          if (didReceiveResponse) {
+            reportWriteErrorAfterResponse(error);
 
-            const error = new Error(
-              'Request aborted during response streaming',
-            );
-            error.name = 'AbortError';
-            failRequest(
-              markResponseStreamAbortError(
-                error,
-                req,
-                request.headers,
-                status,
-                headers,
-              ),
-            );
-            return;
-          }
-
-          if (isStreamFactoryPending) {
-            destroyRequestQuietly(req);
-            const abortErr = new Error(
-              'Request aborted during streamResponse setup',
-            );
-            abortErr.name = 'AbortError';
-            failRequest(markStreamFactoryError(abortErr, req, request.headers));
             return;
           }
 
           destroyRequestQuietly(req);
-          const abortErr = new Error('Request aborted');
-          abortErr.name = 'AbortError';
-          failRequest(abortErr);
+
+          // A body source that did not match its size is the caller's value, and reads the
+          // same again: thrown as the non-retryable error it is tagged as, not settled as a
+          // transport failure to retry.
+          if (
+            readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
+            true
+          ) {
+            failRequest(normalizeError(error));
+
+            return;
+          }
+
+          settleResponse({
+            // No isRetryable veto: that would stop retrying an idempotent
+            // PUT or DELETE. Delivery is unproven rather than disproven, so
+            // nothing is claimed and the client's method rule decides.
+            status: 0,
+            isTransportError: true,
+            headers: {},
+            body: null,
+            errorCause: normalizeError(error),
+          });
         };
 
-        signal.addEventListener('abort', onAbort, { once: true });
-        abortListenerRemovers.push(() => {
-          signal.removeEventListener('abort', onAbort);
-        });
-      }
+        // Both body shapes finish the same way. Finalization can throw even after every
+        // body write succeeded, so the one-shot upload outcome stays pending until it can
+        // include that failure.
+        const runBodyWrite = (write: () => Promise<void>): void => {
+          beginBodyWrite();
 
-      // Write request body
-      if (request.body instanceof FormData) {
-        // FormData → multipart/form-data with exact Content-Length so upload
-        // progress is length-computable (not chunked-transfer guesswork).
-        const boundary = generateMultipartBoundary();
-
-        beginBodyWrite();
-
-        serializeMultipartFormData(
-          request.body,
-          req,
-          boundary,
-          reportUploadProgress,
-          (isWaiting) => {
-            sourceWaitSince = isWaiting ? Date.now() : undefined;
-          },
-        )
-          .then(() => {
-            endBodyWrite();
+          const writeTask = (async (): Promise<void> => {
+            await write();
             req.end();
-          })
-          .catch((error: unknown) => {
-            endBodyWrite(error);
-
-            // The abort path first, the same priority `req.on('error')` gives it: a
-            // caller tearing its own request down - or a per-attempt timeout doing it -
-            // parks the writer's rejection here too, and against an endpoint that answers
-            // early (a `413`, a redirect, an early `2xx`) `didReceiveResponse` is already
-            // true, so every cancelled upload put a spurious transport failure on the
-            // host's global `'error'` channel for a teardown that was asked for. The
-            // outcome is settled above either way; `failRequest` is first-call-wins, so
-            // the abort listener's own answer stands where it got there first.
-            if (request.signal?.aborted) {
-              destroyRequestQuietly(req);
-
-              const abortErr = new Error('Request aborted');
-
-              abortErr.name = 'AbortError';
-              failRequest(abortErr);
-
-              return;
-            }
-
-            // See `didReceiveResponse`: the server has already answered, so the
-            // write failing is how that answer arrived, not a transport failure
-            // to report over it. The response path resolves with the real status.
-            // Said rather than dropped, and the leftovers cleaned up: see
-            // `reportWriteErrorAfterResponse`.
-            if (didReceiveResponse) {
-              reportWriteErrorAfterResponse(error);
-
-              return;
-            }
-
-            destroyRequestQuietly(req);
-            settleResponse({
-              // No isRetryable veto: that would stop retrying an idempotent
-              // PUT or DELETE. Delivery is unproven rather than disproven, so
-              // nothing is claimed and the client's method rule decides.
-              status: 0,
-              isTransportError: true,
-              headers: {},
-              body: null,
-              errorCause: normalizeError(error),
-            });
-          });
-      } else if (
-        typeof request.body === 'string' ||
-        request.body instanceof Uint8Array
-      ) {
-        // String or Uint8Array body — write in chunks so upload progress fires
-        // at meaningful granularity rather than one giant 100% event at the end.
-        const bytes =
-          typeof request.body === 'string'
-            ? Buffer.from(request.body, 'utf8')
-            : Buffer.from(request.body);
-
-        req.setHeader('Content-Length', bytes.length.toString());
-
-        beginBodyWrite();
-
-        writeRequestBodyChunked(bytes, req, reportUploadProgress)
-          .then(() => {
             endBodyWrite();
-            req.end();
-          })
-          .catch((error: unknown) => {
-            endBodyWrite(error);
+          })();
+          observeTaskFailure(writeTask, onBodyWriteFailure);
+        };
 
-            // The abort path first, the same priority `req.on('error')` gives it: a
-            // caller tearing its own request down - or a per-attempt timeout doing it -
-            // parks the writer's rejection here too, and against an endpoint that answers
-            // early (a `413`, a redirect, an early `2xx`) `didReceiveResponse` is already
-            // true, so every cancelled upload put a spurious transport failure on the
-            // host's global `'error'` channel for a teardown that was asked for. The
-            // outcome is settled above either way; `failRequest` is first-call-wins, so
-            // the abort listener's own answer stands where it got there first.
-            if (request.signal?.aborted) {
-              destroyRequestQuietly(req);
+        // Write request body - by the classification that opened its outcome above, so a
+        // body written here always has one.
+        if (classifiedBody?.kind === 'form') {
+          // FormData → multipart/form-data with exact Content-Length so upload
+          // progress is length-computable (not chunked-transfer guesswork).
+          const boundary = generateMultipartBoundary();
+          const form = classifiedBody.body;
 
-              const abortErr = new Error('Request aborted');
+          runBodyWrite(() =>
+            serializeMultipartFormData(
+              form,
+              req,
+              boundary,
+              reportUploadProgress,
+              (isWaiting) => {
+                sourceWaitSince = isWaiting ? performance.now() : undefined;
+              },
+            ),
+          );
+        } else if (classifiedBody?.kind === 'bytes') {
+          // String or Uint8Array body — write in chunks so upload progress fires
+          // at meaningful granularity rather than one giant 100% event at the end.
+          const body = classifiedBody.body;
+          const bytes =
+            typeof body === 'string'
+              ? Buffer.from(body, 'utf8')
+              : Buffer.from(body);
 
-              abortErr.name = 'AbortError';
-              failRequest(abortErr);
+          req.setHeader('Content-Length', bytes.length.toString());
 
-              return;
-            }
+          runBodyWrite(() =>
+            writeRequestBodyChunked(bytes, req, reportUploadProgress),
+          );
+        } else if (request.body === undefined || request.body === null) {
+          // No body — fire 100% upload immediately and end the request. (A caller's
+          // `Content-Length` was taken off the request; see `dropBodilessContentLength`.)
+          reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
+          req.end();
+        } else {
+          // Refused rather than dropped: anything else - an `ArrayBuffer`, a `Blob`, a plain
+          // object, another realm's `FormData` - went out as no body at all, and the request
+          // succeeded without it. `HTTPClient` serializes bodies first; this is the adapter
+          // called directly.
+          const refusal = new TypeError(
+            'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+          );
+          markNonRetryableAdapterError(refusal);
+          throw refusal;
+        }
+      } catch (error) {
+        // This adapter's own refusal goes out as it is; anything else may be the caller's
+        // (a header value's `toString`, a hostile signal) and goes out on a carrier.
+        if (
+          readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
+          true
+        ) {
+          throw error;
+        }
 
-            // See `didReceiveResponse`: the server has already answered, so the
-            // write failing is how that answer arrived, not a transport failure
-            // to report over it. The response path resolves with the real status.
-            // Said rather than dropped, and the leftovers cleaned up: see
-            // `reportWriteErrorAfterResponse`.
-            if (didReceiveResponse) {
-              reportWriteErrorAfterResponse(error);
-
-              return;
-            }
-
-            destroyRequestQuietly(req);
-            settleResponse({
-              // No isRetryable veto: that would stop retrying an idempotent
-              // PUT or DELETE. Delivery is unproven rather than disproven, so
-              // nothing is claimed and the client's method rule decides.
-              status: 0,
-              isTransportError: true,
-              headers: {},
-              body: null,
-              errorCause: normalizeError(error),
-            });
-          });
-      } else {
-        // No body — fire 100% upload immediately and end the request
-        reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
-        req.end();
+        throw nonRetryableAdapterErrorFrom(error);
       }
-    }).catch((error: unknown) => {
+    });
+    return await operation.catch((error: unknown) => {
       // The one rejection path the executor's own handlers cannot see: a `Promise`
       // executor rejects on a synchronous throw too, and `httpModule.request`,
       // `Buffer.from` and `req.setHeader` can all raise one after the outcome promise has
       // been opened. Re-thrown unchanged apart from the tag, so classification upstream is
       // untouched.
+      if (requestForCleanup !== undefined) {
+        try {
+          destroyRequestQuietly(requestForCleanup);
+        } catch {
+          // Even a teardown-state getter can throw. Preserve the original failure;
+          // asynchronous recovery already reports any undelivered teardown failure.
+        }
+      }
       throw settleRequestBodyForThrow(normalizeError(error));
     });
   }
@@ -1749,12 +2455,11 @@ export class NodeAdapter implements HTTPAdapter {
  * two-second pause truncated an 8 MiB upload at 6.8 MiB and handed the caller the early
  * status as a clean success.
  *
- * Five seconds is past any such pause on a connection that is still alive, and it is what
- * the pending-writable absorber in this file already waits before deciding nobody claimed
- * an error. What is left is a bound rather than a promise: a receiver that stops reading
- * for longer than this while still intending to read gets a truncated body, and the far
- * more common shape - a proxy that has answered and will never read again - costs one idle
- * socket for five seconds instead of one held to that server's timeout.
+ * Five seconds is past any such pause on a connection that is still alive. What is left
+ * is a bound rather than a promise: a receiver that stops reading for longer than this
+ * while still intending to read gets a truncated body, and the far more common shape - a
+ * proxy that has answered and will never read again - costs one idle socket for five
+ * seconds instead of one held to that server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
 
@@ -1772,48 +2477,6 @@ const UPLOAD_STALL_GRACE_MS = 5_000;
 const UPLOAD_SOURCE_STALL_GRACE_MS = 60_000;
 
 // ---------------------------------------------------------------------------
-// Identity and credential scoping
-// ---------------------------------------------------------------------------
-
-/**
- * Whether an attempt is a redirect hop to an origin other than the one the caller
- * addressed.
- *
- * Three things are scoped by it: the TLS identity (`servername`, `mtls.cert` / `mtls.key`),
- * the configured `socketPath`, and Basic credentials taken from a request URL's
- * `user:pass@`. All three are addressed to an origin the caller chose, and a `Location`
- * header is the remote server's choice.
- *
- * `servername` and `mtls.cert` / `mtls.key` are the caller's TLS *identity*: the name it
- * meant to talk to and the certificate it authenticates with. Applied to every `https:`
- * request, they followed a `Location` header wherever it pointed - a cross-origin
- * redirect had the adapter present the caller's client certificate to, and send the
- * configured SNI to, a host the caller never named and the remote server chose. The
- * client passes {@link AdapterRequest.initialURL} so a hop can be told from the request
- * that started it; the identity is withheld when the origin (scheme, host and port)
- * differs.
- *
- * Absent `initialURL` - the adapter driven directly - is the request itself, so the
- * identity applies as it always did. An `initialURL` that cannot be parsed is treated as
- * cross-origin: it cannot be shown to be the same origin, and failing closed withholds an
- * identity rather than presenting one.
- */
-function isCrossOriginRedirectHop(
-  initialURL: string | undefined,
-  requestURL: URL,
-): boolean {
-  if (initialURL === undefined) {
-    return false;
-  }
-
-  try {
-    return new URL(initialURL).origin !== requestURL.origin;
-  } catch {
-    return true;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Streaming pipe helper
 // ---------------------------------------------------------------------------
 
@@ -1826,13 +2489,18 @@ function isCrossOriginRedirectHop(
 // that error into isStreamError rather than throwing, so the real HTTP status
 // is preserved and the failure stays non-retryable once streaming has started.
 async function streamResponseBody(
-  res: http.IncomingMessage,
+  res: ResponseBodySource,
   writable: WritableLike,
   totalBytes: number,
   onProgress?: (e: AdapterProgressEvent) => void,
 ): Promise<StreamResponseBodyResult> {
-  return new Promise((resolve) => {
+  return await new Promise((resolve) => {
     let loadedBytes = 0;
+    // Every byte handed to `write`, whether or not its optional callback is ever called:
+    // a sink that reports failure by `'error'` alone never calls it, and the terminal
+    // event below, sent once `end` has called back clean, read only the callbacks' count
+    // and said `loaded: 0` for a body the sink had taken whole.
+    let handedBytes = 0;
 
     // Deduplication guard — same as buffered download: when Content-Length is
     // known and the last write callback fills the body exactly, progress: 1
@@ -1843,360 +2511,6 @@ async function streamResponseBody(
     let isSettled = false;
     let didReceiveEnd = false;
 
-    /**
-     * Absorb an `error` the writable has not delivered yet.
-     *
-     * A failed write destroys the stream and emits its `error` on a later tick, usually
-     * after this request has settled and its listeners are gone - and an `error` event
-     * with no listener is an uncaught exception that takes the process down.
-     *
-     * Keyed on the writable rather than on the request, because `streamResponse` may hand
-     * the same sink to several requests at once. A per-request absorber meant a dozen
-     * concurrent failures on one shared writable attached a dozen listeners within the
-     * same turn, before any removal ran, which is the `MaxListenersExceededWarning` this
-     * is meant to avoid. One absorber per writable is also all that is needed: it is
-     * attached with `on`, not `once`, so it keeps absorbing for as long as it is there
-     * instead of standing down after the first error and leaving a sibling's unhandled.
-     *
-     * Its lifetime is bounded by the stream's own delivery: the absorber removes itself
-     * once the error arrives, and a `'close'` listener removes it once the stream has
-     * finished tearing down. A `setImmediate` is the fallback, and only for a writable
-     * that would not take a `'close'` listener - a hand-written {@link WritableLike} that
-     * throws from `write` or `end` is not obliged to emit anything afterwards, so a
-     * listener waiting for delivery could otherwise wait forever.
-     *
-     * Skipped entirely for a writable with no listener-removal method, because an
-     * absorber attached to one could never be taken back: the `setImmediate` would drop
-     * the `WeakMap` entry while the listener stayed, and the next failure would attach
-     * another, which is the unbounded growth this exists to prevent. Nothing is lost by
-     * skipping it - such a writable is listened to through the permanent fan-out at
-     * {@link attachWritableListener}, whose listener stays attached whatever this request
-     * does, so a late error still lands on `onWritableError` and settles nothing because
-     * `settle` has already run.
-     */
-    const absorbPendingWritableError = (): void => {
-      // Captured once, here, rather than looked up again inside the removal below. Two
-      // lookups is two answers: the member is caller code and could be gone, or changed,
-      // by the time the removal runs, and a removal that cannot find its method is one
-      // that silently does not happen.
-      const removeListener = getWritableListenerRemover(writable);
-
-      if (removeListener === null) {
-        return;
-      }
-
-      try {
-        const existing = pendingWritableErrorAbsorbers.get(writable);
-
-        if (existing !== undefined && existing.extend()) {
-          // One is already attached to this writable and still absorbing. Its deadline is
-          // pushed out to a full window from *here*, because this request is now relying
-          // on it and has no listener of its own left.
-          return;
-        }
-
-        // `extend` answered that the absorber was out of lifetime and took itself off, so
-        // there is nothing on this writable now. Falling through attaches a fresh one,
-        // which is exactly the path a writable with no absorber at all takes - a new
-        // request getting its own window is what the cap is for, as against one absorber
-        // extending itself forever.
-      } catch {
-        // Not a usable `WeakMap` key, so it cannot be tracked or protected.
-        return;
-      }
-
-      // Whether the `WeakMap` still names this absorber. A read that throws answers `true`
-      // - the safe direction, since the cost of believing an absorber is present is one
-      // late error absorbed twice, and the cost of believing it is gone is a second
-      // listener attached on top of one that never came off.
-      const isStillAttached = (): boolean => {
-        try {
-          return pendingWritableErrorAbsorbers.get(writable)?.absorb === absorb;
-        } catch {
-          return true;
-        }
-      };
-
-      // Takes the absorber back off, whichever signal got here first. Guarded on the
-      // `WeakMap` still naming this absorber so a second call, or a removal that has
-      // already run, does nothing.
-      const detach = (): void => {
-        try {
-          if (pendingWritableErrorAbsorbers.get(writable)?.absorb !== absorb) {
-            return;
-          }
-        } catch {
-          return;
-        }
-
-        try {
-          removeListener('error', absorb);
-        } catch {
-          // The removal itself is caller code and can refuse. The listener is therefore
-          // still attached, so the bookkeeping that says so is kept: dropping it would
-          // let the next failure add a second listener on top of one that never came
-          // off, which is the accumulation being prevented. The one still attached goes
-          // on absorbing, so nothing is left uncovered.
-          return;
-        }
-
-        try {
-          removeListener('close', onClose);
-        } catch {
-          // Not the same trade as the `'error'` removal above, because the `'error'`
-          // listener is already off by the time this runs. Keeping the entry here said
-          // an absorber was attached when none was, so every later failure on this
-          // writable short-circuited and attached nothing - and `cleanup` had taken that
-          // request's own `onWritableError` off too, leaving the late `'error'` event
-          // with no listener at all, which is the uncaught exception this exists to
-          // prevent. A stale `onClose` is the lesser cost and an inert one: it only
-          // calls `detach`, which returns immediately once the entry below is gone.
-        }
-
-        pendingWritableErrorAbsorbers.delete(writable);
-
-        // Nothing left for it to do, and it holds this closure until it fires otherwise.
-        if (backstop !== undefined) {
-          clearTimeout(backstop);
-          backstop = undefined;
-        }
-      };
-
-      // Detach on the next turn of the loop rather than now, so an error delivered in
-      // this one still finds the listener. `unref` so a pending removal cannot hold the
-      // process open.
-      //
-      // Cancelled by a renewal, which is what `generation` counts. The queued removal
-      // only knows that *at the time it was scheduled* nothing further was expected; a
-      // request settling in the meantime calls `extend` and is handed a fresh window, and
-      // tearing the absorber down anyway left that request covered by nothing - the same
-      // uncaught-`'error'` gap, reached from the other side. The `'close'` and backstop
-      // paths call `detach` directly and are unaffected: those are deliveries, not
-      // guesses about one.
-      const scheduleDetach = (): void => {
-        const scheduledAt = generation;
-
-        try {
-          const removal = setImmediate(() => {
-            if (generation !== scheduledAt) {
-              return;
-            }
-
-            detach();
-          });
-
-          removal.unref?.();
-        } catch {
-          // No way to schedule it, so the listener stays. `'close'` may still take it off,
-          // and holding one absorber is the safe direction of the two.
-        }
-      };
-
-      const absorb = (error?: unknown): void => {
-        // Reported, then absorbed. "Already reported through `settle`" held while this
-        // listener only ever ran after a failed request had been settled with the error in
-        // hand; it stopped holding once the absorber was attached on the success path too.
-        // A sink that accepted every byte and then failed its own `close(fd)` inside this
-        // window - a truncated file, reported to the caller as a completed download - had
-        // its error discarded here with no trace anywhere: not on the response, not on the
-        // global `'error'` channel, not in the log. Absorbing an event so it cannot kill
-        // the process is the job; deciding nobody needs to know is not.
-        //
-        // Guarded, and deliberately not allowed to rethrow: this runs as an `'error'`
-        // listener, and a listener that throws is the uncaught exception this whole
-        // mechanism exists to prevent.
-        // Decided a turn later, not now. Whether this error has a home depends on listener
-        // order, and that order is not this function's to control: one absorber covers
-        // every request sharing a writable, so a sibling's absorber can already be attached
-        // when a later request registers its own `onWritableError` - and `EventEmitter`
-        // then runs the absorber first, before the listener that would have claimed the
-        // error. Asking after the emit has finished lets every listener have its say, and
-        // the answer is the same for the ordinary case where the claim came first.
-        const reportIfUnclaimed = (): void => {
-          let wasDelivered = false;
-
-          try {
-            wasDelivered =
-              typeof error === 'object' &&
-              error !== null &&
-              deliveredWritableErrors.delete(error);
-          } catch {
-            // Unreadable as a key; treated as undelivered, so it is reported rather than
-            // lost.
-          }
-
-          if (wasDelivered) {
-            return;
-          }
-
-          try {
-            const failure = normalizeError(
-              error ??
-                new Error(
-                  'A writable passed to streamResponse emitted an error after the request settled',
-                ),
-            );
-
-            // Rendered for the console rung; see the other `reportToHost` call above.
-            reportToHost(failure, () => describeError(failure));
-          } catch {
-            // Nothing left to report with; the event is still absorbed either way.
-          }
-        };
-
-        try {
-          const deferred = setImmediate(reportIfUnclaimed);
-
-          deferred.unref?.();
-        } catch {
-          // No way to schedule it, so the question is answered now. Reporting an error the
-          // caller also received is the safe direction; losing one silently is not.
-          reportIfUnclaimed();
-        }
-
-        // Beyond the report, this exists to keep the event from
-        // going unhandled.
-        //
-        // Stands down a turn after delivery, not on it. `streamResponse` may hand the same
-        // writable to several requests at once and one absorber covers them all, so
-        // detaching the moment the first error lands would leave a sibling's unhandled -
-        // but staying attached until a `'close'` that a writable is not obliged to emit
-        // keeps this closure, and with it the whole request scope it was declared in,
-        // alive for as long as the writable is. Deferring by one turn covers the siblings
-        // and still bounds it.
-        scheduleDetach();
-      };
-
-      const onClose = (): void => {
-        // The stream has finished tearing down, so nothing further is coming.
-        detach();
-      };
-
-      // Restarts the backstop from now, within the absorber's own lifetime cap. Called once
-      // below for the request that attaches the absorber, and again by every later request
-      // that finds it already in place, so the window each of them gets is its own full one
-      // rather than the remainder of the first request's.
-      let backstop: ReturnType<typeof setTimeout> | undefined;
-      const attachedAt = Date.now();
-
-      // Bumped by every renewal, so a `detach` already queued by `scheduleDetach` knows
-      // its answer is stale. See `scheduleDetach`.
-      let generation = 0;
-
-      /**
-       * @param isRenewal Whether a *later* request is asking, rather than the attach below.
-       *        Only a renewal invalidates a queued detach: the attach path runs after the
-       *        `'close'` fallback may have scheduled one, and that fallback is the only
-       *        bound a writable refusing listeners has.
-       * @returns Whether an absorber is still attached afterwards.
-       */
-      const extend = (isRenewal: boolean = false): boolean => {
-        const remainingLifetime =
-          MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS - (Date.now() - attachedAt);
-
-        // Out of lifetime, so this is the last word rather than another window: see
-        // `MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS` for why an unconditional restart is a
-        // deadline that never arrives.
-        if (remainingLifetime <= 0) {
-          detach();
-
-          // Not simply `false`: `detach` returns early when the writable refuses to give
-          // the listener back, and the bookkeeping is deliberately kept in that case
-          // because the listener really is still attached and still absorbing. The caller
-          // is covered, so it must not add a second one on top.
-          return isStillAttached();
-        }
-
-        try {
-          // Scheduled before the old one is cleared, never after. A `setTimeout` that
-          // refuses would otherwise leave this absorber with the bound it already had
-          // cleared and no replacement - unbounded, by way of the code that bounds it.
-          const next = setTimeout(
-            detach,
-            Math.min(PENDING_WRITABLE_ERROR_WINDOW_MS, remainingLifetime),
-          );
-
-          next.unref?.();
-
-          if (backstop !== undefined) {
-            clearTimeout(backstop);
-          }
-
-          backstop = next;
-
-          if (isRenewal) {
-            generation++;
-          }
-        } catch {
-          // No way to schedule it. Whatever was already pending still stands, and on the
-          // attach path that is nothing - the two signals above are the bound, which is the
-          // behaviour that shipped before this one existed.
-        }
-
-        return true;
-      };
-
-      try {
-        writable.on('error', absorb);
-        pendingWritableErrorAbsorbers.set(writable, {
-          absorb,
-          extend: () => extend(true),
-        });
-      } catch {
-        // A writable that will not take a listener cannot be protected. Nothing else
-        // here depends on it.
-        return;
-      }
-
-      // Bounded by delivery, and by the stream's own teardown, rather than by a turn of
-      // the loop counted from here.
-      //
-      // A `setImmediate` scheduled at this point used to remove it unconditionally, on the
-      // measurement that a failed write emits within the same turn. That is not true of
-      // every stream: a real `fs.WriteStream` destroys itself through an asynchronous
-      // `fs.close(fd)` before it emits, so the error lands a poll phase later - after the
-      // removal had run and after `cleanup` had taken `onWritableError` off too. With no
-      // listener left, Node turned a `stream_write_error` this had already reported
-      // correctly into an uncaught exception that killed the process. It could not be
-      // caught here either: Bun emits inside the window, so the suite never saw it.
-      //
-      // Both signals are used because neither alone is enough. `absorb` cannot cover a
-      // writable that is never going to emit at all - a hand-written {@link WritableLike}
-      // that throws from `write` or `end` is not obliged to. `'close'` cannot cover one
-      // that emits `'error'` and nothing after it, and waiting on a close that never comes
-      // is what would pin this closure, and the request scope around it, to the writable's
-      // lifetime.
-      try {
-        writable.on('close', onClose);
-      } catch {
-        // Neither bound is available: this writable would not take the `'close'` listener,
-        // and `absorb` only fires if the error actually arrives. A writable that emits
-        // nothing at all would keep the absorber, and the request scope it closes over,
-        // for as long as it lives - so fall back to the turn-counted removal. It is the
-        // timing that was wrong for a real stream, and a writable that refuses a listener
-        // is not one.
-        scheduleDetach();
-      }
-
-      // A last bound, because the two above only cover streams that eventually say
-      // something. A writable handed to `streamResponse` belongs to the *caller* and may
-      // well outlive the request without ever closing - `process.stdout`, a pooled sink, a
-      // long-lived socket - and for one of those neither `'error'` nor `'close'` is coming.
-      // Left unbounded, this absorber would stay on the caller's stream for the life of the
-      // process: swallowing the first genuine error it emits long after this request
-      // succeeded, and pinning the whole request scope - `res`, its listeners, the
-      // accumulated state - to the stream it closes over. That is the hazard the comment
-      // above names, and it applied to the throw paths before this was reached from
-      // `cleanup` on every settle.
-      //
-      // Long enough for the case the `'close'` listener exists for - a real `fs.WriteStream`
-      // destroys itself through an asynchronous `fs.close(fd)` and emits a poll phase later,
-      // which a `setImmediate` lands before - and short enough that "for the life of the
-      // process" is never the answer. `unref` so a pending removal cannot hold the process
-      // open on its own.
-      extend();
-    };
-
     const cleanup = (): void => {
       // Before the removal, and on *every* settle path rather than only the three that
       // asked for it explicitly. `cleanup` takes `onWritableError` off unconditionally, so
@@ -2206,7 +2520,8 @@ async function streamResponseBody(
       // does not need to: `absorbPendingWritableError` returns early for it, and the
       // permanent fan-out listener from `attachWritableListener` stays on the writable
       // whatever this request does, so the `'error'` channel is never unhandled there.
-      // A late error lands on `onWritableError` and settles nothing.)
+      // A late error reaches it with no request registered and is reported through the
+      // host error reporter, as the absorber would report it.)
       //
       // The three call sites that asked were the ones where a `write`/`end` throw made the
       // late error obvious, which left the ordinary paths uncovered: `settle(true)` on
@@ -2219,10 +2534,11 @@ async function streamResponseBody(
       // Cheap and idempotent to call here: it is keyed on the writable through a `WeakMap`,
       // returns immediately when one is already attached, and takes itself back off on
       // delivery or on `'close'`.
-      absorbPendingWritableError();
+      absorbPendingWritableError(writable);
 
       detachWritableListener(writable, 'drain', onWritableDrain);
       detachWritableListener(writable, 'error', onWritableError);
+      detachWritableListener(writable, 'close', onWritableClose);
 
       res.off('data', onResponseData);
       res.off('end', onResponseEnd);
@@ -2271,12 +2587,41 @@ async function streamResponseBody(
       });
     };
 
+    // A writable that closes with no error before the body is through - destroyed by
+    // its owner, a proxied client that went away - would otherwise leave a response
+    // paused for backpressure waiting on a `'drain'` that never comes, and the request
+    // open until its timeout, or forever with none.
+    //
+    // After the response ended it is still a failure when the writable says it did not
+    // finish: a Node stream destroyed with writes still queued calls neither those
+    // writes' callbacks nor `end`'s, so the `end` callback never comes to answer. A sink
+    // that does not track `writableFinished` is left to its `end` callback - the docs
+    // ask a hand-written one to emit `'close'` when it is finished, and it may do so
+    // before calling that callback.
+    const onWritableClose = (): void => {
+      if (didReceiveEnd) {
+        const finished = readObjectMember(writable, 'writableFinished');
+
+        if (finished === true || typeof finished !== 'boolean') {
+          return;
+        }
+      }
+
+      settle({
+        code: 'stream_write_error',
+        cause: new Error(
+          'Writable closed before the response body was fully written',
+        ),
+      });
+    };
+
     const onResponseData = (chunk: Buffer): void => {
       if (isSettled) {
         return;
       }
 
       let canContinue: boolean;
+      handedBytes += chunk.length;
 
       try {
         canContinue = writable.write(chunk, (error) => {
@@ -2297,7 +2642,7 @@ async function streamResponseBody(
           // stream's event arriving on the next tick would otherwise be uncaught.
           if (error) {
             claimWritableError(error);
-            absorbPendingWritableError();
+            absorbPendingWritableError(writable);
             settle({
               code: 'stream_write_error',
               cause: normalizeError(error),
@@ -2329,7 +2674,7 @@ async function streamResponseBody(
         // its own `error` event is still on the way - carrying this same object, which is
         // why it is claimed here rather than left for the absorber to report again.
         claimWritableError(error);
-        absorbPendingWritableError();
+        absorbPendingWritableError(writable);
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -2386,7 +2731,7 @@ async function streamResponseBody(
 
           if (writeFailure) {
             claimWritableError(writeFailure);
-            absorbPendingWritableError();
+            absorbPendingWritableError(writable);
             settle({
               code: 'stream_write_error',
               cause: normalizeError(writeFailure),
@@ -2400,8 +2745,8 @@ async function streamResponseBody(
           // last chunk completed the body).
           if (!didFireDownload100) {
             onProgress?.({
-              loaded: loadedBytes,
-              total: loadedBytes,
+              loaded: handedBytes,
+              total: handedBytes,
               progress: 1,
             });
           }
@@ -2413,7 +2758,7 @@ async function streamResponseBody(
         // stream is being torn down, and its own `error` event is still on the way -
         // after `settle` has removed every listener this function registered.
         claimWritableError(error);
-        absorbPendingWritableError();
+        absorbPendingWritableError(writable);
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -2444,6 +2789,23 @@ async function streamResponseBody(
       settle({ code: 'stream_response_error', cause: streamError });
     };
 
+    // A sink that failed before a byte was handed to it - one its factory destroyed with
+    // an error - settles with that error at once, the response never resumed: written to,
+    // it fails only with a destroyed-stream error that hides the real one. Claimed, so the
+    // late-error absorber `settle` attaches - in the turn a sync factory returned it, so
+    // before that error's `nextTick` emit - absorbs it without reporting it again.
+    // Truthy, as the end-of-stream read of the same field takes it: a sink that reports
+    // `errored: false` is a healthy one.
+    const erroredAtStart: unknown = readObjectMember(writable, 'errored');
+    if (erroredAtStart) {
+      claimWritableError(erroredAtStart);
+      settle({
+        code: 'stream_write_error',
+        cause: normalizeError(erroredAtStart),
+      });
+      return;
+    }
+
     // Through `attachWritableListener`, which for a writable that defines neither `off`
     // nor `removeListener` registers with one permanent listener per event instead of
     // adding another of its own. `off` and `removeListener` are both optional on
@@ -2451,6 +2813,7 @@ async function streamResponseBody(
     // retained request closure behind each of them, request after request.
     attachWritableListener(writable, 'drain', onWritableDrain);
     attachWritableListener(writable, 'error', onWritableError);
+    attachWritableListener(writable, 'close', onWritableClose);
 
     res.on('data', onResponseData);
     res.on('end', onResponseEnd);
@@ -2458,6 +2821,430 @@ async function streamResponseBody(
     res.on('aborted', onResponseAborted);
     res.on('close', onResponseClose);
   });
+}
+
+/**
+ * Absorb an `error` the writable has not delivered yet.
+ *
+ * A failed write destroys the stream and emits its `error` on a later tick, usually
+ * after this request has settled and its listeners are gone - and an `error` event
+ * with no listener is an uncaught exception that takes the process down.
+ *
+ * Module-level, not inside {@link streamResponseBody}, because that function is not the
+ * only owner of a writable it has to cover: a sink the factory hands back after its
+ * request was already torn down never reaches it, and is destroyed by
+ * {@link discardUnstreamedWritable} with this attached first.
+ *
+ * Keyed on the writable rather than on the request, because `streamResponse` may hand
+ * the same sink to several requests at once. A per-request absorber meant a dozen
+ * concurrent failures on one shared writable attached a dozen listeners within the
+ * same turn, before any removal ran, which is the `MaxListenersExceededWarning` this
+ * is meant to avoid. One absorber per writable is also all that is needed: it is
+ * attached with `on`, not `once`, so it keeps absorbing for as long as it is there
+ * instead of standing down after the first error and leaving a sibling's unhandled.
+ *
+ * Its lifetime is bounded: each delivered error schedules its removal a turn later (a
+ * `setImmediate`, so a sibling error in the same turn is still absorbed), a `'close'`
+ * listener removes it once the stream has finished tearing down, and a backstop timer
+ * (1 s, extended by later requests that settle on the same writable, up to 5 s) removes
+ * it from a writable that emits neither - a hand-written {@link WritableLike} that throws from `write` or `end` is not
+ * obliged to emit anything afterwards. See the file head.
+ *
+ * Skipped entirely for a writable with no listener-removal method, because an
+ * absorber attached to one could never be taken back: the `setImmediate` would drop
+ * the `WeakMap` entry while the listener stayed, and the next failure would attach
+ * another, which is the unbounded growth this exists to prevent. Nothing is lost by
+ * skipping it - such a writable is listened to through the permanent fan-out at
+ * {@link attachWritableListener}, whose listener stays attached whatever this request
+ * does. A late error reaches it once `cleanup` has deregistered `onWritableError`, finds
+ * no request behind it, and is reported through the host error reporter exactly as this
+ * absorber would report it, within the same {@link PENDING_WRITABLE_ERROR_WINDOW_MS}.
+ */
+function absorbPendingWritableError(writable: WritableLike): void {
+  // Captured once, here, rather than looked up again inside the removal below. Two
+  // lookups is two answers: the member is caller code and could be gone, or changed,
+  // by the time the removal runs, and a removal that cannot find its method is one
+  // that silently does not happen.
+  const removeListener = getWritableListenerRemover(writable);
+
+  if (removeListener === null) {
+    return;
+  }
+
+  try {
+    const existing = pendingWritableErrorAbsorbers.get(writable);
+
+    if (existing !== undefined && existing.extend()) {
+      // One is already attached to this writable and still absorbing. Its deadline is
+      // pushed out to a full window from *here*, because this request is now relying
+      // on it and has no listener of its own left.
+      return;
+    }
+
+    // `extend` answered that the absorber was out of lifetime and took itself off, so
+    // there is nothing on this writable now. Falling through attaches a fresh one,
+    // which is exactly the path a writable with no absorber at all takes - a new
+    // request getting its own window is what the cap is for, as against one absorber
+    // extending itself forever.
+  } catch {
+    // Not a usable `WeakMap` key, so it cannot be tracked or protected.
+    return;
+  }
+
+  // Whether the `WeakMap` still names this absorber. A read that throws answers `true`
+  // - the safe direction, since the cost of believing an absorber is present is one
+  // late error absorbed twice, and the cost of believing it is gone is a second
+  // listener attached on top of one that never came off.
+  const isStillAttached = (): boolean => {
+    try {
+      return pendingWritableErrorAbsorbers.get(writable)?.absorb === absorb;
+    } catch {
+      return true;
+    }
+  };
+
+  // Takes the absorber back off, whichever signal got here first. Guarded on the
+  // `WeakMap` still naming this absorber so a second call, or a removal that has
+  // already run, does nothing.
+  const detach = (): void => {
+    try {
+      if (pendingWritableErrorAbsorbers.get(writable)?.absorb !== absorb) {
+        return;
+      }
+    } catch {
+      return;
+    }
+
+    try {
+      removeListener('error', absorb);
+    } catch {
+      // The removal itself is caller code and can refuse. The listener is therefore
+      // still attached, so the bookkeeping that says so is kept: dropping it would
+      // let the next failure add a second listener on top of one that never came
+      // off, which is the accumulation being prevented. The one still attached goes
+      // on absorbing, so nothing is left uncovered.
+      return;
+    }
+
+    try {
+      removeListener('close', onClose);
+    } catch {
+      // Not the same trade as the `'error'` removal above, because the `'error'`
+      // listener is already off by the time this runs. Keeping the entry here said
+      // an absorber was attached when none was, so every later failure on this
+      // writable short-circuited and attached nothing - and `cleanup` had taken that
+      // request's own `onWritableError` off too, leaving the late `'error'` event
+      // with no listener at all, which is the uncaught exception this exists to
+      // prevent. A stale `onClose` is the lesser cost and an inert one: it only
+      // calls `detach`, which returns immediately once the entry below is gone.
+    }
+
+    pendingWritableErrorAbsorbers.delete(writable);
+
+    // Nothing left for it to do, and it holds this closure until it fires otherwise.
+    if (backstop !== undefined) {
+      clearTimeout(backstop);
+      backstop = undefined;
+    }
+  };
+
+  // Detach on the next turn of the loop rather than now, so an error delivered in
+  // this one still finds the listener. `unref` so a pending removal cannot hold the
+  // process open.
+  //
+  // Cancelled by a renewal, which is what `generation` counts. The queued removal
+  // only knows that *at the time it was scheduled* nothing further was expected; a
+  // request settling in the meantime calls `extend` and is handed a fresh window, and
+  // tearing the absorber down anyway left that request covered by nothing - the same
+  // uncaught-`'error'` gap, reached from the other side. The `'close'` and backstop
+  // paths call `detach` directly and are unaffected: those are deliveries, not
+  // guesses about one.
+  const scheduleDetach = (): void => {
+    const scheduledAt = generation;
+
+    try {
+      const removal = setImmediate(() => {
+        if (generation !== scheduledAt) {
+          return;
+        }
+
+        detach();
+      });
+
+      removal.unref?.();
+    } catch {
+      // No way to schedule it, so the listener stays. `'close'` may still take it off,
+      // and holding one absorber is the safe direction of the two.
+    }
+  };
+
+  const absorb = (error?: unknown): void => {
+    // Reported, then absorbed. "Already reported through `settle`" held while this
+    // listener only ever ran after a failed request had been settled with the error in
+    // hand; it stopped holding once the absorber was attached on the success path too.
+    // A sink that accepted every byte and then failed its own `close(fd)` inside this
+    // window - a truncated file, reported to the caller as a completed download - had
+    // its error discarded here with no trace anywhere: not on the response, not on the
+    // global `'error'` channel, not in the log. Absorbing an event so it cannot kill
+    // the process is the job; deciding nobody needs to know is not.
+    //
+    // Guarded, and deliberately not allowed to rethrow: this runs as an `'error'`
+    // listener, and a listener that throws is the uncaught exception this whole
+    // mechanism exists to prevent.
+    reportUnclaimedWritableError(error);
+
+    // Beyond the report, this exists to keep the event from
+    // going unhandled.
+    //
+    // Stands down a turn after delivery, not on it. `streamResponse` may hand the same
+    // writable to several requests at once and one absorber covers them all, so
+    // detaching the moment the first error lands would leave a sibling's unhandled -
+    // but staying attached until a `'close'` that a writable is not obliged to emit
+    // keeps this listener on the caller's stream for as long as the writable lives.
+    // Deferring by one turn covers the siblings and still bounds it.
+    scheduleDetach();
+  };
+
+  const onClose = (): void => {
+    // The stream has finished tearing down, so nothing further is coming.
+    detach();
+  };
+
+  // Restarts the backstop from now, within the absorber's own lifetime cap. Called once
+  // below for the request that attaches the absorber, and again by every later request
+  // that finds it already in place, so the window each of them gets is its own full one
+  // rather than the remainder of the first request's.
+  let backstop: ReturnType<typeof setTimeout> | undefined;
+  const attachedAt = performance.now();
+
+  // Bumped by every renewal, so a `detach` already queued by `scheduleDetach` knows
+  // its answer is stale. See `scheduleDetach`.
+  let generation = 0;
+
+  /**
+   * @param isRenewal Whether a *later* request is asking, rather than the attach below.
+   *        Only a renewal invalidates a queued detach: the attach path runs after the
+   *        `'close'` fallback may have scheduled one, and that fallback is the only
+   *        bound a writable refusing listeners has.
+   * @returns Whether an absorber is still attached afterwards.
+   */
+  const extend = (isRenewal: boolean = false): boolean => {
+    const remainingLifetime =
+      MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS - (performance.now() - attachedAt);
+
+    // Out of lifetime, so this is the last word rather than another window: see
+    // `MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS` for why an unconditional restart is a
+    // deadline that never arrives. Too little left for a whole window counts as out:
+    // renewed with the remainder, a request settling near the cap was covered for a few
+    // milliseconds, and a late error inside the window it relied on went uncaught. Out,
+    // it attaches a fresh absorber with a whole window of its own.
+    if (remainingLifetime < PENDING_WRITABLE_ERROR_WINDOW_MS) {
+      detach();
+
+      // Not simply `false`: `detach` returns early when the writable refuses to give
+      // the listener back, and the bookkeeping is deliberately kept in that case
+      // because the listener really is still attached and still absorbing. The caller
+      // is covered, so it must not add a second one on top.
+      return isStillAttached();
+    }
+
+    try {
+      // Scheduled before the old one is cleared, never after. A `setTimeout` that
+      // refuses would otherwise leave this absorber with the bound it already had
+      // cleared and no replacement - unbounded, by way of the code that bounds it.
+      const next = setTimeout(detach, PENDING_WRITABLE_ERROR_WINDOW_MS);
+
+      next.unref?.();
+
+      if (backstop !== undefined) {
+        clearTimeout(backstop);
+      }
+
+      backstop = next;
+
+      if (isRenewal) {
+        generation++;
+      }
+    } catch {
+      // No way to schedule it. Whatever was already pending still stands, and on the
+      // attach path that is nothing - the two signals above are the bound, which is the
+      // behaviour that shipped before this one existed.
+    }
+
+    return true;
+  };
+
+  try {
+    writable.on('error', absorb);
+    pendingWritableErrorAbsorbers.set(writable, {
+      absorb,
+      extend: () => extend(true),
+    });
+  } catch {
+    // A writable that will not take a listener cannot be protected. Nothing else
+    // here depends on it.
+    return;
+  }
+
+  // Bounded by delivery, and by the stream's own teardown, rather than by a turn of
+  // the loop counted from here.
+  //
+  // A `setImmediate` scheduled at this point used to remove it unconditionally, on the
+  // measurement that a failed write emits within the same turn. That is not true of
+  // every stream: a real `fs.WriteStream` destroys itself through an asynchronous
+  // `fs.close(fd)` before it emits, so the error lands a poll phase later - after the
+  // removal had run and after `cleanup` had taken `onWritableError` off too. With no
+  // listener left, Node turned a `stream_write_error` this had already reported
+  // correctly into an uncaught exception that killed the process. It could not be
+  // caught here either: Bun emits inside the window, so the suite never saw it.
+  //
+  // Both signals are used because neither alone is enough. `absorb` cannot cover a
+  // writable that is never going to emit at all - a hand-written {@link WritableLike}
+  // that throws from `write` or `end` is not obliged to. `'close'` cannot cover one
+  // that emits `'error'` and nothing after it, and waiting on a close that never comes
+  // is what would pin this absorber to the writable's lifetime.
+  try {
+    writable.on('close', onClose);
+  } catch {
+    // Neither bound is available: this writable would not take the `'close'` listener,
+    // and `absorb` only fires if the error actually arrives. A writable that emits
+    // nothing at all would keep the absorber for as long as it lives - so fall back to
+    // the turn-counted removal. It is the
+    // timing that was wrong for a real stream, and a writable that refuses a listener
+    // is not one.
+    scheduleDetach();
+  }
+
+  // A last bound, because the two above only cover streams that eventually say
+  // something. A writable handed to `streamResponse` belongs to the *caller* and may
+  // well outlive the request without ever closing - `process.stdout`, a pooled sink, a
+  // long-lived socket - and for one of those neither `'error'` nor `'close'` is coming.
+  // Left unbounded, this absorber would stay on the caller's stream for the life of the
+  // process, taking over the first genuine error it emits long after this request
+  // succeeded. That is the hazard the comment above names.
+  //
+  // Long enough for the case the `'close'` listener exists for - a real `fs.WriteStream`
+  // destroys itself through an asynchronous `fs.close(fd)` and emits a poll phase later,
+  // which a `setImmediate` lands before - and short enough that "for the life of the
+  // process" is never the answer. `unref` so a pending removal cannot hold the process
+  // open on its own.
+  extend();
+}
+
+/**
+ * Destroy a writable the `streamResponse` factory handed back after its request was
+ * already over - cancelled, timed out, or its socket lost while an async factory was
+ * still awaiting - covered first by the listener {@link streamResponseBody} would have
+ * left behind.
+ *
+ * `destroy()` does not stop an error the stream is already on its way to emitting: a
+ * `fs.createWriteStream()` into a missing directory fails its asynchronous `open` and
+ * emits `'error'` whether or not it has been destroyed in the meantime. This sink never
+ * reached `streamResponseBody`, so nothing of ours is listening, and that event would be
+ * an uncaught exception. The same bounded absorber a settled request leaves covers it -
+ * reported through the host error reporter, since the request it belonged to has already
+ * answered - and a writable with no listener-removal method joins the permanent fan-out
+ * from {@link attachWritableListener} instead, exactly as a streamed request leaves it.
+ * Never throws.
+ */
+function discardUnstreamedWritable(writable: WritableLike): void {
+  try {
+    if (getWritableListenerRemover(writable) === null) {
+      // Registered and at once deregistered: what is wanted is the permanent fan-out
+      // listener, which reports an `'error'` arriving with no request registered.
+      attachWritableListener(writable, 'error', ignoreWritableError);
+      detachWritableListener(writable, 'error', ignoreWritableError);
+    } else {
+      absorbPendingWritableError(writable);
+    }
+  } catch {
+    // Not a value a listener can be tracked on - a factory that returned a primitive.
+    // Nothing of ours can be attached to it, and nothing can emit on it either.
+  }
+
+  destroyWritableQuietly(writable);
+}
+
+/** Registered and at once deregistered, so only the permanent fan-out stays behind. */
+function ignoreWritableError(): void {
+  // Intentionally empty.
+}
+
+/**
+ * The request without a caller's `Content-Length` when it has no body, as the bodied
+ * paths replace it: sent with no body after it, the server waited for bytes that never
+ * came, and on a pooled keep-alive socket took them from the next request. Taken off the
+ * request itself - its headers are this adapter's own copy, so in place - so the effective
+ * headers reported to observers do not put it back.
+ */
+function dropBodilessContentLength(request: AdapterRequest): void {
+  if (request.body === undefined || request.body === null) {
+    deleteHeader(request.headers, 'content-length');
+  }
+}
+
+/**
+ * The kind of request body this adapter writes: multipart for a `FormData`, bytes for a
+ * string or `Uint8Array`, and `undefined` for none. Read once, by both the branch that
+ * opens the upload's outcome and the one that writes it, so a body is never written
+ * without one.
+ */
+function classifyRequestBody(
+  body: unknown,
+):
+  | { kind: 'form'; body: FormData }
+  | { kind: 'bytes'; body: string | Uint8Array }
+  | undefined {
+  if (body instanceof FormData) {
+    return { kind: 'form', body };
+  }
+
+  return typeof body === 'string' || body instanceof Uint8Array
+    ? { kind: 'bytes', body }
+    : undefined;
+}
+
+/**
+ * Every member of an {@link AdapterRequest} read once, into a plain object this adapter
+ * owns: the members every adapter reads, from `fields` (see `readAdapterRequestFields`,
+ * where any new rule for them belongs, so it reaches every adapter), and the three only
+ * this one reads - `streamResponse`, `attemptNumber`, `requestID`. The progress callbacks
+ * are left off: `send` reads their guarded forms from `fields`, the one place they live.
+ *
+ * `send()` is public, and the request it is handed may be any object: its members can be
+ * getters. Most of them are consulted again long after `send()` has returned - the URL
+ * and headers when the response settles, the signal from the request's `'error'` handler,
+ * the headers from the abort listener - and those run as emitter or `AbortSignal`
+ * callbacks, where a throw is an uncaught exception rather than a rejection, and the
+ * request never settles. Read here, inside `send()`'s own promise, a member that throws
+ * fails this send instead.
+ *
+ * `streamResponse` is called on the caller's request rather than on this copy, so a
+ * factory that is a method reading `this` - a class-instance request - sees the object it
+ * belongs to. Only the member read is moved up front; the receiver is not changed.
+ */
+function snapshotAdapterRequest(
+  request: AdapterRequest,
+  fields: AdapterRequestFields,
+): AdapterRequest {
+  const { streamResponse, attemptNumber, requestID } = request;
+
+  return {
+    requestURL: fields.requestURL,
+    method: fields.method,
+    headers: fields.headers,
+    body: fields.body,
+    signal: fields.signal,
+    streamResponse:
+      typeof streamResponse === 'function'
+        ? (info, context) =>
+            Reflect.apply(streamResponse, request, [info, context])
+        : streamResponse,
+    attemptNumber,
+    requestID,
+    initialURL: fields.initialURL,
+    maxResponseBytes: fields.maxResponseBytes,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2513,25 +3300,185 @@ const RESIDUE_OUTSIDE_PEM_BLOCKS = /\S/;
  * otherwise contribute one CRL where it should contribute three. A string
  * inside an array is treated exactly like a string passed on its own.
  *
- * Anything that is not a multi-CRL string is returned untouched: a Buffer may
- * be DER, and a string with exactly one match is passed through so Node
- * reports its own error rather than having one masked here.
+ * A string with exactly one complete block is passed through as it is, and a
+ * single block in binary data as the Buffer over it.
  *
- * A string with NO complete block does not reach that pass-through: unless it
- * is entirely whitespace, the residue check below throws. That is the case a
+ * A string with NO complete block is refused: by the residue check below, or,
+ * when it is empty or whitespace, by the check after it. That is the case a
  * caller hits when a download truncated to nothing or a path pointed at a file
  * with no CRL in it, and the explicit error names the problem where Node would
  * only report `UNABLE_TO_GET_CRL` at handshake time.
  */
 function normalizeCRL(
-  crl: string | Buffer | Array<string | Buffer>,
+  crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
+  /** The adapter the parse is cached for. */
+  owner: object,
 ): string | Buffer | Array<string | Buffer> {
-  if (Array.isArray(crl)) {
-    return crl.flatMap((entry) => normalizeCRLEntry(entry));
+  // Read per request: when the value holds exactly what last normalized and parsed, its
+  // result is reused, rather than running the PEM split over the whole list on every
+  // HTTPS request - a string by its text, a buffer by its bytes, compared against a copy
+  // of what was given. Never by identity: an array or buffer is the caller's to change in
+  // place, and one kept by identity could keep a revoked certificate's list current.
+  const last = lastParsedCRLs.get(owner);
+  if (last !== undefined && isSameCRLInput(last.input, crl)) {
+    // A buffer that normalized to itself is passed on as itself again - the one now
+    // given, which holds the same bytes - rather than as the copy kept here. Only when it
+    // starts at the start of its memory, as normalizing it would have required: one at
+    // an offset (a `subarray`) is copied there, since Bun's `tls` reads a view from the
+    // start of its memory - and the copy kept here is that copy.
+    return last.isPassedThrough && Buffer.isBuffer(crl) && crl.byteOffset === 0
+      ? crl
+      : last.normalized;
   }
 
-  return normalizeCRLEntry(crl);
+  const normalized = Array.isArray(crl)
+    ? crl.flatMap((entry) => normalizeCRLEntry(entry))
+    : normalizeCRLEntry(crl);
+
+  // An empty array adds no CRL, so revocation would be off while `crl` is set - a cached
+  // list emptied by a failed refresh, a filter that matched nothing. Refused as `''` is.
+  if (Array.isArray(normalized) && normalized.length === 0) {
+    throw crlValidationError(
+      new Error(
+        'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block. ' +
+          'Leave `crl` unset for no revocation list.',
+      ),
+    );
+  }
+
+  assertCRLParses(normalized);
+  // Kept as a copy this adapter owns, not the caller's: a single-block buffer normalizes
+  // to the caller's own, which goes out as it is now, and a later value with the same
+  // bytes in another buffer was answered with that one - which its owner may since have
+  // reused for something else.
+  // One copy, not two: a value that normalized to itself keeps its input copy as its
+  // normalized form too.
+  const input = copyCRLInput(crl);
+  const isPassedThrough = normalized === crl;
+  const owned = isPassedThrough
+    ? (input as string | Buffer)
+    : Array.isArray(normalized)
+      ? normalized.map(ownCRLEntry)
+      : ownCRLEntry(normalized);
+  lastParsedCRLs.set(owner, { input, normalized: owned, isPassedThrough });
+
+  return normalized;
 }
+
+/** A normalized CRL entry this adapter owns: a string as is, a buffer copied. */
+function ownCRLEntry(entry: string | Buffer): string | Buffer {
+  return typeof entry === 'string' ? entry : Buffer.from(entry);
+}
+
+/** A `crl` value as given, copied: a string as is, a buffer's bytes into one of its own. */
+type CRLInputCopy = string | Buffer | Array<string | Buffer>;
+
+function copyCRLInput(
+  crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
+): CRLInputCopy {
+  const copyEntry = (entry: string | ArrayBufferView): string | Buffer =>
+    typeof entry === 'string'
+      ? entry
+      : Buffer.from(
+          new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength),
+        );
+
+  return Array.isArray(crl) ? crl.map(copyEntry) : copyEntry(crl);
+}
+
+/**
+ * Whether `crl` holds exactly what `last` copied: the same text, the same bytes, entry by
+ * entry. A value that cannot be read so (a detached buffer) is not the same, and is
+ * normalized afresh - which refuses it.
+ */
+function isSameCRLInput(
+  last: CRLInputCopy,
+  crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
+): boolean {
+  const isSameEntry = (
+    copied: string | Buffer | undefined,
+    entry: string | ArrayBufferView | undefined,
+  ): boolean => {
+    if (typeof copied === 'string' || typeof entry === 'string') {
+      return copied === entry;
+    }
+
+    if (copied === undefined || entry === undefined) {
+      return false;
+    }
+
+    try {
+      return copied.equals(
+        new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength),
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  if (Array.isArray(last) || Array.isArray(crl)) {
+    return (
+      Array.isArray(last) &&
+      Array.isArray(crl) &&
+      last.length === crl.length &&
+      last.every((copied, index) => isSameEntry(copied, crl[index]))
+    );
+  }
+
+  return isSameEntry(last, crl);
+}
+
+/**
+ * The last `crl` that normalized and parsed, per adapter - a copy of the value as given,
+ * with its result - so a value read per request is normalized and parsed once, and two
+ * adapters with different CRLs do not evict each other's.
+ */
+const lastParsedCRLs = new WeakMap<
+  object,
+  {
+    input: CRLInputCopy;
+    normalized: string | Buffer | Array<string | Buffer>;
+    /** Whether the value normalized to itself: a single-block buffer, passed on as is. */
+    isPassedThrough: boolean;
+  }
+>();
+
+/**
+ * Parse the normalized set the way the TLS context will, so a value the framing check
+ * cannot see is broken - a clipped CRL whose `BEGIN` pairs with the next block's `END`,
+ * corrupted base64 inside intact armour - is refused here rather than failing every HTTPS
+ * request when the context is built, retried as a network error.
+ */
+function assertCRLParses(crl: string | Buffer | Array<string | Buffer>): void {
+  try {
+    tls.createSecureContext({ crl });
+  } catch (error) {
+    throw crlValidationError(
+      new Error(
+        'NodeAdapter: the `crl` value could not be parsed as a CRL. Common causes: ' +
+          "a CRL clipped mid-body (its BEGIN line pairs with the next block's END) " +
+          'or corrupted base64 inside a block.',
+        { cause: error },
+      ),
+    );
+  }
+}
+
+/** Request headers `NodeAdapter` refuses before dispatch, by name, with why. */
+const REFUSED_REQUEST_HEADERS: ReadonlyMap<string, string> = new Map([
+  [
+    'transfer-encoding',
+    'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
+  ],
+  [
+    'upgrade',
+    'NodeAdapter does not switch protocols; an Upgrade request header is not supported',
+  ],
+  [
+    'expect',
+    'NodeAdapter does not wait for 100 Continue; an Expect request header is not supported',
+  ],
+]);
 
 /**
  * One `crl` value — or one element of an array of them.
@@ -2545,31 +3492,81 @@ function normalizeCRL(
  *
  * So the question is not "string or Buffer" but "PEM or DER". A Buffer holding
  * PEM goes through the same splitting and validation as a string; a Buffer
- * holding DER — which has no armour to look for — is passed through untouched,
- * since DER encodes exactly one CRL and there is nothing to split.
+ * holding DER is refused, since Node's `tls` reads PEM CRLs only.
  */
-function normalizeCRLEntry(entry: string | Buffer): string | Buffer | string[] {
+function normalizeCRLEntry(
+  entry: string | ArrayBufferView,
+): string | Buffer | string[] {
   if (typeof entry === 'string') {
     return splitCRLString(entry);
   }
 
-  // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives
-  // exactly and DER cannot be corrupted by the round trip — it is only being
-  // inspected, and is returned as the original Buffer either way.
-  const text = entry.toString('latin1');
+  // Refused as this adapter's own validation error, so a refreshed value of the wrong
+  // kind - a cache cleared to `null`, say - is terminal like bad framing rather than
+  // retried as whatever its `toString` throws. Any binary view is read, as a Buffer over
+  // the same bytes - a plain `Uint8Array` (Bun's `file().bytes()`) included - and that
+  // Buffer is what is passed on, since not every runtime's `tls` takes another view.
+  const candidate: unknown = entry;
+  if (!Buffer.isBuffer(candidate) && !ArrayBuffer.isView(candidate)) {
+    throw crlValidationError(
+      new TypeError(
+        `NodeAdapter crl must be a string, binary data such as a Buffer, or an array of them (got ${candidate === null ? 'null' : typeof candidate})`,
+      ),
+    );
+  }
+  const bytes = Buffer.isBuffer(candidate)
+    ? candidate
+    : Buffer.from(candidate.buffer, candidate.byteOffset, candidate.byteLength);
 
+  // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives exactly; the
+  // bytes are only inspected here.
+  const text = bytes.toString('latin1');
+
+  // Node's `tls` reads PEM CRLs only, so DER bytes would fail every HTTPS request when
+  // the context is built. Refused here instead, at construction or for a refreshed value.
   if (!text.includes(PEM_CRL_HEADER)) {
-    return entry;
+    throw crlValidationError(
+      new TypeError(
+        `NodeAdapter crl must be PEM ("${PEM_CRL_HEADER}" blocks); DER is not read by Node's tls. Convert it with \`openssl crl -inform DER -outform PEM\`.`,
+      ),
+    );
   }
 
   const split = splitCRLString(text);
 
-  // A single block stays a Buffer: it needed no splitting, so hand back what
-  // the caller gave rather than a re-encoded copy of it.
-  return Array.isArray(split) ? split : entry;
+  // A single block stays the Buffer: it needed no splitting - without a leading UTF-8
+  // byte-order mark, which not every runtime's `tls` reads past.
+  if (Array.isArray(split)) {
+    return split;
+  }
+
+  const withoutBOM =
+    bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+      ? bytes.subarray(3)
+      : bytes;
+
+  // Copied when it starts partway into its memory (a `subarray`, a view at an offset):
+  // Bun's `tls` reads such a view from the start of the memory, and failed to parse it.
+  return withoutBOM.byteOffset === 0 ? withoutBOM : Buffer.from(withoutBOM);
 }
 
-function splitCRLString(crl: string): string | string[] {
+/**
+ * The errors {@link splitCRLString} itself raised for a malformed bundle, so `send()` can
+ * tell its own validation refusal from a throw out of caller code that `normalizeCRL`
+ * runs - an array element's getter, an entry's `toString` - which stays retryable.
+ */
+const crlValidationErrors = new WeakSet<Error>();
+
+/** Mark `error` as this adapter's own CRL refusal (see `crlValidationErrors`). */
+function crlValidationError(error: Error): Error {
+  crlValidationErrors.add(error);
+  return error;
+}
+
+function splitCRLString(withBOM: string): string | string[] {
+  // A leading byte-order mark is no content: a CRL file saved with one reads as `\uFEFF`
+  // as a string, or `ï»¿` once a Buffer is read as latin1, and Node's own `tls` takes it.
+  const crl = withBOM.replace(/^(?:\uFEFF|\u00EF\u00BB\u00BF)/, '');
   const blocks = crl.match(PEM_CRL_BLOCK) ?? [];
 
   // Returning only the complete blocks would DISCARD whatever did not match,
@@ -2586,7 +3583,7 @@ function splitCRLString(crl: string): string | string[] {
   const residue = crl.replace(PEM_CRL_BLOCK, '');
 
   if (RESIDUE_OUTSIDE_PEM_BLOCKS.test(residue)) {
-    throw new Error(
+    const error = new Error(
       'NodeAdapter: the `crl` value contains content outside any complete ' +
         '-----BEGIN/END X509 CRL----- block. Only PEM CRL blocks separated ' +
         'by whitespace are accepted, because a truncated CRL and a line of ' +
@@ -2596,9 +3593,35 @@ function splitCRLString(crl: string): string | string[] {
         'delimiter, or decoded text from `openssl ... -text`, which must be ' +
         'stripped before the bundle is passed here.',
     );
+
+    crlValidationErrors.add(error);
+    throw error;
+  }
+
+  // Nothing at all, or only whitespace: Node's `tls` fails to parse that on every HTTPS
+  // request, so it is refused here like any other value it cannot read.
+  if (blocks.length === 0) {
+    throw crlValidationError(
+      new Error(
+        'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block. ' +
+          'Leave `crl` unset for no revocation list.',
+      ),
+    );
   }
 
   return blocks.length > 1 ? blocks : crl;
+}
+
+/**
+ * The body length the response declares, as the size limit and download progress read
+ * it. Unknown once decoded: a compressed body's `Content-Length` counts the encoded bytes,
+ * and the limit and progress count what is handed over.
+ */
+function declaredBodyLength(
+  headers: Record<string, string | string[]>,
+  isDecoded: boolean,
+): number | undefined {
+  return isDecoded ? undefined : parseContentLength(headers['content-length']);
 }
 
 function normalizeResponseHeaders(
@@ -2611,7 +3634,7 @@ function normalizeResponseHeaders(
       continue;
     }
     // Keys are already lowercase from Node's http parser
-    result[key] = Array.isArray(value) ? value : String(value);
+    defineEntry(result, key, Array.isArray(value) ? value : String(value));
   }
 
   return result;
@@ -2621,12 +3644,9 @@ function snapshotEffectiveRequestHeaders(
   req: http.ClientRequest,
   fallbackHeaders: Record<string, string | string[]>,
 ): Record<string, string | string[]> {
-  return normalizeNodeRequestHeaders({
-    // Start with the client-level attempt headers, then overlay any adapter-side
-    // mutations (for example multipart Content-Type/Content-Length).
-    ...fallbackHeaders,
-    ...req.getHeaders(),
-  });
+  // Start with the client-level attempt headers, then overlay any adapter-side
+  // mutations (for example multipart Content-Type/Content-Length).
+  return mergeObservedHeaders(fallbackHeaders, req.getHeaders());
 }
 
 function resolveAdapterResponse(
@@ -2636,19 +3656,12 @@ function resolveAdapterResponse(
   fallbackHeaders: Record<string, string | string[]>,
   response: Omit<AdapterResponse, 'effectiveRequestHeaders'>,
 ): void {
-  const detectedRedirectURL = resolveDetectedRedirectURL(
-    requestURL,
-    response.status,
-    response.headers,
-  );
-
   resolve({
     ...response,
     // Flag redirect responses so HTTPClient can surface wasRedirectDetected on
     // the final HTTPResponse consistently across all adapters. The actual
     // follow-or-disable decision is still made by HTTPClient's redirect loop.
-    wasRedirectDetected: REDIRECT_STATUS_CODES.has(response.status),
-    ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+    ...derivedRedirectFields(requestURL, response.status, response.headers),
     effectiveRequestHeaders: snapshotEffectiveRequestHeaders(
       req,
       fallbackHeaders,
@@ -2716,24 +3729,34 @@ type WritableListenerRemover = (
  */
 const sharedWritableListeners = new WeakMap<
   WritableLike,
-  Map<string, Set<(argument: never) => void>>
+  Map<string, SharedWritableListenerEntry>
 >();
+
+interface SharedWritableListenerEntry {
+  readonly listeners: Set<(argument: never) => void>;
+  /**
+   * Until when, as `performance.now()`, an `'error'` arriving with no request registered is still
+   * reported. Restarted each time the last request deregisters; see `dispatch`.
+   */
+  reportUnclaimedUntil: number;
+}
 
 function attachWritableListener(
   writable: WritableLike,
-  event: 'drain' | 'error',
+  event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ): void {
   if (getWritableListenerRemover(writable) !== null) {
     // Guarded like every other interaction with a caller-supplied `WritableLike` in this
     // file. `on` is the sink's own method and free to throw, and an unguarded throw here
-    // left `writeToWritable` reporting a *request* failure for a response that had
-    // arrived intact - a `streamResponse` factory's writable misclassified as a network
-    // error. Losing the listener costs this writable its `'drain'` or `'error'` channel,
+    // would report a *request* failure for a response that had arrived intact - a
+    // `streamResponse` factory's writable misclassified as a network error. Losing the listener costs this writable its `'drain'` or `'error'` channel,
     // which the write loop already tolerates; raising out of the attach does not.
     try {
       if (event === 'error') {
         writable.on('error', listener);
+      } else if (event === 'close') {
+        writable.on('close', listener as () => void);
       } else {
         writable.on('drain', listener as () => void);
       }
@@ -2755,19 +3778,41 @@ function attachWritableListener(
   const existing = events.get(event);
 
   if (existing !== undefined) {
-    existing.add(listener);
+    existing.listeners.add(listener);
 
     return;
   }
 
-  const listeners = new Set<(argument: never) => void>([listener]);
+  const entry: SharedWritableListenerEntry = {
+    listeners: new Set<(argument: never) => void>([listener]),
+    reportUnclaimedUntil: 0,
+  };
+  const { listeners } = entry;
 
-  events.set(event, listeners);
+  events.set(event, entry);
 
   // Copied before dispatch: a listener that settles its request deregisters itself from
   // this very set, and mutating a `Set` while iterating it would skip the sibling behind
   // it - two concurrent downloads into one sink, and only one of them hears the failure.
   const dispatch = (argument: never): void => {
+    // An `'error'` with no request behind it any more - every one that registered has
+    // settled, or the writable was discarded before any did - is absorbed, because this
+    // listener is permanent and so is the absorber for such a writable. It answers the
+    // way `absorbPendingWritableError` does for one that can be detached: reported within
+    // `PENDING_WRITABLE_ERROR_WINDOW_MS` of the last request leaving. Past that it is
+    // absorbed unreported: the owner's own `'error'` listener still hears it, but an owner
+    // with none loses it, since this listener keeps it from being unhandled (as the docs
+    // for a writable without `off` say). Not reported for the life of the writable, or
+    // every error a long-lived sink's owner handles itself - an hour after its last
+    // download - would also land on the host's global `'error'` channel.
+    if (event === 'error' && listeners.size === 0) {
+      if (performance.now() <= entry.reportUnclaimedUntil) {
+        reportUnclaimedWritableError(argument);
+      }
+
+      return;
+    }
+
     for (const registered of [...listeners]) {
       if (listeners.has(registered)) {
         registered(argument);
@@ -2785,6 +3830,12 @@ function attachWritableListener(
       return;
     }
 
+    if (event === 'close') {
+      writable.on('close', dispatch as unknown as () => void);
+
+      return;
+    }
+
     writable.on('drain', dispatch as unknown as () => void);
   } catch {
     // The entry goes, so a later request attaches a fresh `dispatch` rather than joining a
@@ -2798,7 +3849,7 @@ function attachWritableListener(
 
 function detachWritableListener(
   writable: WritableLike,
-  event: 'drain' | 'error',
+  event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ): void {
   if (getWritableListenerRemover(writable) !== null) {
@@ -2807,7 +3858,19 @@ function detachWritableListener(
     return;
   }
 
-  sharedWritableListeners.get(writable)?.get(event)?.delete(listener);
+  const entry = sharedWritableListeners.get(writable)?.get(event);
+
+  if (entry === undefined) {
+    return;
+  }
+
+  entry.listeners.delete(listener);
+
+  // The last request has gone, so the reporting window `dispatch` honours starts now.
+  if (entry.listeners.size === 0) {
+    entry.reportUnclaimedUntil =
+      performance.now() + PENDING_WRITABLE_ERROR_WINDOW_MS;
+  }
 }
 
 /**
@@ -2842,7 +3905,7 @@ function getWritableListenerRemover(
 
 function removeWritableListener(
   writable: WritableLike,
-  event: 'drain' | 'error',
+  event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ): void {
   try {
@@ -2893,33 +3956,27 @@ function markStreamFactoryError(
   error: unknown,
   req: http.ClientRequest,
   fallbackHeaders: Record<string, string | string[]>,
+  answered: { status: number; headers: Record<string, string | string[]> },
 ): Error {
   const normalized = normalizeError(error);
   const marks = {
     [NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG]: true,
     [STREAM_FACTORY_ERROR_FLAG]: true,
-    effectiveRequestHeaders: snapshotEffectiveRequestHeaders(
+    [EFFECTIVE_REQUEST_HEADERS_KEY]: snapshotEffectiveRequestHeaders(
       req,
       fallbackHeaders,
     ),
+    // The answer the factory was called for: its headers had arrived, so the client
+    // stores their `Set-Cookie` and reports its status.
+    [STREAM_ABORT_STATUS_KEY]: answered.status,
+    [STREAM_ABORT_HEADERS_KEY]: answered.headers,
   };
 
-  // Tagged in place when possible, so the caller still sees the error its own
-  // `streamResponse` factory threw, with its identity and stack intact.
-  try {
-    Object.assign(normalized, marks);
-
-    return normalized;
-  } catch {
-    // The factory threw something frozen or sealed, and in strict mode assigning to it
-    // raises `TypeError: object is not extensible`. Falling through with an untagged
-    // error is the damaging outcome: the client reads both flags to classify this as a
-    // non-retryable `stream_setup_error`, so without them the failure lands in the
-    // generic retry arm and the factory is invoked again. A fresh carrier keeps the
-    // classification and preserves the original on `cause`, the same way
-    // `markResponseStreamAbort` does in the fetch adapter.
-  }
-
+  // Always a fresh carrier, with the caller's error on `cause` (the client reports that
+  // cause). Tagging the caller's own error in place shared the tags between requests that
+  // threw the same object - a rethrown `await storageReady`, a module-level sentinel - so
+  // one request read another's headers, `Authorization` among them, and its status and
+  // `Set-Cookie`; and it left the request's headers attached to the caller's object.
   const carrier = new Error(
     readErrorMessage(normalized) ?? 'Stream factory failed',
     { cause: error },
@@ -2931,7 +3988,7 @@ function markStreamFactoryError(
     carrier.name = originalName;
   }
 
-  Object.assign(carrier, marks);
+  defineHiddenTags(carrier, marks);
 
   return carrier;
 }
@@ -2945,33 +4002,86 @@ function readErrorMessage(error: Error): string | undefined {
     : undefined;
 }
 
-function markResponseStreamAbortError(
-  error: Error,
+/**
+ * The `AbortError` for a caller abort or timeout that lands while a response body is
+ * still arriving, tagged with what the client needs to report it: the response's status
+ * and headers, and the effective request headers.
+ */
+function makeResponseStreamAbortError(
   req: http.ClientRequest,
   fallbackHeaders: Record<string, string | string[]>,
   status: number,
   headers: Record<string, string | string[]>,
+  message = 'Request aborted during response streaming',
 ): Error {
-  const tagged = error as Error &
-    Partial<Record<typeof RESPONSE_STREAM_ABORT_FLAG, boolean>> & {
-      effectiveRequestHeaders?: Record<string, string | string[]>;
-      streamAbortStatus?: number;
-      streamAbortHeaders?: Record<string, string | string[]>;
-    };
+  const error = makeAbortError(message);
 
-  // Keep the flag sourced from consts while avoiding eslint's false-positive
-  // on direct computed assignment into an Error-typed value.
-  Object.assign(tagged, { [RESPONSE_STREAM_ABORT_FLAG]: true });
-  tagged.effectiveRequestHeaders = snapshotEffectiveRequestHeaders(
-    req,
-    fallbackHeaders,
-  );
-  tagged.streamAbortStatus = status;
-  tagged.streamAbortHeaders = headers;
+  // Hidden, as `markStreamFactoryError`'s tags are: the request's headers carry its
+  // credentials, and a serialized error must not.
+  defineHiddenTags(error, {
+    [RESPONSE_STREAM_ABORT_FLAG]: true,
+    [EFFECTIVE_REQUEST_HEADERS_KEY]: snapshotEffectiveRequestHeaders(
+      req,
+      fallbackHeaders,
+    ),
+    [STREAM_ABORT_STATUS_KEY]: status,
+    [STREAM_ABORT_HEADERS_KEY]: headers,
+  });
 
   return error;
 }
 
 function isStreamResponseCancel(value: unknown): value is StreamResponseCancel {
   return readObjectMember(value, 'cancel') === true;
+}
+
+/**
+ * Whether a `streamResponse` factory's return can be streamed into: `write` and `end` are
+ * the two members the adapter cannot do without. The rest of `WritableLike` is used
+ * guardedly - a writable whose `on` throws only loses that channel - so it is not asked
+ * for here. Read guardedly too, so a member whose getter throws counts as absent.
+ */
+function isWritableShaped(value: unknown): value is WritableLike {
+  return (
+    typeof readObjectMember(value, 'write') === 'function' &&
+    typeof readObjectMember(value, 'end') === 'function'
+  );
+}
+
+/** Names what a refused `streamResponse` factory return was, for the setup error. */
+function describeFactoryReturn(value: unknown): string {
+  if (typeof value === 'object' || typeof value === 'function') {
+    return `${typeof value} without callable write() and end()`;
+  }
+
+  return typeof value;
+}
+
+/**
+ * Refuse a trust store with nothing in it - `''`, `[]`, an empty buffer, or a list with
+ * any empty entry (`['', pem]` reads as a mistake, not a store) - as `crl` refuses an
+ * empty list: it would leave the connection on the
+ * runtime's public roots, the opposite of what a caller supplying its own CA meant.
+ */
+function assertTrustAnchors(value: unknown, name: string): void {
+  if (value === undefined) {
+    return;
+  }
+  // `null` too, and a `null` entry: a loader that came back with nothing is no trust
+  // store, and Node reads `ca: null` as "use the public roots".
+  const isEmpty = (entry: unknown): boolean =>
+    entry === null ||
+    entry === undefined ||
+    (typeof entry === 'string' && entry.trim() === '') ||
+    (ArrayBuffer.isView(entry) && entry.byteLength === 0);
+  if (
+    isEmpty(value) ||
+    (Array.isArray(value) && (value.length === 0 || value.some(isEmpty)))
+  ) {
+    const error = new TypeError(
+      `NodeAdapter ${name} holds no certificate. Leave it unset to use the runtime's default trust store.`,
+    );
+    markNonRetryableAdapterError(error);
+    throw error;
+  }
 }

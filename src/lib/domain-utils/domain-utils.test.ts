@@ -2698,10 +2698,11 @@ describe('domain-utils', () => {
           wildcardKind: 'none',
         });
 
-        // Invalid IP-like strings are treated as domain names (not IPs), so they may be valid domains
-        // This is consistent with how browsers and DNS work - "999.999.999.999" could theoretically be a domain name
+        // A host whose last label is a number is IPv4 to the URL parser, and one it
+        // cannot read as an address is no URL's host at all, so it can never match.
         expect(validateConfigEntry('999.999.999.999', 'domain')).toEqual({
-          valid: true,
+          valid: false,
+          info: 'IP address is not one the URL parser accepts',
           wildcardKind: 'none',
         });
       });
@@ -3072,10 +3073,10 @@ describe('domain-utils', () => {
       });
 
       it('rejects wildcard patterns with concrete labels that fail IDN normalization', () => {
-        // Underscore is rejected by TR46 useSTD3ASCIIRules — normalizeDomain returns ''
-        // This exercises the nd === '' branch in validateConcreteLabels
+        // A character no host name uses (`!`) normalizes to '' - `_` is allowed, as the URL
+        // standard allows it. This exercises the nd === '' branch in validateConcreteLabels
         const underscoreLabel = validateConfigEntry(
-          '*.foo_bar.example.com',
+          '*.foo!bar.example.com',
           'domain',
         );
         expect(underscoreLabel.valid).toBe(false);
@@ -3083,7 +3084,7 @@ describe('domain-utils', () => {
 
         // Same check in origin context
         const underscoreOrigin = validateConfigEntry(
-          '*.foo_bar.example.com',
+          '*.foo!bar.example.com',
           'origin',
         );
         expect(underscoreOrigin.valid).toBe(false);
@@ -3142,11 +3143,13 @@ describe('domain-utils', () => {
     });
 
     it('rejects an origin whose hostname fails normalization (normalizeOrigin returns empty)', () => {
-      // An exact-origin list entry with an underscore in the hostname parses as a URL
-      // but fails TR46 normalization — normalizeOrigin returns '', so parseExactOriginForMatching returns null
+      // An exact-origin list entry with a `!` in the hostname parses as a URL but fails
+      // hostname normalization (an underscore no longer does: it is a valid label
+      // character) — normalizeOrigin returns '', so parseExactOriginForMatching returns null
+      expect(normalizeOrigin('https://foo!bar.example.com')).toBe('');
       expect(
         matchesOriginList('https://example.com', [
-          'https://foo_bar.example.com',
+          'https://foo!bar.example.com',
         ]),
       ).toBe(false);
     });
@@ -3183,14 +3186,23 @@ describe('domain-utils', () => {
     });
 
     it('rejects wildcard patterns with concrete labels that fail IDN normalization', () => {
-      // Underscore label fails TR46 — nd === '' branch inside isValidCredentialWildcardHost
+      // A `!` label fails normalization — the nd === '' branch inside
+      // isValidCredentialWildcardHost. (An underscore label is valid now, so it no longer
+      // reached that branch.) The same pattern with a valid label matches.
       expect(
         matchesCORSCredentialsList(
-          'https://app.example.com',
-          ['*.foo_bar.example.com'],
+          'https://app.foo-bar.example.com',
+          ['*.foo!bar.example.com'],
           { allowWildcardSubdomains: true },
         ),
       ).toBe(false);
+      expect(
+        matchesCORSCredentialsList(
+          'https://app.foo-bar.example.com',
+          ['*.foo-bar.example.com'],
+          { allowWildcardSubdomains: true },
+        ),
+      ).toBe(true);
     });
 
     it('rejects wildcard patterns with a concrete label over 63 chars', () => {
@@ -3325,12 +3337,20 @@ describe('domain-utils', () => {
     });
 
     it('enforces step limit to avoid exponential blowups', () => {
-      const deepDomain =
-        Array.from({ length: 28 }, () => 'a').join('.') + '.example.com';
-      const explosivePattern =
-        Array.from({ length: 20 }, () => '**').join('.') + '.zzz.example.com';
+      // The fixed tails must agree, or the match fails at the tail comparison before
+      // any recursion: `zzz.**.example.com` against `x.a.....example.com` recurses on
+      // every `**` (about 10,000 steps here) and stops at the limit.
+      const deepDomain = `x.${'a.'.repeat(26)}example.com`;
+      const explosivePattern = `x.${'**.'.repeat(12)}zzz.**.example.com`;
       // Should fail without hanging due to step limit guard
       expect(matchesWildcardDomain(deepDomain, explosivePattern)).toBe(false);
+      // The same pattern still matches a domain that holds `zzz`.
+      expect(
+        matchesWildcardDomain(
+          `x.${'a.'.repeat(12)}zzz.a.example.com`,
+          explosivePattern,
+        ),
+      ).toBe(true);
     });
 
     it('covers helper-level DNS and wildcard guard branches', () => {
@@ -3706,5 +3726,27 @@ describe('domain-utils', () => {
       expect(isApexDomain('example.com.')).toBe(true);
       expect(isApexDomain('example.com..')).toBe(false);
     });
+  });
+});
+
+describe('hyphens in labels', () => {
+  it('accepts a -- in a label as the URL parser does, and still refuses a leading or trailing hyphen', () => {
+    expect(normalizeDomain('r3---sn-abc.googlevideo.com')).toBe(
+      'r3---sn-abc.googlevideo.com',
+    );
+    expect(normalizeDomain('ab--cd.example.com')).toBe('ab--cd.example.com');
+    expect(matchesWildcardDomain('ab--cd.example.com', '**.example.com')).toBe(
+      true,
+    );
+    expect(normalizeDomain('-bad.com')).toBe('');
+    expect(normalizeDomain('bad-.com')).toBe('');
+  });
+});
+
+describe('hyphens in IDN labels', () => {
+  it('refuses a Unicode label that starts or ends with a hyphen', () => {
+    expect(normalizeDomain('-ñ.com')).toBe('');
+    expect(normalizeDomain('ñ-.com')).toBe('');
+    expect(normalizeDomain('a-ñ.com')).not.toBe('');
   });
 });

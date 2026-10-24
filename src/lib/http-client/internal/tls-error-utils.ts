@@ -22,6 +22,14 @@ const CERT_ERROR_CODES = new Set([
   'SELF_SIGNED_CERT_IN_CHAIN',
   'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
   'CERT_REVOKED',
+  'CERT_UNTRUSTED',
+  'HOSTNAME_MISMATCH',
+  'INVALID_CA',
+  'PERMITTED_VIOLATION',
+  'EXCLUDED_VIOLATION',
+  'UNHANDLED_CRITICAL_EXTENSION',
+  'PATH_LENGTH_EXCEEDED',
+  'UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY',
 ]);
 
 /** `CRL` or `CRLS` as an underscore-delimited token, anywhere in a code. */
@@ -39,6 +47,9 @@ const CRL_CODE_PATTERN = /(?:^|_)CRLS?(?:_|$)/;
 const TRANSPORT_ERROR_CODES = new Set([
   'ENOTFOUND',
   'EAI_AGAIN',
+  // A permanent getaddrinfo failure, whatever the message says about the host
+  // (`certificates.internal.corp`); Node reports `EAI_NONAME` / `EAI_NODATA` as `ENOTFOUND`.
+  'EAI_FAIL',
   'ECONNREFUSED',
   'ECONNRESET',
   'ECONNABORTED',
@@ -49,6 +60,12 @@ const TRANSPORT_ERROR_CODES = new Set([
   'ENETUNREACH',
   'ENETDOWN',
   'EADDRNOTAVAIL',
+  // A `socketPath` that is missing, not permitted or not a socket: the message names the
+  // path, and `sock/certificates/agent.sock` matched /certificate/ on it alone.
+  'ENOENT',
+  'EACCES',
+  'EINVAL',
+  'ENOTSOCK',
 ]);
 
 /**
@@ -112,9 +129,12 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
     return true;
   }
 
+  // `UNKNOWN_CA` too: the server's alert that it does not trust the client certificate's
+  // issuer (`ERR_SSL_TLSV1_ALERT_UNKNOWN_CA`), the mTLS refusal the other certificate
+  // alerts already are - it fails the same way every time.
   if (
     (code.startsWith('ERR_TLS_') || code.startsWith('ERR_SSL_')) &&
-    code.includes('CERT')
+    (code.includes('CERT') || code.includes('UNKNOWN_CA'))
   ) {
     return true;
   }
@@ -136,11 +156,13 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
 
   // Reached with no code, or a code the checks above do not recognize — which is
   // why the fallback cannot be dropped for any error carrying one. OpenSSL has
-  // many more permanent verification failures (CERT_UNTRUSTED, HOSTNAME_MISMATCH,
-  // UNABLE_TO_GET_ISSUER_CERT, INVALID_CA, …) that match no code rule above.
+  // more permanent verification failures than the set names (UNABLE_TO_GET_ISSUER_CERT,
+  // CERT_CHAIN_TOO_LONG, …), and a runtime may report one with no code at all.
   const message = readMember(error, 'message');
 
   return typeof message === 'string'
-    ? /certificate|self signed|unable to verify|altname/i.test(message)
+    ? /certificate|self signed|unable to verify|altname|subtree violation|critical extension|path length constraint|issuer public key|alert unknown ca/i.test(
+        message,
+      )
     : false;
 }

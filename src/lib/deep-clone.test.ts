@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'bun:test';
+import vm from 'node:vm';
+import { describe, expect, spyOn, test } from 'bun:test';
+import * as binaryView from './internal/binary-view';
 import { deepClone } from './deep-clone';
 
 describe('deepClone', () => {
@@ -240,6 +242,243 @@ describe('deepClone', () => {
 
       expect(cloned).toEqual(original);
       expect(cloned).not.toBe(original);
+    });
+
+    test('a value reached twice is cloned once, for buffers, views, dates and regexes', () => {
+      const raw = new ArrayBuffer(4);
+      const bytes = new Uint8Array([1, 2]);
+      const view = new DataView(new ArrayBuffer(2));
+      const when = new Date(0);
+      const pattern = /a/g;
+      const cloned = deepClone({
+        raw: [raw, raw],
+        bytes: [bytes, bytes],
+        view: [view, view],
+        when: [when, when],
+        pattern: [pattern, pattern],
+      });
+
+      for (const [first, second] of Object.values(cloned)) {
+        expect(first).toBe(second);
+      }
+      expect(cloned.raw[0]).not.toBe(raw);
+      expect(cloned.bytes[0]).not.toBe(bytes);
+    });
+
+    test('a Buffer is copied as a Buffer, its memory its own', () => {
+      const original = Buffer.from('hello');
+      const cloned = deepClone(original);
+
+      expect(Buffer.isBuffer(cloned)).toBe(true);
+      expect(cloned.toString()).toBe('hello');
+      cloned[0] = 0;
+      expect(original.toString()).toBe('hello');
+    });
+
+    test('a strict Proxy that throws on unknown keys still clones', () => {
+      const strict = new Proxy(
+        { a: 1 },
+        {
+          get(target, key) {
+            if (!(key in target)) {
+              throw new Error(`unknown key ${String(key)}`);
+            }
+            return Reflect.get(target, key) as unknown;
+          },
+        },
+      );
+
+      expect(deepClone({ strict })).toEqual({ strict: { a: 1 } });
+    });
+
+    test('a detached ArrayBuffer throws rather than cloning to {}', () => {
+      const original = new ArrayBuffer(4);
+      structuredClone(original, { transfer: [original] });
+
+      expect(() => deepClone(original)).toThrow();
+    });
+  });
+
+  describe('binary values', () => {
+    test('a view copies only the bytes it covers, not the buffer behind it', () => {
+      const large = new ArrayBuffer(1024);
+      new Uint8Array(large).set([1, 2, 3, 4], 100);
+      const cloned = deepClone({
+        bytes: new Uint8Array(large, 101, 2),
+        view: new DataView(large, 100, 4),
+      });
+
+      expect(cloned.bytes.buffer.byteLength).toBe(2);
+      expect([...cloned.bytes]).toEqual([2, 3]);
+      expect(cloned.view.buffer.byteLength).toBe(4);
+      expect(cloned.view.getUint8(3)).toBe(4);
+    });
+
+    test("buffers and views from another realm are cloned as this realm's", () => {
+      const foreign = vm.runInNewContext(`({
+        raw: new Uint8Array([1, 2, 3]).buffer,
+        view: new DataView(new Uint8Array([4, 5, 6, 7]).buffer, 1, 2),
+        bytes: new Uint16Array([8, 9]),
+      })`) as { raw: ArrayBuffer; view: DataView; bytes: Uint16Array };
+      const cloned = deepClone(foreign);
+
+      expect(cloned.raw).toBeInstanceOf(ArrayBuffer);
+      expect([...new Uint8Array(cloned.raw)]).toEqual([1, 2, 3]);
+      expect(cloned.view).toBeInstanceOf(DataView);
+      expect(cloned.view.getUint8(0)).toBe(5);
+      expect(cloned.view.byteLength).toBe(2);
+      expect(cloned.bytes).toBeInstanceOf(Uint16Array);
+      expect([...cloned.bytes]).toEqual([8, 9]);
+    });
+
+    test('a SharedArrayBuffer, and a view over one, are copied into new shared buffers', () => {
+      const shared = new SharedArrayBuffer(2);
+      new Uint8Array(shared).set([1, 2]);
+      const cloned = deepClone({ shared, bytes: new Uint8Array(shared) });
+
+      expect(cloned.shared).toBeInstanceOf(SharedArrayBuffer);
+      expect([...new Uint8Array(cloned.shared)]).toEqual([1, 2]);
+      expect(cloned.bytes.buffer).toBeInstanceOf(SharedArrayBuffer);
+      expect([...cloned.bytes]).toEqual([1, 2]);
+      // Copies: writing to one does not reach the original.
+      new Uint8Array(cloned.shared)[0] = 9;
+      expect(new Uint8Array(shared)[0]).toBe(1);
+    });
+
+    test('subclasses are copied through their own constructor, their fields set up', () => {
+      class TaggedBuffer extends ArrayBuffer {}
+      class Packet extends Uint8Array {
+        readonly #kind = 1;
+        public get kind(): number {
+          return this.#kind;
+        }
+      }
+      const original = {
+        buffer: new TaggedBuffer(2),
+        packet: new Packet([1, 2]),
+        node: Buffer.from('hi'),
+      };
+      const cloned = deepClone(original);
+
+      expect(cloned.buffer).toBeInstanceOf(TaggedBuffer);
+      expect(cloned.packet).toBeInstanceOf(Packet);
+      expect(cloned.packet.kind).toBe(1);
+      expect([...cloned.packet]).toEqual([1, 2]);
+      expect(Buffer.isBuffer(cloned.node)).toBe(true);
+      expect(cloned.node.toString()).toBe('hi');
+      expect(cloned.packet).not.toBe(original.packet);
+    });
+
+    test('a resizable buffer stays resizable', () => {
+      const resizable = new (
+        ArrayBuffer as unknown as new (
+          length: number,
+          options: { maxByteLength: number },
+        ) => ArrayBuffer & { resizable: boolean; maxByteLength: number }
+      )(4, {
+        maxByteLength: 16,
+      });
+      const cloned = deepClone(resizable);
+
+      expect(cloned.resizable).toBe(true);
+      expect(cloned.maxByteLength).toBe(16);
+      expect(cloned.byteLength).toBe(4);
+    });
+
+    test('a detached buffer throws rather than cloning to {}', () => {
+      const detached = new ArrayBuffer(4);
+      structuredClone(detached, { transfer: [detached] });
+
+      expect(() => deepClone(detached)).toThrow(TypeError);
+    });
+
+    test('a strict Proxy, a null-prototype dictionary and a class instance clone as before', () => {
+      const strict = new Proxy(
+        { a: 1 },
+        {
+          get(target, key) {
+            if (!(key in target)) {
+              throw new Error(`unknown key ${String(key)}`);
+            }
+            return Reflect.get(target, key) as unknown;
+          },
+        },
+      );
+      const dictionary = Object.assign(Object.create(null) as object, {
+        b: 2,
+      });
+      class Point {
+        public x = 3;
+      }
+
+      expect(deepClone({ strict, dictionary, point: new Point() })).toEqual({
+        strict: { a: 1 },
+        dictionary: { b: 2 },
+        point: { x: 3 },
+      });
+    });
+
+    test("another realm's plain objects are passed over without the throwing slot check", () => {
+      const foreign = vm.runInNewContext(
+        '({ a: { b: 1 }, raw: new ArrayBuffer(2) })',
+      ) as { a: { b: number }; raw: ArrayBuffer };
+      const spy = spyOn(binaryView, 'arrayBufferKindOf');
+
+      try {
+        const cloned = deepClone(foreign);
+        expect(cloned.a).toEqual({ b: 1 });
+        expect(cloned.raw).toBeInstanceOf(ArrayBuffer);
+        // Asked of the buffer alone, not of the plain objects around it.
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('a strict Proxy from another realm clones without its traps being tripped', () => {
+      const strict = vm.runInNewContext(
+        "new Proxy({ a: 1 }, { get(t, k) { if (!(k in t)) throw new Error('strict'); return t[k]; } })",
+      ) as { a: number };
+
+      expect(deepClone({ strict })).toEqual({ strict: { a: 1 } });
+    });
+
+    test('an object that only inherits a buffer prototype clones as a plain object', () => {
+      const fake = Object.assign(
+        Object.create(SharedArrayBuffer.prototype) as object,
+        { x: 1 },
+      );
+
+      expect(deepClone({ fake })).toEqual({ fake: { x: 1 } });
+    });
+
+    test("a Buffer stays a Buffer where the typed-array globals are another realm's", () => {
+      const original = globalThis.Uint8Array;
+      (globalThis as Record<string, unknown>).Uint8Array =
+        vm.runInNewContext('Uint8Array');
+
+      try {
+        const cloned = deepClone(Buffer.from('hi'));
+        expect(Buffer.isBuffer(cloned)).toBe(true);
+        expect(cloned.toString('hex')).toBe('6869');
+      } finally {
+        (globalThis as Record<string, unknown>).Uint8Array = original;
+      }
+    });
+
+    test('a view over a resizable buffer is copied onto a fixed-length one', () => {
+      const resizable = new (
+        ArrayBuffer as unknown as new (
+          length: number,
+          options: { maxByteLength: number },
+        ) => ArrayBuffer
+      )(4, { maxByteLength: 16 });
+      const cloned = deepClone(new Uint8Array(resizable));
+
+      expect(
+        (cloned.buffer as ArrayBuffer & { resizable: boolean }).resizable,
+      ).toBe(false);
+      expect(cloned.length).toBe(4);
     });
   });
 

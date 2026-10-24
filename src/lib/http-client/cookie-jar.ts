@@ -1,14 +1,56 @@
+import { MAX_COOKIE_LIFETIME_SECONDS } from './consts';
 import { parse } from 'tldts';
 import { toASCII } from 'tr46';
 import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
+import { describeValue } from '../internal/describe-value';
 import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
-import { normalizeAdapterResponseHeaders } from './utils';
+import { assertHeaderRecord } from './internal/plain-record';
+import { lowerCaseHeaderName } from './internal/header-utils';
+import { isNullish } from '../internal/is-nullish';
+import { isHeaderSafeCookieText } from './internal/cookie-text';
 
 // Matches bare hostnames like 'localhost', 'myapp', 'my-app' that tldts
 // won't assign a registered domain to but are still valid cookie domains.
-const HOSTNAME_PATTERN =
-  /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/;
+// `_` and a hyphen anywhere in a label are allowed as the URL parser allows them, and as
+// `normalizeStoredDomain` keeps them: docker-compose service names (`my_service`) and
+// hosts like `-edge.example.com` set cookies the jar otherwise discarded.
+const HOSTNAME_PATTERN = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
+
+/**
+ * `maxAge` and `expires` held to {@link MAX_COOKIE_LIFETIME_SECONDS} from `createdAt`:
+ * only the fields over it, so one within it, or absent, is left as given.
+ */
+function capLifetime(
+  cookie: Pick<Cookie, 'maxAge' | 'expires'>,
+  createdAt: number,
+): Partial<Pick<Cookie, 'maxAge' | 'expires'>> {
+  const capped: Partial<Pick<Cookie, 'maxAge' | 'expires'>> = {};
+
+  if (
+    typeof cookie.maxAge === 'number' &&
+    cookie.maxAge > MAX_COOKIE_LIFETIME_SECONDS
+  ) {
+    capped.maxAge = MAX_COOKIE_LIFETIME_SECONDS;
+  }
+
+  const latest = createdAt + MAX_COOKIE_LIFETIME_SECONDS * 1000;
+  if (cookie.expires instanceof Date && cookie.expires.getTime() > latest) {
+    capped.expires = new Date(latest);
+  }
+
+  return capped;
+}
+
+/**
+ * A request host, or a stored cookie domain, prepared for matching against many of the
+ * other: its IP literal read once, and its normalized form once, when first asked for.
+ */
+interface PreparedHost {
+  host: string;
+  canonicalIP: string | null;
+  normalized?: string;
+}
 
 interface ParsedCookie {
   name: string;
@@ -26,7 +68,12 @@ export interface Cookie {
   name: string;
   value: string;
   domain?: string;
-  /** True when the cookie came from a Set-Cookie without Domain= and must not match subdomains. */
+  /**
+   * True when the cookie must not match subdomains: a Set-Cookie with no `Domain=`, a last
+   * `Domain=` that is empty or `.` (even after a valid one: the last wins, as Chrome and
+   * Firefox read it), or a `Domain=` naming a public suffix that is the request host
+   * itself (`Domain=localhost` from `http://localhost/`).
+   */
   hostOnly?: boolean;
   path?: string;
   expires?: Date;
@@ -61,9 +108,119 @@ export interface CookieJarJSON {
 interface StoredCookieScope {
   name: string;
   domain: string;
+  /** `domain` prepared for matching, so a send does not read it again per cookie. */
+  preparedDomain: PreparedHost;
   path: string;
   hostOnly?: boolean;
   secure?: boolean;
+}
+
+/** RFC 6265 §5.2.2 delta-seconds: an optional `-`, then digits only. */
+const MAX_AGE_PATTERN = /^-?\d+$/;
+
+/** RFC 6265bis §5.6: a cookie whose name and value together pass this is ignored. */
+const MAX_COOKIE_NAME_VALUE_BYTES = 4096;
+
+const COOKIE_DATE_DELIMITER =
+  /[\t\u0020-\u002f\u003b-\u0040\u005b-\u0060\u007b-\u007e]+/;
+const COOKIE_DATE_TIME = /^(\d{1,2}):(\d{1,2}):(\d{1,2})(?:\D.*)?$/;
+const COOKIE_DATE_DAY = /^(\d{1,2})(?:\D.*)?$/;
+const COOKIE_DATE_YEAR = /^(\d{2,4})(?:\D.*)?$/;
+const COOKIE_DATE_MONTHS = [
+  'jan',
+  'feb',
+  'mar',
+  'apr',
+  'may',
+  'jun',
+  'jul',
+  'aug',
+  'sep',
+  'oct',
+  'nov',
+  'dec',
+];
+
+/**
+ * RFC 6265 §5.1.1's cookie-date algorithm: the time, day, month and year taken from the
+ * first token of each shape, in UTC whatever zone is written. `new Date()` read a date
+ * with no zone - the asctime form - as local time, and `Expires=0` as the year 2000.
+ * `undefined` when the value is not a cookie-date, so the attribute is ignored.
+ */
+function parseCookieDate(value: string): Date | undefined {
+  let time: [number, number, number] | undefined;
+  let day: number | undefined;
+  let month: number | undefined;
+  let year: number | undefined;
+
+  for (const token of value.split(COOKIE_DATE_DELIMITER)) {
+    if (token === '') {
+      continue;
+    }
+    const timeMatch = time === undefined ? COOKIE_DATE_TIME.exec(token) : null;
+    if (timeMatch) {
+      time = [Number(timeMatch[1]), Number(timeMatch[2]), Number(timeMatch[3])];
+      continue;
+    }
+    const dayMatch = day === undefined ? COOKIE_DATE_DAY.exec(token) : null;
+    if (dayMatch) {
+      day = Number(dayMatch[1]);
+      continue;
+    }
+    if (month === undefined) {
+      const index = COOKIE_DATE_MONTHS.indexOf(token.slice(0, 3).toLowerCase());
+      if (index !== -1) {
+        month = index;
+        continue;
+      }
+    }
+    const yearMatch = year === undefined ? COOKIE_DATE_YEAR.exec(token) : null;
+    if (yearMatch) {
+      year = Number(yearMatch[1]);
+    }
+  }
+
+  if (
+    time === undefined ||
+    day === undefined ||
+    month === undefined ||
+    year === undefined
+  ) {
+    return undefined;
+  }
+  if (year >= 70 && year <= 99) {
+    year += 1900;
+  } else if (year >= 0 && year <= 69) {
+    year += 2000;
+  }
+  const [hours, minutes, seconds] = time;
+  if (
+    day < 1 ||
+    day > 31 ||
+    year < 1601 ||
+    hours > 23 ||
+    minutes > 59 ||
+    seconds > 59
+  ) {
+    return undefined;
+  }
+  const date = new Date(Date.UTC(year, month, day, hours, minutes, seconds));
+  // A day the month does not have (31 February) is not a date.
+  return date.getUTCDate() === day ? date : undefined;
+}
+
+/** Construction options for {@link CookieJar}. */
+export interface CookieJarOptions {
+  /**
+   * Adjustments to the Public Suffix List this jar scopes cookies with.
+   *
+   * The bundled list (from `tldts`, including its private section) is used as-is when
+   * this is omitted, which is the right answer for public hosts. Supply `add` for
+   * internal or multi-tenant domains the public list does not carry, and `remove` to
+   * opt a suffix back out. Invalid entries throw from the constructor rather than being
+   * ignored - see {@link PublicSuffixOverrides}.
+   */
+  publicSuffixes?: PublicSuffixOverrides;
 }
 
 /**
@@ -90,54 +247,6 @@ interface StoredCookieScope {
  * setting `Domain=localhost` keeps working while `https://evil.localhost/` cannot claim
  * the shared name.
  */
-/**
- * Whether every character of `text` can be written into a `Cookie` header as part of
- * one cookie-pair: no control character (a CR LF is a header injection, a DEL or tab is
- * refused by the header parser on the other side), no `;` (the pair delimiter), and
- * none of `extra`.
- *
- * Deliberately looser than RFC 6265's cookie-octet grammar, which also forbids space,
- * comma, double quote and backslash in a value. Servers send all four - a JSON blob, a
- * quoted value, a comma-separated list - and browsers store and return them, so
- * refusing them would drop real cookies from `parseSetCookieHeader`. What is refused
- * here is exactly what would change the *framing* of the header: another pair, or
- * another line.
- */
-function isHeaderSafeCookieText(text: string, extra: string): boolean {
-  for (const char of text) {
-    const code = char.charCodeAt(0);
-
-    if (code <= 0x1f || code === 0x7f || char === ';' || extra.includes(char)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-/** RFC 6265 §5.2.2 delta-seconds: an optional `-`, then digits only. */
-const MAX_AGE_PATTERN = /^-?\d+$/;
-
-/**
- * The longest `Max-Age` stored, in seconds: the largest value whose expiry in
- * milliseconds is still a safe integer.
- */
-const MAX_COOKIE_MAX_AGE_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
-
-/** Construction options for {@link CookieJar}. */
-export interface CookieJarOptions {
-  /**
-   * Adjustments to the Public Suffix List this jar scopes cookies with.
-   *
-   * The bundled list (from `tldts`, including its private section) is used as-is when
-   * this is omitted, which is the right answer for public hosts. Supply `add` for
-   * internal or multi-tenant domains the public list does not carry, and `remove` to
-   * opt a suffix back out. Invalid entries throw from the constructor rather than being
-   * ignored - see {@link PublicSuffixOverrides}.
-   */
-  publicSuffixes?: PublicSuffixOverrides;
-}
-
 export class CookieJar {
   // Outer key: apex domain from the Public Suffix List (e.g. 'example.co.uk'), or the
   //            hostname itself for IPs and bare names like localhost
@@ -155,6 +264,8 @@ export class CookieJar {
   // off it, because the object itself is handed out by `getAllCookies()` and is writable
   // from there; dropped with the cookie when the bucket entry goes.
   private storedScopes: WeakMap<Cookie, StoredCookieScope> = new WeakMap();
+  /** When each stored cookie's identity was first stored; orders the `Cookie` header. */
+  private creationTimes: WeakMap<Cookie, number> = new WeakMap();
 
   constructor(options?: CookieJarOptions) {
     this.publicSuffixes = new PublicSuffixResolver(options?.publicSuffixes);
@@ -170,8 +281,11 @@ export class CookieJar {
    *
    * Also returns false for a name or value that cannot be written into a `Cookie`
    * header as one cookie-pair (and `getCookiesFor` withholds a stored cookie that no
-   * longer passes, so a mutation through `getAllCookies()` cannot reach the header): a name that is empty or holds `=`, `;`, whitespace or a
-   * control character, or a value holding `;` or a control character. The header is
+   * longer passes, so a mutation through `getAllCookies()` cannot reach the header): a name that holds `=`, `;`, whitespace or a
+   * control character, or a value holding `;` or a control character other than a tab.
+   * A name may be
+   * empty - a nameless cookie, sent as its value alone - when the value is not empty,
+   * holds no `=` and does not start with `__Secure-` / `__Host-`. The header is
    * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` was sent
    * as two cookies, and a CR LF was a header injection. The Set-Cookie parser cannot
    * produce these - it splits on `;` first - so this closes the programmatic path and
@@ -212,6 +326,21 @@ export class CookieJar {
       return false;
     }
 
+    // A same-realm copy of a `Date` made in another realm (a `vm` context, an iframe),
+    // which `hasReadableExpiry` accepts by its time rather than by `instanceof`.
+    if (input.expires !== undefined && !(input.expires instanceof Date)) {
+      input.expires = new Date(Date.prototype.getTime.call(input.expires));
+    }
+
+    // Booleans or absent: the send path withholds a cookie whose `secure`, `hostOnly` or
+    // `httpOnly` is anything else, so storing one reported a cookie that never goes out.
+    for (const flag of ['secure', 'hostOnly', 'httpOnly'] as const) {
+      const value: unknown = input[flag];
+      if (value !== undefined && typeof value !== 'boolean') {
+        return false;
+      }
+    }
+
     if (!this.hasWritableNameAndValue(input)) {
       return false;
     }
@@ -241,7 +370,10 @@ export class CookieJar {
     ) {
       return false;
     }
-    const createdAt = input.createdAt ?? Date.now();
+    // Never in the future: the lifetime cap (and `Max-Age`) count from it, so a persisted
+    // jar claiming a creation five years on held a cookie past the cap.
+    const now = Date.now();
+    const createdAt = Math.min(input.createdAt ?? now, now);
     const bucket = this.getOrCreateBucket(this.apexFor(normalizedDomain));
 
     const stored: Cookie = {
@@ -249,13 +381,41 @@ export class CookieJar {
       createdAt,
       domain: normalizedDomain,
       path,
+      // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
+      // creation: a jar restored through `fromJSON` from before the cap kept a 10-year
+      // lifetime.
+      ...capLifetime(input, createdAt),
     };
 
-    bucket.set(this.cookieKey(stored.name, normalizedDomain, path), stored);
+    const key = this.cookieKey(
+      stored.name,
+      normalizedDomain,
+      path,
+      input.hostOnly === true,
+    );
+    // A replacement keeps the creation time of the cookie it replaces (RFC 6265 §5.3
+    // step 11.3), which orders the `Cookie` header; `createdAt` stays the new cookie's
+    // own, the base of its `Max-Age`.
+    // Not an expired one still waiting to be purged: it was already gone (§5.3 step 11
+    // reads the store, from which an expired cookie has been evicted), so the new cookie
+    // takes its own place.
+    const replaced = bucket.get(key);
+    const replacedSnapshot =
+      replaced === undefined ? null : this.snapshotForSend(replaced);
+    this.creationTimes.set(
+      stored,
+      replaced === undefined ||
+        replacedSnapshot === null ||
+        this.isExpired(replacedSnapshot, Date.now())
+        ? createdAt
+        : (this.creationTimes.get(replaced) ?? replaced.createdAt),
+    );
+    bucket.set(key, stored);
 
     const scope: StoredCookieScope = {
       name: stored.name,
       domain: normalizedDomain,
+      preparedDomain: this.prepareHost(normalizedDomain),
       path,
     };
 
@@ -331,27 +491,42 @@ export class CookieJar {
   }
 
   /**
-   * Processes all Set-Cookie headers from a response headers object.
+   * Processes all Set-Cookie headers from a response headers object: a plain object of
+   * header names to values, its `set-cookie` lines read under any capitalization, in the
+   * order they appear (as `HTTPClient` merges them). Only those lines are read; other
+   * headers are not this method's to check.
    *
-   * Uses the same normalization as `HTTPClient` ({@link normalizeAdapterResponseHeaders}):
-   * lowercase keys and merged `set-cookie` lines, so mixed-case adapter output
-   * matches `FetchAdapter` / normalized responses.
+   * @throws {TypeError} When `headers` is not a plain object - a `Headers` or `Map`
+   *         keeps its entries where this cannot read them, and every cookie in it was
+   *         silently dropped - or a `set-cookie` line is not a string.
    */
   public processResponseHeaders(
     headers: Record<string, string | string[]>,
     url: string,
   ): void {
-    const normalized = normalizeAdapterResponseHeaders(headers);
-    const raw = normalized['set-cookie'];
+    assertHeaderRecord(headers, 'CookieJar processResponseHeaders headers');
 
-    if (raw === undefined || raw === '') {
-      return;
-    }
+    // Every line checked before any is stored, so a refused call leaves the jar as it
+    // found it rather than holding the cookies that came before the bad line.
+    const lines: string[] = [];
+    for (const [name, raw] of Object.entries(headers)) {
+      if (lowerCaseHeaderName(name) !== 'set-cookie' || isNullish(raw)) {
+        continue;
+      }
 
-    const lines: string[] = Array.isArray(raw) ? raw : [raw];
+      for (const line of Array.isArray(raw) ? (raw as unknown[]) : [raw]) {
+        if (isNullish(line) || line === '') {
+          continue;
+        }
 
-    if (lines.length === 0) {
-      return;
+        if (typeof line !== 'string') {
+          throw new TypeError(
+            `CookieJar processResponseHeaders set-cookie line is not a string (got ${describeValue(line)})`,
+          );
+        }
+
+        lines.push(line);
+      }
     }
 
     for (const line of lines) {
@@ -361,16 +536,17 @@ export class CookieJar {
 
   /**
    * Returns cookies applicable for the given URL (domain + path matching, unexpired).
-   * Cookies with the Secure attribute are omitted unless the URL uses the `https:` scheme
-   * (RFC 6265 §5.4).
+   * Cookies with the Secure attribute are omitted unless the URL uses a secure scheme,
+   * `https:` or `wss:` (RFC 6265 §5.4).
    *
    * Scans the URL and ancestor-domain buckets, including parents above nested
    * private suffixes, instead of scanning all cookies.
    *
    * Returns *copies*, not the stored objects. A cookie's `name`, `domain`, `path`,
    * `hostOnly` and `secure` come from the scope `setCookie` accepted it with, and every
-   * other field is read exactly once; all the checks run against that copy and the header
-   * is built from it. So a stored cookie mutated through `getAllCookies()` — a cleared
+   * other field is read exactly once, for a cookie whose stored scope matches; the scope
+   * checks run against that scope, the rest against the copy, and the header is built
+   * from it. So a stored cookie mutated through `getAllCookies()` — a cleared
    * `secure`, a widened `domain` or `path`, a `value` getter that answers differently on
    * the second read — cannot reach the wire with a scope or a framing it was never stored
    * with. A cookie whose fields cannot be read at all (an accessor that throws) is
@@ -395,7 +571,19 @@ export class CookieJar {
     }
 
     const now = Date.now();
-    const result: Cookie[] = [];
+    const result: Array<{ cookie: Cookie; creationTime: number }> = [];
+    // The request host read once, not once per cookie: normalizing it runs IDNA and a URL
+    // parse. Likewise each stored domain's public-suffix answer.
+    const requestHost = this.prepareHost(hostname);
+    const publicSuffixAnswers = new Map<string, boolean>();
+    const isPublicSuffix = (domain: string): boolean => {
+      let isSuffix = publicSuffixAnswers.get(domain);
+      if (isSuffix === undefined) {
+        isSuffix = this.isPublicSuffix(domain);
+        publicSuffixAnswers.set(domain, isSuffix);
+      }
+      return isSuffix;
+    };
     // A parent domain can live above a nested private suffix. Include its
     // bucket while retaining the ordinary domain/host-only checks below.
     const candidateBuckets = new Set<string>();
@@ -410,61 +598,70 @@ export class CookieJar {
         continue;
       }
       for (const stored of apexBucket.values()) {
-        // Every check below runs against the snapshot, never the stored object: the
-        // fields were read once each, so what is vetted is what goes out. A cookie whose
-        // snapshot cannot be trusted is withheld.
-        const cookie = this.snapshotForSend(stored);
+        // The scope checks first, on the stored scope - what the snapshot's `domain`,
+        // `path`, `hostOnly` and `secure` are copied from - so only a cookie bound for
+        // this request has its live fields read.
+        const scope = this.storedScopes.get(stored);
 
-        if (cookie === null) {
-          continue;
-        }
-
-        if (this.isExpired(cookie, now)) {
+        if (scope === undefined) {
           continue;
         }
 
         // Persisted cookies can predate the current suffix policy. Never let
         // a domain cookie for a public suffix span its tenants.
         if (
-          !cookie.hostOnly &&
-          cookie.domain &&
-          this.isPublicSuffix(cookie.domain) &&
-          !this.hostOnlyDomainMatches(hostname, cookie.domain)
+          !scope.hostOnly &&
+          scope.domain &&
+          isPublicSuffix(scope.domain) &&
+          !this.hostOnlyDomainMatches(requestHost, scope.preparedDomain)
         ) {
           continue;
         }
 
-        const isDomainMatch = cookie.hostOnly
-          ? this.hostOnlyDomainMatches(hostname, cookie.domain ?? '')
-          : this.domainMatches(hostname, cookie.domain ?? '');
+        const isDomainMatch = scope.hostOnly
+          ? this.hostOnlyDomainMatches(requestHost, scope.preparedDomain)
+          : this.domainMatches(requestHost, scope.preparedDomain);
 
         if (!isDomainMatch) {
           continue;
         }
 
-        if (!this.pathMatches(pathname, cookie.path ?? '/')) {
+        if (!this.pathMatches(pathname, scope.path)) {
           continue;
         }
 
-        if (cookie.secure === true && !this.isSecureScheme(requestScheme)) {
+        if (scope.secure === true && !this.isSecureScheme(requestScheme)) {
           continue;
         }
 
-        result.push(cookie);
+        // The rest against the snapshot, never the stored object: the fields were read
+        // once each, so what is vetted is what goes out. A cookie whose snapshot cannot be
+        // trusted is withheld.
+        const cookie = this.snapshotForSend(stored);
+
+        if (cookie === null || this.isExpired(cookie, now)) {
+          continue;
+        }
+
+        result.push({
+          cookie,
+          creationTime: this.creationTimes.get(stored) ?? cookie.createdAt,
+        });
       }
     }
 
     result.sort((a, b) => {
-      const pathLengthDelta = (b.path ?? '/').length - (a.path ?? '/').length;
+      const pathLengthDelta =
+        (b.cookie.path ?? '/').length - (a.cookie.path ?? '/').length;
 
       if (pathLengthDelta !== 0) {
         return pathLengthDelta;
       }
 
-      return a.createdAt - b.createdAt;
+      return a.creationTime - b.creationTime;
     });
 
-    return result;
+    return result.map((entry) => entry.cookie);
   }
 
   /**
@@ -475,8 +672,9 @@ export class CookieJar {
    * written onto them.
    */
   public getCookieHeaderString(url: string): string {
+    // A nameless cookie goes out as its value alone, as browsers send it.
     return this.getCookiesFor(url)
-      .map((c) => `${c.name}=${c.value}`)
+      .map((c) => (c.name === '' ? c.value : `${c.name}=${c.value}`))
       .join('; ');
   }
 
@@ -513,15 +711,49 @@ export class CookieJar {
    *   does not touch cookies stored for `example.com`.
    * - `clear(host, 'domain')` — removes all cookies for the entire domain family
    *   (apex + all subdomains). e.g. `clear('api.example.com', 'domain')` clears
-   *   everything in the `example.com` apex bucket.
+   *   everything in the `example.com` apex bucket, and `clear('github.io', 'domain')`
+   *   every `*.github.io` site's cookies. A site behind a nested private suffix is its
+   *   own domain and is not cleared with its parent: `clear('amazonaws.com', 'domain')`
+   *   leaves `bucket.s3.amazonaws.com`'s cookies.
+   *
+   * A `host` that is not a non-empty string, or a `scope` that is not one of the two,
+   * throws: only a call with no arguments at all clears everything.
    */
   public clear(): number;
   public clear(host: string, scope: 'hostname' | 'domain'): number;
-  public clear(host?: string, scope?: 'hostname' | 'domain'): number {
-    if (host === undefined) {
-      const count = this.getAllCookies().length;
+  public clear(
+    ...args: [] | [host: string, scope: 'hostname' | 'domain']
+  ): number {
+    if (args.length === 0) {
+      let count = 0;
+      for (const bucket of this.buckets.values()) {
+        count += bucket.size;
+      }
       this.buckets.clear();
       return count;
+    }
+
+    // Both refused rather than read loosely. A `host` that was `undefined` - a config
+    // value left unset - wiped the whole jar whatever scope came with it; a missing or
+    // misspelled `scope` (`'Domain'`) cleared by hostname and quietly left the domain's
+    // other cookies in place.
+    const [host, scope] = args as unknown[];
+    if (typeof host !== 'string' || host.trim() === '') {
+      const got =
+        typeof host !== 'string'
+          ? describeValue(host)
+          : host === ''
+            ? 'an empty string'
+            : 'a blank string';
+      throw new TypeError(
+        `CookieJar.clear() host must be a non-empty string (got ${got})`,
+      );
+    }
+
+    if (scope !== 'hostname' && scope !== 'domain') {
+      throw new TypeError(
+        `CookieJar.clear() scope must be 'hostname' or 'domain' (got ${typeof scope === 'string' ? 'an unknown scope' : describeValue(scope)})`,
+      );
     }
 
     const normalizedHost = this.normalizeStoredDomain(host);
@@ -533,8 +765,23 @@ export class CookieJar {
     const apex = this.apexFor(normalizedHost);
 
     if (scope === 'domain') {
-      const count = this.buckets.get(apex)?.size ?? 0;
-      this.buckets.delete(apex);
+      let count = 0;
+
+      // The apex bucket - and, when the host is itself a public suffix or a bare name,
+      // every bucket beneath it. Such a name has no registrable part, so each host under
+      // it is its own bucket: `clear('github.io', 'domain')` or `clear('localhost',
+      // 'domain')` cleared only the suffix's own and left `a.github.io` and
+      // `sub.localhost` in place. Only then: under an ordinary domain a bucket beneath
+      // the apex is a separate site behind a nested private suffix (`bucket.s3.amazonaws.com`
+      // under `amazonaws.com`), not part of the domain being cleared.
+      const isSuffixClear = this.isPublicSuffix(apex);
+      for (const [key, bucket] of [...this.buckets.entries()]) {
+        if (key === apex || (isSuffixClear && key.endsWith(`.${apex}`))) {
+          count += bucket.size;
+          this.buckets.delete(key);
+        }
+      }
+
       return count;
     } else {
       const bucket = this.buckets.get(apex);
@@ -564,6 +811,9 @@ export class CookieJar {
    * Serializes detached cookie snapshots using their stored scope. Caller edits to
    * live cookie objects cannot widen that scope after a save and restore. Cookies
    * whose mutable fields cannot be safely read are omitted, as on the send path.
+   *
+   * A replaced cookie's place in the `Cookie` header - its first creation time - is not
+   * saved: after a restore, cookies of equal path length are ordered by `createdAt`.
    */
   public toJSON(): CookieJarJSON {
     const cookies: Cookie[] = [];
@@ -583,16 +833,15 @@ export class CookieJar {
    * Restores a jar from serialized JSON.
    *
    * `setCookie` refuses a cookie with a missing or invalid domain and says so by returning
-   * `false`. This threw that answer away and returned `void`, so a persisted jar could come
-   * back short with nothing to say it had - and every other mutator on this class
-   * (`clear`, `clearExpiredCookies`, `setCookie`) reports what it did.
+   * `false`. A restore reports those refusals through its count, as every other mutator on
+   * this class (`clear`, `clearExpiredCookies`, `setCookie`) reports what it did, so a
+   * persisted jar that comes back short says so.
    *
    * The payload is read in full before the jar is touched, and each cookie is copied
-   * rather than taken. This used to `clear()` first and mutate `expires` in place, so a
-   * payload with no `cookies`, a `null` entry, or a frozen cookie threw *after* the jar
-   * was already empty - the one order in which a failed restore also loses what was
-   * there - and a caller's own array of cookies came back with `Date` objects written
-   * into it.
+   * rather than taken. A payload with no `cookies` or a `null` entry therefore throws
+   * while the jar still holds what it had, rather than after emptying it. Frozen entries
+   * are accepted because each entry is copied before modification, and a caller's own
+   * array of cookies never has `Date` objects written into it.
    *
    * A restore *replaces*: once the payload has been read, the jar is emptied and refilled
    * with whatever `setCookie` accepts. A well-formed payload whose cookies are all refused
@@ -601,21 +850,21 @@ export class CookieJar {
    * jar untouched. Snapshot with `toJSON()` first if a short restore should be rolled back.
    *
    * A cookie whose `expires` cannot be read as a date is refused the same way a cookie
-   * with a bad domain is: left out of the jar and out of the count. It used to be
-   * restored with `new Date('garbage')` - an `Invalid Date`, which is truthy, so
-   * `isExpired` compared `now` against `NaN`, found it never greater, and the cookie
-   * was sent for the life of the jar and never purged. One corrupt date in a persisted
-   * jar made an immortal cookie. Refused rather than restored as a session cookie,
+   * with a bad domain is: left out of the jar and out of the count. Restored as
+   * `new Date('garbage')` it would be an `Invalid Date`, which is truthy, so `isExpired`
+   * would compare `now` against `NaN`, never find it greater, and send the cookie for the
+   * life of the jar without ever purging it - one corrupt date in a persisted jar would
+   * make an immortal cookie. Refused rather than restored as a session cookie,
    * because a cookie that was persisted with an expiry was not a session cookie, and
    * the header parser drops an unreadable `Expires` attribute for the same reason.
    * `null` - what `JSON.stringify` writes for an `Invalid Date` - and `undefined` mean
    * no expiry, as they do on a live cookie.
    *
    * The same refusal covers the other half of the expiry model: a `maxAge` or a
-   * `createdAt` that is not a finite number - a string, `NaN`, an object - made
+   * `createdAt` that is not a finite number - a string, `NaN`, an object - would make
    * `createdAt + maxAge * 1000` come out `NaN` and the cookie just as immortal, and
    * `isExpired` prefers `maxAge` over `expires`, so a sound `expires` beside a corrupt
-   * `maxAge` did not save it. `setCookie` refuses those the way it refuses a bad domain.
+   * `maxAge` would not save it. `setCookie` refuses those the way it refuses a bad domain.
    * A `null` `maxAge` or `createdAt` reads as absent, as a `null` `expires` does.
    *
    * @returns How many cookies were restored. Compare against `data.cookies.length` to learn
@@ -649,6 +898,14 @@ export class CookieJar {
 
       if ((cookie.maxAge as unknown) === null) {
         delete cookie.maxAge;
+      }
+
+      // A `null` flag reads as absent, as a `null` expiry does; any other non-boolean is
+      // refused by `setCookie`, and counted out of the total.
+      for (const flag of ['secure', 'hostOnly', 'httpOnly'] as const) {
+        if ((cookie[flag] as unknown) === null) {
+          delete cookie[flag];
+        }
       }
 
       if (rawExpires === undefined || rawExpires === null) {
@@ -685,8 +942,23 @@ export class CookieJar {
 
   // --- Private helpers ---
 
-  private cookieKey(name: string, domain: string, path: string): string {
-    return `${name}@${domain}${path}`;
+  /**
+   * A cookie's identity (RFC 6265bis: name, domain, host-only flag and path) as one
+   * unambiguous key. Encoded as a JSON array rather than joined: a name may contain `@`
+   * and `/` and a path `@`, so `a@x.example.com/` with path `/` and `a` on
+   * `x.example.com` with path `/@...` must not become the same key, or one site's cookie
+   * could replace another's. The host-only flag is part of it, as browsers keep it: a
+   * `Domain=example.com` cookie from `evil.example.com` and `example.com`'s own host-only
+   * one of the same name are two cookies - one shared, not the other replacing or
+   * deleting the parent's session.
+   */
+  private cookieKey(
+    name: string,
+    domain: string,
+    path: string,
+    isHostOnly: boolean,
+  ): string {
+    return JSON.stringify([name, domain, path, isHostOnly]);
   }
 
   /** Canonical form for stored cookie domains: no leading dot, ASCII/IDNA DNS names;
@@ -714,7 +986,10 @@ export class CookieJar {
     // Keep IDNA safety checks and length limits without silently discarding their cookies.
     try {
       const ascii = toASCII(
-        this.unbracketHost(raw).normalize('NFC').toLowerCase(),
+        // Neither lowercased nor NFC-normalized first: TR46 maps case and then
+        // normalizes, as the URL parser does - `toLowerCase` made a word-final `Σ` the
+        // final sigma `ς`, another domain (see `normalizeHostText` in domain-utils).
+        this.unbracketHost(raw),
         {
           useSTD3ASCIIRules: false,
           checkHyphens: false,
@@ -724,6 +999,22 @@ export class CookieJar {
           verifyDNSLength: false,
         },
       );
+      // A trailing dot mapping exposed (`example.com.` and a soft hyphen): dropped as the
+      // one trailing dot if none was written, so the cookie is stored for `example.com`
+      // and not beside it under `example.com.`; refused as a second if one was. A leading
+      // one exposed the same way (a soft hyphen, then `.example.com`) is refused on
+      // purpose, below, as domain-utils refuses it: an empty first label is no host, and
+      // only a dot actually written is the leading dot RFC 6265 ignores.
+      // Not when mapping exposed a leading dot too: the call below would strip it as a
+      // written one.
+      if (ascii?.endsWith('.')) {
+        return raw === withoutLeadingDot &&
+          !ascii.endsWith('..') &&
+          !ascii.startsWith('.')
+          ? this.normalizeStoredDomain(ascii.slice(0, -1))
+          : '';
+      }
+
       // IDNA alone permits URL delimiters in non-strict mode. Reject anything
       // that URL parsing would interpret as credentials, a port, a path, or an escape.
       return ascii &&
@@ -737,18 +1028,28 @@ export class CookieJar {
   }
 
   private parseCookieString(header: string): ParsedCookie | null {
-    const parts = header.split(';').map((p) => p.trim());
-    const nameValuePart = parts[0];
-    const eqIndex = nameValuePart.indexOf('=');
-
-    if (eqIndex === -1) {
+    // A control character other than a tab anywhere ignores the whole line (RFC 6265bis).
+    // eslint-disable-next-line no-control-regex -- control characters are what is refused
+    if (/[\u0000-\u0008\u000a-\u001f\u007f]/.test(header)) {
       return null;
     }
 
-    const name = nameValuePart.slice(0, eqIndex).trim();
-    const value = nameValuePart.slice(eqIndex + 1).trim();
+    // Trimmed of spaces and tabs only, as RFC 6265bis trims. `trim()` also took U+00A0 -
+    // the last byte of a UTF-8 `à` or `Р` once Node and Bun read the header as latin1 -
+    // and sent the value back cut in the middle of a character.
+    const parts = header.split(';').map(trimSpacesAndTabs);
+    const nameValuePart = parts[0] ?? '';
+    const eqIndex = nameValuePart.indexOf('=');
 
-    if (!name) {
+    // No `=` is a nameless cookie, its whole text the value (RFC 6265bis), as browsers
+    // store it and send it back as `Cookie: foo`.
+    const name =
+      eqIndex === -1 ? '' : trimSpacesAndTabs(nameValuePart.slice(0, eqIndex));
+    const value = trimSpacesAndTabs(
+      eqIndex === -1 ? nameValuePart : nameValuePart.slice(eqIndex + 1),
+    );
+
+    if (name === '' && value === '') {
       return null;
     }
 
@@ -757,9 +1058,9 @@ export class CookieJar {
     for (let i = 1; i < parts.length; i++) {
       const part = parts[i];
       const eqIdx = part.indexOf('=');
-      const attrName = (eqIdx === -1 ? part : part.slice(0, eqIdx))
-        .trim()
-        .toLowerCase();
+      const attrName = trimSpacesAndTabs(
+        eqIdx === -1 ? part : part.slice(0, eqIdx),
+      ).toLowerCase();
 
       // Flag attributes are matched by name; RFC 6265bis ignores any value.
       if (attrName === 'secure') {
@@ -767,14 +1068,28 @@ export class CookieJar {
       } else if (attrName === 'httponly') {
         cookie.httpOnly = true;
       } else {
-        if (eqIdx === -1) {
+        // A bare attribute (`; Path`) has an empty value, as RFC 6265bis §5.6 reads it -
+        // the same as `; Path=`. Skipped, it left an earlier `Path=/` in force, which let
+        // `__Host-id=1; Secure; Path=/; Path` past the prefix rule.
+        const attrValue =
+          eqIdx === -1 ? '' : trimSpacesAndTabs(part.slice(eqIdx + 1));
+
+        // An attribute value over 1024 octets is ignored, as RFC 6265bis ignores it.
+        // Counted in characters: the header arrives read as latin1, one character per
+        // octet on the wire, and encoding it as UTF-8 counted each byte above 0x7F twice.
+        if (attrValue.length > 1024) {
           continue;
         }
 
-        const attrValue = part.slice(eqIdx + 1).trim();
-
         switch (attrName) {
           case 'domain': {
+            // The last one wins, an empty one included: `Domain=example.com; Domain=` is
+            // host-only, as Chrome and Firefox store it. RFC 6265bis §5.6.3 would ignore
+            // the empty one and keep the cookie on every subdomain; the narrower reading
+            // is kept on purpose.
+            // One leading dot dropped, as RFC 6265 §5.2.3 drops it; a second is kept, so
+            // `Domain=..example.com` names no host and its cookie is ignored (see
+            // `storeParsed`), as browsers ignore it, rather than becoming `example.com`.
             cookie.domain = attrValue.startsWith('.')
               ? attrValue.slice(1)
               : attrValue;
@@ -791,8 +1106,9 @@ export class CookieJar {
             break;
           }
           case 'expires': {
-            const date = new Date(attrValue);
-            if (!isNaN(date.getTime())) {
+            const date = parseCookieDate(attrValue);
+            if (date) {
+              // Capped where it is stored (see `capLifetime`), as every cookie is.
               cookie.expires = date;
             }
             break;
@@ -800,13 +1116,13 @@ export class CookieJar {
           case 'max-age': {
             // RFC 6265 §5.2.2 — an optional `-` then digits, and nothing else; otherwise
             // the attribute is ignored. `parseInt` read a prefix, so `Max-Age=60abc` was
-            // a minute and `Max-Age=1e9` was one second. Capped so `createdAt + maxAge *
-            // 1000` stays a finite number of milliseconds; a longer lifetime is
-            // indistinguishable from it.
+            // a minute and `Max-Age=1e9` was one second. Bounded here only so it is a
+            // finite number: a run of digits too long for one reads as `Infinity`, which
+            // `setCookie` refuses. The lifetime cap itself is `capLifetime`'s.
             if (MAX_AGE_PATTERN.test(attrValue)) {
               cookie.maxAge = Math.min(
                 parseInt(attrValue, 10),
-                MAX_COOKIE_MAX_AGE_SECONDS,
+                Number.MAX_SAFE_INTEGER,
               );
             }
             break;
@@ -819,6 +1135,10 @@ export class CookieJar {
               cookie.sameSite = 'Lax';
             } else if (lower === 'none') {
               cookie.sameSite = 'None';
+            } else {
+              // The last `SameSite` wins, an unrecognized one included: it is the
+              // default enforcement (RFC 6265bis §5.6.7), not the earlier value.
+              delete cookie.sameSite;
             }
             break;
           }
@@ -839,10 +1159,13 @@ export class CookieJar {
     name: string,
     domain: string,
     path: string,
+    isHostOnly: boolean,
   ): void {
     domain = this.normalizeStoredDomain(domain);
     const apex = this.apexFor(domain);
-    this.buckets.get(apex)?.delete(this.cookieKey(name, domain, path));
+    this.buckets
+      .get(apex)
+      ?.delete(this.cookieKey(name, domain, path, isHostOnly));
     this.pruneEmptyBucket(apex);
   }
 
@@ -906,6 +1229,13 @@ export class CookieJar {
   }
 
   private storeParsed(parsed: ParsedCookie, url: string): void {
+    if (
+      parsed.name.length + parsed.value.length >
+      MAX_COOKIE_NAME_VALUE_BYTES
+    ) {
+      return;
+    }
+
     let address: URL;
 
     try {
@@ -927,6 +1257,11 @@ export class CookieJar {
       return;
     }
 
+    // RFC 6265bis §5.7: `SameSite=None` without `Secure` is ignored, as browsers ignore it.
+    if (parsed.sameSite === 'None' && parsed.secure !== true) {
+      return;
+    }
+
     let domain: string;
 
     // Set when `Domain=` names a public suffix that is also the request host. RFC 6265bis
@@ -936,6 +1271,17 @@ export class CookieJar {
     let isPublicSuffixHostOnly = false;
 
     if (parsed.domain) {
+      // A dot the parser left: `Domain=..example.com`, which no host domain-matches. And
+      // a non-ASCII one, which RFC 6265bis §5.6.3 ignores: header bytes arrive read as
+      // latin1, so `Domain=m\xFCnchen.de` reads as `münchen.de` and IDNA made it the
+      // registrable `xn--mnchen-3ya.de`. A server sends the `xn--` form.
+      if (
+        parsed.domain.startsWith('.') ||
+        /[\u0080-\uffff]/.test(parsed.domain)
+      ) {
+        return;
+      }
+
       // RFC 6265 §5.2.3 / §5.1.3: ignore a leading dot and match domains
       // case-insensitively. URL.host is lowercased but Domain= is not.
       const normalizedDomain = this.normalizeStoredDomain(parsed.domain);
@@ -977,10 +1323,17 @@ export class CookieJar {
 
     const path = this.resolvedCookiePath(parsed, address.pathname);
 
-    // Prefix validation uses the effective path. An omitted Path attribute on a root
-    // request resolves to `/` and therefore satisfies `__Host-`; an omission whose
-    // RFC default path is deeper than `/` still does not.
-    if (!this.hasValidNamePrefix({ ...parsed, path })) {
+    // Prefix validation reads the `Path` attribute as sent: `__Host-` needs an explicit
+    // `Path=/`, as RFC 6265bis §5.7 and browsers require - an omitted one that would
+    // resolve to `/` from a root request does not count.
+    if (!this.hasValidNamePrefix(parsed)) {
+      return;
+    }
+
+    // A nameless cookie posing as a prefixed one - `__Host-x; Max-Age=0` - is ignored
+    // whole (RFC 6265bis §5.7), before the deletions below: it deleted the jar's
+    // nameless cookie, which `setCookie` would never have let it replace.
+    if (parsed.name === '' && /^__(secure|host)-/i.test(parsed.value)) {
       return;
     }
 
@@ -997,9 +1350,15 @@ export class CookieJar {
       return;
     }
 
+    // Align with `if (parsed.domain)` above: empty `Domain=` / `Domain=.` parses to
+    // `''` and must be host-only like a missing Domain attribute. A `Domain=` naming a
+    // public suffix that is the request host is host-only too, per RFC 6265bis §5.5:
+    // the cookie is kept, but only for the host that set it.
+    const isHostOnly = !parsed.domain || isPublicSuffixHostOnly;
+
     // Max-Age=0 or negative → delete the cookie
     if (parsed.maxAge !== undefined && parsed.maxAge <= 0) {
-      this.deleteCookieByIdentity(parsed.name, domain, path);
+      this.deleteCookieByIdentity(parsed.name, domain, path, isHostOnly);
       return;
     }
 
@@ -1011,7 +1370,7 @@ export class CookieJar {
       parsed.expires.getTime() <= Date.now() &&
       parsed.maxAge === undefined
     ) {
-      this.deleteCookieByIdentity(parsed.name, domain, path);
+      this.deleteCookieByIdentity(parsed.name, domain, path, isHostOnly);
       return;
     }
 
@@ -1019,11 +1378,7 @@ export class CookieJar {
       name: parsed.name,
       value: parsed.value,
       domain,
-      // Align with `if (parsed.domain)` above: empty `Domain=` / `Domain=.` parses to
-      // `''` and must be host-only like a missing Domain attribute. A `Domain=` naming a
-      // public suffix that is the request host is host-only too, per RFC 6265bis §5.5:
-      // the cookie is kept, but only for the host that set it.
-      hostOnly: !parsed.domain || isPublicSuffixHostOnly,
+      hostOnly: isHostOnly,
       path,
       createdAt: Date.now(),
     };
@@ -1066,7 +1421,8 @@ export class CookieJar {
    * RFC 6265bis §4.1.3 cookie name prefixes, matched case-insensitively as browsers do.
    *
    * `__Secure-` requires the `Secure` attribute. `__Host-` requires `Secure`, no
-   * `Domain` attribute (so the cookie is host-only) and `Path=/`. A cookie that claims
+   * non-empty `Domain` attribute (so the cookie is host-only; an empty `Domain=` reads
+   * as absent) and `Path=/`. A cookie that claims
    * a prefix without meeting its conditions is refused outright rather than stored with
    * the guarantees the prefix promises to a server reading it back. The secure-scheme
    * half of both prefixes is enforced by the `Secure` check in `storeParsed`; the
@@ -1090,7 +1446,11 @@ export class CookieJar {
    * Whether the jar already holds a Secure cookie named `name` whose scope meets a new
    * cookie stored for `domain` / `path` - RFC 6265bis §5.7 step 21: the stored cookie's
    * domain domain-matches the new cookie's domain *or vice versa*, and either path
-   * path-matches the other. Both directions, and without regard to `hostOnly`: a
+   * path-matches the other. The RFC asks only that the new path path-match the stored
+   * one; the reverse is refused too, on purpose and stricter than browsers: a `/`
+   * cookie planted beside a Secure `/admin` one is sent with it, and a server that reads
+   * the last of two same-named cookies reads the plant. Both directions, and without
+   * regard to `hostOnly`: a
    * host-only Secure cookie on `app.example.com` is shadowed by a `Domain=example.com`
    * cookie planted from `http://example.com`, which the send path would deliver beside
    * it, so the wider plant must be refused as much as the narrower one.
@@ -1104,6 +1464,9 @@ export class CookieJar {
     path: string,
   ): boolean {
     const now = Date.now();
+    // Read once, not once per stored cookie in each direction: normalizing it runs IDNA
+    // and a URL parse.
+    const preparedDomain = this.prepareHost(domain);
     // Matching scopes can cross bucket boundaries at nested public suffixes,
     // in either direction (a wider insecure cookie can shadow a narrow secure one).
     for (const bucket of this.buckets.values()) {
@@ -1119,8 +1482,8 @@ export class CookieJar {
         }
 
         const isDomainMatch =
-          this.domainMatches(domain, scope.domain) ||
-          this.domainMatches(scope.domain, domain);
+          this.domainMatches(preparedDomain, scope.preparedDomain) ||
+          this.domainMatches(scope.preparedDomain, preparedDomain);
 
         if (
           isDomainMatch &&
@@ -1256,11 +1619,19 @@ export class CookieJar {
   private hasReadableExpiry(cookie: CookieInput): boolean {
     const { expires, maxAge, createdAt } = cookie;
 
-    if (
-      expires !== undefined &&
-      (!(expires instanceof Date) || Number.isNaN(expires.getTime()))
-    ) {
-      return false;
+    // A `Date` read by its time, not `instanceof`, so one from another realm counts.
+    if (expires !== undefined) {
+      let time: number;
+
+      try {
+        time = Date.prototype.getTime.call(expires);
+      } catch {
+        return false;
+      }
+
+      if (Number.isNaN(time)) {
+        return false;
+      }
     }
 
     if (maxAge !== undefined && !Number.isFinite(maxAge)) {
@@ -1285,11 +1656,21 @@ export class CookieJar {
       return false;
     }
 
-    // A name is also non-empty and holds no `=` (its own delimiter) and no space.
+    // A name holds no `=` (its own delimiter) and no space. It may be empty - a nameless
+    // cookie, sent as its value alone (RFC 6265bis) - when the value is not: and then the
+    // value holds no `=`, or it would be read back as a name, and does not pose as a
+    // `__Secure-` / `__Host-` cookie, which RFC 6265bis refuses.
+    if (name === '') {
+      return (
+        value !== '' &&
+        !value.includes('=') &&
+        !/^__(secure|host)-/i.test(value) &&
+        isHeaderSafeCookieText(value, '')
+      );
+    }
+
     return (
-      name !== '' &&
-      isHeaderSafeCookieText(name, '= ') &&
-      isHeaderSafeCookieText(value, '')
+      isHeaderSafeCookieText(name, '= \t') && isHeaderSafeCookieText(value, '')
     );
   }
 
@@ -1419,13 +1800,38 @@ export class CookieJar {
     }
   }
 
-  private domainMatches(requestHost: string, cookieDomain: string): boolean {
-    if (!cookieDomain) {
+  /**
+   * A host to match many cookie domains against, its IP literal and normalized form read
+   * once (the normalized form only when first asked for).
+   */
+  private prepareHost(host: string): PreparedHost {
+    return { host, canonicalIP: this.tryCanonicalIPLiteral(host) };
+  }
+
+  private normalizedPreparedHost(prepared: PreparedHost): string {
+    prepared.normalized ??= this.normalizeStoredDomain(prepared.host);
+    return prepared.normalized;
+  }
+
+  private domainMatches(
+    requestHostInput: string | PreparedHost,
+    cookieDomainInput: string | PreparedHost,
+  ): boolean {
+    const cookieDomain =
+      typeof cookieDomainInput === 'string'
+        ? this.prepareHost(cookieDomainInput)
+        : cookieDomainInput;
+
+    if (!cookieDomain.host) {
       return true;
     }
 
-    const canonicalRequestHost = this.tryCanonicalIPLiteral(requestHost);
-    const canonicalCookieDomain = this.tryCanonicalIPLiteral(cookieDomain);
+    const requestHost =
+      typeof requestHostInput === 'string'
+        ? this.prepareHost(requestHostInput)
+        : requestHostInput;
+    const canonicalRequestHost = requestHost.canonicalIP;
+    const canonicalCookieDomain = cookieDomain.canonicalIP;
 
     if (canonicalRequestHost !== null && canonicalCookieDomain !== null) {
       return canonicalRequestHost === canonicalCookieDomain;
@@ -1437,8 +1843,8 @@ export class CookieJar {
       return false;
     }
 
-    const req = this.normalizeStoredDomain(requestHost);
-    const cook = this.normalizeStoredDomain(cookieDomain);
+    const req = this.normalizedPreparedHost(requestHost);
+    const cook = this.normalizedPreparedHost(cookieDomain);
 
     if (req === cook) {
       return true;
@@ -1453,19 +1859,27 @@ export class CookieJar {
   }
 
   private hostOnlyDomainMatches(
-    requestHost: string,
-    cookieDomain: string,
+    requestHostInput: string | PreparedHost,
+    cookieDomainInput: string | PreparedHost,
   ): boolean {
-    const canonicalRequestHost = this.tryCanonicalIPLiteral(requestHost);
-    const canonicalCookieDomain = this.tryCanonicalIPLiteral(cookieDomain);
+    const requestHost =
+      typeof requestHostInput === 'string'
+        ? this.prepareHost(requestHostInput)
+        : requestHostInput;
+    const cookieDomain =
+      typeof cookieDomainInput === 'string'
+        ? this.prepareHost(cookieDomainInput)
+        : cookieDomainInput;
+    const canonicalRequestHost = requestHost.canonicalIP;
+    const canonicalCookieDomain = cookieDomain.canonicalIP;
 
     if (canonicalRequestHost !== null && canonicalCookieDomain !== null) {
       return canonicalRequestHost === canonicalCookieDomain;
     }
 
     return (
-      this.normalizeStoredDomain(requestHost) ===
-      this.normalizeStoredDomain(cookieDomain)
+      this.normalizedPreparedHost(requestHost) ===
+      this.normalizedPreparedHost(cookieDomain)
     );
   }
 
@@ -1493,4 +1907,20 @@ export class CookieJar {
       );
     }
   }
+}
+
+/** `text` without leading and trailing spaces and tabs, the only whitespace RFC 6265bis trims. */
+function trimSpacesAndTabs(text: string): string {
+  let start = 0;
+  let end = text.length;
+
+  while (start < end && (text[start] === ' ' || text[start] === '\t')) {
+    start++;
+  }
+
+  while (end > start && (text[end - 1] === ' ' || text[end - 1] === '\t')) {
+    end--;
+  }
+
+  return text.slice(start, end);
 }

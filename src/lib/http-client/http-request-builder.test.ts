@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { HTTPRequestBuilder } from './http-request-builder';
 import type { BuilderSendContext } from './http-request-builder';
-import type { HTTPResponse } from './types';
+import type { HTTPRequestOptions, HTTPResponse } from './types';
 
 // Captures the context passed to sendFn so tests can inspect it.
 function makeSendFn(
@@ -218,6 +218,20 @@ describe('HTTPRequestBuilder', () => {
       expect(requireContext().options.headers['x-b']).toBe('2');
     });
 
+    test('.headers() keeps a __proto__ header as an own key', async () => {
+      const { builder, requireContext } = makeBuilder();
+      const source = JSON.parse('{"__proto__": ["a", "b"]}') as Record<
+        string,
+        string[]
+      >;
+      await builder.headers(source).send();
+      const headers = requireContext().options.headers;
+      expect(Object.getPrototypeOf(headers)).toBe(Object.prototype);
+      expect(
+        Object.getOwnPropertyDescriptor(headers, '__proto__')?.value,
+      ).toEqual(['a', 'b']);
+    });
+
     test('forwards params', async () => {
       const { builder, requireContext } = makeBuilder();
       await builder.params({ page: 1 }).send();
@@ -291,6 +305,87 @@ describe('HTTPRequestBuilder', () => {
   });
 
   describe('constructor options', () => {
+    const firstValues = {
+      headers: { 'x-first': 'yes' },
+      params: { page: 1 },
+      body: { first: true },
+      timeout: 1000,
+      maxResponseBytes: 2048,
+      signal: new AbortController().signal,
+      retryPolicy: null,
+      retryNonIdempotentMethods: false,
+      label: 'first-label',
+      onUploadProgress: () => {},
+      onDownloadProgress: () => {},
+      onAttemptStart: () => {},
+      onAttemptEnd: () => {},
+      streamResponse: () => null,
+    } satisfies Required<HTTPRequestOptions>;
+
+    test.each(Object.keys(firstValues) as (keyof typeof firstValues)[])(
+      'captures the first value of the %s getter exactly once',
+      async (key) => {
+        const { sendFn, requireContext } = makeSendFn();
+        let reads = 0;
+        const options: HTTPRequestOptions = {};
+        Object.defineProperty(options, key, {
+          get() {
+            reads += 1;
+            return reads === 1 ? firstValues[key] : undefined;
+          },
+        });
+
+        const builder = new HTTPRequestBuilder('GET', '/test', sendFn, options);
+        await builder.send();
+
+        expect(reads).toBe(1);
+        expect(requireContext().options[key]).toEqual(firstValues[key]);
+      },
+    );
+
+    test('applies each option before reading the next and stops on validation failure', () => {
+      const { sendFn } = makeSendFn();
+      const events: string[] = [];
+      const options: HTTPRequestOptions = {
+        get headers() {
+          events.push('read headers');
+          return {
+            get 'x-first'() {
+              events.push('apply headers');
+              return 'yes';
+            },
+          };
+        },
+        get params() {
+          events.push('read params');
+          return undefined;
+        },
+        get body() {
+          events.push('read body');
+          return undefined;
+        },
+        get timeout() {
+          events.push('read timeout');
+          return Number.NaN;
+        },
+        get signal() {
+          events.push('read signal');
+          return undefined;
+        },
+      };
+
+      expect(
+        () => new HTTPRequestBuilder('GET', '/test', sendFn, options),
+      ).toThrow();
+      expect(events).toEqual([
+        'read headers',
+        'apply headers',
+        'read params',
+        'read body',
+        'read timeout',
+      ]);
+    });
+
     test('applies options passed to constructor', async () => {
       const { sendFn, requireContext } = makeSendFn();
       const builder = new HTTPRequestBuilder('GET', '/test', sendFn, {
@@ -526,17 +621,18 @@ describe('HTTPRequestBuilder', () => {
   });
 
   describe('cancel()', () => {
-    test('calls cancelFn and returns true when in-flight', async () => {
+    test('calls cancelFn and returns its result when in-flight', async () => {
       let wasCancelCalled = false;
 
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
+          return 'cancelled';
         });
       });
 
       await builder.send();
-      expect(builder.cancel()).toBe(true);
+      expect(builder.cancel()).toBe('cancelled');
       expect(wasCancelCalled).toBe(true);
     });
 
@@ -546,6 +642,7 @@ describe('HTTPRequestBuilder', () => {
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setCancelFn((reason) => {
           capturedReason = reason;
+          return 'cancelled';
         });
       });
 
@@ -560,6 +657,7 @@ describe('HTTPRequestBuilder', () => {
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setCancelFn((reason) => {
           capturedReason = reason;
+          return 'cancelled';
         });
       });
 
@@ -568,9 +666,9 @@ describe('HTTPRequestBuilder', () => {
       expect(capturedReason).toBeUndefined();
     });
 
-    test('before send: sets state to cancelled and returns true', () => {
+    test('before send: sets state to cancelled and returns cancelled', () => {
       const { builder } = makeBuilder();
-      expect(builder.cancel()).toBe(true);
+      expect(builder.cancel()).toBe('cancelled');
       expect(builder.state).toBe('cancelled');
     });
 
@@ -594,49 +692,73 @@ describe('HTTPRequestBuilder', () => {
       );
     });
 
-    test('returns false when state is completed', async () => {
+    test('returns already_settled when state is completed', async () => {
       let wasCancelCalled = false;
 
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setState('completed');
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
+          return 'cancelled';
         });
       });
 
       await builder.send();
-      expect(builder.cancel()).toBe(false);
+      expect(builder.cancel()).toBe('already_settled');
       expect(wasCancelCalled).toBe(false);
     });
 
-    test('returns false when state is cancelled', async () => {
+    test('returns already_cancelled when state is cancelled', async () => {
       let wasCancelCalled = false;
 
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setState('cancelled');
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
+          return 'cancelled';
         });
       });
 
       await builder.send();
-      expect(builder.cancel()).toBe(false);
+      expect(builder.cancel()).toBe('already_cancelled');
       expect(wasCancelCalled).toBe(false);
     });
 
-    test('returns false when state is failed', async () => {
+    test('returns already_settled when state is failed', async () => {
       let wasCancelCalled = false;
 
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setState('failed');
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
+          return 'cancelled';
         });
       });
 
       await builder.send();
-      expect(builder.cancel()).toBe(false);
+      expect(builder.cancel()).toBe('already_settled');
       expect(wasCancelCalled).toBe(false);
     });
   });
+});
+
+test('headers() refuses a Headers, Map or array instead of dropping its entries', () => {
+  for (const value of [
+    new Headers({ authorization: 'Bearer t' }),
+    new Map([['authorization', 'Bearer t']]),
+    [['authorization', 'Bearer t']],
+  ]) {
+    const { sendFn } = makeSendFn();
+    const builder = new HTTPRequestBuilder('GET', '/x', sendFn);
+    expect(() => builder.headers(value as never)).toThrow(
+      'HTTPRequestBuilder headers must be a plain object',
+    );
+  }
+
+  // Nullish stays a no-op, and a null-prototype record is a plain record.
+  const { sendFn } = makeSendFn();
+  const builder = new HTTPRequestBuilder('GET', '/x', sendFn);
+  expect(builder.headers(null)).toBe(builder);
+  const record = Object.assign(Object.create(null) as object, { 'x-a': '1' });
+  expect(builder.headers(record as Record<string, string>)).toBe(builder);
 });

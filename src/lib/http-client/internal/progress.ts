@@ -1,5 +1,7 @@
 import type { AdapterProgressEvent } from '../types';
 import { safeHandleCallback } from '../../safe-handle-callback';
+import { readBinaryByteLength } from '../../internal/binary-view';
+import { utf8ByteLength } from './utf8-length';
 
 /**
  * Wrap a caller's progress callback so a throw from it cannot be mistaken for a transport
@@ -47,4 +49,56 @@ export function guardProgressCallback(
     // else's function, and it covers a non-function, a throw and a rejection alike.
     safeHandleCallback(label, callback, event);
   };
+}
+
+/**
+ * The byte size of a request body as the browser adapters can know it without reading it:
+ * `0` for no body, the encoded length of a string, a binary body's `byteLength`, a `Blob`'s
+ * `size`, and `undefined` when it cannot be known up front (a `FormData`, a stream). Their
+ * terminal upload event reports it, so `loaded` / `total` mean bytes, as on NodeAdapter,
+ * rather than a stand-in `1`.
+ */
+export function knownBodyByteLength(body: unknown): number | undefined {
+  if (body === undefined || body === null) {
+    return 0;
+  }
+
+  if (typeof body === 'string') {
+    return utf8ByteLength(body);
+  }
+
+  if (typeof body !== 'object') {
+    return undefined;
+  }
+
+  // Bytes by their internal slot, as the response limit measures them: a buffer of any
+  // kind, from any realm, at its real size rather than the one it reports.
+  const byteLength = readBinaryByteLength(body);
+  if (byteLength !== null) {
+    return byteLength;
+  }
+
+  // Guarded: the body is the caller's, and a Proxy whose `getPrototypeOf` throws made
+  // this `instanceof` check throw from inside an XHR event listener - an uncaught
+  // exception on the global channel rather than a size that cannot be known.
+  try {
+    if (typeof Blob !== 'undefined' && body instanceof Blob) {
+      return body.size;
+    }
+  } catch {
+    // Unknowable, as for a body of another kind.
+  }
+
+  return undefined;
+}
+
+/** The terminal upload event for a body of `byteLength` bytes, or of unknown size. */
+export function uploadCompleteEvent(byteLength: number | undefined): {
+  loaded: number;
+  total: number;
+  progress: 1;
+} {
+  const bytes = byteLength ?? 0;
+
+  return { loaded: bytes, total: bytes, progress: 1 };
 }

@@ -1,4 +1,7 @@
+import { isPlainRecord } from './internal/plain-record';
+import { describeValue } from '../internal/describe-value';
 import { parse } from 'tldts';
+import { endsInANumber } from '../domain-utils/helpers';
 
 /**
  * Caller adjustments to the Public Suffix List the jar scopes cookies with.
@@ -56,10 +59,19 @@ function toLabels(hostname: string): string[] {
  * going somewhere it should not, months later. Every other refusal in this file is a
  * response to a remote server and has to keep the process running.
  */
-function normalizeSuffix(entry: unknown, listName: string): string {
+function normalizeSuffix(
+  entry: unknown,
+  listName: string,
+  index: number,
+): string {
+  // Named by its place in the list, never its text, as every entry refused here is. The
+  // only text a refusal here quotes is an unknown field's key, an option name and not a
+  // hostname.
+  const entryName = `publicSuffixes.${listName}[${String(index)}]`;
+
   if (typeof entry !== 'string') {
     throw new TypeError(
-      `publicSuffixes.${listName} must hold strings; received ${typeof entry}`,
+      `${entryName} must be a string (got ${entry === null ? 'null' : typeof entry})`,
     );
   }
 
@@ -71,48 +83,54 @@ function normalizeSuffix(entry: unknown, listName: string): string {
     : stripped.toLowerCase();
 
   if (normalized === '') {
-    throw new TypeError(
-      `publicSuffixes.${listName} must not hold empty suffixes`,
-    );
+    throw new TypeError(`${entryName} is empty`);
   }
 
   if (normalized.includes('*')) {
     throw new TypeError(
-      `publicSuffixes.${listName} does not support wildcards; list '${entry}' as a plain suffix`,
+      `${entryName} is a wildcard, which publicSuffixes does not support; list it as a plain suffix`,
     );
   }
 
   if (normalized.length > 253) {
-    throw new TypeError(
-      `publicSuffixes.${listName} entry '${entry}' is longer than a hostname`,
-    );
+    throw new TypeError(`${entryName} is longer than a hostname`);
   }
 
   for (const label of normalized.split('.')) {
     if (label === '') {
-      throw new TypeError(
-        `publicSuffixes.${listName} entry '${entry}' has an empty label`,
-      );
+      throw new TypeError(`${entryName} has an empty label`);
     }
 
     // Overrides are hostname suffixes, not URLs or arbitrary match strings. Keeping the
     // accepted form deliberately narrow also prevents a typo such as a scheme, slash or
     // whitespace from silently installing a rule that can never match a request host.
-    if (label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)) {
-      throw new TypeError(
-        `publicSuffixes.${listName} entry '${entry}' is not a valid hostname suffix`,
-      );
+    // As narrow as the hosts the jar stores, and no narrower: letters, digits, `_` and
+    // hyphens, an edge hyphen included, so a `my_net` the jar keeps cookies for can be
+    // declared a suffix to isolate its tenants.
+    if (label.length > 63 || !/^[a-z0-9_-]+$/.test(label)) {
+      throw new TypeError(`${entryName} is not a valid hostname suffix`);
     }
+  }
+
+  // A last label the URL parser reads as a number, decimal or hex (`0x1f`, `0x`): an IP
+  // address, which the jar answers before it consults any suffix rule, or a name the
+  // parser reads as one (`corp.123`), which no request host can be. Either way the entry
+  // could never take effect.
+  if (endsInANumber(normalized.split('.').at(-1) ?? '')) {
+    throw new TypeError(
+      `${entryName} ends in a number, so no request host can match it (an IP address is never a public suffix)`,
+    );
   }
 
   return normalized;
 }
 
+/** A list's suffixes normalized, index for index, so a refusal can name an entry's place. */
 function normalizeList(
   entries: readonly string[] | undefined,
   listName: string,
-): ReadonlySet<string> {
-  const result = new Set<string>();
+): string[] {
+  const result: string[] = [];
 
   if (entries === undefined) {
     return result;
@@ -122,8 +140,8 @@ function normalizeList(
     throw new TypeError(`publicSuffixes.${listName} must be an array`);
   }
 
-  for (const entry of entries) {
-    result.add(normalizeSuffix(entry, listName));
+  for (const [index, entry] of entries.entries()) {
+    result.push(normalizeSuffix(entry, listName, index));
   }
 
   return result;
@@ -150,14 +168,38 @@ export class PublicSuffixResolver {
   private readonly hasOverrides: boolean;
 
   constructor(overrides?: PublicSuffixOverrides) {
-    this.added = normalizeList(overrides?.add, 'add');
-    this.removed = normalizeList(overrides?.remove, 'remove');
+    // Shape-checked, as every entry is: `publicSuffixes: ['corp.internal']` (the list
+    // given where `{ add }` belongs) or a misspelled `{ ad: [...] }` built a jar with no
+    // overrides at all, leaving the tenants the caller meant to isolate sharing cookies.
+    if (overrides !== undefined) {
+      // A plain object: a `Map` keeps its entries off its own properties, so it passed
+      // the key check below with no keys and built a jar with no overrides.
+      const candidate: unknown = overrides;
+      if (!isPlainRecord(candidate)) {
+        throw new TypeError(
+          `publicSuffixes must be a plain object with 'add' and/or 'remove' lists (got ${Array.isArray(candidate) ? 'an array' : describeValue(candidate)})`,
+        );
+      }
 
-    for (const suffix of this.added) {
-      for (const removed of this.removed) {
-        if (suffix === removed || suffix.endsWith(`.${removed}`)) {
+      for (const key of Object.keys(overrides)) {
+        if (key !== 'add' && key !== 'remove') {
           throw new TypeError(
-            `publicSuffixes cannot add '${suffix}' beneath removed suffix '${removed}'; shared cookies conflict with tenant isolation`,
+            `publicSuffixes has an unknown field '${key}'; only 'add' and 'remove' are read`,
+          );
+        }
+      }
+    }
+
+    const added = normalizeList(overrides?.add, 'add');
+    const removed = normalizeList(overrides?.remove, 'remove');
+    this.added = new Set(added);
+    this.removed = new Set(removed);
+
+    for (const [addIndex, suffix] of added.entries()) {
+      for (const [removeIndex, removedSuffix] of removed.entries()) {
+        if (suffix === removedSuffix || suffix.endsWith(`.${removedSuffix}`)) {
+          throw new TypeError(
+            `publicSuffixes.add[${String(addIndex)}] is, or is beneath, publicSuffixes.remove[${String(removeIndex)}]; shared cookies conflict with tenant isolation`,
           );
         }
       }
@@ -196,29 +238,7 @@ export class PublicSuffixResolver {
       return false;
     }
 
-    const result = parse(normalized, { allowPrivateDomains: true });
-
-    if (result.isIp) {
-      return false;
-    }
-
-    if (labels.length === 1) {
-      return true;
-    }
-
-    // `domain === null` says no registrable name sits under this hostname, which is true
-    // both for a listed suffix and for a bare name the list has never heard of. The
-    // section flags separate them: `com` and `co.uk` are ICANN, `github.io` and
-    // `herokuapp.com` are private, and `localhost` is neither.
-    return (
-      result.domain === null &&
-      (result.isIcann === true || result.isPrivate === true)
-    );
-  }
-
-  /** Whether the caller explicitly removed this exact suffix from the bundled list. */
-  public isRemovedSuffix(hostname: string): boolean {
-    return this.removed.has(toLabels(hostname).join('.'));
+    return isBundledPublicSuffix(normalized);
   }
 
   /**
@@ -237,18 +257,28 @@ export class PublicSuffixResolver {
       // with `com` removed, a `Domain=com` cookie must still be reachable from a host
       // below a more-specific bundled suffix such as `app.blogspot.com`. Stopping at
       // `blogspot.com` first would admit the cookie but file the request elsewhere.
+      //
+      // Only a removal of something the bundled list does treat as a suffix: one below
+      // a registrable domain (`a.example.com`, or a suffix a later list dropped) widened
+      // nothing, and filing its hosts under it narrowed them - `Domain=example.com` from
+      // `x.a.example.com` was refused, and a domain clear of `example.com` missed them.
       for (let i = labels.length - 1; i >= 0; i--) {
         const candidate = labels.slice(i).join('.');
 
-        if (this.removed.has(candidate)) {
+        if (this.removed.has(candidate) && isBundledPublicSuffix(candidate)) {
           return candidate;
         }
       }
 
       // Parse the whole hostname so bundled wildcard exceptions remain in force.
       // Only caller additions may narrow that result; probing bundled suffixes
-      // individually loses the exception context (e.g. city.kawasaki.jp).
-      const bundled = parse(normalized, { allowPrivateDomains: true });
+      // individually loses the exception context (e.g. city.kawasaki.jp). Read
+      // without tldts's hostname check, as below: it finds no suffix at all for an
+      // edge-hyphen host, and an added suffix above a longer bundled one then won.
+      const bundled = parse(normalized, {
+        allowPrivateDomains: true,
+        validateHostname: false,
+      });
       const bundledLength = bundled.publicSuffix?.split('.').length ?? 0;
       for (let i = 0; i < labels.length; i++) {
         const candidate = labels.slice(i).join('.');
@@ -266,8 +296,49 @@ export class PublicSuffixResolver {
     // from quietly re-bucketing every unrelated internal name in the jar: the walk would
     // have filed `host.notcorp.acme` under itself and `notcorp.acme` under a second
     // bucket, so a cookie stored from one was invisible to the other.
+    const domain = parse(normalized, { allowPrivateDomains: true }).domain;
+    if (domain !== null) {
+      return domain;
+    }
+
+    // tldts reads no domain for a host with a hyphen at a label's edge
+    // (`-edge.example.com`), which the URL parser accepts and the jar keeps: its hostname
+    // check refuses it. Read again without that check - the suffix lookup itself is the
+    // same - so such a host is under `example.com`, not its own apex: its
+    // `Domain=example.com` cookies are kept and a domain clear of `example.com` reaches it.
     return (
-      parse(normalized, { allowPrivateDomains: true }).domain ?? normalized
+      parse(normalized, { allowPrivateDomains: true, validateHostname: false })
+        .domain ?? normalized
     );
   }
+}
+
+/** Whether the bundled list, without the caller's overrides, reads `normalized` as a public suffix. */
+function isBundledPublicSuffix(normalized: string): boolean {
+  const labels = normalized.split('.');
+
+  // Without tldts's hostname check, as `apexFor` reads it: with the check, a label
+  // starting or ending with a hyphen (`x-.ck` under `*.ck`) was read as no suffix at all,
+  // so a `Domain=x-.ck` cookie was stored for every tenant under it.
+  const result = parse(normalized, {
+    allowPrivateDomains: true,
+    validateHostname: false,
+  });
+
+  if (result.isIp) {
+    return false;
+  }
+
+  if (labels.length === 1) {
+    return true;
+  }
+
+  // `domain === null` says no registrable name sits under this hostname, which is true
+  // both for a listed suffix and for a bare name the list has never heard of. The
+  // section flags separate them: `com` and `co.uk` are ICANN, `github.io` and
+  // `herokuapp.com` are private, and `localhost` is neither.
+  return (
+    result.domain === null &&
+    (result.isIcann === true || result.isPrivate === true)
+  );
 }

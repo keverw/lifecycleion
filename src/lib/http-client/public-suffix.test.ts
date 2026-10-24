@@ -26,7 +26,6 @@ describe('PublicSuffixResolver', () => {
   test('removed ancestors share a bucket even beneath a private suffix', () => {
     const resolver = new PublicSuffixResolver({ remove: ['COM'] });
     expect(resolver.isPublicSuffix('com')).toBe(false);
-    expect(resolver.isRemovedSuffix('COM')).toBe(true);
     expect(resolver.apexFor('tenant.blogspot.com')).toBe('com');
   });
 

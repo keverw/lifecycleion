@@ -12,6 +12,8 @@ export default [
   ...tseslint.configs.recommendedTypeChecked,
   {
     ignores: [
+      // Worktrees the Claude desktop app creates inside the repo, each a full checkout
+      '.claude/**',
       // Build outputs
       '**/dist/**',
       '**/coverage/**',

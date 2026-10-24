@@ -48,7 +48,17 @@ describe('CookieJar', () => {
     jar = new CookieJar();
   });
 
-  test.each(['münchen.de', 'xn--mnchen-3ya.de', '.MÜNCHEN.de'])(
+  test('ignores a Set-Cookie whose Domain is not ASCII (RFC 6265bis)', () => {
+    for (const domain of ['münchen.de', '.MÜNCHEN.de', 'm\u00fcnchen.de']) {
+      jar.parseSetCookieHeader(
+        `session=x; Domain=${domain}; Path=/`,
+        'https://www.xn--mnchen-3ya.de/',
+      );
+    }
+    expect(jar.getAllCookies()).toEqual([]);
+  });
+
+  test.each(['xn--mnchen-3ya.de', '.XN--MNCHEN-3YA.de'])(
     'canonicalizes IDN Domain=%s',
     (domain) => {
       jar.parseSetCookieHeader(
@@ -173,8 +183,16 @@ describe('CookieJar', () => {
         path: '/',
         createdAt: Date.now(),
       });
-      expect(jar.getCookieFor('sid', 'http://[::1]/')).toBeDefined();
+      jar.setCookie({
+        name: 'bare',
+        value: 'y',
+        domain: '::1',
+        path: '/',
+        createdAt: Date.now(),
+      });
       expect(jar.getCookieFor('sid', 'http://[::1]/')?.value).toBe('x');
+      expect(jar.getCookieFor('bare', 'http://[::1]/')?.value).toBe('y');
+      expect(jar.getCookieFor('bare', 'http://[0:0::1]/')?.value).toBe('y');
     });
 
     test('returns true for .test TLD', () => {
@@ -331,10 +349,18 @@ describe('CookieJar', () => {
       expect(
         jar.setCookie({ ...base, name: 'sid', value: 'x\r\nX-Injected: 1' }),
       ).toBe(false);
+      // A tab is header-safe, and RFC 6265bis keeps a cookie that carries one.
       expect(jar.setCookie({ ...base, name: 'sid', value: 'tab\there' })).toBe(
+        true,
+      );
+      expect(jar.setCookie({ ...base, name: 'sid', value: 'bell\u0007' })).toBe(
         false,
       );
-      expect(jar.setCookie({ ...base, name: '', value: 'x' })).toBe(false);
+      // A nameless cookie is fine; a nameless one with nothing in it, or with an `=` that
+      // would read back as a name, is not.
+      expect(jar.setCookie({ ...base, name: '', value: 'x' })).toBe(true);
+      expect(jar.setCookie({ ...base, name: '', value: '' })).toBe(false);
+      expect(jar.setCookie({ ...base, name: '', value: 'a=b' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a=b', value: 'x' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a;b', value: 'x' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a b', value: 'x' })).toBe(false);
@@ -347,7 +373,8 @@ describe('CookieJar', () => {
         }),
       ).toBe(false);
 
-      expect(jar.getAllCookies()).toHaveLength(0);
+      // Only the tab-carrying `sid` and the nameless `x` above were stored.
+      expect(jar.getAllCookies()).toHaveLength(2);
 
       // What the header can carry: an empty value, and the characters RFC 6265 allows.
       expect(jar.setCookie({ ...base, name: 'empty', value: '' })).toBe(true);
@@ -730,14 +757,17 @@ describe('CookieJar', () => {
     });
 
     test('parses Expires attribute', () => {
-      // Use a fixed RFC date string to avoid timing sensitivity
+      // Within the 400-day lifetime cap, whole seconds as an HTTP-date carries them.
+      const expires = new Date(
+        Math.floor((Date.now() + 30 * 86_400_000) / 1000) * 1000,
+      );
       jar.parseSetCookieHeader(
-        'session=abc; Expires=Thu, 01 Jan 2099 00:00:00 GMT',
+        `session=abc; Expires=${expires.toUTCString()}`,
         'https://example.com',
       );
       const cookie = jar.getCookieFor('session', 'https://example.com');
       expect(cookie?.expires).toBeInstanceOf(Date);
-      expect(cookie?.expires?.getFullYear()).toBe(2099);
+      expect(cookie?.expires?.getTime()).toBe(expires.getTime());
     });
 
     test('parses Secure and SameSite=Strict', () => {
@@ -774,7 +804,7 @@ describe('CookieJar', () => {
 
     test('parses SameSite=None', () => {
       jar.parseSetCookieHeader(
-        'auth=token; SameSite=None',
+        'auth=token; SameSite=None; Secure',
         'https://example.com',
       );
       expect(jar.getCookieFor('auth', 'https://example.com')?.sameSite).toBe(
@@ -1315,6 +1345,13 @@ describe('CookieJar', () => {
       expect(
         jar.getCookieFor('session', 'https://api.mine.github.io')?.value,
       ).toBe('ok');
+      // A domain cookie, not a host-only one: another subdomain, and the domain itself.
+      expect(
+        jar.getCookieFor('session', 'https://www.mine.github.io')?.value,
+      ).toBe('ok');
+      expect(jar.getCookieFor('session', 'https://mine.github.io')?.value).toBe(
+        'ok',
+      );
       expect(
         jar.getCookieFor('session', 'https://other.github.io'),
       ).toBeUndefined();
@@ -1634,13 +1671,19 @@ describe('CookieJar', () => {
     test('canonicalizes a trailing root dot for domain and host-only cookies', () => {
       const domainCookie = new CookieJar();
 
+      // A real domain cookie: `localhost` is a public suffix, so `Domain=localhost` is
+      // stored host-only and never reached this path.
       domainCookie.parseSetCookieHeader(
-        'session=domain; Domain=localhost; Path=/',
-        'http://localhost./',
+        'session=domain; Domain=example.com; Path=/',
+        'https://www.example.com./',
       );
 
+      expect(domainCookie.getAllCookies()[0]?.hostOnly).toBe(false);
       expect(
-        domainCookie.getCookieFor('session', 'http://localhost/')?.value,
+        domainCookie.getCookieFor('session', 'https://www.example.com/')?.value,
+      ).toBe('domain');
+      expect(
+        domainCookie.getCookieFor('session', 'https://api.example.com/')?.value,
       ).toBe('domain');
 
       const hostOnlyCookie = new CookieJar();
@@ -1680,7 +1723,7 @@ describe('CookieJar', () => {
       [{ add: ['https://corp.internal'] }, 'scheme'],
       [{ add: ['corp internal'] }, 'whitespace'],
       [{ add: ['corp/internal'] }, 'path separator'],
-      [{ add: ['-corp.internal'] }, 'leading hyphen'],
+      [{ add: ['corp!.internal'] }, 'punctuation'],
       [{ add: [42 as unknown as string] }, 'non-string'],
       [{ add: ['corp.internal'], remove: ['corp.internal'] }, 'contradiction'],
     ])('throws on a %o config (%s)', (publicSuffixes) => {
@@ -1754,6 +1797,22 @@ describe('CookieJar', () => {
       const cookie = jar.getCookieFor('session', 'https://example.com');
       expect(cookie?.value).toBe('abc');
       expect(cookie?.domain).toBe('example.com');
+    });
+
+    test('a last empty Domain= or Domain=. makes the cookie host-only, as browsers store it', () => {
+      jar.parseSetCookieHeader(
+        'a=1; Domain=example.com; Domain=; Path=/',
+        'https://www.example.com',
+      );
+      jar.parseSetCookieHeader(
+        'b=2; Domain=example.com; Domain=.; Path=/',
+        'https://www.example.com',
+      );
+
+      expect(jar.getCookieFor('a', 'https://api.example.com')).toBeUndefined();
+      expect(jar.getCookieFor('a', 'https://www.example.com')?.value).toBe('1');
+      expect(jar.getCookieFor('b', 'https://api.example.com')).toBeUndefined();
+      expect(jar.getCookieFor('b', 'https://www.example.com')?.value).toBe('2');
     });
 
     test('empty Domain= or Domain=. is host-only and does not match subdomains', () => {
@@ -2053,22 +2112,15 @@ describe('CookieJar', () => {
       );
       expect(jar.getAllCookies()).toHaveLength(0);
 
+      // An omitted Path is refused even where it would default to `/`, as RFC 6265bis
+      // and browsers require the attribute.
       jar.parseSetCookieHeader('__Host-id=4; Secure', 'https://example.com/');
-      expect(jar.getCookieFor('__Host-id', 'https://example.com/')?.value).toBe(
-        '4',
-      );
       jar.parseSetCookieHeader('__Host-id=4b; Secure', 'https://example.com');
-      expect(jar.getCookieFor('__Host-id', 'https://example.com/')?.value).toBe(
-        '4b',
-      );
-
       jar.parseSetCookieHeader(
         '__Host-id=refused; Secure',
         'https://example.com/app/page',
       );
-      expect(
-        jar.getCookieFor('__Host-id', 'https://example.com/app/page')?.value,
-      ).toBe('4b');
+      expect(jar.getAllCookies()).toHaveLength(0);
 
       jar.parseSetCookieHeader(
         '__Host-id=5; Secure; Path=/',
@@ -3114,3 +3166,115 @@ test.each(['maxAge', 'createdAt', 'expires', 'getTime'])(
     expect(jar.getAllCookies().map((cookie) => cookie.name)).toEqual(['live']);
   },
 );
+
+describe('round 62', () => {
+  test('a cookie a header cannot carry is refused, so the host keeps its other cookies', () => {
+    const jar = new CookieJar();
+    expect(
+      jar.setCookie({ name: 'pref', value: 'café→x', domain: '127.0.0.1' }),
+    ).toBe(false);
+    jar.setCookie({ name: 'session', value: 'abc', domain: '127.0.0.1' });
+
+    expect(jar.getCookieHeaderString('http://127.0.0.1/')).toBe('session=abc');
+  });
+
+  test('a single-label host with an underscore keeps its cookies', () => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('a=1', 'http://my_service/');
+
+    expect(jar.getCookieHeaderString('http://my_service/')).toBe('a=1');
+  });
+
+  test('Expires is read with the RFC 6265 cookie-date algorithm', () => {
+    const jar = new CookieJar();
+    const inAnHour = new Date(Date.now() + 3_600_000);
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    const pad = (n: number) => String(n).padStart(2, '0');
+    // asctime form, no zone: read as UTC.
+    const asctime = `${days[inAnHour.getUTCDay()]} ${months[inAnHour.getUTCMonth()]} ${pad(inAnHour.getUTCDate())} ${pad(inAnHour.getUTCHours())}:${pad(inAnHour.getUTCMinutes())}:${pad(inAnHour.getUTCSeconds())} ${inAnHour.getUTCFullYear()}`;
+    jar.parseSetCookieHeader(`a=1; Expires=${asctime}`, 'http://example.com/');
+    const stored = jar.getAllCookies().find((cookie) => cookie.name === 'a');
+    expect(stored?.expires?.getTime()).toBe(
+      Math.floor(inAnHour.getTime() / 1000) * 1000,
+    );
+
+    // Not a cookie-date at all: the attribute is ignored, a session cookie stored.
+    jar.parseSetCookieHeader('b=1; Expires=0', 'http://example.com/');
+    expect(jar.getCookieHeaderString('http://example.com/')).toContain('b=1');
+
+    // A two-digit year below 70 is 20xx.
+    jar.parseSetCookieHeader(
+      'c=1; Expires=Wed, 01 Jan 69 00:00:00 GMT',
+      'http://example.com/',
+    );
+    expect(
+      jar.getAllCookies().find((cookie) => cookie.name === 'c')?.expires,
+    ).toBeDefined();
+    expect(jar.getCookieHeaderString('http://example.com/')).toContain('c=1');
+  });
+
+  test('a cookie lifetime is capped at 400 days, and an oversized cookie is ignored', () => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('a=1; Max-Age=2000000000', 'http://example.com/');
+    jar.parseSetCookieHeader(
+      'b=1; Expires=Fri, 01 Jan 2100 00:00:00 GMT',
+      'http://example.com/',
+    );
+    const cap = 400 * 24 * 60 * 60;
+    const a = jar.getAllCookies().find((cookie) => cookie.name === 'a');
+    const b = jar.getAllCookies().find((cookie) => cookie.name === 'b');
+    expect(a?.maxAge).toBe(cap);
+    expect(b?.expires?.getTime()).toBeLessThanOrEqual(Date.now() + cap * 1000);
+
+    jar.parseSetCookieHeader(`big=${'x'.repeat(5000)}`, 'http://example.com/');
+    expect(jar.getAllCookies().some((cookie) => cookie.name === 'big')).toBe(
+      false,
+    );
+  });
+});
+
+test('a host with a hyphen at a label edge keeps its cookies', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader('sid=abc; Path=/', 'http://-edge.example.com/');
+  jar.parseSetCookieHeader('a=1', 'http://edge-.internal/');
+
+  expect(jar.getCookieHeaderString('http://-edge.example.com/')).toBe(
+    'sid=abc',
+  );
+  expect(jar.getCookieHeaderString('http://edge-.internal/')).toBe('a=1');
+});
+
+test('an edge-hyphen host keeps its Domain cookies and is cleared with its domain', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader(
+    'edge=1; Domain=example.com',
+    'https://-edge.example.com/',
+  );
+  jar.parseSetCookieHeader('a=1', 'https://-edge.example.com/');
+
+  expect(jar.getCookieHeaderString('https://www.example.com/')).toBe('edge=1');
+
+  jar.clear('example.com', 'domain');
+  expect(jar.getAllCookies()).toEqual([]);
+});
+
+test('an edge-hyphen host whose stand-in would read as a public suffix still gets its real apex', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader('t=1; Domain=prgmr.com', 'https://a.-en.prgmr.com/');
+
+  expect(jar.getCookieHeaderString('https://www.prgmr.com/')).toBe('t=1');
+});

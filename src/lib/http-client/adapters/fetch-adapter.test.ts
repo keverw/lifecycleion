@@ -7,9 +7,17 @@ import {
   test,
 } from 'bun:test';
 import { FetchAdapter } from './fetch-adapter';
+import { materializeRequestHeaders } from '../internal/header-utils';
+import { serializeError } from '../../serialize-error';
 import { HTTPClient } from '../http-client';
 import { startTestServer, type TestServer } from '../test-helpers/test-server';
-import { RESPONSE_STREAM_ABORT_FLAG } from '../consts';
+import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+  RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_HEADERS_KEY,
+} from '../consts';
+import type { AdapterRequest } from '../types';
+import { errorText } from '../test-helpers/error-text';
 
 let server: TestServer;
 const decoder = new TextDecoder();
@@ -93,6 +101,144 @@ describe('FetchAdapter', () => {
     expect(capturedInit?.redirect).toBe('manual');
   });
 
+  test('each header value is read once, so the build check and fetch see the same one', async () => {
+    let capturedInit: RequestInit | undefined;
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      capturedInit = init;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+    let reads = 0;
+    const headers = {
+      get authorization() {
+        reads++;
+        return reads === 1 ? 'Bearer checked' : 'Bearer swapped';
+      },
+    } as unknown as Record<string, string>;
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers,
+    });
+
+    expect(reads).toBe(1);
+    expect(capturedInit?.headers).toEqual({ authorization: 'Bearer checked' });
+  });
+
+  test('a Cookie given under two spellings is joined with "; " whether or not another header is an array', async () => {
+    // Read off what the adapter hands over, as one field: two spellings left for the
+    // runtime to join would be joined with `, ` in Node and browsers (Bun uses `; `).
+    const sent: string[] = [];
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      const given = init?.headers;
+      const fields =
+        given instanceof Headers
+          ? [given.get('cookie')]
+          : Object.entries(given ?? {})
+              .filter(([name]) => name.toLowerCase() === 'cookie')
+              .map(([, value]) => value as string);
+      sent.push(fields.length === 1 ? (fields[0] ?? '') : 'not joined');
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { Cookie: 'a=1', cookie: 'b=2' },
+    });
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { Cookie: 'a=1', cookie: 'b=2', accept: ['x', 'y'] },
+    });
+
+    expect(sent).toEqual(['a=1; b=2', 'a=1; b=2']);
+  });
+
+  test('PR review round 4: an empty Cookie part is left out', async () => {
+    let cookie = null as string | null;
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      cookie = new Headers(init?.headers).get('cookie');
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { Cookie: [], cookie: 'b=2' },
+    });
+
+    expect(cookie).toBe('b=2');
+  });
+
+  test('PR review round 5: the Cookie header is the one NodeAdapter sends', async () => {
+    for (const headers of [
+      { Cookie: [], cookie: 'b=2' },
+      { cookie: ['a=1', ''] },
+      { Cookie: '', cookie: 'b=2' },
+      { Cookie: 'a=1', cookie: ['b=2', 'c=3'], accept: ['x', 'y'] },
+    ] as Array<Record<string, string | string[]>>) {
+      const expected = Object.entries(materializeRequestHeaders(headers)).find(
+        ([name]) => name.toLowerCase() === 'cookie',
+      )?.[1];
+      let sent = null as string | null;
+      (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+        sent =
+          init?.headers instanceof Headers
+            ? init.headers.get('cookie')
+            : ((Object.entries(init?.headers ?? {}).find(
+                ([name]) => name.toLowerCase() === 'cookie',
+              )?.[1] as string | undefined) ?? null);
+        return Promise.resolve(new Response('ok', { status: 200 }));
+      };
+
+      await new FetchAdapter().send({
+        requestURL: 'https://local.test/users',
+        method: 'GET',
+        headers,
+      });
+
+      // `Headers` trims each value, as fetch sends every header.
+      expect([headers, sent]).toEqual([headers, expected?.trim() ?? null]);
+    }
+  });
+
+  test('PR review round 6: an unset cookie is not sent as the text "undefined"', async () => {
+    let init: RequestInit | undefined;
+    (globalThis as any).fetch = (_url: unknown, given?: RequestInit) => {
+      init = given;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { cookie: undefined } as unknown as Record<string, string>,
+    });
+
+    expect(new Headers(init?.headers).get('cookie')).toBeNull();
+  });
+
+  test('PR review round 9: a 205 has no body, so no size refusal is read off it', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(null, {
+          status: 205,
+          headers: { 'content-length': '1000' },
+        }),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/reset',
+      method: 'POST',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.streamErrorCode).toBeUndefined();
+  });
+
   test('withholds URL userinfo on a cross-origin hop', async () => {
     let capturedURL = '';
 
@@ -117,6 +263,26 @@ describe('FetchAdapter', () => {
     expect(response.detectedRedirectURL).toBe('https://evil.test/next');
   });
 
+  test('PR review round 36: a redirect of a relative request URL reports its target', async () => {
+    (globalThis as any).document = { baseURI: 'https://app.test/dir/page' };
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'next' },
+        }),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'api/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://app.test/dir/api/next');
+  });
+
   test('keeps URL userinfo when the initial and request origins match', async () => {
     let capturedURL = '';
 
@@ -138,6 +304,7 @@ describe('FetchAdapter', () => {
   test('withholds userinfo from a protocol-relative cross-origin URL', async () => {
     let capturedURL = '';
 
+    (globalThis as any).document = { baseURI: 'https://api.example.test/page' };
     (globalThis as any).fetch = (url: string) => {
       capturedURL = url;
       return Promise.resolve(new Response(null, { status: 204 }));
@@ -150,7 +317,401 @@ describe('FetchAdapter', () => {
       headers: {},
     });
 
-    expect(capturedURL).toBe('//evil.test/collect');
+    expect(capturedURL).toBe('https://evil.test/collect');
+  });
+
+  test('PR review round 40: userinfo is withheld from a protocol-relative URL that resolves to another origin', async () => {
+    let capturedURL = '';
+    // An `http:` page: `//u:p@api.test/x` is `http://api.test/x`, not the `https:` origin
+    // the request started on.
+    (globalThis as any).document = { baseURI: 'http://api.test/page' };
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    const originalRequest = globalThis.Request;
+    const probedURLs: string[] = [];
+    globalThis.Request = class extends originalRequest {
+      constructor(input: RequestInfo | URL, init?: RequestInit) {
+        super(input, init);
+        probedURLs.push(this.url);
+      }
+    };
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: '//u:p@api.test/x',
+        initialURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.status).toBe(204);
+      expect(capturedURL).toBe('http://api.test/x');
+      // Checked before it was sent, as the URL that was sent.
+      expect(probedURLs).toEqual(['http://api.test/x']);
+    } finally {
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('PR review round 40: same-origin userinfo is kept once resolved against the page', async () => {
+    let capturedURL = '';
+    (globalThis as any).document = { baseURI: 'https://api.test/page' };
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    // Bun's `Request` takes a URL with credentials; Node's refuses one, which is not what
+    // this test is about.
+    const originalRequest = globalThis.Request;
+    delete (globalThis as { Request?: unknown }).Request;
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: '//u:p@api.test/x',
+        initialURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.status).toBe(204);
+      expect(capturedURL).toBe('https://u:p@api.test/x');
+    } finally {
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('PR review round 40: a network-path URL with no base is refused, not stripped into an absolute one and sent', async () => {
+    // No `document` or `location`: nothing resolves the URL against a page, so it is
+    // refused as a relative URL with no base, not sent as one stripped against the initial
+    // URL into an absolute `https://evil.test/x`.
+    expect((globalThis as any).document).toBeUndefined();
+    expect((globalThis as any).location).toBeUndefined();
+
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: '\\\\u:p@evil.test/x',
+        initialURL: 'https://api.test/',
+        method: 'GET',
+        headers: {},
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect(String(outcome?.message)).toContain(
+      'could not be resolved to an absolute URL',
+    );
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(calls).toBe(0);
+  });
+
+  test('PR review round 41: a URL that is not http(s) is refused as non-retryable before it is fetched', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response('127.0.0.1 localhost'));
+    };
+
+    for (const requestURL of [
+      'file:///etc/hosts',
+      'data:text/plain,hi',
+      'blob:https://app.test/0b2c',
+      'ftp://files.test/x',
+    ]) {
+      const outcome = await new FetchAdapter()
+        .send({ requestURL, method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as unknown as Error).message).toBe(
+        `FetchAdapter sends http: and https: URLs only (got ${requestURL.slice(0, requestURL.indexOf(':') + 1)})`,
+      );
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test('PR review round 41: a relative URL with no base to resolve it against is refused as non-retryable', async () => {
+    // No `document` or `location`: nothing to resolve the URL against.
+    expect((globalThis as any).document).toBeUndefined();
+    expect((globalThis as any).location).toBeUndefined();
+
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    for (const requestURL of [
+      '/relative',
+      '//h.test/x',
+      'api/x',
+      'not a url',
+    ]) {
+      const outcome = await new FetchAdapter()
+        .send({ requestURL, method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as unknown as Error).message).toBe(
+        'FetchAdapter request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)',
+      );
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test('PR review round 41: a relative initial URL is resolved against the page before credentials are judged', async () => {
+    let capturedURL = '';
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    // Bun's `Request` takes a URL with credentials; Node's refuses one, which is not what
+    // this test is about.
+    const originalRequest = globalThis.Request;
+    delete (globalThis as { Request?: unknown }).Request;
+
+    const sentURL = async (requestURL: string): Promise<string> => {
+      await new FetchAdapter().send({
+        requestURL,
+        initialURL: '/start',
+        method: 'GET',
+        headers: {},
+      });
+      return capturedURL;
+    };
+
+    try {
+      (globalThis as any).document = { baseURI: 'https://api.test/page' };
+      // `/start` on this page is `https://api.test/start`: same origin, kept.
+      expect(await sentURL('https://u:p@api.test/x')).toBe(
+        'https://u:p@api.test/x',
+      );
+      // Another origin than the page's: withheld.
+      expect(await sentURL('https://u:p@evil.test/x')).toBe(
+        'https://evil.test/x',
+      );
+
+      // No base: the initial URL cannot be resolved, so it still fails closed.
+      delete (globalThis as any).document;
+      expect(await sentURL('https://u:p@api.test/x')).toBe(
+        'https://api.test/x',
+      );
+    } finally {
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('PR review round 42: an initial URL that names no origin fails closed rather than naming the page', async () => {
+    // Resolved against the page, `''`, `#top`, `?q` or `start` is the page itself: the
+    // request URL's userinfo was kept with nothing to show it belonged to that origin. A
+    // root- or protocol-relative one names an origin, and is resolved.
+    let capturedURL = '';
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    // Bun's `Request` takes a URL with credentials; Node's refuses one, which is not what
+    // this test is about.
+    const originalRequest = globalThis.Request;
+    delete (globalThis as { Request?: unknown }).Request;
+    const previousDocument = (globalThis as any).document;
+
+    const sentURL = async (initialURL: string): Promise<string> => {
+      await new FetchAdapter().send({
+        requestURL: 'https://u:p@app.test/x',
+        initialURL,
+        method: 'GET',
+        headers: {},
+      });
+      return capturedURL;
+    };
+
+    try {
+      (globalThis as any).document = { baseURI: 'https://app.test/page' };
+
+      for (const initialURL of ['', ' \t\n', '#top', '?q', '.', 'start']) {
+        expect(await sentURL(initialURL)).toBe('https://app.test/x');
+      }
+
+      for (const initialURL of ['/start', '//app.test/start']) {
+        expect(await sentURL(initialURL)).toBe('https://u:p@app.test/x');
+      }
+    } finally {
+      if (previousDocument === undefined) {
+        delete (globalThis as any).document;
+      } else {
+        (globalThis as any).document = previousDocument;
+      }
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('PR review round 42: a request refused before it is sent reports no upload start', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    const refusals: Array<Partial<AdapterRequest>> = [
+      // Refused by the `Request` probe: a header name `fetch` will not take.
+      { headers: { 'bad name': 'x' } },
+      // Refused as its signal is read.
+      {
+        signal: {
+          get aborted(): boolean {
+            throw new Error('aborted getter failed');
+          },
+        } as unknown as AbortSignal,
+      },
+    ];
+
+    for (const refusal of refusals) {
+      const events: unknown[] = [];
+      const outcome = await new FetchAdapter()
+        .send({
+          requestURL: 'https://api.test/upload',
+          method: 'POST',
+          headers: {},
+          body: 'hello',
+          onUploadProgress: (event) => events.push(event),
+          ...refusal,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(events).toEqual([]);
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test("PR review round 43: a request the runtime refuses to build is reported without the runtime's error, which quotes the value", async () => {
+    const secret = 'secret-token';
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+    const send = (request: Partial<AdapterRequest>) =>
+      new FetchAdapter()
+        .send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+          ...request,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+    // This runtime's own refusal: Bun quotes a header value it will not take.
+    const header = await send({
+      headers: { authorization: `Bearer ${secret}\u0000x` },
+    });
+    expect(String(header?.message)).toBe(
+      "FetchAdapter request could not be built: the runtime refused the value of header 'authorization'",
+    );
+    expect(header?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(errorText(header)).not.toContain(secret);
+
+    // A name that is not a token - a whole header line pasted in as one - is not written.
+    const name = await send({
+      headers: { [`Authorization: Bearer ${secret}`]: 'x' },
+    });
+    expect(String(name?.message)).toBe(
+      'FetchAdapter request could not be built: the runtime refused a header name',
+    );
+    expect(errorText(name)).not.toContain(secret);
+
+    // Node's refusal of a URL with credentials, which quotes the URL.
+    const OriginalRequest = globalThis.Request;
+    globalThis.Request = class {
+      constructor(url: string) {
+        throw Object.assign(
+          new TypeError(
+            `Request cannot be constructed from a URL that includes credentials: ${url}`,
+          ),
+          { input: url },
+        );
+      }
+    } as unknown as typeof Request;
+    try {
+      const url = await send({
+        requestURL: `https://user:${secret}@api.test/x?token=${secret}`,
+      });
+      expect(String(url?.message)).toBe(
+        'FetchAdapter request could not be built: the runtime refused its URL or method',
+      );
+      expect(errorText(url)).not.toContain(secret);
+    } finally {
+      globalThis.Request = OriginalRequest;
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test("PR review round 43: without a global Request, a header Headers refuses is refused before fetch, without the runtime's error", async () => {
+    const secret = 'secret-token';
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+    const OriginalRequest = globalThis.Request;
+    delete (globalThis as Record<string, unknown>).Request;
+    try {
+      // A repeated header is appended to a `Headers`; a single one checked by one.
+      for (const headers of [
+        { authorization: ['Bearer a', `Bearer ${secret}\u0000x`] },
+        { authorization: `Bearer ${secret}\u0000x` },
+      ]) {
+        const outcome = await new FetchAdapter()
+          .send({ requestURL: 'https://api.test/x', method: 'GET', headers })
+          .then(
+            () => undefined,
+            (error: unknown) => error as Record<PropertyKey, unknown>,
+          );
+
+        expect(String(outcome?.message)).toBe(
+          "FetchAdapter request could not be built: the runtime refused the value of header 'authorization'",
+        );
+        expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+        expect(errorText(outcome)).not.toContain(secret);
+      }
+    } finally {
+      globalThis.Request = OriginalRequest;
+    }
+
+    expect(calls).toBe(0);
   });
 
   test('materializes repeated request headers with Headers.append', async () => {
@@ -303,7 +864,8 @@ describe('FetchAdapter', () => {
     expect(response.detectedRedirectURL).toBeUndefined();
     expect(uploadEvents).toEqual([
       { loaded: 0, total: 0, progress: 0 },
-      { loaded: 1, total: 1, progress: 1 },
+      // No body: zero bytes, as NodeAdapter reports it.
+      { loaded: 0, total: 0, progress: 1 },
     ]);
     expect(downloadEvents).toEqual([{ loaded: 0, total: 0, progress: 1 }]);
   });
@@ -532,7 +1094,8 @@ describe('FetchAdapter', () => {
 
     expect(uploadEvents).toEqual([
       { loaded: 0, total: 0, progress: 0 },
-      { loaded: 1, total: 1, progress: 1 },
+      // No body: zero bytes, as NodeAdapter reports it.
+      { loaded: 0, total: 0, progress: 1 },
     ]);
 
     expect(downloadEvents).toEqual([{ loaded: 5, total: 5, progress: 1 }]);
@@ -1263,7 +1826,7 @@ describe('FetchAdapter aborts while reading the body', () => {
     // A signal hands the same reason to every consumer, so tagging it in place
     // would let concurrent requests overwrite each other's response metadata.
     expect(RESPONSE_STREAM_ABORT_FLAG in sharedReason).toBe(false);
-    expect('streamAbortHeaders' in sharedReason).toBe(false);
+    expect(STREAM_ABORT_HEADERS_KEY in sharedReason).toBe(false);
   }, 15_000);
 
   test('survives a frozen abort reason', async () => {
@@ -1314,4 +1877,137 @@ describe('FetchAdapter aborts while reading the body', () => {
     expect(response.isCancelled).toBe(true);
     expect(response.isStreamError).toBe(false);
   }, 15_000);
+});
+
+describe('FetchAdapter - round 58', () => {
+  test("a cut-off response's Set-Cookie is not written by serializeError", async () => {
+    (globalThis as any).fetch = (_url: string, init?: RequestInit) =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              init?.signal?.addEventListener('abort', () => {
+                controller.error(new DOMException('aborted', 'AbortError'));
+              });
+            },
+          }),
+          { status: 200, headers: { 'set-cookie': 'session=SECRET123' } },
+        ),
+      );
+    const builder = new HTTPClient({
+      adapter: new FetchAdapter(),
+      timeout: 30,
+    }).get('http://api.test/x');
+
+    await builder.send();
+
+    expect(builder.error?.code).toBe('stream_response_error');
+    expect(JSON.stringify(serializeError(builder.error?.cause))).not.toContain(
+      'SECRET123',
+    );
+  });
+
+  test('a request fetch refuses to build fails once as adapter_error, not a retried network error', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    };
+    const builder = new HTTPClient({
+      adapter: new FetchAdapter(),
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 0 },
+    })
+      .get('http://api.test/x')
+      .headers({ 'x-bad': 'a\nb' });
+
+    const response = await builder.send();
+
+    expect(calls).toBe(0);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(response.isNetworkError).toBe(false);
+    expect(builder.attemptCount).toBe(1);
+  });
+});
+
+test('FetchAdapter still sends where Request or URL.canParse is missing', async () => {
+  let calls = 0;
+  (globalThis as any).fetch = () => {
+    calls++;
+    return Promise.resolve(new Response(null, { status: 200 }));
+  };
+  const originalRequest = globalThis.Request;
+  const canParseDescriptor = Object.getOwnPropertyDescriptor(URL, 'canParse');
+  try {
+    delete (globalThis as { Request?: unknown }).Request;
+    (URL as { canParse?: unknown }).canParse = undefined;
+
+    const response = await new HTTPClient({ adapter: new FetchAdapter() })
+      .get('http://api.test/x')
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(calls).toBe(1);
+  } finally {
+    globalThis.Request = originalRequest;
+    if (canParseDescriptor) {
+      Object.defineProperty(URL, 'canParse', canParseDescriptor);
+    }
+  }
+});
+
+test('FetchAdapter refuses a method the runtime fetch would rewrite, rather than sending it as another', async () => {
+  // Bun's Request reads an unknown method as GET; where the runtime keeps it, there is
+  // nothing to refuse.
+  if (
+    new Request('http://a.test', { method: 'APPROVE' }).method === 'APPROVE'
+  ) {
+    return;
+  }
+  let calls = 0;
+  (globalThis as any).fetch = () => {
+    calls++;
+    return Promise.resolve(new Response(null, { status: 200 }));
+  };
+  const builder = new HTTPClient({ adapter: new FetchAdapter() }).request(
+    'APPROVE',
+    'http://api.test/x',
+  );
+
+  await builder.send();
+
+  expect(calls).toBe(0);
+  expect(builder.error?.code).toBe('adapter_error');
+});
+
+test('PR review round 37: an empty document.baseURI falls back to location, as the client resolves', async () => {
+  const locationDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis,
+    'location',
+  );
+  (globalThis as any).document = { baseURI: '' };
+  Object.defineProperty(globalThis, 'location', {
+    value: { href: 'https://app.test/dir/page' },
+    configurable: true,
+    writable: true,
+  });
+  (globalThis as any).fetch = () =>
+    Promise.resolve(
+      new Response(null, { status: 302, headers: { location: 'next' } }),
+    );
+
+  try {
+    const response = await new FetchAdapter().send({
+      requestURL: 'api/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.detectedRedirectURL).toBe('https://app.test/dir/api/next');
+  } finally {
+    if (locationDescriptor === undefined) {
+      delete (globalThis as any).location;
+    } else {
+      Object.defineProperty(globalThis, 'location', locationDescriptor);
+    }
+  }
 });
