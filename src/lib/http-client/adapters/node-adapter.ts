@@ -31,7 +31,6 @@ import {
   EFFECTIVE_REQUEST_HEADERS_KEY,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
-  REDIRECT_STATUS_CODES,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
@@ -61,9 +60,9 @@ import {
   materializeRequestHeaders,
 } from '../internal/header-utils';
 import {
+  derivedRedirectFields,
   isCrossOrigin,
   mergeObservedHeaders,
-  resolveDetectedRedirectURL,
 } from '../utils';
 import { defineEntry } from '../../internal/define-entry';
 // Shared error normalization preserves Error instances and wraps other thrown values.
@@ -554,14 +553,31 @@ export class NodeAdapter implements HTTPAdapter {
       // not impose its own timeout so the client retains full control.
     };
 
-    // Whether this attempt is a redirect hop to an origin the caller never named. Asked
-    // here rather than only inside the `https:` branch below, because `socketPath` is the
-    // other piece of caller-configured *reach* a `Location` header must not be able to
-    // retarget - and unlike TLS identity it applies to plain `http:` too.
-    const isCrossOriginHop = isCrossOriginRedirectHop(
-      request.initialURL,
-      parsedURL,
-    );
+    // Whether this attempt is a redirect hop to an origin the caller never named.
+    //
+    // Three things are scoped by it: the TLS identity (`servername`, `mtls.cert` /
+    // `mtls.key`), the configured `socketPath`, and Basic credentials taken from a request
+    // URL's `user:pass@`. All three are addressed to an origin the caller chose, and a
+    // `Location` header is the remote server's choice. Asked here rather than only inside
+    // the `https:` branch below, because `socketPath` and the credentials apply to plain
+    // `http:` too.
+    //
+    // `servername` and `mtls.cert` / `mtls.key` are the caller's TLS *identity*: the name
+    // it meant to talk to and the certificate it authenticates with. Applied to every
+    // `https:` request, they followed a `Location` header wherever it pointed - a
+    // cross-origin redirect had the adapter present the caller's client certificate to,
+    // and send the configured SNI to, a host the caller never named and the remote server
+    // chose. The client passes `initialURL` so a hop can be told from the request that
+    // started it; the identity is withheld when the origin (scheme, host and port)
+    // differs.
+    //
+    // Absent `initialURL` - the adapter driven directly - is the request itself, so the
+    // identity applies as it always did. An `initialURL` that cannot be parsed is treated
+    // as cross-origin (`isCrossOrigin`): it cannot be shown to be the same origin, and
+    // failing closed withholds an identity rather than presenting one.
+    const isCrossOriginHop =
+      request.initialURL !== undefined &&
+      isCrossOrigin(request.initialURL, parsedURL);
 
     // `user:pass@` from the request URL, as Basic credentials on the wire.
     //
@@ -608,7 +624,7 @@ export class NodeAdapter implements HTTPAdapter {
       // configured *trust* (`ca`, `mtls.ca`, `crl`, `rejectUnauthorized`) still applies
       // there - it says which servers to believe, and that is the caller's rule for every
       // connection this adapter opens. The configured *identity* does not, and neither
-      // does `socketPath` above: see `isCrossOriginRedirectHop`.
+      // does `socketPath` above: see `isCrossOriginHop`.
 
       // custom CA trust store. An empty one is refused rather than skipped: skipped, it
       // fell back to the public roots - a client meant to trust one private CA, whose
@@ -2438,40 +2454,6 @@ const UPLOAD_STALL_GRACE_MS = 5_000;
 const UPLOAD_SOURCE_STALL_GRACE_MS = 60_000;
 
 // ---------------------------------------------------------------------------
-// Identity and credential scoping
-// ---------------------------------------------------------------------------
-
-/**
- * Whether an attempt is a redirect hop to an origin other than the one the caller
- * addressed.
- *
- * Three things are scoped by it: the TLS identity (`servername`, `mtls.cert` / `mtls.key`),
- * the configured `socketPath`, and Basic credentials taken from a request URL's
- * `user:pass@`. All three are addressed to an origin the caller chose, and a `Location`
- * header is the remote server's choice.
- *
- * `servername` and `mtls.cert` / `mtls.key` are the caller's TLS *identity*: the name it
- * meant to talk to and the certificate it authenticates with. Applied to every `https:`
- * request, they followed a `Location` header wherever it pointed - a cross-origin
- * redirect had the adapter present the caller's client certificate to, and send the
- * configured SNI to, a host the caller never named and the remote server chose. The
- * client passes {@link AdapterRequest.initialURL} so a hop can be told from the request
- * that started it; the identity is withheld when the origin (scheme, host and port)
- * differs.
- *
- * Absent `initialURL` - the adapter driven directly - is the request itself, so the
- * identity applies as it always did. An `initialURL` that cannot be parsed is treated as
- * cross-origin: it cannot be shown to be the same origin, and failing closed withholds an
- * identity rather than presenting one.
- */
-function isCrossOriginRedirectHop(
-  initialURL: string | undefined,
-  requestURL: URL,
-): boolean {
-  return initialURL !== undefined && isCrossOrigin(initialURL, requestURL);
-}
-
-// ---------------------------------------------------------------------------
 // Streaming pipe helper
 // ---------------------------------------------------------------------------
 
@@ -3651,19 +3633,12 @@ function resolveAdapterResponse(
   fallbackHeaders: Record<string, string | string[]>,
   response: Omit<AdapterResponse, 'effectiveRequestHeaders'>,
 ): void {
-  const detectedRedirectURL = resolveDetectedRedirectURL(
-    requestURL,
-    response.status,
-    response.headers,
-  );
-
   resolve({
     ...response,
     // Flag redirect responses so HTTPClient can surface wasRedirectDetected on
     // the final HTTPResponse consistently across all adapters. The actual
     // follow-or-disable decision is still made by HTTPClient's redirect loop.
-    wasRedirectDetected: REDIRECT_STATUS_CODES.has(response.status),
-    ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+    ...derivedRedirectFields(requestURL, response.status, response.headers),
     effectiveRequestHeaders: snapshotEffectiveRequestHeaders(
       req,
       fallbackHeaders,

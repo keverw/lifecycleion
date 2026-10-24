@@ -1475,7 +1475,7 @@ No configuration options. Adapter-level behavior is controlled through `HTTPClie
 
 A synchronous throw from `xhr.send()` fails the request once, as a non-retryable `adapter_error`. An asynchronous `send()` throws only an `InvalidStateError` or for a body it cannot convert, and both fail the same way on every attempt; network failures arrive as `error` events and follow the retry rules. An `XMLHttpRequest` shim that throws a network failure from `send()` instead is not retried.
 
-Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, after the request completes, the adapter compares `xhr.responseURL` to the original URL to detect whether a redirect occurred. If one is detected the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`.
+Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, after the request completes, the adapter compares `xhr.responseURL` to the original URL to detect whether a redirect occurred. If one is detected the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`. A `3xx` the XHR hands over without following - in a browser, one with no `Location`; outside one, an `XMLHttpRequest` that does not follow redirects - reports `wasRedirectDetected` from its status, and `detectedRedirectURL` where it has a `Location`, as FetchAdapter and NodeAdapter report a real `3xx`.
 
 ### MockAdapter (Testing)
 

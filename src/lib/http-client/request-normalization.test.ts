@@ -9784,3 +9784,60 @@ test('PR review round 33: a HEAD answered 200 does not call the streamResponse f
     },
   );
 });
+
+test('PR review round 34: a stacked deflate is read whole where the inflater reports no byte count', async () => {
+  // An inflater with no `bytesWritten`, as a runtime may have: its count is not read.
+  const prototypes = [zlib.Inflate.prototype, zlib.InflateRaw.prototype];
+  for (const prototype of prototypes) {
+    Object.defineProperty(prototype, 'bytesWritten', {
+      configurable: true,
+      get: () => undefined,
+      set: () => undefined,
+    });
+  }
+
+  try {
+    for (const encode of [zlib.deflateSync, zlib.deflateRawSync]) {
+      const res = new PassThrough() as unknown as http.IncomingMessage;
+      // `deflate` applied first, so it is the inner coding and told by its first bytes.
+      const { source } = createResponseBodySource(res, 'deflate, gzip');
+      const chunks: Buffer[] = [];
+      const outcome = new Promise<string>((resolve) => {
+        source.on('data', (chunk: Buffer) => chunks.push(chunk));
+        source.on('end', () => resolve('end'));
+        source.on('error', (error: Error) => resolve(error.message));
+      });
+
+      (res as unknown as PassThrough).end(
+        zlib.gzipSync(encode(Buffer.from('hello'))),
+      );
+
+      expect(await outcome).toBe('end');
+      expect(Buffer.concat(chunks).toString()).toBe('hello');
+    }
+  } finally {
+    for (const prototype of prototypes) {
+      delete (prototype as { bytesWritten?: unknown }).bytesWritten;
+    }
+  }
+});
+
+test("PR review round 34: getCookiesFor reads a stored cookie's live fields only when its scope matches", () => {
+  const jar = new CookieJar();
+  jar.setCookie({ name: 'a', value: '1', domain: 'example.com', path: '/a' });
+  jar.setCookie({ name: 'b', value: '2', domain: 'example.com', path: '/b' });
+
+  const reads: string[] = [];
+  for (const stored of jar.getAllCookies()) {
+    const { name, value } = stored;
+    Object.defineProperty(stored, 'value', {
+      get: () => {
+        reads.push(name);
+        return value;
+      },
+    });
+  }
+
+  expect(jar.getCookieHeaderString('https://example.com/a')).toBe('a=1');
+  expect(reads).toEqual(['a']);
+});

@@ -571,8 +571,9 @@ export class CookieJar {
    *
    * Returns *copies*, not the stored objects. A cookie's `name`, `domain`, `path`,
    * `hostOnly` and `secure` come from the scope `setCookie` accepted it with, and every
-   * other field is read exactly once; all the checks run against that copy and the header
-   * is built from it. So a stored cookie mutated through `getAllCookies()` — a cleared
+   * other field is read exactly once, for a cookie whose stored scope matches; the scope
+   * checks run against that scope, the rest against the copy, and the header is built
+   * from it. So a stored cookie mutated through `getAllCookies()` — a cleared
    * `secure`, a widened `domain` or `path`, a `value` getter that answers differently on
    * the second read — cannot reach the wire with a scope or a framing it was never stored
    * with. A cookie whose fields cannot be read at all (an accessor that throws) is
@@ -624,43 +625,48 @@ export class CookieJar {
         continue;
       }
       for (const stored of apexBucket.values()) {
-        // Every check below runs against the snapshot, never the stored object: the
-        // fields were read once each, so what is vetted is what goes out. A cookie whose
-        // snapshot cannot be trusted is withheld.
-        const cookie = this.snapshotForSend(stored);
+        // The scope checks first, on the stored scope - what the snapshot's `domain`,
+        // `path`, `hostOnly` and `secure` are copied from - so only a cookie bound for
+        // this request has its live fields read.
+        const scope = this.storedScopes.get(stored);
 
-        if (cookie === null) {
-          continue;
-        }
-
-        if (this.isExpired(cookie, now)) {
+        if (scope === undefined) {
           continue;
         }
 
         // Persisted cookies can predate the current suffix policy. Never let
         // a domain cookie for a public suffix span its tenants.
         if (
-          !cookie.hostOnly &&
-          cookie.domain &&
-          isPublicSuffix(cookie.domain) &&
-          !this.hostOnlyDomainMatches(requestHost, cookie.domain)
+          !scope.hostOnly &&
+          scope.domain &&
+          isPublicSuffix(scope.domain) &&
+          !this.hostOnlyDomainMatches(requestHost, scope.domain)
         ) {
           continue;
         }
 
-        const isDomainMatch = cookie.hostOnly
-          ? this.hostOnlyDomainMatches(requestHost, cookie.domain ?? '')
-          : this.domainMatches(requestHost, cookie.domain ?? '');
+        const isDomainMatch = scope.hostOnly
+          ? this.hostOnlyDomainMatches(requestHost, scope.domain)
+          : this.domainMatches(requestHost, scope.domain);
 
         if (!isDomainMatch) {
           continue;
         }
 
-        if (!this.pathMatches(pathname, cookie.path ?? '/')) {
+        if (!this.pathMatches(pathname, scope.path)) {
           continue;
         }
 
-        if (cookie.secure === true && !this.isSecureScheme(requestScheme)) {
+        if (scope.secure === true && !this.isSecureScheme(requestScheme)) {
+          continue;
+        }
+
+        // The rest against the snapshot, never the stored object: the fields were read
+        // once each, so what is vetted is what goes out. A cookie whose snapshot cannot be
+        // trusted is withheld.
+        const cookie = this.snapshotForSend(stored);
+
+        if (cookie === null || this.isExpired(cookie, now)) {
           continue;
         }
 
@@ -746,7 +752,10 @@ export class CookieJar {
     ...args: [] | [host: string, scope: 'hostname' | 'domain']
   ): number {
     if (args.length === 0) {
-      const count = this.getAllCookies().length;
+      let count = 0;
+      for (const bucket of this.buckets.values()) {
+        count += bucket.size;
+      }
       this.buckets.clear();
       return count;
     }

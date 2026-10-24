@@ -978,7 +978,7 @@ export function resolveDetectedRedirectURL(
   headers: Record<string, string | string[]>,
   baseURL?: string,
 ): string | undefined {
-  if (![301, 302, 303, 307, 308].includes(status)) {
+  if (!REDIRECT_STATUS_CODES.has(status)) {
     return undefined;
   }
 
@@ -1020,8 +1020,7 @@ export function derivedRedirectFields(
   );
 
   return {
-    wasRedirectDetected:
-      detectedRedirectURL !== undefined || REDIRECT_STATUS_CODES.has(status),
+    wasRedirectDetected: REDIRECT_STATUS_CODES.has(status),
     ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
   };
 }

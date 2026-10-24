@@ -112,7 +112,9 @@ export interface AdapterResponse {
    * - **XHRAdapter**: the browser always follows redirects with no opt-out.
    *   Detected after the fact by comparing `xhr.responseURL` to the original
    *   URL; resolves as status 0 with `wasRedirectDetected: true`. Same
-   *   HTTPClient routing as FetchAdapter.
+   *   HTTPClient routing as FetchAdapter. A real 3xx the XHR hands over
+   *   unfollowed (no `Location` in a browser, or an XHR that does not follow)
+   *   sets it from the status, as FetchAdapter does.
    */
   wasRedirectDetected?: boolean;
   /**

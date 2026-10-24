@@ -254,7 +254,7 @@ describe('XHRAdapter', () => {
     const response = await promise;
 
     expect(lastXHR.openArgs?.url).toBe('https://evil.test/collect');
-    expect(response.wasRedirectDetected).toBeUndefined();
+    expect(response.wasRedirectDetected).toBe(false);
   });
 
   test('keeps URL userinfo when the initial and request origins match', async () => {
@@ -271,7 +271,7 @@ describe('XHRAdapter', () => {
     const response = await promise;
 
     expect(response.status).toBe(204);
-    expect(response.wasRedirectDetected).toBeUndefined();
+    expect(response.wasRedirectDetected).toBe(false);
 
     expect(lastXHR.openArgs?.url).toBe(
       'https://user:hunter2@api.example.test/next',
@@ -292,7 +292,7 @@ describe('XHRAdapter', () => {
     const response = await promise;
 
     expect(lastXHR.openArgs?.url).toBe('//evil.test/collect');
-    expect(response.wasRedirectDetected).toBeUndefined();
+    expect(response.wasRedirectDetected).toBe(false);
   });
 
   test('sets responseType to arraybuffer', async () => {
@@ -928,6 +928,48 @@ describe('XHRAdapter', () => {
 
     expect(response.isStreamError).toBeUndefined();
     expect(response.status).toBe(200);
+  });
+
+  test('PR review round 34: a 3xx the XHR hands over unfollowed is reported as a redirect, as FetchAdapter reports one', async () => {
+    const cases: Array<
+      [
+        string,
+        {
+          wasRedirectDetected: boolean;
+          detectedRedirectURL: string | undefined;
+        },
+      ]
+    > = [
+      [
+        'location: /next\r\n',
+        {
+          wasRedirectDetected: true,
+          detectedRedirectURL: 'https://api.test/next',
+        },
+      ],
+      ['', { wasRedirectDetected: true, detectedRedirectURL: undefined }],
+    ];
+
+    for (const [rawHeaders, expected] of cases) {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 301;
+      lastXHR.responseURL = 'https://api.test/start';
+      lastXHR.getAllResponseHeadersResult = rawHeaders;
+      lastXHR.response = textBody('');
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.status).toBe(301);
+      expect({
+        wasRedirectDetected: response.wasRedirectDetected,
+        detectedRedirectURL: response.detectedRedirectURL,
+      }).toEqual(expected);
+    }
   });
 
   test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {
@@ -1854,7 +1896,7 @@ describe('XHRAdapter', () => {
 
     const response = await promise;
 
-    expect(response.wasRedirectDetected).toBeUndefined();
+    expect(response.wasRedirectDetected).toBe(false);
     expect(response.status).toBe(200);
   });
 
@@ -1875,7 +1917,7 @@ describe('XHRAdapter', () => {
 
     const response = await promise;
 
-    expect(response.wasRedirectDetected).toBeUndefined();
+    expect(response.wasRedirectDetected).toBe(false);
     expect(response.status).toBe(200);
   });
 
@@ -1905,7 +1947,7 @@ describe('XHRAdapter', () => {
 
       const response = await promise;
 
-      expect(response.wasRedirectDetected).toBeUndefined();
+      expect(response.wasRedirectDetected).toBe(false);
       expect(response.status).toBe(200);
     } finally {
       if (originalWindow === undefined) {
@@ -1989,7 +2031,7 @@ describe('XHRAdapter', () => {
 
     const response = await promise;
 
-    expect(response.wasRedirectDetected).toBeUndefined();
+    expect(response.wasRedirectDetected).toBe(false);
     expect(response.status).toBe(200);
   });
 

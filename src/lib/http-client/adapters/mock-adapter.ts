@@ -34,12 +34,12 @@ import {
   adoptPromise,
   type PromiseResultBox,
 } from '../../internal/adopt-promise';
-import { REDIRECT_STATUS_CODES, MAX_COOKIE_LIFETIME_SECONDS } from '../consts';
+import { MAX_COOKIE_LIFETIME_SECONDS } from '../consts';
 import {
+  derivedRedirectFields,
   isPlainJSONBodyObject,
   normalizeAdapterResponseHeaders,
   parseContentType,
-  resolveDetectedRedirectURL,
 } from '../utils';
 import type {
   HTTPAdapter,
@@ -723,16 +723,13 @@ export class MockAdapter implements HTTPAdapter {
       });
     }
 
-    const detectedRedirectURL = resolveDetectedRedirectURL(
-      requestURL,
-      mockResponse.status,
-      normalizedResponseHeaders,
-    );
-
     return {
       status: mockResponse.status,
-      wasRedirectDetected: REDIRECT_STATUS_CODES.has(mockResponse.status),
-      ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+      ...derivedRedirectFields(
+        requestURL,
+        mockResponse.status,
+        normalizedResponseHeaders,
+      ),
       headers: normalizedResponseHeaders,
       body: responseBody,
       ...(streamErrorCode !== undefined

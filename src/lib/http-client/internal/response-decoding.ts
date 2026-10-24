@@ -749,8 +749,8 @@ abstract class InnerDecoderTransform<
 }
 
 /**
- * A `deflate` decoder that tells zlib-wrapped from raw deflate by the first byte it is
- * given, as undici's inflate stage does - for a `deflate` stacked inside another coding,
+ * A `deflate` decoder that tells zlib-wrapped from raw deflate by the first two bytes it
+ * is given, as undici's inflate stage does - for a `deflate` stacked inside another coding,
  * whose bytes only exist once the outer one is decoded.
  */
 class SniffingInflate extends InnerDecoderTransform<
@@ -821,9 +821,15 @@ class SniffingInflate extends InnerDecoderTransform<
     );
   }
 
-  /** Whether the inner inflater stopped short of what it was given. */
+  /**
+   * Whether the inner inflater stopped short of what it was given. Only told where it
+   * reports a count, as `attachDecoders` reads one: a runtime whose inflater has no
+   * `bytesWritten` would otherwise fail every body as trailing bytes.
+   */
   private hasLeftover(): boolean {
-    return (this.inner?.bytesWritten ?? 0) < this.fedBytes;
+    const consumed: unknown = this.inner?.bytesWritten;
+
+    return typeof consumed === 'number' && consumed < this.fedBytes;
   }
 }
 

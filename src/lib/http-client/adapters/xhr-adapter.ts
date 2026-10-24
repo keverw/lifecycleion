@@ -25,6 +25,7 @@ import type {
   AdapterType,
 } from '../types';
 import {
+  derivedRedirectFields,
   resolveAbsoluteURLForRuntime,
   stripURLCredentials,
   stripCrossOriginURLCredentials,
@@ -314,6 +315,7 @@ export class XHRAdapter implements HTTPAdapter {
         } else {
           resolve({
             status,
+            ...derivedRedirectFields(dispatchedURL, status, headers),
             headers,
             body: null,
             isStreamError: true,
@@ -418,6 +420,7 @@ export class XHRAdapter implements HTTPAdapter {
         if (body !== null && body.length > maxResponseBytes) {
           resolve({
             status,
+            ...derivedRedirectFields(dispatchedURL, status, responseHeaders),
             headers: responseHeaders,
             body: null,
             isStreamError: true,
@@ -437,8 +440,12 @@ export class XHRAdapter implements HTTPAdapter {
           });
         }
 
+        // A 3xx the browser did not follow - one with no `Location` - or one handed over
+        // by an XHR outside a browser is reported as a redirect, as FetchAdapter reports
+        // a real 3xx.
         resolve({
           status,
+          ...derivedRedirectFields(dispatchedURL, status, responseHeaders),
           headers: responseHeaders,
           body,
         });

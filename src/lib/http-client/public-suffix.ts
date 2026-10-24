@@ -1,6 +1,7 @@
 import { isPlainRecord } from './internal/plain-record';
 import { describeValue } from '../internal/describe-value';
 import { parse } from 'tldts';
+import { endsInANumber } from '../domain-utils/helpers';
 
 /**
  * Caller adjustments to the Public Suffix List the jar scopes cookies with.
@@ -110,12 +111,11 @@ function normalizeSuffix(entry: unknown, listName: string): string {
     }
   }
 
-  // A last label of digits only: an IP address, which the jar answers before it consults
-  // any suffix rule, or a name the URL parser reads as one (`corp.123`), which no
-  // request host can be. Either way the entry could never take effect.
-  // Hex too (`0x1f`, `0x`), as the parser reads it - the rule `wildcardTailIsInvalid`
-  // applies in domain-utils.
-  if (/^(?:\d+|0x[0-9a-f]*)$/i.test(normalized.split('.').at(-1) ?? '')) {
+  // A last label the URL parser reads as a number, decimal or hex (`0x1f`, `0x`): an IP
+  // address, which the jar answers before it consults any suffix rule, or a name the
+  // parser reads as one (`corp.123`), which no request host can be. Either way the entry
+  // could never take effect.
+  if (endsInANumber(normalized.split('.').at(-1) ?? '')) {
     throw new TypeError(
       `publicSuffixes.${listName} entry '${entry}' ends in a number, so no request host can match it (an IP address is never a public suffix)`,
     );

@@ -122,7 +122,8 @@ export function isIPAddress(str: string): boolean {
 /**
  * Whether `label` is what WHATWG's host parser reads as a number - decimal digits, or
  * `0x` and hex digits - so a host whose last label it is must be an IPv4 address. Shared
- * by the IPv4 reader and the wildcard-tail guard, so the two read alike.
+ * by the IPv4 reader, the wildcard-tail guard and the public-suffix override check, so
+ * they read alike.
  */
 export function endsInANumber(label: string): boolean {
   return /^(?:\d+|0x[0-9a-f]*)$/i.test(label);
