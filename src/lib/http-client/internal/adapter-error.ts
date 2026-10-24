@@ -102,6 +102,17 @@ export function makeAbortError(message = 'Request aborted'): Error {
 }
 
 /**
+ * Whether `error` is an `AbortError` as the client and the adapters know one: by name, on
+ * an error value - one from another realm too (see `isErrorValue`), which `instanceof`
+ * would miss - with the name read guarded.
+ */
+export function isAbortError(error: unknown): error is Error {
+  return (
+    isErrorValue(error) && readObjectMember(error, 'name') === 'AbortError'
+  );
+}
+
+/**
  * Tag a terminal adapter configuration failure so `HTTPClient` reports it as a
  * non-retryable `adapter_error` rather than retrying it as a network error.
  */

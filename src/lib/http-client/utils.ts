@@ -56,6 +56,14 @@ function tryAbsoluteWebHref(path: string): string | null {
   return null;
 }
 
+/**
+ * Whether `url` is an absolute http(s) URL on its own, as a request is sent: `''`, a
+ * relative path and a protocol-relative `//host` are not (see {@link tryAbsoluteWebHref}).
+ */
+export function isAbsoluteWebURL(url: string): boolean {
+  return tryAbsoluteWebHref(url) !== null;
+}
+
 /** Whether a `.params()` value names its key: not `undefined`, nor made only of it. */
 function isGivenParam(value: unknown): boolean {
   if (value === undefined) {
@@ -477,14 +485,6 @@ export function normalizeHeaders(
   return result;
 }
 
-/**
- * A standard method in any case, uppercased, and any other method as given (see
- * `normalizeStandardMethod`).
- */
-export function normalizeHTTPMethod(method: string): HTTPMethod {
-  return normalizeStandardMethod(method);
-}
-
 /** RFC 9110's `token`: the characters a method name is made of. */
 const HTTP_METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
@@ -549,7 +549,7 @@ export function normalizeFilterMethods(
     if (problem !== undefined) {
       throw new TypeError(`${label} filter method ${problem}`);
     }
-    normalized.push(normalizeHTTPMethod(entry as string));
+    normalized.push(normalizeStandardMethod(entry as string));
   }
   return normalized;
 }
@@ -1540,7 +1540,7 @@ export function matchesFilter(
     const candidate: unknown = context.method;
     if (
       typeof candidate !== 'string' ||
-      !filter.methods.includes(normalizeHTTPMethod(candidate))
+      !filter.methods.includes(normalizeStandardMethod(candidate))
     ) {
       return false;
     }

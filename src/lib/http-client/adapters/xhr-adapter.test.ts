@@ -2171,6 +2171,218 @@ describe('XHRAdapter', () => {
 
     expect(response.headers).toEqual({});
   });
+
+  test('PR review round 39: a path-relative request URL with no page to resolve it is not taken for a redirect', async () => {
+    // No `document` or `location`: the URL stays relative, and the XHR resolves it itself.
+    expect((globalThis as Record<string, unknown>).document).toBeUndefined();
+    expect((globalThis as Record<string, unknown>).location).toBeUndefined();
+
+    const promise = new XHRAdapter().send({
+      requestURL: 'api/x',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 200;
+    lastXHR.responseURL = 'http://h.test/dir/api/x';
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+    expect(response.wasRedirectDetected).toBe(false);
+    expect(new TextDecoder().decode(response.body as Uint8Array)).toBe('ok');
+  });
+
+  test('PR review round 39: an XHR with no upload sends without per-chunk upload progress', async () => {
+    const uploads: number[] = [];
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
+      FakeXHR
+    ) {
+      constructor() {
+        super();
+        Object.defineProperty(this, 'upload', { value: undefined });
+      }
+    };
+
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+      onUploadProgress: (event) => {
+        uploads.push(event.progress);
+      },
+    });
+
+    const xhr = FakeXHR.instances[0];
+    if (!xhr) {
+      throw new Error('FakeXHR instance was not initialized');
+    }
+    expect(xhr.sentBody).toBe('hello');
+    xhr.status = 200;
+    xhr.response = textBody('ok');
+    xhr.simulateLoad();
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+    expect(uploads).toEqual([0, 1]);
+  });
+
+  test('PR review round 39: an XHR whose upload throws is refused as non-retryable and takes its abort listener off the signal', async () => {
+    let added = 0;
+    let removed = 0;
+    const signal = {
+      aborted: false,
+      addEventListener() {
+        added++;
+      },
+      removeEventListener() {
+        removed++;
+      },
+    };
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
+      FakeXHR
+    ) {
+      constructor() {
+        super();
+        Object.defineProperty(this, 'upload', {
+          get() {
+            throw new Error('upload getter failed');
+          },
+        });
+      }
+    };
+
+    const outcome = await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/x',
+        method: 'POST',
+        headers: {},
+        body: 'hello',
+        signal: signal as unknown as AbortSignal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect((outcome as unknown as Error).message).toBe('upload getter failed');
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(added).toBe(1);
+    expect(removed).toBe(1);
+    expect(FakeXHR.instances[0]?.sentBody).toBeNull();
+  });
+
+  test('PR review round 39: a root- or protocol-relative request URL with no page to resolve it still detects a followed redirect', async () => {
+    expect((globalThis as Record<string, unknown>).document).toBeUndefined();
+    expect((globalThis as Record<string, unknown>).location).toBeUndefined();
+
+    for (const requestURL of ['/start', '//h.test/start']) {
+      const promise = new XHRAdapter().send({
+        requestURL,
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 200;
+      lastXHR.responseURL = 'https://h.test/login';
+      lastXHR.response = textBody('login page');
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.status).toBe(0);
+      expect(response.wasRedirectDetected).toBe(true);
+      expect(response.detectedRedirectURL).toBe('https://h.test/login');
+    }
+  });
+
+  test('PR review round 39: a root-relative request URL answered where it was sent is not taken for a redirect', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: '/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 200;
+    lastXHR.responseURL = 'https://h.test/start';
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+    expect(response.wasRedirectDetected).toBe(false);
+  });
+
+  test('PR review round 39: a relative request URL is compared as written when responseURL does not parse', async () => {
+    for (const [responseURL, isRedirect] of [
+      ['api/x', false],
+      ['api/elsewhere', true],
+    ] as const) {
+      const promise = new XHRAdapter().send({
+        requestURL: 'api/x',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 200;
+      lastXHR.responseURL = responseURL;
+      lastXHR.response = textBody('ok');
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.wasRedirectDetected).toBe(isRedirect);
+    }
+  });
+
+  test('PR review round 39: an XHR whose upload addEventListener throws is refused as non-retryable and takes its abort listener off the signal', async () => {
+    let added = 0;
+    let removed = 0;
+    const signal = {
+      aborted: false,
+      addEventListener() {
+        added++;
+      },
+      removeEventListener() {
+        removed++;
+      },
+    };
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
+      FakeXHR
+    ) {
+      constructor() {
+        super();
+        Object.defineProperty(this, 'upload', {
+          value: {
+            addEventListener() {
+              throw new Error('upload listener refused');
+            },
+          },
+        });
+      }
+    };
+
+    const outcome = await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/x',
+        method: 'POST',
+        headers: {},
+        body: 'hello',
+        signal: signal as unknown as AbortSignal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect((outcome as unknown as Error).message).toBe(
+      'upload listener refused',
+    );
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(added).toBe(1);
+    expect(removed).toBe(1);
+    expect(FakeXHR.instances[0]?.sentBody).toBeNull();
+  });
 });
 
 describe('XHRAdapter - round 58', () => {

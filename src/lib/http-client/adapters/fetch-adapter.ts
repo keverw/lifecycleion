@@ -8,6 +8,7 @@ import {
   readAdapterRequestFields,
 } from '../internal/request-fields';
 import {
+  isAbortError,
   markResponseStreamAbort,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
@@ -34,12 +35,10 @@ import type {
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
 // original value retained on cause for consumers of the normalized error.
-import { isErrorValue, toError as normalizeError } from '../../to-error';
-// Guard error members for the same reason adapter marker reads are guarded.
-import {
-  readMember as readObjectMember,
-  readUnknownMember,
-} from '../../internal/read-member';
+import { toError as normalizeError } from '../../to-error';
+// Members of a body or a thrown error read guarded, for the same reason adapter marker
+// reads are.
+import { readUnknownMember } from '../../internal/read-member';
 
 export class FetchAdapter implements HTTPAdapter {
   public getType(): AdapterType {
@@ -460,27 +459,6 @@ function cancelBodyQuietly(body: unknown): void {
   } catch {
     // A locked or already-cancelled stream: nothing left to release.
   }
-}
-
-function isAbortError(error: unknown): boolean {
-  const normalized = asError(error);
-
-  return (
-    normalized !== undefined &&
-    readObjectMember(normalized, 'name') === 'AbortError'
-  );
-}
-
-/**
- * Return an Error value without letting a Proxy prototype trap escape.
- *
- * The shared check, not a local `instanceof`, so this answers the same question
- * `normalizeError` above already answers: an error built in another realm - a `vm`
- * context, an iframe - fails `instanceof` while being an error in every respect. A
- * cross-realm `AbortError` was therefore invisible to `isAbortError`.
- */
-function asError(value: unknown): Error | undefined {
-  return isErrorValue(value) ? value : undefined;
 }
 
 /**

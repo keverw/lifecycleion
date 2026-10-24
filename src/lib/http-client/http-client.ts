@@ -1,5 +1,9 @@
-import { asciiUppercase } from './internal/http-method';
+import {
+  asciiUppercase,
+  normalizeStandardMethod,
+} from './internal/http-method';
 import { isSignalAbortedQuietly } from './internal/request-fields';
+import { isAbortError } from './internal/adapter-error';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { describeValue } from '../internal/describe-value';
@@ -38,12 +42,12 @@ import {
   assertSupportedRequestBody,
   buildURL,
   extractHostname,
+  isAbsoluteWebURL,
   isBrowserEnvironment,
   isCrossOrigin,
   mergeObservedHeaders,
   mergeHeaders,
   normalizeMergedHeaderValue,
-  normalizeHTTPMethod,
   describeInvalidHTTPMethod,
   isPlainJSONBodyObject,
   normalizeAdapterResponseHeaders,
@@ -419,7 +423,7 @@ export class BaseHTTPClient {
     }
 
     return new HTTPRequestBuilder<T>(
-      normalizeHTTPMethod(method),
+      normalizeStandardMethod(method),
       path,
       (ctx) => this._execute(ctx),
       options,
@@ -875,7 +879,7 @@ export class BaseHTTPClient {
         // Validate the resolved URL is a proper http(s) URL. Protocol-relative
         // //host paths without a baseURL to supply the scheme stay unresolved and
         // must fail here as a request_setup_error rather than reaching the adapter.
-        if (!this._isSupportedRequestURL(url)) {
+        if (!isAbsoluteWebURL(url)) {
           throw new Error(
             `[HTTPClient] Request URL could not be resolved to an absolute http(s) URL: "${url}". ` +
               `Set a baseURL with an http(s) scheme or pass an absolute URL.`,
@@ -1493,8 +1497,7 @@ export class BaseHTTPClient {
             // name. An interceptor that rescues a bad `Location` still gets to; one that
             // only observes still sees the hop; a `cancel` still reports as a cancel. Only
             // a `Location` nobody fixed fails, and it fails as the server's fault.
-            const wasLocationUnsupported =
-              !this._isSupportedRequestURL(redirectURL);
+            const wasLocationUnsupported = !isAbsoluteWebURL(redirectURL);
 
             // Only the fields a request interceptor is handed in the other phases: the
             // attempt that answered carries its own (`rawBody`, `timeout`, the attempt
@@ -1688,7 +1691,7 @@ export class BaseHTTPClient {
             // as the server's doing: `request_setup_error`, not `interceptor_error`. See
             // `wasLocationUnsupported` above. Nothing has been dispatched - the adapter
             // never sees a `file:` or `data:` URL either way.
-            if (!this._isSupportedRequestURL(redirectInterceptURL)) {
+            if (!isAbsoluteWebURL(redirectInterceptURL)) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 redirectIntercept,
                 attemptLimits,
@@ -3302,7 +3305,8 @@ export class BaseHTTPClient {
           readObjectMember(error, STREAM_FACTORY_CANCEL_KEY) !== undefined;
         const factoryAnsweredResponse =
           abortedResponse === undefined &&
-          (isFactoryCancel || isStreamFactoryClientCallbackError(error))
+          (isFactoryCancel ||
+            hasAdapterMarker(error, STREAM_FACTORY_ERROR_FLAG))
             ? getResponseStreamAbortInfo(error)
             : undefined;
         const answeredBeforeFailure =
@@ -3543,7 +3547,7 @@ export class BaseHTTPClient {
         // opens its sink with - is its failure, `stream_setup_error` below, not a cancel:
         // only a factory's `null` or `{ cancel: true }` carries the cancel tag.
         const isFactoryOwnAbort =
-          isStreamFactoryClientCallbackError(error) &&
+          hasAdapterMarker(error, STREAM_FACTORY_ERROR_FLAG) &&
           readObjectMember(error, STREAM_FACTORY_CANCEL_KEY) === undefined &&
           !cancelSignal.aborted &&
           !isTimedOut;
@@ -3643,8 +3647,10 @@ export class BaseHTTPClient {
         // callback's throw are still their own. Otherwise an answer, late or not, decides:
         // one that reads cleanly is delivered, and one that cannot be read is the answered
         // response's non-retryable adapter_error below, so it is not sent again.
-        const isNonRetryableClientCallbackFailure =
-          isNonRetryableClientCallbackError(error);
+        const isNonRetryableClientCallbackFailure = hasAdapterMarker(
+          error,
+          NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+        );
         const didTimeoutThisAttempt =
           isTimedOut &&
           !isFlaggedAdapterFailure &&
@@ -3665,8 +3671,10 @@ export class BaseHTTPClient {
             status: factoryAnsweredResponse?.status ?? answeredStatus,
           });
 
-          const isStreamFactoryError =
-            isStreamFactoryClientCallbackError(error);
+          const isStreamFactoryError = hasAdapterMarker(
+            error,
+            STREAM_FACTORY_ERROR_FLAG,
+          );
 
           return {
             adapterResponse: null,
@@ -4727,22 +4735,13 @@ export class BaseHTTPClient {
   }
 
   private _assertInterceptorResolvedURL(requestURL: string): void {
-    if (this._isSupportedRequestURL(requestURL)) {
+    if (isAbsoluteWebURL(requestURL)) {
       return;
     }
 
     throw new Error(
       `[HTTPClient] Interceptor rewrote requestURL to a value that could not be resolved to an absolute http(s) URL: "${requestURL}".`,
     );
-  }
-
-  private _isSupportedRequestURL(requestURL: string): boolean {
-    try {
-      const url = new URL(requestURL);
-      return url.protocol === 'http:' || url.protocol === 'https:';
-    } catch {
-      return false;
-    }
   }
 }
 
@@ -4820,7 +4819,7 @@ function readStringMember(
  * one-element array collapsed to its string - so a value whose `toString` answers
  * differently on each call is checked and sent as one string. Names are lowercased, and
  * an unset value removes the header whatever its capitalization. A standard method is
- * uppercased (see `normalizeHTTPMethod`), so a `post` is the `POST` the retry and
+ * uppercased (see `normalizeStandardMethod`), so a `post` is the `POST` the retry and
  * redirect rules check for; any other method is kept as given.
  * Throws on a `requestURL` that is not a string, a `method` that is not a method name
  * (see `describeInvalidHTTPMethod`), or `headers` that is not a plain object (an array, a
@@ -4846,7 +4845,7 @@ function snapshotInterceptedRequest(
     );
   }
 
-  const normalizedMethod = normalizeHTTPMethod(method);
+  const normalizedMethod = normalizeStandardMethod(method);
 
   const candidateHeaders: unknown = headers;
 
@@ -5037,21 +5036,6 @@ function isBodyDecodeFailure(response: AdapterResponse): boolean {
   }
 
   return false;
-}
-
-function isAbortError(err: unknown): err is Error {
-  return isErrorValue(err) && readObjectMember(err, 'name') === 'AbortError';
-}
-
-function isNonRetryableClientCallbackError(err: unknown): boolean {
-  return (
-    readObjectMember(err, NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG) ===
-    true
-  );
-}
-
-function isStreamFactoryClientCallbackError(err: unknown): boolean {
-  return readObjectMember(err, STREAM_FACTORY_ERROR_FLAG) === true;
 }
 
 /**

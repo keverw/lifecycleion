@@ -221,19 +221,6 @@ export class XHRAdapter implements HTTPAdapter {
       let uploadedBytes = 0;
       let uploadTotalBytes = 0;
 
-      xhr.upload.addEventListener('progress', (event) => {
-        const { progress, total } = readProgressEvent(event);
-
-        if (progress === 1) {
-          didFireUpload100 = true;
-        }
-
-        uploadedBytes = Math.max(uploadedBytes, event.loaded);
-        uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
-
-        guardedUploadProgress?.({ loaded: event.loaded, total, progress });
-      });
-
       // 100% upload fires as soon as all bytes are sent, always before xhr.load
       // per spec. Skip if upload.progress already reported 100% to avoid a
       // duplicate event. We still track whether this fired so xhr.load can use
@@ -261,17 +248,45 @@ export class XHRAdapter implements HTTPAdapter {
         guardedUploadProgress?.({ loaded: bytes, total: bytes, progress: 1 });
       };
 
-      xhr.upload.addEventListener('load', (event) => {
-        didUploadComplete = true;
+      // `upload` is optional where XHR runs outside a browser - Node's `xmlhttprequest` has
+      // none - so without one there is no per-chunk upload progress, and the final upload
+      // event still fires when the request ends. One whose getter or `addEventListener`
+      // throws fails the same way on every attempt, so it is refused as non-retryable, as a
+      // send the XHR refuses is - and, never sent, takes the abort listener off itself.
+      try {
+        const upload: XMLHttpRequestUpload | null | undefined = xhr.upload;
 
-        uploadedBytes = Math.max(uploadedBytes, event.loaded);
-        uploadTotalBytes = Math.max(
-          uploadTotalBytes,
-          event.total || event.loaded,
-        );
+        if (upload) {
+          upload.addEventListener('progress', (event) => {
+            const { progress, total } = readProgressEvent(event);
 
-        emitFinalUpload();
-      });
+            if (progress === 1) {
+              didFireUpload100 = true;
+            }
+
+            uploadedBytes = Math.max(uploadedBytes, event.loaded);
+            uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
+
+            guardedUploadProgress?.({ loaded: event.loaded, total, progress });
+          });
+
+          upload.addEventListener('load', (event) => {
+            didUploadComplete = true;
+
+            uploadedBytes = Math.max(uploadedBytes, event.loaded);
+            uploadTotalBytes = Math.max(
+              uploadTotalBytes,
+              event.total || event.loaded,
+            );
+
+            emitFinalUpload();
+          });
+        }
+      } catch (error) {
+        removeAbortListener();
+        refuse(error);
+        return;
+      }
 
       // --- Download progress ---
 
@@ -526,7 +541,9 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        xhr.send(prepareBody(requestBody));
+        // A `string`, a `Uint8Array` (a BufferSource) and a `FormData` are all
+        // `XMLHttpRequestBodyInit`: the cast is safe for the bodies the client produces.
+        xhr.send(requestBody as XMLHttpRequestBodyInit | null);
       } catch (error) {
         removeAbortListener();
         refuse(error);
@@ -609,22 +626,6 @@ function readResponseBody(
   }
 
   return null;
-}
-
-/**
- * Converts the adapter request body to a value accepted by `xhr.send()`.
- * `string`, `Uint8Array` (BufferSource), and `FormData` are all valid
- * `XMLHttpRequestBodyInit` values — the cast is safe for the body types
- * the client produces.
- */
-function prepareBody(
-  body: AdapterRequest['body'],
-): XMLHttpRequestBodyInit | null {
-  if (body === null) {
-    return null;
-  }
-
-  return body as XMLHttpRequestBodyInit;
 }
 
 /**
@@ -716,26 +717,50 @@ function parseXHRResponseHeaders(
  * - relies on URL normalization for equivalent forms
  *   (default ports, dot segments, encoding normalization, etc.)
  *
- * `answeredURL` is the dispatched URL as the browser resolved it (`send`'s own); one still
- * relative, with no page to resolve against, is read against `responseURL`.
+ * `answeredURL` is the dispatched URL as the browser resolved it (`send`'s own). One still
+ * relative - no page to resolve it against, an XHR with a base of its own - is read
+ * against `responseURL` only when it starts with `/`: a root-relative `/x` or a
+ * protocol-relative `//h/x` names the same URL against any base on the request's origin,
+ * which an unredirected `responseURL` is. A path-relative `api/x` (or `../x`, `?q`) does
+ * not - against `responseURL` it resolves one directory too deep, and a plain `200` would
+ * be reported as a redirect - so it is taken as answered where it was sent, and a redirect
+ * such a runtime hid goes unreported.
  */
 function didBrowserFollowRedirect(
   responseURL: string,
   answeredURL: string,
 ): boolean {
+  let normalizedResponse: URL;
+
   try {
-    const normalizedResponse = new URL(responseURL);
-    normalizedResponse.hash = '';
-
-    const normalizedRequest = new URL(answeredURL, normalizedResponse.href);
-    normalizedRequest.hash = '';
-
-    return (
-      stripURLCredentials(normalizedResponse.href) !==
-      stripURLCredentials(normalizedRequest.href)
-    );
+    normalizedResponse = new URL(responseURL);
   } catch {
-    // Fallback for non-URL inputs: preserve prior behavior.
+    // Fallback for non-URL inputs: compared as written.
     return responseURL !== answeredURL;
   }
+
+  normalizedResponse.hash = '';
+
+  let normalizedRequest: URL;
+
+  try {
+    normalizedRequest = new URL(answeredURL);
+  } catch {
+    if (!answeredURL.startsWith('/')) {
+      return false;
+    }
+
+    try {
+      normalizedRequest = new URL(answeredURL, normalizedResponse);
+    } catch {
+      return false;
+    }
+  }
+
+  normalizedRequest.hash = '';
+
+  return (
+    stripURLCredentials(normalizedResponse.href) !==
+    stripURLCredentials(normalizedRequest.href)
+  );
 }
