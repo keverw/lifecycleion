@@ -15,7 +15,7 @@ import {
 import {
   extractFetchHeaders,
   derivedRedirectFields,
-  getBrowserResolutionBase,
+  resolveBrowserRequestURL,
   stripCrossOriginURLCredentials,
 } from '../utils';
 import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
@@ -77,8 +77,8 @@ export class FetchAdapter implements HTTPAdapter {
     // `adapter_error` it is, rather than as a network error retried to no end. Built
     // without the body or signal, which `fetch` below takes, so nothing is consumed.
     //
-    // Only where it can be: a URL that resolves (see `resolveProbeURL`), and a runtime
-    // with `Request` - a test setup that polyfills only `fetch` has none.
+    // Only where it can be: a URL that resolves (see `resolveBrowserRequestURL`), and a
+    // runtime with `Request` - a test setup that polyfills only `fetch` has none.
     //
     // The headers it is built with are kept for `fetch` below, so they are materialized
     // once; where it is not built, `fetch` materializes them inside its own `try`.
@@ -88,7 +88,7 @@ export class FetchAdapter implements HTTPAdapter {
     // value or method `fetch` refuses came back as its `TypeError`, retried as a network
     // failure to no end. Only where there is a base to resolve against; elsewhere `fetch`
     // resolves it, or refuses it, as it always did.
-    const probeURL = resolveProbeURL(dispatchedURL);
+    const probeURL = resolveBrowserRequestURL(dispatchedURL);
     // What a `Location` resolves against: the URL as `fetch` resolved it, so a relative
     // one (this adapter driven directly under a global `location`) still reports where
     // a redirect pointed.
@@ -294,34 +294,6 @@ export class FetchAdapter implements HTTPAdapter {
       headers: responseHeadersForBody,
       body: rawBody,
     };
-  }
-}
-
-/**
- * The URL to check a request against before it is sent: `url` itself when absolute, or
- * resolved as `fetch` resolves it, against {@link getBrowserResolutionBase} - the
- * document's base URL in a window, the `location` in a worker; `undefined` when it is
- * relative and there is no base. Tested with `new URL` in a `try`: `URL.canParse` is
- * missing from older browsers and early Node 18, and a check that throws there must not
- * fail every request.
- */
-function resolveProbeURL(url: string): string | undefined {
-  try {
-    return new URL(url).href;
-  } catch {
-    // Relative: resolved below, where there is a base.
-  }
-
-  const base = getBrowserResolutionBase();
-
-  if (base === undefined) {
-    return undefined;
-  }
-
-  try {
-    return new URL(url, base).href;
-  } catch {
-    return undefined;
   }
 }
 

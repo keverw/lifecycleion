@@ -50,7 +50,7 @@ import {
   isAdapterHeaderValue,
   parseContentType,
   resolveAbsoluteURLForRuntime,
-  stripCrossOriginURLCredentials,
+  reportedRedirectTarget,
   derivedRedirectFields,
   detectedRedirectTarget,
   type AdapterRedirectFields,
@@ -202,6 +202,16 @@ const ADAPTER_RESPONSE_FIELDS = [
   'isStreamError',
   'streamErrorCode',
   'errorCause',
+] as const satisfies readonly (keyof AdapterResponse)[];
+
+/** The adapter-answer flags typed `boolean`. */
+const ADAPTER_RESPONSE_FLAGS = [
+  'wasRedirectDetected',
+  'isTransportError',
+  'isRetryable',
+  'wasDefinitelyNotSent',
+  'isStreamed',
+  'isStreamError',
 ] as const satisfies readonly (keyof AdapterResponse)[];
 
 /** Status and headers of an answer whose reading then failed. */
@@ -1309,12 +1319,15 @@ export class BaseHTTPClient {
             // the raw string, recorded and handed to the interceptors below, and refused
             // as unsupported unless one rewrites it.
             let redirectURL: string;
+            // Kept parsed for the cross-origin check below.
+            let parsedRedirectURL: URL | undefined;
 
             try {
-              redirectURL = new URL(
+              parsedRedirectURL = new URL(
                 location,
                 attemptResult.sentRequest.requestURL,
-              ).toString();
+              );
+              redirectURL = parsedRedirectURL.toString();
             } catch {
               redirectURL = location;
             }
@@ -1338,7 +1351,10 @@ export class BaseHTTPClient {
             // `_sanitizeRedirectRequest` had already been handed to the caller's observers
             // and written into the redirect history. See `stripURLCredentials`.
             if (
-              isCrossOrigin(attemptResult.sentRequest.requestURL, redirectURL)
+              isCrossOrigin(
+                attemptResult.sentRequest.requestURL,
+                parsedRedirectURL ?? redirectURL,
+              )
             ) {
               redirectURL = stripURLCredentials(redirectURL);
             }
@@ -2832,13 +2848,26 @@ export class BaseHTTPClient {
           );
         }
         answeredStatus = candidateStatus;
+        // The answer's flags are booleans, and read as booleans from here on: anything
+        // else from a plain-JS adapter - a `'false'` string, a `1` - is dropped as unset
+        // rather than read by truthiness, where `{ status: 0, wasRedirectDetected:
+        // 'false' }` ended as a non-retryable `redirect_disabled` reporting the string.
+        for (const flag of ADAPTER_RESPONSE_FLAGS) {
+          if (
+            Object.hasOwn(adapterResponse, flag) &&
+            typeof adapterResponse[flag] !== 'boolean'
+          ) {
+            delete adapterResponse[flag];
+          }
+        }
         // An adapter's own redirect target is held to the rule the built-in adapters
-        // resolve one by (`detectedRedirectTarget`): no userinfo on a target of another
-        // origin than the URL it answered. Anything but a string - a `URL` object from a
-        // plain-JS adapter - is dropped rather than handed on unchecked; the target is
-        // then derived from `Location`, as for an adapter that names none.
+        // resolve one by (`reportedRedirectTarget`): no userinfo on a target of another
+        // origin than the URL it answered, nor that URL's own userinfo. Anything but a
+        // string - a `URL` object from a plain-JS adapter - is dropped rather than handed
+        // on unchecked; the target is then derived from `Location`, as for an adapter
+        // that names none.
         if (typeof adapterResponse.detectedRedirectURL === 'string') {
-          adapterResponse.detectedRedirectURL = stripCrossOriginURLCredentials(
+          adapterResponse.detectedRedirectURL = reportedRedirectTarget(
             adapterResponse.detectedRedirectURL,
             sentRequest.requestURL,
           );

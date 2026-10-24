@@ -122,12 +122,14 @@ export interface AdapterResponse {
    * does not follow that redirect itself. Where the built-in adapters resolve
    * the `Location` themselves, they do it against the request URL without its
    * userinfo, drop userinfo the server wrote into a `Location` on another origin
-   * (keeping it on the request's own), and leave this unset for a `Location`
-   * that does not resolve to a URL. XHRAdapter reports a redirect the browser
-   * followed as `xhr.responseURL`, the URL the browser followed to.
+   * (keeping it on the request's own, unless it is the request URL's own userinfo),
+   * and leave this unset for a `Location` that does not resolve to a URL. XHRAdapter
+   * reports a redirect the browser followed as `xhr.responseURL`, the URL the browser
+   * followed to.
    *
-   * A custom adapter's value is held to the same userinfo rule by the client, and one
-   * that is not a string is dropped (the target is then derived from `Location`).
+   * A custom adapter's value is held to the same userinfo rule by the client - so one
+   * resolved against the request URL, credentials and all, does not report them - and
+   * one that is not a string is dropped (the target is then derived from `Location`).
    */
   detectedRedirectURL?: string;
   /**
@@ -657,11 +659,12 @@ export interface HTTPResponse<T = unknown> {
    * Redirect target when known but not followed by the client loop: from the built-in
    * adapters and the client, the `Location` resolved against the request URL, without the
    * request URL's userinfo, and unset for a `Location` that does not resolve to a URL (a
-   * custom adapter's own value is passed on as it gave it, but for the userinfo rule). Userinfo in the target - written by the
-   * server into the `Location`, or in a custom adapter's own report - is kept on a target
-   * of the request's own origin and dropped on any other, as the client drops it from a
-   * cross-origin hop it follows. For a redirect a browser followed under XHRAdapter, the
-   * URL the browser followed to (`xhr.responseURL`).
+   * custom adapter's own value is passed on as it gave it, but for the userinfo rule).
+   * Userinfo in the target - written by the server into the `Location`, or in a custom
+   * adapter's own report - is kept on a target of the request's own origin, unless it is
+   * the request URL's own userinfo, and dropped on any other, as the client drops it from
+   * a cross-origin hop it follows. For a redirect a browser followed under XHRAdapter,
+   * the URL the browser followed to (`xhr.responseURL`).
    */
   detectedRedirectURL?: string;
   /**
@@ -743,16 +746,7 @@ export interface HTTPClientError {
   wasRedirectDetected: boolean;
   /** True when HTTPClient's own redirect loop followed at least one hop before the error. */
   wasRedirectFollowed: boolean;
-  /**
-   * Redirect target when known but not followed by the client loop: from the built-in
-   * adapters and the client, the `Location` resolved against the request URL, without the
-   * request URL's userinfo, and unset for a `Location` that does not resolve to a URL (a
-   * custom adapter's own value is passed on as it gave it, but for the userinfo rule). Userinfo in the target - written by the
-   * server into the `Location`, or in a custom adapter's own report - is kept on a target
-   * of the request's own origin and dropped on any other, as the client drops it from a
-   * cross-origin hop it follows. For a redirect a browser followed under XHRAdapter, the
-   * URL the browser followed to (`xhr.responseURL`).
-   */
+  /** Same as {@link HTTPResponse.detectedRedirectURL}. */
   detectedRedirectURL?: string;
   /**
    * Redirect target URLs recorded during redirect handling, in order.

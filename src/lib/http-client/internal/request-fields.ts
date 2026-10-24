@@ -9,6 +9,7 @@ import { presentHeaderValue } from './header-utils';
 import { assertOptionalHeaderRecord } from './plain-record';
 import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
+import { describeValue } from '../../internal/describe-value';
 
 /**
  * The request fields every adapter reads, each read once, before anything is sent. Their
@@ -31,6 +32,15 @@ export function readAdapterRequestFields(request: AdapterRequest) {
   let fields;
   try {
     givenMethod = request.method;
+    const requestURL: unknown = request.requestURL;
+    // A string, as the type has it: an adapter driven directly with anything else - a
+    // number, a `URL` object - threw a raw `TypeError` from wherever it was first read
+    // as one (XHRAdapter's `startsWith`), or was sent as whatever it coerced to.
+    if (typeof requestURL !== 'string') {
+      throw new TypeError(
+        `Adapter request requestURL must be a string (got ${describeValue(requestURL)})`,
+      );
+    }
     fields = {
       guardedUploadProgress: guardProgressCallback(
         request.onUploadProgress,
@@ -40,7 +50,7 @@ export function readAdapterRequestFields(request: AdapterRequest) {
         request.onDownloadProgress,
         'onDownloadProgress',
       ),
-      requestURL: request.requestURL,
+      requestURL,
       initialURL: request.initialURL,
       headers: copyRequestHeaders(request.headers),
       body: request.body,

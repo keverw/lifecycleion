@@ -230,9 +230,14 @@ export function resolveAbsoluteURL(url: string, baseURL?: string): string {
  * opaque origin (a `file:` or other non-special URL), which `URL` spells `'null'` for
  * all of them alike: each parse is a fresh origin, the same as no other.
  */
-export function isCrossOrigin(fromURL: string, toURL: string | URL): boolean {
+export function isCrossOrigin(
+  fromURL: string | URL,
+  toURL: string | URL,
+): boolean {
   try {
-    const fromOrigin = new URL(fromURL).origin;
+    const fromOrigin = (
+      typeof fromURL === 'string' ? new URL(fromURL) : fromURL
+    ).origin;
     const toOrigin = (typeof toURL === 'string' ? new URL(toURL) : toURL)
       .origin;
 
@@ -342,7 +347,7 @@ export function stripCrossOriginURLCredentials(
 
     // The client's cross-origin rule rather than comparing `origin`s: every opaque origin
     // reads `'null'`, so `foo://a.test/` and `foo://u:p@b.test/x` would compare equal.
-    if (!isCrossOrigin(initialURL, target)) {
+    if (!isCrossOrigin(initial, target)) {
       return requestURL;
     }
 
@@ -389,16 +394,34 @@ export function resolveAbsoluteURLForRuntime(
     return resolved;
   }
 
-  const browserBase = getBrowserResolutionBase();
+  return resolveBrowserRequestURL(resolved) ?? resolved;
+}
 
-  if (!browserBase) {
-    return resolved;
+/**
+ * `url` resolved for a browser request: itself when it parses on its own as an absolute
+ * URL, else against {@link getBrowserResolutionBase} - the document's base URL in a
+ * window, the `location` in a worker; `undefined` when it is relative and there is no
+ * base, or does not resolve against it. Tested with `new URL` in a `try`: `URL.canParse`
+ * is missing from older browsers and early Node 18, and a check that throws there must
+ * not fail every request.
+ */
+export function resolveBrowserRequestURL(url: string): string | undefined {
+  try {
+    return new URL(url).href;
+  } catch {
+    // Relative: resolved below, where there is a base.
+  }
+
+  const base = getBrowserResolutionBase();
+
+  if (base === undefined) {
+    return undefined;
   }
 
   try {
-    return new URL(resolved, browserBase).href;
+    return new URL(url, base).href;
   } catch {
-    return resolved;
+    return undefined;
   }
 }
 
@@ -1008,9 +1031,9 @@ export function scalarHeader(
  * against the URL that was answered, without that URL's userinfo. A relative `Location`
  * names no credentials, so the caller's own are not copied into a field that reports the
  * server's target. Userinfo the server wrote into the `Location` itself is kept only on a
- * target of the request's own origin ({@link stripCrossOriginURLCredentials}): on any
- * other, the client's redirect loop strips it from the URL it follows, so it is not
- * reported either.
+ * target of the request's own origin, and only when it is not the request URL's own
+ * ({@link reportedRedirectTarget}): on any other origin, the client's redirect loop
+ * strips it from the URL it follows, so it is not reported either.
  *
  * A `Location` that does not resolve to a URL reports no target at all, rather than the
  * raw string handed on as though it were one. An absolute one still resolves when the
@@ -1023,7 +1046,9 @@ export function detectedRedirectTarget(
 ): string | undefined {
   let base: URL | undefined;
   try {
-    base = new URL(stripURLCredentials(requestURL));
+    base = new URL(requestURL);
+    base.username = '';
+    base.password = '';
   } catch {
     // No base: only an absolute `Location` resolves.
   }
@@ -1035,7 +1060,59 @@ export function detectedRedirectTarget(
     return undefined;
   }
 
-  return stripCrossOriginURLCredentials(target, requestURL);
+  return reportedRedirectTarget(target, requestURL);
+}
+
+/**
+ * A redirect target as `detectedRedirectURL` reports it, whoever resolved it - the
+ * built-in adapters, the client, or a custom adapter's own value: held to
+ * {@link stripCrossOriginURLCredentials} against the URL that was answered, and without
+ * userinfo identical to that URL's own on a target of its origin. Those are the
+ * request's credentials, copied in by resolving a relative `Location` against the
+ * request URL (a custom adapter's `new URL(location, requestURL)`), not the server's:
+ * nothing tells the two apart, so they are not reported. Userinfo the server wrote that
+ * differs from the request's is kept on the request's own origin.
+ */
+export function reportedRedirectTarget(
+  targetURL: string,
+  requestURL: string,
+): string {
+  const reported = stripCrossOriginURLCredentials(targetURL, requestURL);
+
+  try {
+    const request = new URL(requestURL);
+    const { username, password } = request;
+    // A relative target is resolved against the request URL without its userinfo, so
+    // only userinfo written into the target itself is found on it.
+    request.username = '';
+    request.password = '';
+    let target: URL;
+    try {
+      target = new URL(reported);
+    } catch {
+      target = new URL(reported, request);
+    }
+
+    if (
+      (target.username || target.password) &&
+      target.username === username &&
+      target.password === password &&
+      !isCrossOrigin(request, target)
+    ) {
+      target.username = '';
+      target.password = '';
+
+      // Kept in its network-path form, as `stripCrossOriginURLCredentials` keeps one.
+      return reported.startsWith('//')
+        ? target.href.slice(target.protocol.length)
+        : target.href;
+    }
+  } catch {
+    // A request URL that does not parse has no userinfo to match, and the cross-origin
+    // rule above already failed closed on it.
+  }
+
+  return reported;
 }
 
 /** The redirect fields of an answer: whether it was a redirect, and where it pointed. */

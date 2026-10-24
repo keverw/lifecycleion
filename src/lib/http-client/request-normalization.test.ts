@@ -15,6 +15,7 @@ import {
   readHostPattern,
   mergeHeaders,
   parseContentType,
+  reportedRedirectTarget,
   stripCrossOriginURLCredentials,
 } from './utils';
 import { deepClone } from '../deep-clone';
@@ -56,6 +57,7 @@ import type { MockRequest } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
 import { getRevocationFixtures } from './test-helpers/https-test-server';
 import { FetchAdapter } from './adapters/fetch-adapter';
+import { XHRAdapter } from './adapters/xhr-adapter';
 import type {
   AdapterRequest,
   CancelResult,
@@ -9915,9 +9917,13 @@ test("PR review round 35: detectedRedirectURL does not copy the request's userin
           isFollowing ? 'redirect_loop' : 'redirect_disabled',
         );
         expect(relative.detectedRedirectURL).toBe(`${baseURL}/x?q`);
-        // Userinfo the server wrote itself is still reported as written.
+        // Userinfo the server wrote itself is still reported as written - but not where
+        // the loop already followed it: the hop that ends the request was sent with
+        // `s:t`, and userinfo identical to the request URL's own is not reported.
         expect(serverWritten.detectedRedirectURL).toBe(
-          baseURL.replace('http://', 'http://s:t@') + '/userinfo',
+          isFollowing
+            ? `${baseURL}/userinfo`
+            : baseURL.replace('http://', 'http://s:t@') + '/userinfo',
         );
       }
 
@@ -10172,4 +10178,113 @@ test("PR review round 37: an adapter's own detectedRedirectURL drops userinfo on
     'https://ignored.test/',
     'https://ignored.test/',
   ]);
+});
+
+test("PR review round 38: an adapter's answer flags are read only as booleans", async () => {
+  const answering = (answer: Record<string, unknown>): HTTPAdapter => ({
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        headers: {},
+        body: null,
+        ...answer,
+      } as AdapterResponse),
+  });
+
+  // A status-0 answer whose redirect flag is the string `'false'`: no redirect, so the
+  // network error it is, and no string reported as the flag.
+  const redirectBuilder = new HTTPClient({
+    adapter: answering({ status: 0, wasRedirectDetected: 'false' }),
+    baseURL: 'https://a.test',
+    followRedirects: false,
+  }).get('/x');
+  const redirectResponse = await redirectBuilder.send();
+  expect(redirectBuilder.error?.code).toBe('network_error');
+  expect(redirectResponse.wasRedirectDetected).toBe(false);
+  expect(redirectBuilder.error?.wasRedirectDetected).toBe(false);
+
+  // A healthy `200` whose failure flags are strings is the success it reports.
+  const healthyBuilder = new HTTPClient({
+    adapter: answering({
+      status: 200,
+      body: 'ok',
+      isTransportError: 'false',
+      isStreamError: 'false',
+    }),
+    baseURL: 'https://a.test',
+  }).get('/x');
+  const healthyResponse = await healthyBuilder.send();
+  expect(healthyBuilder.error).toBeNull();
+  expect(healthyResponse.isFailed).toBe(false);
+  expect(healthyResponse.isNetworkError).toBe(false);
+  expect(healthyResponse.isStreamError).toBe(false);
+});
+
+test('PR review round 38: an adapter driven with a requestURL that is not a string refuses it as non-retryable', async () => {
+  const refusalOf = (adapter: HTTPAdapter, requestURL: unknown) =>
+    adapter
+      .send({
+        requestURL: requestURL as string,
+        // Another origin, so the URL's credentials are looked for.
+        initialURL: 'https://a.test/',
+        method: 'GET',
+        headers: {},
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+  for (const adapter of [new FetchAdapter(), new XHRAdapter()]) {
+    for (const requestURL of [new URL('https://u:p@b.test/x'), 42]) {
+      const refusal = await refusalOf(adapter, requestURL);
+      expect(refusal?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(String(refusal?.message)).toContain(
+        'Adapter request requestURL must be a string',
+      );
+    }
+  }
+});
+
+test("PR review round 38: detectedRedirectURL does not report the request URL's own userinfo", async () => {
+  // The shared rule: the request's own userinfo is dropped, wherever it came from; other
+  // userinfo on the request's origin is the server's, and kept.
+  expect(
+    reportedRedirectTarget('https://u:p@a.test/next', 'https://u:p@a.test/x'),
+  ).toBe('https://a.test/next');
+  expect(
+    reportedRedirectTarget('//u:p@a.test/next', 'https://u:p@a.test/x'),
+  ).toBe('//a.test/next');
+  expect(
+    reportedRedirectTarget('https://x:y@a.test/next', 'https://u:p@a.test/x'),
+  ).toBe('https://x:y@a.test/next');
+  expect(reportedRedirectTarget('/next', 'https://u:p@a.test/x')).toBe('/next');
+  expect(
+    derivedRedirectFields('https://u:p@a.test/start', 302, {
+      location: 'https://u:p@a.test/next',
+    }).detectedRedirectURL,
+  ).toBe('https://a.test/next');
+
+  // A custom adapter that resolves `Location` against the request URL, credentials and
+  // all, as `new URL(location, requestURL)` does.
+  const resolving: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) =>
+      Promise.resolve({
+        status: 302,
+        headers: { location: '/next' },
+        body: null,
+        wasRedirectDetected: true,
+        detectedRedirectURL: new URL('/next', request.requestURL).href,
+      }),
+  };
+  const builder = new HTTPClient({
+    adapter: resolving,
+    baseURL: 'https://u:p@a.test',
+    followRedirects: false,
+  }).get('/start');
+  const response = await builder.send();
+  expect(builder.error?.code).toBe('redirect_disabled');
+  expect(response.detectedRedirectURL).toBe('https://a.test/next');
+  expect(builder.error?.detectedRedirectURL).toBe('https://a.test/next');
 });

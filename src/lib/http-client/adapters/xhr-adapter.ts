@@ -27,7 +27,7 @@ import type {
 import {
   derivedRedirectFields,
   keepFirstJoinedLocation,
-  resolveAbsoluteURLForRuntime,
+  resolveBrowserRequestURL,
   stripURLCredentials,
   stripCrossOriginURLCredentials,
 } from '../utils';
@@ -73,11 +73,8 @@ export class XHRAdapter implements HTTPAdapter {
     // What a `Location` resolves against, and what `didBrowserFollowRedirect` compares
     // `responseURL` with: the dispatched URL as the browser resolves it, so a relative one
     // (this adapter driven directly) still reports where an unfollowed redirect pointed.
-    const answeredURL = resolveAbsoluteURLForRuntime(
-      dispatchedURL,
-      undefined,
-      true,
-    );
+    const answeredURL =
+      resolveBrowserRequestURL(dispatchedURL) ?? dispatchedURL;
 
     return await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
