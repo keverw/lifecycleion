@@ -5,6 +5,7 @@ import {
   isBrowserRestrictedHeader,
   materializeRequestHeaders,
 } from './header-utils';
+import { errorText } from '../test-helpers/error-text';
 
 describe('isBrowserRestrictedHeader', () => {
   test('detects exact-match browser restricted headers', () => {
@@ -91,7 +92,7 @@ describe('assertNoBrowserRestrictedHeaders', () => {
         { 'sec-fetch-site': 'same-origin' },
         'FetchAdapter',
       ),
-    ).toThrow(/browser-restricted header "sec-fetch-site"/);
+    ).toThrow("Cannot set header 'sec-fetch-site': it is browser-restricted");
   });
 
   test('includes the adapter name in the error message', () => {
@@ -113,6 +114,25 @@ describe('assertNoBrowserRestrictedHeaders', () => {
     expect(() =>
       assertNoBrowserRestrictedHeaders({}, 'FetchAdapter'),
     ).not.toThrow();
+  });
+
+  test('PR review round 47: a restricted header pasted whole as its name is refused without the name', () => {
+    // Lowercased, it matches the `proxy-` prefix: the name is the credential.
+    let thrown: unknown;
+    try {
+      assertNoBrowserRestrictedHeaders(
+        { 'proxy-authorization: basic c2VjcmV0LXRva2Vu': 'x' },
+        'FetchAdapter',
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain(
+      'Cannot set a header name: it is browser-restricted',
+    );
+    expect(errorText(thrown)).not.toContain('c2VjcmV0LXRva2Vu');
   });
 });
 

@@ -8,7 +8,7 @@ import {
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
 } from './adapter-error';
-import { describeValue } from '../../internal/describe-value';
+import { validateMaxResponseBytes } from '../consts';
 import type { AdapterRequest, AdapterResponse } from '../types';
 import { derivedRedirectFields } from '../utils';
 import {
@@ -23,9 +23,10 @@ import { utf8ByteLength } from './utf8-length';
  *
  * Read once, guarded: an adapter can be driven directly, with a request object that is
  * the caller's own. `HTTPClient` validates the value before it gets here; a caller
- * driving an adapter directly gets the same rule - a positive integer, or `Infinity` -
- * as a non-retryable `TypeError`, rather than an unusable limit (`'1048576'` from an
- * environment variable, `0`, `NaN`) silently read as no limit at all.
+ * driving an adapter directly gets the same rule (`validateMaxResponseBytes`) - a
+ * positive integer, or `Infinity` - as a non-retryable `TypeError`, rather than an
+ * unusable limit (`'1048576'` from an environment variable, `0`, `NaN`) silently read
+ * as no limit at all.
  */
 export function readMaxResponseBytes(request: AdapterRequest): number {
   // Not `readUnknownMember`, which reads a throw as absent: a getter that throws turned
@@ -37,23 +38,14 @@ export function readMaxResponseBytes(request: AdapterRequest): number {
     throw nonRetryableAdapterErrorFrom(error);
   }
 
-  if (value === undefined || value === null) {
-    return Number.POSITIVE_INFINITY;
+  try {
+    validateMaxResponseBytes(value, 'Adapter request maxResponseBytes');
+  } catch (error) {
+    markNonRetryableAdapterError(error);
+    throw error;
   }
 
-  if (
-    typeof value === 'number' &&
-    value > 0 &&
-    (Number.isInteger(value) || value === Number.POSITIVE_INFINITY)
-  ) {
-    return value;
-  }
-
-  const refusal = new TypeError(
-    `Adapter request maxResponseBytes must be a positive integer or Infinity (got ${typeof value === 'number' ? String(value) : describeValue(value)})`,
-  );
-  markNonRetryableAdapterError(refusal);
-  throw refusal;
+  return value ?? Number.POSITIVE_INFINITY;
 }
 
 /**

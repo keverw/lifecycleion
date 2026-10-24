@@ -154,7 +154,7 @@ export function validateMaxResponseBytes(
     requested <= 0
   ) {
     throw new TypeError(
-      `${label} must be a positive integer, or Infinity for no limit (got ${typeof requested === 'number' ? String(requested) : requested === null ? 'null' : typeof requested})`,
+      `${label} must be a positive integer, or Infinity for no limit (got ${typeof requested === 'number' ? String(requested) : typeof requested})`,
     );
   }
 }

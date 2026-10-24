@@ -143,7 +143,7 @@ export function assertNoBrowserRestrictedHeaders(
       )
     ) {
       throw new Error(
-        `[${adapterName}] Cannot set browser-restricted header "${key}". ` +
+        `[${adapterName}] Cannot set ${describeRefusedHeader(key, 'header')}: it is browser-restricted. ` +
           `Browsers silently ignore this header — remove it to avoid subtle bugs.`,
       );
     }

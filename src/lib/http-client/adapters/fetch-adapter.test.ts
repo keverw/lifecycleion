@@ -1979,6 +1979,43 @@ test('FetchAdapter refuses a method the runtime fetch would rewrite, rather than
   expect(builder.error?.code).toBe('adapter_error');
 });
 
+test('PR review round 47: FetchAdapter refuses a fetch that uppercases a custom method, which is case-sensitive', async () => {
+  let calls = 0;
+  (globalThis as any).fetch = () => {
+    calls++;
+    return Promise.resolve(new Response(null, { status: 200 }));
+  };
+  const originalRequest = globalThis.Request;
+  // A polyfill that uppercases every method, as `fetch` does only the standard six.
+  globalThis.Request = class {
+    public readonly method: string;
+
+    constructor(_input: RequestInfo | URL, init?: RequestInit) {
+      this.method = (init?.method ?? 'GET').toUpperCase();
+    }
+  } as unknown as typeof Request;
+
+  try {
+    let thrown: unknown;
+    try {
+      await new FetchAdapter().send({
+        requestURL: 'http://api.test/x',
+        method: 'purge',
+        headers: {},
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(calls).toBe(0);
+    expect((thrown as Error).message).toBe(
+      "[FetchAdapter] This runtime's fetch would send the purge request as PURGE. Use NodeAdapter for it.",
+    );
+  } finally {
+    globalThis.Request = originalRequest;
+  }
+});
+
 test('PR review round 37: an empty document.baseURI falls back to location, as the client resolves', async () => {
   const locationDescriptor = Object.getOwnPropertyDescriptor(
     globalThis,

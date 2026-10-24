@@ -2671,6 +2671,8 @@ export class BaseHTTPClient {
       }
 
       let sentRequest: AttemptRequest;
+      // The body handed to the adapter: the client's own, not the observers' `body`.
+      let sentBody: AttemptRequest['body'];
       // What the snapshot of a failed setup may reuse: the bodies once built, or
       // `unbuildable` while building them is what is under way.
       let knownBodies: ObservedAttemptBodies | 'unbuildable' | undefined;
@@ -2693,6 +2695,7 @@ export class BaseHTTPClient {
         knownBodies = 'unbuildable';
         const observedBodies = buildObservedAttemptBodies(attemptRequest.body);
         knownBodies = observedBodies;
+        sentBody = observedBodies.body;
         params.sentBody.value = attemptRequest.body;
         sentRequest = this._buildAttemptRequest(
           attemptRequest,
@@ -2765,7 +2768,7 @@ export class BaseHTTPClient {
             requestURL: sentRequest.requestURL,
             method: sentRequest.method,
             headers: { ...sentRequest.headers },
-            body: sentRequest.body ?? null,
+            body: sentBody ?? null,
             signal: attemptSignal,
             // Forward the builder's streaming factory to each adapter attempt.
             // NodeAdapter invokes it only for a 200 response with a body, letting the caller
@@ -2802,7 +2805,7 @@ export class BaseHTTPClient {
             // are, not left to the adapter: a custom adapter that calls them bare had a
             // throwing hook fail - and retry - a request that succeeded.
             onUploadProgress:
-              onUploadProgress || (sentRequest.body ?? null) !== null
+              onUploadProgress || (sentBody ?? null) !== null
                 ? (e) => {
                     uploadActivity.at = performance.now();
 
@@ -2997,13 +3000,13 @@ export class BaseHTTPClient {
         );
 
         observedSentRequest = observedEffectiveHeaders
-          ? {
-              ...sentRequest,
-              headers: mergeObservedHeaders(
+          ? withObservedHeaders(
+              sentRequest,
+              mergeObservedHeaders(
                 sentRequest.headers,
                 observedEffectiveHeaders,
               ),
-            }
+            )
           : sentRequest;
 
         // A transport failure answered once the attempt's timer had fired is that timer's
@@ -4539,17 +4542,20 @@ export class BaseHTTPClient {
       }
     }
 
-    return {
-      requestURL: request.requestURL,
-      method: request.method,
-      headers,
-      body: observedBodies.body,
-      rawBody: observedBodies.rawBody,
-      timeout,
-      maxResponseBytes,
-      attemptNumber,
-      requestID,
-    };
+    return withObservedBodies(
+      {
+        requestURL: request.requestURL,
+        method: request.method,
+        headers,
+        body: undefined,
+        rawBody: undefined,
+        timeout,
+        maxResponseBytes,
+        attemptNumber,
+        requestID,
+      },
+      observedBodies.observerReaders(),
+    );
   }
 
   /**
@@ -4629,38 +4635,41 @@ export class BaseHTTPClient {
     // be read is left empty rather than failing the snapshot - a retry interceptor's
     // request with a throwing `body` getter would otherwise turn its `interceptor_error`
     // into a `request_setup_error` and drop the attempt it had already ended.
-    let clonedBodies: Pick<AttemptRequest, 'body' | 'rawBody'>;
+    let clonedBodies: ObservedBodyReaders;
 
     if (knownBodies !== undefined && knownBodies !== 'unbuildable') {
-      clonedBodies = knownBodies;
+      clonedBodies = knownBodies.observerReaders();
     } else {
       const rawBody = readObjectMember(request, 'body');
 
       // A body the dispatch path already failed to build is not validated and cloned a
       // second time; it is reported as it came.
       if (knownBodies === 'unbuildable') {
-        clonedBodies = { body: null, rawBody };
+        clonedBodies = { readBody: () => null, readRawBody: () => rawBody };
       } else {
         try {
-          clonedBodies = buildObservedAttemptBodies(rawBody);
+          clonedBodies = buildObservedAttemptBodies(rawBody).observerReaders();
         } catch {
-          clonedBodies = { body: null, rawBody };
+          clonedBodies = { readBody: () => null, readRawBody: () => rawBody };
         }
       }
     }
 
-    return {
-      requestURL:
-        urls.reportedURL ??
-        readStringMember(request, 'requestURL', urls.fallbackURL ?? ''),
-      method: readStringMember(request, 'method', ''),
-      headers,
-      body: clonedBodies.body,
-      rawBody: clonedBodies.rawBody,
-      timeout: limits.timeout,
-      maxResponseBytes: limits.maxResponseBytes,
-      requestID,
-    };
+    return withObservedBodies(
+      {
+        requestURL:
+          urls.reportedURL ??
+          readStringMember(request, 'requestURL', urls.fallbackURL ?? ''),
+        method: readStringMember(request, 'method', ''),
+        headers,
+        body: undefined,
+        rawBody: undefined,
+        timeout: limits.timeout,
+        maxResponseBytes: limits.maxResponseBytes,
+        requestID,
+      },
+      clonedBodies,
+    );
   }
 
   private _runResponseObservers(
@@ -4863,8 +4872,18 @@ type AttemptLimits = Required<
   Pick<AttemptRequest, 'timeout' | 'maxResponseBytes'>
 >;
 
-type ObservedAttemptBodies = Pick<AttemptRequest, 'body' | 'rawBody'> & {
+type ObservedAttemptBodies = {
+  /** The body handed to the adapter, never to an observer. */
+  body: AttemptRequest['body'];
   contentType: string | null;
+  /** The readers of one observed request's bodies (see `withObservedBodies`). */
+  observerReaders: () => ObservedBodyReaders;
+};
+
+/** What builds an observed request's `body` and `rawBody`, each when first read. */
+type ObservedBodyReaders = {
+  readBody: () => AttemptRequest['body'];
+  readRawBody: () => unknown;
 };
 
 /**
@@ -4923,21 +4942,112 @@ function buildObservedAttemptBodies(rawBody: unknown): ObservedAttemptBodies {
 
     return {
       body,
-      // A top-level `toJSON` that answers `undefined` serializes to nothing.
-      rawBody: typeof body === 'string' ? JSON.parse(body) : undefined,
       contentType,
+      observerReaders: () => ({
+        // A string, which no observer can change in place.
+        readBody: () => body,
+        // A top-level `toJSON` that answers `undefined` serializes to nothing.
+        readRawBody: () =>
+          typeof body === 'string' ? (JSON.parse(body) as unknown) : undefined,
+      }),
     };
   }
 
-  // Bytes and form data are sent as the copy.
-  const rawBodySnapshot = cloneBodyValue(rawBody);
-  const { body, contentType } = serializeBody(rawBodySnapshot);
+  // Bytes and form data are sent as the client's own copy, which no observer is handed:
+  // their `body` and `rawBody` are one copy taken from it. NodeAdapter writes a FormData's parts as
+  // it walks them, so a redirect- or retry-phase observer changing the one being sent,
+  // while its upload was still under way, changed parts not yet written.
+  const sentBody = cloneBodyValue(rawBody);
+  const { body, contentType } = serializeBody(sentBody);
 
   return {
     body,
-    rawBody: rawBodySnapshot,
     contentType,
+    observerReaders: () => {
+      if (!(body instanceof Uint8Array || body instanceof FormData)) {
+        // A string, or nothing: `rawBody` is what the caller gave, `undefined` included.
+        return { readBody: () => body, readRawBody: () => sentBody };
+      }
+
+      // One copy for both, as they are the same bytes: a logger that spreads the request
+      // pays for one.
+      let copy: Uint8Array | FormData | undefined;
+      const readCopy = () => (copy ??= cloneBodyValue(body) as typeof body);
+
+      return { readBody: readCopy, readRawBody: readCopy };
+    },
   };
+}
+
+/**
+ * `request`, with its `body` and `rawBody` each built when first read, and kept: a JSON
+ * body is parsed back, and bytes or form data copied, only for an observer that reads
+ * them. Both are enumerable accessors with a setter, so they are serialized and spread
+ * with the rest, and `Object.freeze` does not stop assigning them. Each request built has
+ * its own.
+ */
+function withObservedBodies(
+  request: AttemptRequest,
+  bodies: ObservedBodyReaders,
+): AttemptRequest {
+  defineBuiltOnRead(request, 'body', bodies.readBody);
+  defineBuiltOnRead(request, 'rawBody', bodies.readRawBody);
+
+  return request;
+}
+
+/** `key` of `request` as an accessor built by `build` on first read, or set by a write. */
+function defineBuiltOnRead(
+  request: AttemptRequest,
+  key: 'body' | 'rawBody',
+  build: () => unknown,
+): void {
+  let isBuilt = false;
+  let value: unknown;
+
+  // Redefined in place, so the field keeps its position among the others.
+  Object.defineProperty(request, key, {
+    enumerable: true,
+    configurable: true,
+    get(): unknown {
+      if (!isBuilt) {
+        value = build();
+        isBuilt = true;
+      }
+
+      return value;
+    },
+    set(next: unknown) {
+      value = next;
+      isBuilt = true;
+    },
+  });
+}
+
+/**
+ * A copy of an observed `request` with `headers` in place of its own, its bodies read from
+ * `request` when first read: a spread would read them at once, building them for an
+ * attempt no observer looks at.
+ */
+function withObservedHeaders(
+  request: AttemptRequest,
+  headers: Record<string, string | string[]>,
+): AttemptRequest {
+  const copy = Object.defineProperties(
+    {},
+    Object.getOwnPropertyDescriptors(request),
+  ) as AttemptRequest;
+  Object.defineProperty(copy, 'headers', {
+    value: headers,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+
+  return withObservedBodies(copy, {
+    readBody: () => request.body,
+    readRawBody: () => request.rawBody,
+  });
 }
 
 function cloneBodyValue(body: unknown): unknown {
@@ -5054,10 +5164,10 @@ function sentRequestForObservedAdapterError(
     return observedAfterAdapterResolve;
   }
 
-  return {
-    ...sentRequest,
-    headers: mergeObservedHeaders(sentRequest.headers, eff),
-  };
+  return withObservedHeaders(
+    sentRequest,
+    mergeObservedHeaders(sentRequest.headers, eff),
+  );
 }
 
 function getEffectiveRequestHeadersFromError(

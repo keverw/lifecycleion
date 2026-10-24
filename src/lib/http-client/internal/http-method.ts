@@ -1,4 +1,5 @@
 import { HTTP_METHODS } from '../consts';
+import { isHTTPToken } from './http-token';
 
 const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set(HTTP_METHODS);
 
@@ -8,6 +9,22 @@ const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set(HTTP_METHODS);
  */
 export function asciiUppercase(text: string): string {
   return text.replace(/[a-z]/g, (letter) => letter.toUpperCase());
+}
+
+/**
+ * What is wrong with `method` as a method name - completing "the method …" - or
+ * `undefined` when nothing is: a method is a non-empty RFC 9110 token. Never the method
+ * itself, which may be text pasted in whole. The rule `request()` and every adapter hold
+ * a method to.
+ */
+export function describeNonTokenMethod(method: string): string | undefined {
+  if (method === '') {
+    return 'is empty';
+  }
+  if (!isHTTPToken(method)) {
+    return 'is not a valid HTTP method name (got a string with characters an HTTP token does not allow)';
+  }
+  return undefined;
 }
 
 /**

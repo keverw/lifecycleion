@@ -24,6 +24,7 @@ import { deepClone } from '../deep-clone';
 import {
   ADAPTER_ERROR_CARRIER_KEY,
   DEFAULT_MAX_RESPONSE_BYTES,
+  EFFECTIVE_REQUEST_HEADERS_KEY,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   RESPONSE_DECODE_ERROR_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
@@ -1115,6 +1116,219 @@ test("PR review round 46: a JSON body's rawBody is the value sent, read from the
     '{"token":"t1","when":"1970-01-01T00:00:00.000Z"}',
   );
   expect(observed).toEqual([{ token: 't1', when: '1970-01-01T00:00:00.000Z' }]);
+});
+
+test('PR review round 47: a JSON body that serializes to nothing is sent without a JSON content type', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const observed: Array<Record<string, string | string[]>> = [];
+  client.addResponseObserver((_response, request) => {
+    observed.push(request.headers);
+  });
+
+  const response = await client
+    .post('/x')
+    .json({ toJSON: () => undefined })
+    .send();
+
+  expect(response.status).toBe(200);
+  expect(adapter.requests[0]?.body).toBeNull();
+  expect(adapter.requests[0]?.headers['content-type']).toBeUndefined();
+  expect(observed[0]?.['content-type']).toBeUndefined();
+});
+
+test("PR review round 47: an observer redacting a byte or form body's rawBody in place leaves the body sent alone", async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  client.addResponseObserver((_response, request) => {
+    const rawBody = request.rawBody;
+    if (rawBody instanceof Uint8Array) {
+      rawBody.fill(0);
+    } else if (rawBody instanceof FormData) {
+      rawBody.set('secret', 'redacted');
+    }
+  });
+  const form = new FormData();
+  form.set('secret', 's3cret');
+
+  await client
+    .post('/bytes')
+    .body(new Uint8Array([1, 2, 3]))
+    .send();
+  await client.post('/form').formData(form).send();
+
+  expect(adapter.requests[0]?.body).toEqual(new Uint8Array([1, 2, 3]));
+  expect((adapter.requests[1]?.body as FormData).get('secret')).toBe('s3cret');
+});
+
+test('PR review round 47: rawBody is built only when an observer reads it, and reads as an ordinary field', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const parse = spyOn(JSON, 'parse');
+
+  try {
+    await client.post('/x').json({ a: 1 }).send();
+    expect(parse).toHaveBeenCalledTimes(0);
+
+    const seen: unknown[] = [];
+    client.addResponseObserver((_response, request) => {
+      seen.push(
+        Object.keys(request).includes('rawBody'),
+        JSON.parse(JSON.stringify(request)).rawBody,
+        { ...request }.rawBody,
+        request.rawBody === request.rawBody,
+      );
+      request.rawBody = 'replaced';
+      seen.push(request.rawBody);
+    });
+    await client.post('/x').json({ a: 1 }).send();
+
+    expect(seen).toEqual([true, { a: 1 }, { a: 1 }, true, 'replaced']);
+  } finally {
+    parse.mockRestore();
+  }
+});
+
+test('PR review round 47: an adapter reporting effectiveRequestHeaders builds no observer bodies when no observer reads them', async () => {
+  let calls = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => {
+      calls++;
+      if (calls % 2 === 0) {
+        // A non-retryable adapter failure, whose report copies the request for the
+        // headers it carries, as the answered path does.
+        const error = new Error('refused');
+        Object.defineProperty(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG, {
+          value: true,
+        });
+        (error as unknown as Record<symbol, unknown>)[
+          EFFECTIVE_REQUEST_HEADERS_KEY
+        ] = { 'x-sent': '1' };
+        return Promise.reject(error);
+      }
+      return Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        effectiveRequestHeaders: { 'x-sent': '1' },
+      });
+    },
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  // Observers that read only the headers, so nothing reads a body.
+  const seen: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    seen.push(request.headers['x-sent']);
+  });
+  client.addErrorObserver((_error, request) => {
+    seen.push(request.headers['x-sent']);
+  });
+  const parse = spyOn(JSON, 'parse');
+  const entries = spyOn(FormData.prototype, 'entries');
+
+  try {
+    const form = new FormData();
+    form.set('a', '1');
+    for (const send of [
+      () => client.post('/x').json({ a: 1 }).send(),
+      () => client.post('/x').json({ a: 1 }).send(),
+      () => client.post('/x').formData(form).send(),
+      () => client.post('/x').formData(form).send(),
+    ]) {
+      await send();
+    }
+
+    expect(calls).toBe(4);
+    // Each observer saw the headers the adapter reported, merged into its copy.
+    expect(seen).toEqual(['1', '1', '1', '1']);
+    expect(parse).toHaveBeenCalledTimes(0);
+    // Once per request: the copy sent, taken from the caller's form.
+    expect(entries).toHaveBeenCalledTimes(2);
+  } finally {
+    parse.mockRestore();
+    entries.mockRestore();
+  }
+});
+
+test("PR review round 47: an observer's body and rawBody for bytes or form data are one copy, not the one sent", async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const seen: Array<{ isShared: boolean; isSent: boolean }> = [];
+  client.addResponseObserver((_response, request) => {
+    seen.push({
+      isShared: request.body === request.rawBody,
+      isSent: request.body === adapter.requests.at(-1)?.body,
+    });
+  });
+  const form = new FormData();
+  form.set('a', '1');
+
+  await client
+    .post('/bytes')
+    .body(new Uint8Array([1, 2, 3]))
+    .send();
+  await client.post('/form').formData(form).send();
+
+  expect(seen).toEqual([
+    { isShared: true, isSent: false },
+    { isShared: true, isSent: false },
+  ]);
+});
+
+test('PR review round 47: a redirect-phase observer changing request.body in place leaves the body being sent alone', async () => {
+  // Answered before the upload is written, as a server that answers early is: the
+  // adapter reads what it was handed only once the observers have run.
+  const handed: unknown[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      handed.push(request.body);
+      const status = handed.length % 2 === 1 ? 307 : 200;
+      return Promise.resolve<AdapterResponse>(
+        status === 307
+          ? {
+              status,
+              headers: { location: 'http://example.test/next' },
+              body: null,
+              wasRedirectDetected: true,
+              detectedRedirectURL: 'http://example.test/next',
+            }
+          : { status, headers: {}, body: null },
+      );
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+  });
+  client.addResponseObserver(
+    (_response, request) => {
+      const body = request.body;
+      if (body instanceof FormData) {
+        body.set('secret', 'redacted');
+      } else if (body instanceof Uint8Array) {
+        body.fill(0);
+      }
+    },
+    { phases: ['redirect'] },
+  );
+  const form = new FormData();
+  form.set('secret', 's3cret');
+
+  await client.post('/form').formData(form).send();
+  await client
+    .post('/bytes')
+    .body(new Uint8Array([1, 2, 3]))
+    .send();
+
+  expect(handed).toHaveLength(4);
+  expect((handed[0] as FormData).get('secret')).toBe('s3cret');
+  expect(handed[2]).toEqual(new Uint8Array([1, 2, 3]));
+  // The 307 replays carry the caller's body too.
+  expect((handed[1] as FormData).get('secret')).toBe('s3cret');
+  expect(handed[3]).toEqual(new Uint8Array([1, 2, 3]));
 });
 
 test("PR review round 46: a retry-phase observer changing rawBody changes neither the next attempt's bytes nor its rawBody", async () => {
@@ -9638,6 +9852,16 @@ test('PR review round 26: FetchAdapter sends a standard method uppercase, as eve
     sent.push(init?.method);
     return Promise.resolve(new Response('ok', { status: 200 }));
   };
+  // A `Request` that keeps a custom method as written, as Node's does. Bun's uppercases
+  // `purge`, so its `fetch` would send `PURGE`, which FetchAdapter refuses.
+  const originalRequest = globalThis.Request;
+  globalThis.Request = class {
+    public readonly method: string;
+
+    constructor(_input: RequestInfo | URL, init?: RequestInit) {
+      this.method = init?.method ?? 'GET';
+    }
+  } as unknown as typeof Request;
 
   try {
     for (const method of ['patch', 'purge']) {
@@ -9649,6 +9873,7 @@ test('PR review round 26: FetchAdapter sends a standard method uppercase, as eve
     }
   } finally {
     globalThis.fetch = originalFetch;
+    globalThis.Request = originalRequest;
   }
 
   // A standard method uppercased; any other kept as written (RFC 9110).

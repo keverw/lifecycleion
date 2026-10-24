@@ -260,7 +260,7 @@ const response = await client
 | `.body(data)`        | Inferred from value type (see below)                  | Generic form. Accepts JSON objects/arrays (`application/json; charset=utf-8`), strings (`text/plain; charset=utf-8`), Uint8Array (`application/octet-stream`), FormData (see `.formData`), null, or undefined                                     |
 | `undefined` / `null` | none                                                  | No body sent                                                                                                                                                                                                                                      |
 
-> **Note:** Passing `null` or `undefined` to any body method, including `.json()`, always results in no body and no `Content-Type`. This applies across all methods since serialization is type-based, not method-based. To send a JSON primitive - `null`, a string, a number - serialize it yourself and say what it is: `.body(JSON.stringify(value)).headers({ 'content-type': 'application/json' })`.
+> **Note:** Passing `null` or `undefined` to any body method, including `.json()`, always results in no body and no `Content-Type`, as does an object whose own `toJSON` answers `undefined`, which `JSON.stringify` serializes to nothing. This applies across all methods since serialization is type-based, not method-based. To send a JSON primitive - `null`, a string, a number - serialize it yourself and say what it is: `.body(JSON.stringify(value)).headers({ 'content-type': 'application/json' })`.
 
 **The body is held by reference, not copied.** Request interceptors are handed it unserialized, so it is serialized when each attempt is dispatched, as axios serializes after its interceptors. Changing the object, `Uint8Array` or `FormData` you passed before the request settles changes what is sent - including on a retry or a `307`/`308` replay. Pass a fresh value per request (or `structuredClone` it) if you reuse one.
 
@@ -575,8 +575,8 @@ replaced it, and is reported from that result whatever is registered after it. A
 the retry and redirect rules; any other method is case-sensitive and passed to the
 adapter as given, as `request()` passes it too. What goes on the wire depends on the
 transport: Node's `http` uppercases it, Node's `fetch` sends it as given, and Bun's
-`fetch` uppercases a method it knows and would send one it does not know as `GET` - `FetchAdapter` refuses that
-request as a non-retryable `adapter_error` rather than sending it, so use `NodeAdapter` for a custom method on Bun. `CONNECT` is refused on every adapter (it opens a tunnel), and
+`fetch` uppercases a method it knows (`purge` goes out as `PURGE`) and would send one it does not know as `GET` - `FetchAdapter` refuses a
+request whose method the runtime's `fetch` would change, its case included, as a non-retryable `adapter_error` rather than sending it, so use `NodeAdapter` for a custom method on Bun. `CONNECT` is refused on every adapter (it opens a tunnel), and
 `TRACE` and `TRACK` are refused before dispatch through `FetchAdapter`, and through
 `XHRAdapter` in a browser, since those refuse them. A `GET` or `HEAD` with a body is
 refused before dispatch through `FetchAdapter`, and through `XHRAdapter` in a browser,
@@ -675,7 +675,7 @@ interface AttemptRequest {
 }
 ```
 
-`request.rawBody` is the body before serialization, built for each attempt from the caller's body, so changing it changes no later attempt. For a JSON body it is the value sent, parsed back from `request.body`: the caller's body is read once per attempt, by `JSON.stringify`, so a `toJSON` is applied, a `Date` is its ISO string, a `Map` is `{}`, and an `undefined` member is dropped (`null` in an array). A `Uint8Array` or `FormData` body is a copy of the caller's, and a string is the string. When the body could not be built - a `BigInt` or a circular reference in a JSON body, an unsupported body type - an error observer's `request.body` is `null` and `request.rawBody` is the caller's own value, not a copy.
+`request.rawBody` is the body before serialization, built for each attempt from the caller's body, so changing it changes no later attempt. For a JSON body it is the value sent, parsed back from `request.body`: the caller's body is read once per attempt, by `JSON.stringify`, so a `toJSON` is applied, a `Date` is its ISO string, a `Map` is `{}`, and an `undefined` member is dropped (`null` in an array). A `Uint8Array` or `FormData` body is a copy of the caller's, and not the one sent, so redacting it in place leaves the bytes on the wire alone; a string is the string. It is built when an observer first reads it. `request.body` is the body as serialized for the adapter; for a `Uint8Array` or `FormData` body it is the same copy as `request.rawBody`, built when either is first read, so a redirect- or retry-phase observer changing it in place leaves what is still being written alone. When the body could not be built - a `BigInt` or a circular reference in a JSON body, an unsupported body type - an error observer's `request.body` is `null` and `request.rawBody` is the caller's own value, not a copy.
 
 Use `request.timeout` to inspect what timeout budget was configured for that attempt. Use `response.isTimeout` / `error.isTimeout` to inspect what actually happened.
 

@@ -1,4 +1,3 @@
-import { asciiUppercase } from '../internal/http-method';
 import {
   deleteHeader,
   describeRefusedHeader,
@@ -124,7 +123,10 @@ export class FetchAdapter implements HTTPAdapter {
       // A runtime that rewrites the method - Bun's fetch reads one it does not know as
       // `GET` - would send a different request than the caller's, and report its answer
       // as a success: a state-changing custom verb landing on a GET handler. Refused.
-      if (asciiUppercase(builtMethod) !== asciiUppercase(method)) {
+      // Compared exactly: a standard method is already uppercase (see
+      // `readAdapterMethod`), and any other is case-sensitive - a `fetch` that
+      // uppercases `purge` sends a different method, which a server may route apart.
+      if (builtMethod !== method) {
         const refusal = new Error(
           `[FetchAdapter] This runtime's fetch would send the ${method} request as ${builtMethod}. Use NodeAdapter for it.`,
         );

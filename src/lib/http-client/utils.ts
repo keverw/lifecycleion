@@ -1,12 +1,12 @@
 import {
   asciiUppercase,
+  describeNonTokenMethod,
   normalizeStandardMethod,
 } from './internal/http-method';
 import { REDIRECT_STATUS_CODES } from './consts';
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
-import { isHTTPToken } from './internal/http-token';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { readUnknownMember } from '../internal/read-member';
 import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
@@ -594,11 +594,9 @@ export function describeInvalidHTTPMethod(
   if (typeof candidate !== 'string') {
     return `is not a string (got ${candidate === null ? 'null' : typeof candidate})`;
   }
-  if (candidate === '') {
-    return 'is empty';
-  }
-  if (!isHTTPToken(candidate)) {
-    return 'is not a valid HTTP method name (got a string with characters an HTTP token does not allow)';
+  const tokenProblem = describeNonTokenMethod(candidate);
+  if (tokenProblem !== undefined) {
+    return tokenProblem;
   }
   // CONNECT asks for a tunnel rather than a response, which no adapter here handles:
   // NodeAdapter would wait on it until the attempt timed out, or forever.
@@ -1313,10 +1311,13 @@ export function serializeBody(body: unknown): {
   } else if (body instanceof Uint8Array) {
     return { body, contentType: 'application/octet-stream' };
   } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
-    return {
-      body: JSON.stringify(body),
-      contentType: 'application/json; charset=utf-8',
-    };
+    // `JSON.stringify` answers `undefined` for a top-level `toJSON` that does: nothing is
+    // sent, so nothing is typed as JSON either.
+    const serialized = JSON.stringify(body) as string | undefined;
+
+    return serialized === undefined
+      ? { body: null, contentType: null }
+      : { body: serialized, contentType: 'application/json; charset=utf-8' };
   } else {
     throw new Error(
       'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.',

@@ -443,7 +443,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('request_setup_error');
     expect(builder.error?.cause?.message).toMatch(
-      /browser-restricted header "host"/i,
+      /header 'host': it is browser-restricted/i,
     );
     expect(errorCodes).toEqual(['request_setup_error']);
   });
@@ -505,7 +505,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('interceptor_error');
     expect(builder.error?.cause?.message).toMatch(
-      /browser-restricted header "host"/i,
+      /header 'host': it is browser-restricted/i,
     );
     expect(errorCodes).toEqual(['interceptor_error']);
   });

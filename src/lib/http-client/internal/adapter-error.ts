@@ -1,5 +1,4 @@
-import { normalizeStandardMethod } from './http-method';
-import { isHTTPToken } from './http-token';
+import { describeNonTokenMethod, normalizeStandardMethod } from './http-method';
 import {
   ADAPTER_ERROR_CARRIER_KEY,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
@@ -99,15 +98,12 @@ export function readAdapterMethod(method: unknown): string {
 
 /** `method` as given, or a non-retryable `TypeError` naming no value when it is not a token. */
 function assertMethodToken(method: string): string {
-  if (isHTTPToken(method)) {
+  const problem = describeNonTokenMethod(method);
+  if (problem === undefined) {
     return method;
   }
 
-  const refusal = new TypeError(
-    method === ''
-      ? 'Adapter request method is empty'
-      : 'Adapter request method is not a valid HTTP method name (got a string with characters an HTTP token does not allow)',
-  );
+  const refusal = new TypeError(`Adapter request method ${problem}`);
   markNonRetryableAdapterError(refusal);
   throw refusal;
 }
