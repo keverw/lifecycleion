@@ -224,13 +224,18 @@ export function resolveAbsoluteURL(url: string, baseURL?: string): string {
 /**
  * Whether `toURL` is on a different origin (scheme, host and port) from `fromURL` - the
  * rule a redirect hop's credentials, socket path and client certificate follow. A URL
- * that does not parse counts as cross-origin: nothing is carried on a doubt.
+ * that does not parse counts as cross-origin: nothing is carried on a doubt. So does an
+ * opaque origin (a `file:` or other non-special URL), which `URL` spells `'null'` for
+ * all of them alike: each parse is a fresh origin, the same as no other.
  */
 export function isCrossOrigin(fromURL: string, toURL: string | URL): boolean {
   try {
+    const fromOrigin = new URL(fromURL).origin;
+    const toOrigin = (typeof toURL === 'string' ? new URL(toURL) : toURL)
+      .origin;
+
     return (
-      new URL(fromURL).origin !==
-      (typeof toURL === 'string' ? new URL(toURL) : toURL).origin
+      fromOrigin === 'null' || toOrigin === 'null' || fromOrigin !== toOrigin
     );
   } catch {
     return true;
@@ -969,8 +974,38 @@ export function scalarHeader(
 }
 
 /**
+ * Where a redirect's `Location` points, as `detectedRedirectURL` reports it: resolved
+ * against the URL that was answered, without that URL's userinfo. A relative `Location`
+ * names no credentials, so the caller's own are not copied into a field that reports the
+ * server's target; userinfo the server wrote into the `Location` itself is kept.
+ *
+ * A `Location` that does not resolve to a URL reports no target at all, rather than the
+ * raw string handed on as though it were one. An absolute one still resolves when the
+ * request URL does not parse (an adapter driven directly with a relative one): it needs
+ * no base.
+ */
+export function detectedRedirectTarget(
+  location: string,
+  requestURL: string,
+): string | undefined {
+  let base: URL | undefined;
+  try {
+    base = new URL(stripURLCredentials(requestURL));
+  } catch {
+    // No base: only an absolute `Location` resolves.
+  }
+
+  try {
+    return new URL(location, base).href;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Resolves a redirect target from response headers when the adapter can
- * observe a redirect response but the client may not follow it itself.
+ * observe a redirect response but the client may not follow it itself. See
+ * {@link detectedRedirectTarget}.
  */
 export function resolveDetectedRedirectURL(
   requestURL: string,
@@ -988,12 +1023,10 @@ export function resolveDetectedRedirectURL(
     return undefined;
   }
 
-  try {
-    const absoluteRequestURL = resolveAbsoluteURL(requestURL, baseURL);
-    return new URL(location, absoluteRequestURL).toString();
-  } catch {
-    return location;
-  }
+  return detectedRedirectTarget(
+    location,
+    resolveAbsoluteURL(requestURL, baseURL),
+  );
 }
 
 /** The redirect fields of an answer: whether it was a redirect, and where it pointed. */

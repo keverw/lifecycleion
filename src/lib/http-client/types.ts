@@ -119,7 +119,11 @@ export interface AdapterResponse {
   wasRedirectDetected?: boolean;
   /**
    * Redirect target when the adapter can determine it, even if the client
-   * does not follow that redirect itself.
+   * does not follow that redirect itself. Where the built-in adapters resolve
+   * the `Location` themselves, they do it against the request URL without its
+   * userinfo, and leave this unset for a `Location` that does not resolve to a
+   * URL. XHRAdapter reports a redirect the browser followed as `xhr.responseURL`,
+   * the URL the browser followed to.
    */
   detectedRedirectURL?: string;
   /**
@@ -645,7 +649,12 @@ export interface HTTPResponse<T = unknown> {
   wasRedirectDetected: boolean;
   /** True when HTTPClient's own redirect loop followed at least one hop. */
   wasRedirectFollowed: boolean;
-  /** Redirect target when known but not followed by the client loop. */
+  /**
+   * Redirect target when known but not followed by the client loop: the `Location` as
+   * the server wrote it, its own userinfo included but not the request URL's, and unset
+   * for a `Location` that does not resolve to a URL. For a redirect a browser followed
+   * under XHRAdapter, the URL the browser followed to (`xhr.responseURL`).
+   */
   detectedRedirectURL?: string;
   /**
    * Redirect target URLs recorded during redirect handling, in order.
@@ -726,7 +735,12 @@ export interface HTTPClientError {
   wasRedirectDetected: boolean;
   /** True when HTTPClient's own redirect loop followed at least one hop before the error. */
   wasRedirectFollowed: boolean;
-  /** Redirect target when known but not followed by the client loop. */
+  /**
+   * Redirect target when known but not followed by the client loop: the `Location` as
+   * the server wrote it, its own userinfo included but not the request URL's, and unset
+   * for a `Location` that does not resolve to a URL. For a redirect a browser followed
+   * under XHRAdapter, the URL the browser followed to (`xhr.responseURL`).
+   */
   detectedRedirectURL?: string;
   /**
    * Redirect target URLs recorded during redirect handling, in order.

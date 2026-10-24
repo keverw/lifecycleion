@@ -716,24 +716,29 @@ abstract class InnerDecoderTransform<
     return inner;
   }
 
-  /** Hand `pieces` to the inner decoder, each as its own write, then call back. */
+  /**
+   * Hand `pieces` to the inner decoder, each as its own write, then call back. Walked by
+   * index in a loop that waits only on a `drain`, since a chunk of many tiny zstd frames
+   * is many pieces: no `shift` moving the rest along.
+   */
   protected writeInner(pieces: Buffer[], callback: TransformCallback): void {
     const inner = this.inner as Inner;
-    const writeNext = (): void => {
-      const piece = pieces.shift();
-      if (piece === undefined) {
-        callback();
-        return;
+    let index = 0;
+    const writeRest = (): void => {
+      while (index < pieces.length) {
+        const piece = pieces[index];
+        index++;
+
+        if (!inner.write(piece)) {
+          inner.once('drain', writeRest);
+          return;
+        }
       }
 
-      if (inner.write(piece)) {
-        writeNext();
-      } else {
-        inner.once('drain', writeNext);
-      }
+      callback();
     };
 
-    writeNext();
+    writeRest();
   }
 
   /** End the inner decoder, if there is one, and call back once it has ended. */

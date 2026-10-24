@@ -52,6 +52,7 @@ import {
   resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
   derivedRedirectFields,
+  detectedRedirectTarget,
   type AdapterRedirectFields,
   scalarHeader,
   serializeBody,
@@ -1107,7 +1108,9 @@ export class BaseHTTPClient {
         let lastAttemptNumber = 0;
         let currentHopInfo: RedirectHopInfo | undefined;
         // The last followed redirect's target as the server wrote it, for a hop that then
-        // ends before it is dispatched: it is reported detected, not followed.
+        // ends before it is dispatched: it is reported detected, not followed. Set for each
+        // hop that reaches resolving its `Location`, and `undefined` for one that does not
+        // resolve.
         let lastDetectedTargetURL: string | undefined;
 
         while (true) {
@@ -1313,10 +1316,17 @@ export class BaseHTTPClient {
 
             redirectURL = resolveAbsoluteURL(redirectURL, this._config.baseURL);
 
-            // The target as the server wrote it, userinfo included, for `detectedRedirectURL`
-            // on every exit that does not follow it - as `redirect_disabled` and
-            // `redirect_loop` report it, and as the docs promise. Nothing is sent to it.
-            const detectedTargetURL = redirectURL;
+            // The target as the server wrote it - its own userinfo included, not this
+            // request's - for `detectedRedirectURL` on the exits below that end before the
+            // hop goes out. `redirect_disabled` and `redirect_loop` do not use it: they
+            // report the adapter's own, or one resolved by this same rule where the
+            // adapter gave none (`unfollowedRedirectAnswer`). None for a `Location` that
+            // does not resolve, which is still recorded and handed to the interceptors
+            // below. Nothing is sent to it.
+            const detectedTargetURL = detectedRedirectTarget(
+              location,
+              attemptResult.sentRequest.requestURL,
+            );
             lastDetectedTargetURL = detectedTargetURL;
 
             // Stripped here, before the hop is recorded, rather than only on the request:
@@ -1833,8 +1843,7 @@ export class BaseHTTPClient {
             // `onAttemptStart`, a body that failed on replay - was detected, not
             // followed, as a cancel between hops reports it.
             ...(currentHopInfo !== undefined &&
-            attemptResult.isHopUndispatched === true &&
-            lastDetectedTargetURL !== undefined
+            attemptResult.isHopUndispatched === true
               ? {
                   undispatchedRedirect: {
                     url: lastDetectedTargetURL,
@@ -1938,20 +1947,22 @@ export class BaseHTTPClient {
           // The response's own: a hop that failed after it was recorded carries it.
           redirectHistory: response.redirectHistory,
           // And the redirect it detected and did not follow (`redirect_disabled`, say),
-          // which this rebuild would otherwise drop.
-          ...(response.detectedRedirectURL !== undefined
+          // which this rebuild would otherwise drop. Recorded exactly when the answer
+          // counted it out of its own followed hops - a history with nothing followed is
+          // that target - whether or not it has a URL to report: a recorded `Location`
+          // that does not resolve has none, and is still no followed hop.
+          ...(response.detectedRedirectURL !== undefined ||
+          (!response.wasRedirectFollowed && response.redirectHistory.length > 0)
             ? {
                 undispatchedRedirect: {
                   url: response.detectedRedirectURL,
-                  // Recorded exactly when the answer counted it out of its own
-                  // followed hops: a history with nothing followed is that target.
                   isRecorded:
                     !response.wasRedirectFollowed &&
                     response.redirectHistory.length > 0,
                 },
               }
-            : // One detected with no target to name - an opaque redirect, a `3xx`
-              // with no `Location` - is kept too, flag alone.
+            : // One detected with no target to name and nothing recorded - an opaque
+              // redirect, a `3xx` with no `Location` - is kept too, flag alone.
               response.wasRedirectDetected
               ? { wasRedirectDetected: true }
               : {}),
@@ -3933,12 +3944,13 @@ export class BaseHTTPClient {
     /**
      * A redirect target detected but never dispatched - refused, cancelled or failed
      * before its hop went out. It is the redirect detected and not followed: reported
-     * as `detectedRedirectURL`, and - when the caller already recorded it as the last
+     * as `detectedRedirectURL` (none, for a `Location` that did not resolve - the hop is
+     * still a redirect detected), and - when the caller already recorded it as the last
      * `redirectHistory` entry (`isRecorded`) - not counted as a followed hop. Said by
      * the caller rather than inferred by comparing URLs: a hop that redirects to its own
      * URL makes the followed entry and the new target the same string.
      */
-    undispatchedRedirect?: { url: string; isRecorded: boolean };
+    undispatchedRedirect?: { url: string | undefined; isRecorded: boolean };
     /**
      * A redirect the answer being replaced had detected with no target to name - a
      * browser's opaque redirect, a `3xx` with no `Location` - kept when the response is
@@ -3970,7 +3982,9 @@ export class BaseHTTPClient {
       undispatchedRedirect !== undefined
         ? {
             wasRedirectDetected: true,
-            detectedRedirectURL: undispatchedRedirect.url,
+            ...(undispatchedRedirect.url !== undefined
+              ? { detectedRedirectURL: undispatchedRedirect.url }
+              : {}),
           }
         : adapterResponse
           ? adapterRedirectFields(adapterResponse)

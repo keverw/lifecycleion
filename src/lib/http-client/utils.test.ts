@@ -906,12 +906,25 @@ describe('resolveDetectedRedirectURL', () => {
     ).toBeUndefined();
   });
 
-  test('falls back to the raw location when URL parsing fails', () => {
+  test('reports no target when the location cannot be resolved', () => {
+    expect(
+      resolveDetectedRedirectURL('https://example.com/start', 301, {
+        location: 'http://[bad',
+      }),
+    ).toBeUndefined();
     expect(
       resolveDetectedRedirectURL('not a url', 301, {
         location: '%%%bad%%%',
       }),
-    ).toBe('%%%bad%%%');
+    ).toBeUndefined();
+  });
+
+  test('resolves an absolute location when the request URL does not parse', () => {
+    expect(
+      resolveDetectedRedirectURL('not a url', 301, {
+        location: 'https://ok.test/next',
+      }),
+    ).toBe('https://ok.test/next');
   });
 });
 

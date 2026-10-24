@@ -8,6 +8,7 @@ import { HTTPClient } from './http-client';
 import {
   buildURL,
   extractFetchHeaders,
+  isCrossOrigin,
   matchesFilter,
   matchesHostPattern,
   readHostPattern,
@@ -9840,4 +9841,173 @@ test("PR review round 34: getCookiesFor reads a stored cookie's live fields only
 
   expect(jar.getCookieHeaderString('https://example.com/a')).toBe('a=1');
   expect(reads).toEqual(['a']);
+});
+
+test('PR review round 35: a zstd body of many empty skippable frames before its data decodes whole', async () => {
+  const data = (
+    zlib as unknown as { zstdCompressSync: (input: Buffer) => Buffer }
+  ).zstdCompressSync(Buffer.from('hello'));
+  // An empty skippable frame (RFC 8878): its magic and a size of zero, 8 bytes in all.
+  const skippable = Buffer.from([0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0]);
+  const res = new PassThrough() as unknown as http.IncomingMessage;
+  const { source } = createResponseBodySource(res, 'zstd');
+  const chunks: Buffer[] = [];
+  const outcome = new Promise<string>((resolve) => {
+    source.on('data', (chunk: Buffer) => chunks.push(chunk));
+    source.on('end', () => resolve('end'));
+    source.on('error', (error: Error) => resolve(error.message));
+  });
+
+  // A 64 KiB chunk of them: each frame is its own write to the decoder.
+  (res as unknown as PassThrough).end(
+    Buffer.concat([...new Array<Buffer>(8192).fill(skippable), data]),
+  );
+
+  expect(await outcome).toBe('end');
+  expect(Buffer.concat(chunks).toString()).toBe('hello');
+});
+
+test('PR review round 35: an opaque origin is cross-origin, even to the same URL', () => {
+  expect(isCrossOrigin('foo://a/x', 'foo://b/y')).toBe(true);
+  expect(isCrossOrigin('foo://a/x', 'foo://a/x')).toBe(true);
+  expect(isCrossOrigin('file:///a', new URL('file:///a'))).toBe(true);
+  expect(isCrossOrigin('https://a.test/x', 'foo://a.test/x')).toBe(true);
+  expect(isCrossOrigin('https://a.test/x', 'https://a.test/y')).toBe(false);
+});
+
+test("PR review round 35: detectedRedirectURL does not copy the request's userinfo onto a relative Location", async () => {
+  await withRawServer(
+    (res) => {
+      // Each answers a redirect to itself, so a followed one ends as `redirect_loop`.
+      res.writeHead(302, {
+        location:
+          res.req.url === '/userinfo'
+            ? `//s:t@${res.req.headers.host}/userinfo`
+            : '/x?q',
+      });
+      res.end();
+    },
+    async (baseURL) => {
+      const credentialedURL = baseURL.replace('http://', 'http://u:p@');
+      // The adapter's own report, as `redirect`-phase observers read it.
+      const adapterResponse = await new NodeAdapter().send({
+        requestURL: `${credentialedURL}/x`,
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(adapterResponse.detectedRedirectURL).toBe(`${baseURL}/x?q`);
+
+      // `redirect_disabled`, and the client loop's own `redirect_loop`.
+      for (const isFollowing of [false, true]) {
+        const client = new HTTPClient({
+          adapter: new NodeAdapter(),
+          followRedirects: isFollowing,
+          ...(isFollowing ? { maxRedirects: 1 } : {}),
+        });
+        const relativeBuilder = client.get(`${credentialedURL}/x`);
+        const relative = await relativeBuilder.send();
+        const serverWritten = await client
+          .get(`${credentialedURL}/userinfo`)
+          .send();
+
+        expect(relativeBuilder.error?.code).toBe(
+          isFollowing ? 'redirect_loop' : 'redirect_disabled',
+        );
+        expect(relative.detectedRedirectURL).toBe(`${baseURL}/x?q`);
+        // Userinfo the server wrote itself is still reported as written.
+        expect(serverWritten.detectedRedirectURL).toBe(
+          baseURL.replace('http://', 'http://s:t@') + '/userinfo',
+        );
+      }
+
+      // A hop the client loop detected and then did not follow: cancelled before it went out.
+      const cancelling = new HTTPClient({
+        adapter: new NodeAdapter(),
+        followRedirects: true,
+      });
+      cancelling.addRequestInterceptor(() => ({ cancel: true as const }), {
+        phases: ['redirect'],
+      });
+      const cancelled = await cancelling.get(`${credentialedURL}/x`).send();
+
+      expect(cancelled.isCancelled).toBe(true);
+      expect(cancelled.detectedRedirectURL).toBe(`${baseURL}/x?q`);
+    },
+  );
+});
+
+test('PR review round 35: a Location that does not resolve reports no detectedRedirectURL', async () => {
+  await withRawServer(
+    (res) => {
+      res.writeHead(302, { location: 'http://[bad' });
+      res.end();
+    },
+    async (baseURL) => {
+      const adapterResponse = await new NodeAdapter().send({
+        requestURL: `${baseURL}/x`,
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(adapterResponse.wasRedirectDetected).toBe(true);
+      expect(adapterResponse.detectedRedirectURL).toBeUndefined();
+
+      for (const isFollowing of [false, true]) {
+        const builder = new HTTPClient({
+          adapter: new NodeAdapter(),
+          baseURL,
+          followRedirects: isFollowing,
+        }).get('/x');
+        const response = await builder.send();
+
+        expect(builder.error?.code).toBe(
+          isFollowing ? 'request_setup_error' : 'redirect_disabled',
+        );
+        expect(response.wasRedirectDetected).toBe(true);
+        expect(response.wasRedirectFollowed).toBe(false);
+        expect(response.detectedRedirectURL).toBeUndefined();
+        expect(builder.error?.detectedRedirectURL).toBeUndefined();
+      }
+    },
+  );
+});
+
+test('PR review round 35: a late cancel at a Location that does not resolve counts no followed hop', async () => {
+  for (const location of ['http://[bad', '/ok']) {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/x', () => ({ status: 302, headers: { location } }));
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://a.test',
+      followRedirects: true,
+    });
+    const builder = client.get('/x');
+    // Cancelled from the interceptor, which then throws: the `interceptor_error` this
+    // ends with is turned into a cancel after the loop.
+    client.addRequestInterceptor(
+      () => {
+        builder.cancel();
+        throw new Error('boom');
+      },
+      { phases: ['redirect'] },
+    );
+    const response = await builder.send();
+
+    expect({
+      location,
+      isCancelled: response.isCancelled,
+      wasRedirectDetected: response.wasRedirectDetected,
+      wasRedirectFollowed: response.wasRedirectFollowed,
+      detectedRedirectURL: response.detectedRedirectURL,
+      redirectHistory: response.redirectHistory,
+    }).toEqual({
+      location,
+      isCancelled: true,
+      wasRedirectDetected: true,
+      wasRedirectFollowed: false,
+      detectedRedirectURL: location === '/ok' ? 'http://a.test/ok' : undefined,
+      redirectHistory: [location === '/ok' ? 'http://a.test/ok' : location],
+    });
+  }
 });
