@@ -1113,20 +1113,23 @@ export type AttemptRequest = Omit<
    */
   headers: Record<string, string | string[]>;
   /**
-   * The body as serialized for the adapter. A `Uint8Array` or `FormData` body is a copy
-   * of the one sent - the same copy as `rawBody`, built when either is first read - so
-   * changing it in place leaves what is written alone.
+   * The body as serialized for the adapter: a JSON body's string, or the string given. A
+   * `Uint8Array` or `FormData` body is a copy of the one sent, taken before the adapter is
+   * handed it - the same copy as `rawBody` - so changing it in place leaves what is
+   * written alone. Built at dispatch, and only when a response or error observer is
+   * registered on the client or its parent; absent otherwise, with `rawBody`.
    */
   body?: string | Uint8Array | FormData | null;
   /**
    * The attempt's body before serialization, for observers that need the payload as well
    * as the adapter-facing `body`, built for each attempt from the caller's body (after
-   * interceptors). A JSON body is the value sent, parsed back from `body` (so a `toJSON`
-   * is applied and a `Date` is its ISO string); a `Uint8Array` or `FormData` body is a
-   * copy of the caller's, and not the one sent, so redacting it in place leaves the bytes
-   * on the wire alone; a string is the string. Built when an observer first reads it.
-   * When the body could not be built - a JSON body `JSON.stringify` refuses, an
-   * unsupported type - `body` is `null` and this is the caller's own value.
+   * interceptors), when `body` is. A JSON body is the value sent, parsed back from `body`
+   * (so a `toJSON` is applied and a `Date` is its ISO string); a `Uint8Array` or
+   * `FormData` body is the same copy as `body`, so redacting it in place leaves the bytes
+   * on the wire alone; a string is the string. Changing or replacing it reaches neither
+   * the adapter nor a later attempt. When the body could not be built - a JSON body
+   * `JSON.stringify` refuses, an unsupported type - `body` is `null` and this is the
+   * caller's own value.
    */
   rawBody?: unknown;
   /** Effective per-attempt timeout in ms. */

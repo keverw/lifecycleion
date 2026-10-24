@@ -1190,7 +1190,13 @@ function serializeResponseBody(response: MockResponse): Uint8Array | null {
   } else if (typeof body === 'string') {
     return new TextEncoder().encode(body);
   } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
-    return new TextEncoder().encode(JSON.stringify(body));
+    // `JSON.stringify` answers `undefined` for a top-level `toJSON` that does: nothing is
+    // sent, so nothing is typed as JSON either, as the client sends such a request body.
+    const serialized = JSON.stringify(body) as string | undefined;
+
+    return serialized === undefined
+      ? null
+      : new TextEncoder().encode(serialized);
   }
 
   throw new Error(

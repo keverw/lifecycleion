@@ -675,7 +675,7 @@ interface AttemptRequest {
 }
 ```
 
-`request.rawBody` is the body before serialization, built for each attempt from the caller's body, so changing it changes no later attempt. For a JSON body it is the value sent, parsed back from `request.body`: the caller's body is read once per attempt, by `JSON.stringify`, so a `toJSON` is applied, a `Date` is its ISO string, a `Map` is `{}`, and an `undefined` member is dropped (`null` in an array). A `Uint8Array` or `FormData` body is a copy of the caller's, and not the one sent, so redacting it in place leaves the bytes on the wire alone; a string is the string. It is built when an observer first reads it. `request.body` is the body as serialized for the adapter; for a `Uint8Array` or `FormData` body it is the same copy as `request.rawBody`, built when either is first read, so a redirect- or retry-phase observer changing it in place leaves what is still being written alone. When the body could not be built - a `BigInt` or a circular reference in a JSON body, an unsupported body type - an error observer's `request.body` is `null` and `request.rawBody` is the caller's own value, not a copy.
+`request.body` and `request.rawBody` are built once for each attempt, from the caller's body, as the attempt is dispatched - before the adapter is handed its own body - (for a request that ends before any attempt is dispatched, as it ends) and only when a response or error observer is registered on the client or its parent: an attempt dispatched with none registered carries neither, and no body is parsed back or copied for it. They are plain fields of the attempt's own, so changing or replacing them reaches neither the adapter, a `307`/`308` replay, nor a later attempt. `request.body` is the body as serialized for the adapter: a JSON body's string, or the string given. `request.rawBody` is the body before serialization. For a JSON body it is the value sent, parsed back from `request.body`: the caller's body is read once per attempt, by `JSON.stringify`, so a `toJSON` is applied, a `Date` is its ISO string, a `Map` is `{}`, and an `undefined` member is dropped (`null` in an array). For a `Uint8Array` or `FormData` body, `request.body` and `request.rawBody` are one copy of the body as sent, not the one the adapter is writing, so redacting it in place leaves the bytes on the wire alone, and an adapter changing or transferring what it was handed leaves it alone too. A string body is the string in both. When the body could not be built - a `BigInt` or a circular reference in a JSON body, an unsupported body type - an error observer's `request.body` is `null` and `request.rawBody` is the caller's own value, not a copy.
 
 Use `request.timeout` to inspect what timeout budget was configured for that attempt. Use `response.isTimeout` / `error.isTimeout` to inspect what actually happened.
 
@@ -1581,7 +1581,7 @@ interface MockRequest {
 ```typescript
 interface MockResponse {
   status: number;
-  body?: unknown; // Supports objects (JSON), strings, Uint8Array, ArrayBuffer
+  body?: unknown; // Supports objects (JSON), strings, Uint8Array, ArrayBuffer. An object whose own `toJSON` answers `undefined` is answered with no body and no inferred `content-type` (a HEAD route or a simulated `streamError` never serializes its body, so it still infers one from the object)
   headers?: Record<string, string | string[]>;
   contentType?: 'json' | 'text' | 'binary'; // Overrides auto-detection
   delay?: number | null; // Millisecond delay for this response

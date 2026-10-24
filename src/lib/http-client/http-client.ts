@@ -2536,7 +2536,7 @@ export class BaseHTTPClient {
           adapterCause?: Error;
           cancelReason?: string;
         },
-        knownBodies?: ObservedAttemptBodies | 'unbuildable',
+        knownBodies?: AttemptBodies | 'unbuildable',
       ) => {
         clearTimeout(timeoutID);
         if (outcome.wasCancelled) {
@@ -2675,7 +2675,7 @@ export class BaseHTTPClient {
       let sentBody: AttemptRequest['body'];
       // What the snapshot of a failed setup may reuse: the bodies once built, or
       // `unbuildable` while building them is what is under way.
-      let knownBodies: ObservedAttemptBodies | 'unbuildable' | undefined;
+      let knownBodies: AttemptBodies | 'unbuildable' | undefined;
       try {
         // Only a host change explicitly selects a new credential destination.
         // Editing a redirected URL's path, query or fragment must not authorize the
@@ -2693,15 +2693,23 @@ export class BaseHTTPClient {
         }
 
         knownBodies = 'unbuildable';
-        const observedBodies = buildObservedAttemptBodies(attemptRequest.body);
-        knownBodies = observedBodies;
-        sentBody = observedBodies.body;
-        params.sentBody.value = attemptRequest.body;
-        sentRequest = this._buildAttemptRequest(
-          attemptRequest,
-          observedBodies,
-          { requestID, timeout, maxResponseBytes, attemptNumber, cookieJar },
+        // The observers' bodies are built here, once, and only when an observer is
+        // registered to be handed them: copying bytes or a form, or parsing JSON back,
+        // for an attempt nothing looks at is waste.
+        const attemptBodies = buildAttemptBodies(
+          attemptRequest.body,
+          this._hasAttemptRequestObservers(),
         );
+        knownBodies = attemptBodies;
+        sentBody = attemptBodies.sentBody;
+        params.sentBody.value = attemptRequest.body;
+        sentRequest = this._buildAttemptRequest(attemptRequest, attemptBodies, {
+          requestID,
+          timeout,
+          maxResponseBytes,
+          attemptNumber,
+          cookieJar,
+        });
       } catch (error) {
         // Serialization and cookie/header preparation precede adapter dispatch. The
         // snapshot reuses the bodies built here, or skips a build that already failed.
@@ -3000,13 +3008,13 @@ export class BaseHTTPClient {
         );
 
         observedSentRequest = observedEffectiveHeaders
-          ? withObservedHeaders(
-              sentRequest,
-              mergeObservedHeaders(
+          ? {
+              ...sentRequest,
+              headers: mergeObservedHeaders(
                 sentRequest.headers,
                 observedEffectiveHeaders,
               ),
-            )
+            }
           : sentRequest;
 
         // A transport failure answered once the attempt's timer had fired is that timer's
@@ -4492,7 +4500,7 @@ export class BaseHTTPClient {
 
   private _buildAttemptRequest(
     request: ResolvedRequest,
-    observedBodies: ObservedAttemptBodies,
+    bodies: AttemptBodies,
     params: {
       requestID: string;
       timeout: number;
@@ -4508,7 +4516,7 @@ export class BaseHTTPClient {
     // materialization. Header names are already lowercase (see `ResolvedRequest`), and
     // adapters may further materialize repeated header values at send time. The bodies are
     // built by the caller, so a setup failure's snapshot can reuse them.
-    const { contentType } = observedBodies;
+    const { sentBody, contentType } = bodies;
     const headers = this._withInternalRequestHeaders(
       request.headers,
       requestID,
@@ -4517,7 +4525,7 @@ export class BaseHTTPClient {
 
     // A native FormData body owns its Content-Type: Fetch/XHR install the multipart
     // boundary, and NodeAdapter replaces it with the boundary used by its serializer.
-    if (observedBodies.body instanceof FormData) {
+    if (sentBody instanceof FormData) {
       delete headers['content-type'];
     } else if (contentType && headers['content-type'] === undefined) {
       // Preserve an explicit content-type for every other body; otherwise infer it.
@@ -4526,7 +4534,7 @@ export class BaseHTTPClient {
 
     // No body, no `Content-Length`: every adapter drops a caller's then (browsers refuse to
     // send one, `NodeAdapter` takes it off), so it is not reported to observers as sent.
-    if (observedBodies.body === undefined || observedBodies.body === null) {
+    if (sentBody === undefined || sentBody === null) {
       delete headers['content-length'];
     }
 
@@ -4542,20 +4550,16 @@ export class BaseHTTPClient {
       }
     }
 
-    return withObservedBodies(
-      {
-        requestURL: request.requestURL,
-        method: request.method,
-        headers,
-        body: undefined,
-        rawBody: undefined,
-        timeout,
-        maxResponseBytes,
-        attemptNumber,
-        requestID,
-      },
-      observedBodies.observerReaders(),
-    );
+    return {
+      requestURL: request.requestURL,
+      method: request.method,
+      headers,
+      ...bodies.observed,
+      timeout,
+      maxResponseBytes,
+      attemptNumber,
+      requestID,
+    };
   }
 
   /**
@@ -4576,7 +4580,7 @@ export class BaseHTTPClient {
        */
       reportedURL?: string;
     } = {},
-    knownBodies?: ObservedAttemptBodies | 'unbuildable',
+    knownBodies?: AttemptBodies | 'unbuildable',
   ): AttemptRequest {
     // Best-effort snapshot for observers when a request fails before any adapter
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
@@ -4635,40 +4639,52 @@ export class BaseHTTPClient {
     // be read is left empty rather than failing the snapshot - a retry interceptor's
     // request with a throwing `body` getter would otherwise turn its `interceptor_error`
     // into a `request_setup_error` and drop the attempt it had already ended.
-    let clonedBodies: ObservedBodyReaders;
+    let observed: ObservedBodies | undefined;
 
     if (knownBodies !== undefined && knownBodies !== 'unbuildable') {
-      clonedBodies = knownBodies.observerReaders();
-    } else {
+      observed = knownBodies.observed;
+    } else if (this._hasAttemptRequestObservers()) {
       const rawBody = readObjectMember(request, 'body');
 
       // A body the dispatch path already failed to build is not validated and cloned a
-      // second time; it is reported as it came.
-      if (knownBodies === 'unbuildable') {
-        clonedBodies = { readBody: () => null, readRawBody: () => rawBody };
-      } else {
+      // second time; it is reported as it came, as one that fails to build here is.
+      if (knownBodies === undefined) {
         try {
-          clonedBodies = buildObservedAttemptBodies(rawBody).observerReaders();
+          observed = buildAttemptBodies(rawBody, true).observed;
         } catch {
-          clonedBodies = { readBody: () => null, readRawBody: () => rawBody };
+          // Reported as it came, below.
         }
       }
+
+      observed ??= { body: null, rawBody };
     }
 
-    return withObservedBodies(
-      {
-        requestURL:
-          urls.reportedURL ??
-          readStringMember(request, 'requestURL', urls.fallbackURL ?? ''),
-        method: readStringMember(request, 'method', ''),
-        headers,
-        body: undefined,
-        rawBody: undefined,
-        timeout: limits.timeout,
-        maxResponseBytes: limits.maxResponseBytes,
-        requestID,
-      },
-      clonedBodies,
+    return {
+      requestURL:
+        urls.reportedURL ??
+        readStringMember(request, 'requestURL', urls.fallbackURL ?? ''),
+      method: readStringMember(request, 'method', ''),
+      headers,
+      ...observed,
+      timeout: limits.timeout,
+      maxResponseBytes: limits.maxResponseBytes,
+      requestID,
+    };
+  }
+
+  /**
+   * Whether an observer that is handed an attempt's request - a response or error
+   * observer, on this client or its parent - is registered. Nothing else is handed one:
+   * the attempt hooks are given events without it.
+   */
+  private _hasAttemptRequestObservers(): boolean {
+    const parent = this._parentClient;
+
+    return (
+      !this._responseObservers.isEmpty ||
+      !this._errorObservers.isEmpty ||
+      (parent !== null &&
+        (!parent._responseObservers.isEmpty || !parent._errorObservers.isEmpty))
     );
   }
 
@@ -4872,19 +4888,19 @@ type AttemptLimits = Required<
   Pick<AttemptRequest, 'timeout' | 'maxResponseBytes'>
 >;
 
-type ObservedAttemptBodies = {
+type AttemptBodies = {
   /** The body handed to the adapter, never to an observer. */
-  body: AttemptRequest['body'];
+  sentBody: AttemptRequest['body'];
   contentType: string | null;
-  /** The readers of one observed request's bodies (see `withObservedBodies`). */
-  observerReaders: () => ObservedBodyReaders;
+  /**
+   * The observers' `body` and `rawBody`, built with the rest when something that is handed
+   * the attempt's request is registered (see `_hasAttemptRequestObservers`), and absent
+   * otherwise.
+   */
+  observed: ObservedBodies | undefined;
 };
 
-/** What builds an observed request's `body` and `rawBody`, each when first read. */
-type ObservedBodyReaders = {
-  readBody: () => AttemptRequest['body'];
-  readRawBody: () => unknown;
-};
+type ObservedBodies = Pick<AttemptRequest, 'body' | 'rawBody'>;
 
 /**
  * Read one string field of a caller-supplied request for a best-effort snapshot, through
@@ -4926,7 +4942,15 @@ function snapshotClientConfigFields(config: SubClientConfig) {
   } satisfies Record<keyof HTTPClientConfig, unknown>;
 }
 
-function buildObservedAttemptBodies(rawBody: unknown): ObservedAttemptBodies {
+/**
+ * The bodies of one attempt, built from the caller's body before the adapter is handed
+ * any: the one sent, and, when `isObserved`, the observers' own, so nothing an observer
+ * does to theirs reaches the adapter or a later attempt.
+ */
+function buildAttemptBodies(
+  rawBody: unknown,
+  isObserved: boolean,
+): AttemptBodies {
   // Validate first so unsupported object-like values (URLSearchParams, Blob, etc.) fail
   // explicitly instead of being stringified into `{}`.
   assertSupportedRequestBody(rawBody);
@@ -4941,113 +4965,42 @@ function buildObservedAttemptBodies(rawBody: unknown): ObservedAttemptBodies {
     const { body, contentType } = serializeBody(rawBody);
 
     return {
-      body,
+      sentBody: body,
       contentType,
-      observerReaders: () => ({
-        // A string, which no observer can change in place.
-        readBody: () => body,
-        // A top-level `toJSON` that answers `undefined` serializes to nothing.
-        readRawBody: () =>
-          typeof body === 'string' ? (JSON.parse(body) as unknown) : undefined,
-      }),
+      observed: isObserved
+        ? {
+            // A string, which no observer can change in place.
+            body,
+            // A top-level `toJSON` that answers `undefined` serializes to nothing.
+            rawBody:
+              typeof body === 'string'
+                ? (JSON.parse(body) as unknown)
+                : undefined,
+          }
+        : undefined,
     };
   }
 
   // Bytes and form data are sent as the client's own copy, which no observer is handed:
-  // their `body` and `rawBody` are one copy taken from it. NodeAdapter writes a FormData's parts as
-  // it walks them, so a redirect- or retry-phase observer changing the one being sent,
-  // while its upload was still under way, changed parts not yet written.
+  // their `body` and `rawBody` are one copy of it, taken now - before the adapter can
+  // change or transfer what it was handed. NodeAdapter writes a FormData's parts as it
+  // walks them, so a redirect- or retry-phase observer changing the one being sent, while
+  // its upload was still under way, changed parts not yet written.
   const sentBody = cloneBodyValue(rawBody);
   const { body, contentType } = serializeBody(sentBody);
+  let observed: ObservedBodies | undefined;
 
-  return {
-    body,
-    contentType,
-    observerReaders: () => {
-      if (!(body instanceof Uint8Array || body instanceof FormData)) {
-        // A string, or nothing: `rawBody` is what the caller gave, `undefined` included.
-        return { readBody: () => body, readRawBody: () => sentBody };
-      }
+  if (isObserved) {
+    if (body instanceof Uint8Array || body instanceof FormData) {
+      const copy = cloneBodyValue(body) as typeof body;
+      observed = { body: copy, rawBody: copy };
+    } else {
+      // A string, or nothing: `rawBody` is what the caller gave, `undefined` included.
+      observed = { body, rawBody: sentBody };
+    }
+  }
 
-      // One copy for both, as they are the same bytes: a logger that spreads the request
-      // pays for one.
-      let copy: Uint8Array | FormData | undefined;
-      const readCopy = () => (copy ??= cloneBodyValue(body) as typeof body);
-
-      return { readBody: readCopy, readRawBody: readCopy };
-    },
-  };
-}
-
-/**
- * `request`, with its `body` and `rawBody` each built when first read, and kept: a JSON
- * body is parsed back, and bytes or form data copied, only for an observer that reads
- * them. Both are enumerable accessors with a setter, so they are serialized and spread
- * with the rest, and `Object.freeze` does not stop assigning them. Each request built has
- * its own.
- */
-function withObservedBodies(
-  request: AttemptRequest,
-  bodies: ObservedBodyReaders,
-): AttemptRequest {
-  defineBuiltOnRead(request, 'body', bodies.readBody);
-  defineBuiltOnRead(request, 'rawBody', bodies.readRawBody);
-
-  return request;
-}
-
-/** `key` of `request` as an accessor built by `build` on first read, or set by a write. */
-function defineBuiltOnRead(
-  request: AttemptRequest,
-  key: 'body' | 'rawBody',
-  build: () => unknown,
-): void {
-  let isBuilt = false;
-  let value: unknown;
-
-  // Redefined in place, so the field keeps its position among the others.
-  Object.defineProperty(request, key, {
-    enumerable: true,
-    configurable: true,
-    get(): unknown {
-      if (!isBuilt) {
-        value = build();
-        isBuilt = true;
-      }
-
-      return value;
-    },
-    set(next: unknown) {
-      value = next;
-      isBuilt = true;
-    },
-  });
-}
-
-/**
- * A copy of an observed `request` with `headers` in place of its own, its bodies read from
- * `request` when first read: a spread would read them at once, building them for an
- * attempt no observer looks at.
- */
-function withObservedHeaders(
-  request: AttemptRequest,
-  headers: Record<string, string | string[]>,
-): AttemptRequest {
-  const copy = Object.defineProperties(
-    {},
-    Object.getOwnPropertyDescriptors(request),
-  ) as AttemptRequest;
-  Object.defineProperty(copy, 'headers', {
-    value: headers,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
-
-  return withObservedBodies(copy, {
-    readBody: () => request.body,
-    readRawBody: () => request.rawBody,
-  });
+  return { sentBody: body, contentType, observed };
 }
 
 function cloneBodyValue(body: unknown): unknown {
@@ -5164,10 +5117,10 @@ function sentRequestForObservedAdapterError(
     return observedAfterAdapterResolve;
   }
 
-  return withObservedHeaders(
-    sentRequest,
-    mergeObservedHeaders(sentRequest.headers, eff),
-  );
+  return {
+    ...sentRequest,
+    headers: mergeObservedHeaders(sentRequest.headers, eff),
+  };
 }
 
 function getEffectiveRequestHeadersFromError(
