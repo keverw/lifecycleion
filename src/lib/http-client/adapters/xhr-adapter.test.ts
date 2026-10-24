@@ -2629,7 +2629,7 @@ describe('XHRAdapter - PR review round 43', () => {
       headers: { authorization: `Bearer ${secret}\nx` },
     });
     expect(String(header?.message)).toBe(
-      "XHRAdapter refused the value of header 'authorization'",
+      "XHRAdapter refused header 'authorization'",
     );
     expect(header?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     expect(errorText(header)).not.toContain(secret);
@@ -2648,6 +2648,39 @@ describe('XHRAdapter - PR review round 43', () => {
     );
     expect(method?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     expect(errorText(method)).not.toContain(secret);
+  });
+});
+
+describe('XHRAdapter - PR review round 44', () => {
+  test('PR review round 44: a header the runtime refuses by a token name is not reported as a refused value', async () => {
+    // An XHR outside a browser may refuse a name that is a token, which a browser never
+    // does, so the refusal names the header without claiming which part of it failed.
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
+      FakeXHR
+    ) {
+      public override setRequestHeader(name: string, value: string) {
+        if (name === 'x-blocked') {
+          throw new TypeError('header name not allowed');
+        }
+        super.setRequestHeader(name, value);
+      }
+    };
+
+    const outcome = await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: { 'x-blocked': 'ok' },
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(String(outcome?.message)).toBe(
+      "XHRAdapter refused header 'x-blocked'",
+    );
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
   });
 });
 

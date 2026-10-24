@@ -766,8 +766,14 @@ export class CookieJar {
     // other cookies in place.
     const [host, scope] = args as unknown[];
     if (typeof host !== 'string' || host.trim() === '') {
+      const got =
+        typeof host !== 'string'
+          ? describeValue(host)
+          : host === ''
+            ? 'an empty string'
+            : 'a blank string';
       throw new TypeError(
-        `CookieJar.clear() host must be a non-empty string (got ${typeof host === 'string' ? 'an empty string' : describeValue(host)})`,
+        `CookieJar.clear() host must be a non-empty string (got ${got})`,
       );
     }
 

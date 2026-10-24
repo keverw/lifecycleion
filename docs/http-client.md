@@ -1198,7 +1198,7 @@ client.clientID; // ULID string - unique per HTTPClient or sub-client instance
 client.adapterType; // AdapterType: 'fetch' | 'xhr' | 'node' | 'mock'
 ```
 
-`clientID` matches the `clientID` field on tracked request entries. `adapterType` lets you inspect the active adapter without sending a request, which is useful in shared utilities that need to behave differently per runtime. It is the adapter's `getType()`, read once when the client (or sub-client) is built: the config is checked against that value and every request uses it, so a custom adapter's `getType()` is not consulted again. A `getType()` that returns anything other than `'fetch'`, `'xhr'`, `'node'` or `'mock'` makes the constructor throw a `TypeError`: the adapter and runtime checks are keyed on the type, so a custom adapter returns the one whose rules it follows.
+`clientID` matches the `clientID` field on tracked request entries. `adapterType` lets you inspect the active adapter without sending a request, which is useful in shared utilities that need to behave differently per runtime. It is the adapter's `getType()`, read once when the client is built: the config is checked against that value and every request uses it, so a custom adapter's `getType()` is not consulted again. A sub-client that shares its parent's adapter takes the parent's value rather than reading it again; one given its own adapter reads that adapter's `getType()` once when it is built. A `getType()` that returns anything other than `'fetch'`, `'xhr'`, `'node'` or `'mock'` makes the constructor throw a `TypeError`: the adapter and runtime checks are keyed on the type, so a custom adapter returns the one whose rules it follows.
 
 ## Request Tracking
 

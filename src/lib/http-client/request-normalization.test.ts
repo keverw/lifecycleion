@@ -10315,6 +10315,31 @@ test('PR review round 41: the adapter type is read once, as the config was check
   expect(second.adapterType).toBe('node');
 });
 
+test("PR review round 44: a sub-client sharing its parent's adapter takes the parent's adapter type", async () => {
+  // A custom adapter whose `getType` answers `node` once, then `fetch`: a sub-client that
+  // read it again treated the parent's one adapter as another type, and checked its
+  // config and ran its requests as that type.
+  let typeReads = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => (typeReads++ === 0 ? 'node' : 'fetch'),
+    send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+  };
+  const parent = new HTTPClient({ adapter, baseURL: 'https://a.test' });
+  const inheriting = parent.createSubClient();
+  const explicit = parent.createSubClient({ adapter });
+
+  const response = await inheriting.get('/one').send();
+
+  expect(typeReads).toBe(1);
+  expect(inheriting.adapterType).toBe('node');
+  expect(explicit.adapterType).toBe('node');
+  expect(response.adapterType).toBe('node');
+
+  // A sub-client given an adapter of its own reads that adapter's type, once.
+  const own = parent.createSubClient({ adapter: new MockAdapter() });
+  expect(own.adapterType).toBe('mock');
+});
+
 test('PR review round 42: an initialURL that is not a string is refused as non-retryable by every adapter', async () => {
   // `null` resolved against the page as a relative reference, and was taken for the
   // page's own origin by the browser adapters.
@@ -10803,6 +10828,23 @@ test('PR review round 43: a refused method, strategy, URL, redirect Location, su
   }
 });
 
+test('PR review round 44: CookieJar.clear() tells a blank host from an empty one', () => {
+  const jar = new CookieJar();
+
+  expect(() => jar.clear('', 'hostname')).toThrow(
+    new TypeError(
+      'CookieJar.clear() host must be a non-empty string (got an empty string)',
+    ),
+  );
+  for (const host of ['   ', '\t\n']) {
+    expect(() => jar.clear(host, 'domain')).toThrow(
+      new TypeError(
+        'CookieJar.clear() host must be a non-empty string (got a blank string)',
+      ),
+    );
+  }
+});
+
 test('PR review round 43: a refusal names the entry or the kind of value it refused', () => {
   const thrown = (run: () => unknown): string => {
     try {
@@ -10814,7 +10856,7 @@ test('PR review round 43: a refusal names the entry or the kind of value it refu
   };
   const jar = new CookieJar();
 
-  expect(thrown(() => jar.clear('  ', 'hostname'))).toBe(
+  expect(thrown(() => jar.clear('', 'hostname'))).toBe(
     'CookieJar.clear() host must be a non-empty string (got an empty string)',
   );
   expect(thrown(() => jar.clear('a.test', 'Domain' as never))).toBe(

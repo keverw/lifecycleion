@@ -6,6 +6,7 @@ import { REDIRECT_STATUS_CODES } from './consts';
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
+import { isHTTPToken } from './internal/http-token';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { readUnknownMember } from '../internal/read-member';
 import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
@@ -580,9 +581,6 @@ export function normalizeHeaders(
   return result;
 }
 
-/** RFC 9110's `token`: the characters a method name is made of. */
-const HTTP_METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-
 /**
  * What is wrong with `candidate` as a request method - completing "the method …" - or
  * `undefined` when nothing is. A method is a non-empty string of RFC 9110 token
@@ -599,7 +597,7 @@ export function describeInvalidHTTPMethod(
   if (candidate === '') {
     return 'is empty';
   }
-  if (!HTTP_METHOD_TOKEN.test(candidate)) {
+  if (!isHTTPToken(candidate)) {
     return 'is not a valid HTTP method name (got a string with characters an HTTP token does not allow)';
   }
   // CONNECT asks for a tunnel rather than a response, which no adapter here handles:

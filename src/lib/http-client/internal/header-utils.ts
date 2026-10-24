@@ -6,6 +6,7 @@ import {
 } from '../consts';
 import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
+import { isHTTPToken } from './http-token';
 import type { RequestHeadersInput } from '../types';
 
 /**
@@ -99,28 +100,25 @@ export function isBrowserRestrictedHeader(
   return false;
 }
 
-/** RFC 9110's `token`: the characters a header name is made of. */
-const HEADER_NAME_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-
-/** Whether `name` is an RFC 9110 token, as every transport requires a header name to be. */
-function isHeaderNameToken(name: string): boolean {
-  return HEADER_NAME_TOKEN.test(name);
-}
-
 /**
  * The part of a header a runtime refused, for a refusal message: `the value of header
- * 'name'` or `the name of header 'name'`, or `a header name` whenever the name is not a
- * token - text pasted in whole as a name, `Authorization: Bearer …`, is written nowhere.
- * Never the value: a runtime's own message quotes it, which is why an adapter writes its
- * own.
+ * 'name'` or `the name of header 'name'`, `header 'name'` when the runtime does not say
+ * which part, or `a header name` whenever the name is not a token - text pasted in whole
+ * as a name, `Authorization: Bearer …`, is written nowhere. Never the value: a runtime's
+ * own message quotes it, which is why an adapter writes its own.
  */
 export function describeRefusedHeader(
   name: string,
-  part: 'name' | 'value',
+  part: 'name' | 'value' | 'header',
 ): string {
-  return isHeaderNameToken(name)
-    ? `the ${part} of header '${name}'`
-    : 'a header name';
+  // A token, as every transport requires a header name to be.
+  if (!isHTTPToken(name)) {
+    return 'a header name';
+  }
+
+  return part === 'header'
+    ? `header '${name}'`
+    : `the ${part} of header '${name}'`;
 }
 
 /**

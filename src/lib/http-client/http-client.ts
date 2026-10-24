@@ -272,6 +272,15 @@ function unfollowedRedirectAnswer(
 interface InternalClientState {
   tracker?: RequestTracker;
   parentClient?: BaseHTTPClient | null;
+  /**
+   * The parent's adapter and the type it was checked as: a sub-client sharing that
+   * adapter takes this type rather than reading `getType()` again, so parent and child
+   * never treat one adapter as two types.
+   */
+  inheritedAdapter?: {
+    adapter: NonNullable<HTTPClientConfig['adapter']>;
+    type: AdapterType;
+  };
 }
 
 export class BaseHTTPClient {
@@ -296,6 +305,8 @@ export class BaseHTTPClient {
    * was checked against is the one every request reads, and `adapterType` reports. A
    * custom adapter whose `getType` answers differently on each call could otherwise pass
    * the check as one type and dispatch as another, or disagree with itself mid-request.
+   * A sub-client sharing its parent's adapter takes the parent's value instead
+   * (`inheritedAdapter`), so the two never read that adapter as different types.
    */
   protected readonly _adapterType: AdapterType;
   protected _tracker: RequestTracker;
@@ -324,7 +335,10 @@ export class BaseHTTPClient {
 
     this._clientID = generateID('ulid');
     this._adapter = snapshot.adapter ?? new FetchAdapter();
-    const adapterType: unknown = this._adapter.getType();
+    const adapterType: unknown =
+      internal.inheritedAdapter?.adapter === this._adapter
+        ? internal.inheritedAdapter.type
+        : this._adapter.getType();
     // One of the four, as the type has it: every adapter and runtime check below and per
     // request is keyed on it, so a custom adapter answering anything else - `'custom'`,
     // `undefined` - was checked as none of them. Named by its type only: the answer is
@@ -4832,6 +4846,7 @@ export class HTTPClient extends BaseHTTPClient {
     return new BaseHTTPClient(this._buildSubClientConfig(overrides), {
       tracker: this._tracker,
       parentClient: this,
+      inheritedAdapter: { adapter: this._adapter, type: this._adapterType },
     });
   }
 }

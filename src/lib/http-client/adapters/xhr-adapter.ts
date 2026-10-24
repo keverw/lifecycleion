@@ -140,14 +140,15 @@ export class XHRAdapter implements HTTPAdapter {
         //
         // A header refused is named, never its value, and the runtime's error is not kept:
         // Chrome's `DOMException` quotes the value - a token, in an `authorization`. A
-        // browser refuses a name only when it is not a token, so with one it was the value.
+        // browser refuses a name only when it is not a token, but an XHR outside one may
+        // refuse a token name too, so with a token the part refused is not claimed.
         for (const [name, value] of requestHeaderPairs(headers)) {
           try {
             xhr.setRequestHeader(name, value);
           } catch {
             refuse(
               new TypeError(
-                `XHRAdapter refused ${describeRefusedHeader(name, 'value')}`,
+                `XHRAdapter refused ${describeRefusedHeader(name, 'header')}`,
               ),
             );
             return;

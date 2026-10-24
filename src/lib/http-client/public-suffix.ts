@@ -64,7 +64,9 @@ function normalizeSuffix(
   listName: string,
   index: number,
 ): string {
-  // Named by its place in the list, never its text, as every refusal here is.
+  // Named by its place in the list, never its text, as every entry refused here is. The
+  // only text a refusal here quotes is an unknown field's key, an option name and not a
+  // hostname.
   const entryName = `publicSuffixes.${listName}[${String(index)}]`;
 
   if (typeof entry !== 'string') {

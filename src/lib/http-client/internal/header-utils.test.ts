@@ -156,4 +156,11 @@ describe('describeRefusedHeader', () => {
       expect(describeRefusedHeader(name, 'name')).toBe('a header name');
     }
   });
+
+  test('PR review round 44: names a token header without a part when the part refused is unknown', () => {
+    expect(describeRefusedHeader('x-trace', 'header')).toBe("header 'x-trace'");
+    expect(
+      describeRefusedHeader('Authorization: Bearer secret-token', 'header'),
+    ).toBe('a header name');
+  });
 });

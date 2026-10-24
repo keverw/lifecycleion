@@ -1,4 +1,5 @@
 import { asciiUppercase } from '../internal/http-method';
+import { isHTTPToken } from '../internal/http-token';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -887,11 +888,7 @@ function cookiesToSetCookieHeaders(
     // A `;` or `=` in a name, or a `;` in a value or attribute, would rewrite the line -
     // `abc; Domain=other.test` sets a Domain the route never asked for. A route mistake.
     // A name refused is named by its position: it may itself be the text pasted wrong.
-    assertCookieText(
-      name,
-      `name at position ${String(index)}`,
-      /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/,
-    );
+    assertCookieText(name, `name at position ${String(index)}`, true);
     if (typeof value === 'string') {
       assertCookieText(value, `"${name}" value`);
     } else if (value !== null) {
@@ -1302,13 +1299,18 @@ function asRouteMistake<R>(step: () => R): R {
 }
 
 /**
- * Throw when `text` would change a `Set-Cookie` line's framing, fails `pattern`, or holds a
- * character above U+00FF, which a real server's `setHeader` refuses and the jar drops.
+ * Throw when `text` would change a `Set-Cookie` line's framing, is not an RFC 9110 token
+ * where `shouldBeToken` (a cookie name, RFC 6265), or holds a character above U+00FF, which
+ * a real server's `setHeader` refuses and the jar drops.
  */
-function assertCookieText(text: string, part: string, pattern?: RegExp): void {
+function assertCookieText(
+  text: string,
+  part: string,
+  shouldBeToken = false,
+): void {
   // eslint-disable-next-line no-control-regex -- control characters are what is refused
   const isUnsafe = /[;\u0000-\u001f\u007f\u0100-\uffff]/.test(text);
-  if (isUnsafe || (pattern !== undefined && !pattern.test(text))) {
+  if (isUnsafe || (shouldBeToken && !isHTTPToken(text))) {
     throw new TypeError(
       `MockAdapter cookie ${part} cannot be written into a Set-Cookie line`,
     );
