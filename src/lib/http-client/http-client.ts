@@ -16,7 +16,6 @@ import { generateID } from '../id-helpers';
 import { safeHandleCallback } from '../safe-handle-callback';
 import { reportToHost } from '../internal/report-to-host';
 import { guardAbortListeners } from '../internal/guarded-abort-signal';
-import { deepClone } from '../deep-clone';
 import { RetryPolicy } from '../retry-utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
 import {
@@ -2250,8 +2249,7 @@ export class BaseHTTPClient {
     /**
      * Set to the caller's body of each attempt as it is dispatched, so a 307/308 replays
      * that value - serialized as the attempt's was - rather than the observers' copy,
-     * which rebuilds plain objects and class instances as plain objects, losing their
-     * `toJSON`.
+     * which is theirs to change.
      */
     sentBody: { value: unknown };
     /** Latest destination explicitly selected by the caller or a retry interceptor. */
@@ -4910,18 +4908,30 @@ function snapshotClientConfigFields(config: SubClientConfig) {
 }
 
 function buildObservedAttemptBodies(rawBody: unknown): ObservedAttemptBodies {
-  // Validate before cloning so unsupported object-like values (URLSearchParams,
-  // Blob, etc.) fail explicitly instead of being deep-cloned into `{}`.
+  // Validate first so unsupported object-like values (URLSearchParams, Blob, etc.) fail
+  // explicitly instead of being stringified into `{}`.
   assertSupportedRequestBody(rawBody);
+
+  // A JSON body is read once, by `JSON.stringify` - from the caller's value itself, so
+  // what JSON reads from prototypes (a nested `URL`'s or class instance's `toJSON`,
+  // another realm's `Date`) is honored - and the observers' copy is parsed back from the
+  // bytes sent. A deep copy taken beside the serialization read the caller's value a
+  // second time: a getter, or a change in between, made `rawBody` differ from what went
+  // out. Parsed for each attempt, so an observer that changes its copy changes no other.
+  if (Array.isArray(rawBody) || isPlainJSONBodyObject(rawBody)) {
+    const { body, contentType } = serializeBody(rawBody);
+
+    return {
+      body,
+      // A top-level `toJSON` that answers `undefined` serializes to nothing.
+      rawBody: typeof body === 'string' ? JSON.parse(body) : undefined,
+      contentType,
+    };
+  }
+
+  // Bytes and form data are sent as the copy.
   const rawBodySnapshot = cloneBodyValue(rawBody);
-  // A JSON body is serialized from the caller's value itself, as `JSON.stringify` would:
-  // the snapshot is a deep copy for observers, which rebuilds class instances and objects
-  // it does not recognize as plain objects, so what JSON reads from their prototypes - a
-  // nested `URL`'s or class instance's `toJSON`, another realm's `Date` - would be lost. Bytes and form data are sent as the copy.
-  const isJSONBody = Array.isArray(rawBody) || isPlainJSONBodyObject(rawBody);
-  const { body, contentType } = serializeBody(
-    isJSONBody ? rawBody : rawBodySnapshot,
-  );
+  const { body, contentType } = serializeBody(rawBodySnapshot);
 
   return {
     body,
@@ -4941,8 +4951,6 @@ function cloneBodyValue(body: unknown): unknown {
     return cloned;
   } else if (body instanceof Uint8Array) {
     return new Uint8Array(body);
-  } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
-    return deepClone(body);
   }
 
   return body;

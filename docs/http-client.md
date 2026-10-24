@@ -667,13 +667,15 @@ interface AttemptRequest {
   method: HTTPMethod;
   headers: Record<string, string | string[]>;
   body?: string | Uint8Array | FormData | null; // serialized adapter-facing body
-  rawBody?: unknown; // structured pre-serialization body when available
+  rawBody?: unknown; // structured body when available; see below
   timeout?: number; // configured per-attempt timeout budget in ms
   maxResponseBytes?: number; // configured buffered response size limit; Infinity for none
   attemptNumber?: number; // 1-based; undefined on pre-dispatch best-effort snapshots
   requestID?: string; // matches HTTPResponse.requestID / HTTPClientError.requestID
 }
 ```
+
+`request.rawBody` is the body before serialization, built for each attempt from the caller's body, so changing it changes no later attempt. For a JSON body it is the value sent, parsed back from `request.body`: the caller's body is read once per attempt, by `JSON.stringify`, so a `toJSON` is applied, a `Date` is its ISO string, a `Map` is `{}`, and an `undefined` member is dropped (`null` in an array). A `Uint8Array` or `FormData` body is a copy of the caller's, and a string is the string. When the body could not be built - a `BigInt` or a circular reference in a JSON body, an unsupported body type - an error observer's `request.body` is `null` and `request.rawBody` is the caller's own value, not a copy.
 
 Use `request.timeout` to inspect what timeout budget was configured for that attempt. Use `response.isTimeout` / `error.isTimeout` to inspect what actually happened.
 
@@ -1270,6 +1272,8 @@ Progress granularity depends on the adapter:
 
 ## Adapters
 
+Every built-in adapter, driven directly, refuses a `method` that is absent, empty or not an HTTP token (`GET /x`) as a non-retryable `adapter_error` before anything is sent, with a message that does not quote the method. `HTTPClient` refuses one before that, when the request is built.
+
 ### FetchAdapter (Default)
 
 Uses the global `fetch()` API. Works in browsers, Node.js 18+, Bun, and Deno.
@@ -1595,7 +1599,7 @@ interface MockResponse {
 
 `cookies` entries are appended after any `headers['set-cookie']` entries. If the same cookie name appears in both, the `cookies` entry wins (last Set-Cookie header takes precedence).
 
-Each entry is held to the rule the cookie jar stores by: a name is an HTTP token, and a value, `path` or `domain` is a string with no `;`, no control character other than a tab, and no character above U+00FF (a tab in a value or `path` is written, as it is from a raw `set-cookie`). Nothing is coerced. The request fails with a non-retryable error - so the route is not run again - for an entry that is not a string, `null` or an object; a `MockCookieOptions` whose `value` is not a string; a `path` or `domain` present and not a string; a `sameSite` other than `'Strict'`, `'Lax'` or `'None'`; a `maxAge` that is not a number, or is `NaN`; and an `httpOnly` or `secure` present and not a boolean. Each of these names the cookie by its position in `cookies` (and the type it got), never its text; a name that is not a token is named by its position too.
+Each entry is held to the rule the cookie jar stores by: a name is an HTTP token, and a value, `path` or `domain` is a string with no `;`, no control character other than a tab, and no character above U+00FF (a tab in a value or `path` is written, as it is from a raw `set-cookie`). Nothing is coerced. The request fails with a non-retryable error - so the route is not run again - for an entry that is not a string, `null` or an object (an array is refused as one); a `MockCookieOptions` whose `value` is not a string; a `path` or `domain` present and not a string; a `sameSite` other than `'Strict'`, `'Lax'` or `'None'`; a `maxAge` that is not a number, or is `NaN`; and an `httpOnly` or `secure` present and not a boolean. Each of these names the cookie by its position in `cookies` (and the type it got), never its text; a name that is not a token is named by its position too.
 
 **Simulate multiple domains in tests:**
 

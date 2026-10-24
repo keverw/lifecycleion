@@ -1113,8 +1113,13 @@ export type AttemptRequest = Omit<
    */
   headers: Record<string, string | string[]>;
   /**
-   * Post-interceptor body before attempt materialization. This is useful for
-   * observers that need the semantic payload as well as the adapter-facing body.
+   * The attempt's body before serialization, for observers that need the payload as well
+   * as the adapter-facing `body`, built for each attempt from the caller's body (after
+   * interceptors). A JSON body is the value sent, parsed back from `body` (so a `toJSON`
+   * is applied and a `Date` is its ISO string); a `Uint8Array` or `FormData` body is a
+   * copy of the caller's, and a string is the string. When the body could not be built -
+   * a JSON body `JSON.stringify` refuses, an unsupported type - `body` is `null` and this
+   * is the caller's own value.
    */
   rawBody?: unknown;
   /** Effective per-attempt timeout in ms. */

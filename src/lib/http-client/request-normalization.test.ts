@@ -55,6 +55,7 @@ import {
   normalizeDomain,
 } from '../domain-utils/helpers';
 import { MockAdapter } from './adapters/mock-adapter';
+import { errorText } from './test-helpers/error-text';
 import type {
   MockCookieOptions,
   MockRequest,
@@ -1086,6 +1087,96 @@ test("a JSON body's nested toJSON values are sent as JSON.stringify sends them",
   await client.post('/x').json(body).send();
 
   expect(adapter.requests[0]?.body).toBe(JSON.stringify(body));
+});
+
+test("PR review round 46: a JSON body's rawBody is the value sent, read from the caller's body once", async () => {
+  // A getter answering differently on each read: the observers' deep copy and the
+  // serialization each read it, so `rawBody` said one thing and the bytes another.
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  let reads = 0;
+  const body = {
+    get token(): string {
+      reads++;
+      return `t${reads}`;
+    },
+    when: new Date(0),
+  };
+  const observed: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    observed.push(request.rawBody);
+  });
+
+  const response = await client.post('/x').json(body).send();
+
+  expect(response.status).toBe(200);
+  expect(reads).toBe(1);
+  expect(adapter.requests[0]?.body).toBe(
+    '{"token":"t1","when":"1970-01-01T00:00:00.000Z"}',
+  );
+  expect(observed).toEqual([{ token: 't1', when: '1970-01-01T00:00:00.000Z' }]);
+});
+
+test("PR review round 46: a retry-phase observer changing rawBody changes neither the next attempt's bytes nor its rawBody", async () => {
+  const sent: unknown[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sent.push(request.body);
+      return Promise.resolve({
+        status: sent.length === 1 ? 503 : 200,
+        headers: {},
+        body: null,
+      });
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  });
+  let reads = 0;
+  const body = {
+    nested: { value: 1 },
+    get token(): string {
+      reads++;
+      return 'fixed';
+    },
+  };
+  const observed: Array<{ phase: string; rawBody: unknown; copy: unknown }> =
+    [];
+  client.addResponseObserver(
+    (_response, request, phase) => {
+      observed.push({
+        phase: phase.type,
+        rawBody: request.rawBody,
+        copy: structuredClone(request.rawBody),
+      });
+      if (phase.type === 'retry') {
+        const raw = request.rawBody as {
+          nested: { value: number };
+          token: string;
+        };
+        raw.nested.value = 99;
+        raw.token = 'changed';
+      }
+    },
+    { phases: ['retry', 'final'] },
+  );
+
+  const response = await client.put('/x').json(body).send();
+
+  expect(response.status).toBe(200);
+  // Once per attempt: the bytes and the observers' copy come from the one read.
+  expect(reads).toBe(2);
+  expect(sent).toEqual([
+    '{"nested":{"value":1},"token":"fixed"}',
+    '{"nested":{"value":1},"token":"fixed"}',
+  ]);
+  expect(observed.map((entry) => entry.phase)).toEqual(['retry', 'final']);
+  expect(observed[1]?.rawBody).not.toBe(observed[0]?.rawBody);
+  expect(observed[1]?.copy).toEqual({ nested: { value: 1 }, token: 'fixed' });
+  expect(body.nested.value).toBe(1);
 });
 
 test('a 307 replays the JSON body as the first hop sent it', async () => {
@@ -9399,15 +9490,29 @@ test("PR review round 25: a decode failure after the body reached the caller's s
 
 test('PR review round 25: MockAdapter uppercases a method ASCII only', async () => {
   const mock = new MockAdapter();
-  mock.routes.post('/x', () => ({ status: 201 }));
-
-  const response = await mock.send({
-    requestURL: 'http://api.test/x',
-    method: 'po\u017Ft',
-    headers: {},
+  let calls = 0;
+  mock.routes.post('/x', () => {
+    calls++;
+    return { status: 201 };
   });
 
-  expect(response.status).toBe(404);
+  // `toUpperCase` makes `poſt` (U+017F) `POST`. Not a token, it is refused before any
+  // route is matched - never answered by the `POST` route.
+  const outcome = await mock
+    .send({
+      requestURL: 'http://api.test/x',
+      method: 'po\u017Ft',
+      headers: {},
+    })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+
+  expect(outcome?.message).toBe(
+    'Adapter request method is not a valid HTTP method name (got a string with characters an HTTP token does not allow)',
+  );
+  expect(calls).toBe(0);
 });
 
 test('PR review round 25: a CRL buffer changed in place is read again, not reused', async () => {
@@ -10374,6 +10479,45 @@ test('PR review round 42: an initialURL that is not a string is refused as non-r
   }
 });
 
+test('PR review round 46: a method that is not an HTTP token is refused by every adapter, without the method', async () => {
+  // NodeAdapter passed on Node's refusal, which quotes the method; MockAdapter answered
+  // it with the 404 of a route not found.
+  const secret = 'secret-token';
+  for (const adapter of [
+    new FetchAdapter(),
+    new XHRAdapter(),
+    new NodeAdapter(),
+    new MockAdapter(),
+  ]) {
+    for (const [method, message] of [
+      [
+        `GET ${secret}`,
+        'Adapter request method is not a valid HTTP method name (got a string with characters an HTTP token does not allow)',
+      ],
+      [
+        { toString: () => `GET ${secret}` },
+        'Adapter request method is not a valid HTTP method name (got a string with characters an HTTP token does not allow)',
+      ],
+      ['', 'Adapter request method is empty'],
+    ] as const) {
+      const outcome = await adapter
+        .send({
+          requestURL: 'http://127.0.0.1:1/x',
+          method: method as unknown as string,
+          headers: {},
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect((outcome as unknown as Error | undefined)?.message).toBe(message);
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(errorText(outcome)).not.toContain(secret);
+    }
+  }
+});
+
 test('PR review round 42: an adapter whose getType() is not an adapter type is refused when the client is built', () => {
   for (const [type, got] of [
     ['custom', 'string'],
@@ -11029,6 +11173,26 @@ test('PR review round 45: an onHandlerError that returns nothing is named by the
     'MockAdapter onHandlerError for GET /invite/:code returned no MockResponse (got undefined)',
   );
   expect(message).not.toContain('s3cr3t-code');
+});
+
+test('PR review round 46: a MockAdapter cookie given as an array is refused as an array, not by a missing value', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/login', () => ({
+    status: 200,
+    cookies: {
+      theme: 'dark',
+      session: ['v'] as unknown as MockCookieOptions,
+    },
+  }));
+  const builder = new HTTPClient({
+    adapter,
+    baseURL: 'http://mock.test',
+  }).get('/login');
+  await builder.send();
+
+  expect(builder.error?.cause?.message).toBe(
+    'MockAdapter cookie at position 1 must be a string, null or a MockCookieOptions object (got an array)',
+  );
 });
 
 test('PR review round 45: a MockAdapter cookie field of the wrong type is refused by position and type, not coerced', async () => {

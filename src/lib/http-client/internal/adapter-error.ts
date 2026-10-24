@@ -1,4 +1,5 @@
 import { normalizeStandardMethod } from './http-method';
+import { isHTTPToken } from './http-token';
 import {
   ADAPTER_ERROR_CARRIER_KEY,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
@@ -63,12 +64,18 @@ export function isAdapterErrorCarrier(error: unknown): error is Error {
  * `fetch`, `open` and Node's request line convert it, so a non-string one does not throw
  * at the first `toUpperCase` after the request may already have gone out. Refused as a
  * non-retryable `adapter_error` when it is absent - `String` made that the verb
- * `undefined`, which `fetch` accepts as a token and sent - or when its `toString` throws:
- * every attempt carries the same method.
+ * `undefined`, which `fetch` accepts as a token and sent - when its `toString` throws, or
+ * when what it converts to is not an RFC 9110 token: every attempt carries the same
+ * method.
+ *
+ * The token check is here, for every adapter, rather than left to each runtime: Node's
+ * refusal quotes the method (`Method must be a valid HTTP token ["GET secret-token"]`) and
+ * a carrier passes that message on, while MockAdapter, with no runtime to ask, answered
+ * one with the 404 of a route not found. The refusal names no value.
  */
 export function readAdapterMethod(method: unknown): string {
   if (typeof method === 'string') {
-    return normalizeStandardMethod(method);
+    return normalizeStandardMethod(assertMethodToken(method));
   }
 
   if (method === undefined || method === null) {
@@ -87,7 +94,22 @@ export function readAdapterMethod(method: unknown): string {
     throw nonRetryableAdapterErrorFrom(error);
   }
 
-  return normalizeStandardMethod(text);
+  return normalizeStandardMethod(assertMethodToken(text));
+}
+
+/** `method` as given, or a non-retryable `TypeError` naming no value when it is not a token. */
+function assertMethodToken(method: string): string {
+  if (isHTTPToken(method)) {
+    return method;
+  }
+
+  const refusal = new TypeError(
+    method === ''
+      ? 'Adapter request method is empty'
+      : 'Adapter request method is not a valid HTTP method name (got a string with characters an HTTP token does not allow)',
+  );
+  markNonRetryableAdapterError(refusal);
+  throw refusal;
 }
 
 /**

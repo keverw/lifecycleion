@@ -1859,17 +1859,9 @@ export class CookieJar {
   }
 
   private hostOnlyDomainMatches(
-    requestHostInput: string | PreparedHost,
-    cookieDomainInput: string | PreparedHost,
+    requestHost: PreparedHost,
+    cookieDomain: PreparedHost,
   ): boolean {
-    const requestHost =
-      typeof requestHostInput === 'string'
-        ? this.prepareHost(requestHostInput)
-        : requestHostInput;
-    const cookieDomain =
-      typeof cookieDomainInput === 'string'
-        ? this.prepareHost(cookieDomainInput)
-        : cookieDomainInput;
     const canonicalRequestHost = requestHost.canonicalIP;
     const canonicalCookieDomain = cookieDomain.canonicalIP;
 

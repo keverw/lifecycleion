@@ -933,6 +933,13 @@ function readMockCookieOptions(
   index: number,
 ): MockCookieOptions {
   const position = `at position ${String(index)}`;
+  // An array is an object to `typeof`, and read as options it was refused for its
+  // missing `value` - a message about a field the route never wrote.
+  if (Array.isArray(entry)) {
+    throw new TypeError(
+      `MockAdapter cookie ${position} must be a string, null or a MockCookieOptions object (got an array)`,
+    );
+  }
   if (typeof entry !== 'object' || entry === null) {
     throw new TypeError(
       `MockAdapter cookie ${position} must be a string, null or a MockCookieOptions object (got ${describeValue(entry)})`,
