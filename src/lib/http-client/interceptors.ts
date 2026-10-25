@@ -77,12 +77,16 @@ export interface InterceptorChainOptions {
    */
   onInterceptorCalled?: () => void;
   /**
-   * Called once, as the first interceptor this phase reaches is about to read the
-   * request, and its answer read in place of the request: the client hands interceptors
-   * on a redirect hop to an origin the caller never chose a copy of the hop's body this
-   * way, so one that edits the body in place edits neither the caller's value nor what
-   * that hop sends. A request no interceptor reads is never prepared, so a phase with
-   * nothing registered for it pays nothing.
+   * Called once, as the first interceptor's function this phase calls is about to be
+   * called - after its filter, which reads the request as it was handed over - and its
+   * answer read in place of the request: the client hands interceptors on a redirect hop
+   * to an origin the caller never chose a copy of the hop's body this way, so one that
+   * edits the body in place edits neither the caller's value nor what that hop sends.
+   * The filters up to and including that interceptor's read the request as handed over,
+   * as on any other hop; the filters after it read the prepared request, or whatever an
+   * interceptor returned in its place. A request no interceptor's function is called
+   * for is never prepared, so a phase with nothing registered for it, or nothing its
+   * filters match, pays nothing.
    */
   prepareRequest?: (request: InterceptedRequest) => InterceptedRequest;
 }
@@ -105,8 +109,8 @@ async function runInterceptors(
   let current = request;
   /** Whether `current` is an interceptor's result, not yet copied. */
   let isCurrentUncopied = isInterceptorResult;
-  /** Whether `prepareRequest` is still to be called. */
-  let isUnprepared = prepareRequest !== undefined;
+  /** `prepareRequest` while it is still to be called. */
+  let pendingPrepare = prepareRequest;
 
   for (const { fn, filter } of interceptors) {
     // A cancel made by an earlier interceptor, or while it ran, ends the chain: the request
@@ -141,12 +145,6 @@ async function runInterceptors(
       isCurrentUncopied = false;
     }
 
-    // Before the filter too: it reads the body for `bodyContainsKeys`.
-    if (isUnprepared && prepareRequest !== undefined) {
-      isUnprepared = false;
-      current = prepareRequest(current);
-    }
-
     if (
       !matchesFilter(
         filter ?? {},
@@ -159,6 +157,15 @@ async function runInterceptors(
       )
     ) {
       continue;
+    }
+
+    // After the filter, which reads the request as it was handed over, so this filter
+    // and every one before it match as they do where nothing is prepared; before the
+    // function, the first that can touch the request. Later filters read what it
+    // returns.
+    if (pendingPrepare !== undefined) {
+      current = pendingPrepare(current);
+      pendingPrepare = undefined;
     }
 
     onInterceptorCalled?.();

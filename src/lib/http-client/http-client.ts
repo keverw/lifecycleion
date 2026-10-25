@@ -197,6 +197,19 @@ const CROSS_ORIGIN_SAFE_HEADERS: ReadonlySet<string> = new Set([
   'if-unmodified-since',
 ]);
 
+/**
+ * The headers that describe a request body rather than the caller: dropped with the body
+ * when a redirect hop drops it (see `_sanitizeRedirectRequest`), and restored with it
+ * when a cross-origin hop's own body is (see `withoutAddedCrossOriginCredentials`).
+ */
+const BODY_DESCRIBING_HEADERS: ReadonlySet<string> = new Set([
+  'content-type',
+  'content-length',
+  'content-encoding',
+  'content-language',
+  'content-location',
+]);
+
 /** The `adapter_error` message when the caller's cookie jar threw on a response. */
 const COOKIE_JAR_FAILURE_MESSAGE =
   'Cookie jar failed to process response headers';
@@ -2200,15 +2213,7 @@ export class BaseHTTPClient {
       // GET, or a 303, which leaves a HEAD a HEAD. A 307/308 GET that replays its body
       // keeps them.
       for (const key of Object.keys(headers)) {
-        if (
-          [
-            'content-type',
-            'content-length',
-            'content-encoding',
-            'content-language',
-            'content-location',
-          ].includes(lowerCaseHeaderName(key))
-        ) {
+        if (BODY_DESCRIBING_HEADERS.has(lowerCaseHeaderName(key))) {
           delete headers[key];
         }
       }
@@ -2615,16 +2620,19 @@ export class BaseHTTPClient {
         // handed, which would otherwise make a header it added look like one it was given.
         const retryInputHeaderNames = new Set(Object.keys(retryInputHeaders));
         // On a redirect hop to an origin the caller never chose, the interceptors are
-        // handed a copy of the hop's body (see `copyRequestBody`), taken only once one is
-        // about to read the request: the hop's own is the caller's value, and an
-        // interceptor that added a field to it in place - `request.body.token = ...;
-        // return request` - changed the caller's body and sent that field to the host
-        // the server chose, past the check below, which compares identities. A hop on
-        // the caller's own origin hands over the hop's body as it is, at no cost.
+        // handed a copy of the hop's body (see `copyRequestBody`): the hop's own is the
+        // caller's value, and an interceptor that added a field to it in place -
+        // `request.body.token = ...; return request` - changed the caller's body and sent
+        // that field to the host the server chose, past the check below, which compares
+        // identities. Taken only once an interceptor's function is about to be called,
+        // so the filters up to and including that interceptor's - the parent client's
+        // chain's included - read the hop's own body, as on any other hop; filters after
+        // it read the copy, or whatever that interceptor returned. A hop on the caller's
+        // own origin hands over the hop's body as it is, at no cost.
         const retryBodyCopy: RetryBodyCopy | undefined =
           hopContext !== undefined &&
           isCrossOrigin(credentialScope.url, baseRequest.requestURL)
-            ? { isTaken: false, value: undefined, didFail: false }
+            ? { isTaken: false, didFail: false }
             : undefined;
         const prepareRetryRequest =
           retryBodyCopy === undefined
@@ -2635,13 +2643,14 @@ export class BaseHTTPClient {
                   return request;
                 }
                 retryBodyCopy.isTaken = true;
+                let body: unknown;
                 try {
-                  retryBodyCopy.value = copyRequestBody(request.body);
+                  body = copyRequestBody(request.body);
                 } catch (error) {
                   retryBodyCopy.didFail = true;
                   throw error;
                 }
-                return { ...request, body: retryBodyCopy.value };
+                return { ...request, body };
               };
 
         try {
@@ -2711,13 +2720,13 @@ export class BaseHTTPClient {
         // the value the interceptor gives it: a redirect-phase interceptor added it for a
         // target it trusts, and refreshing it is that interceptor's business. Nor may they
         // put one anywhere else that reaches that host: the hop goes out with its own URL -
-        // an `?access_token=` added to it went along - and its own body, a field added to
-        // a `307`/`308` replay included. A host the interceptor names itself is an
-        // explicit choice of destination, as the credential scope reads it below, so it is
-        // left alone. So is a hop the server kept on the caller's own origin, which is no
-        // origin the caller never chose, and a retry the interceptor sends back to exactly
-        // that origin. Stripped silently, as `_sanitizeRedirectRequest` strips the hop's
-        // own.
+        // an `?access_token=` added to it went along; only an upgrade to `https:` is kept -
+        // and its own body, a field added to a `307`/`308` replay included. A host the
+        // interceptor names itself is an explicit choice of destination, as the
+        // credential scope reads it below, so it is left alone. So is a hop the server
+        // kept on the caller's own origin, which is no origin the caller never chose, and
+        // a retry the interceptor sends back to exactly that origin. Stripped silently, as
+        // `_sanitizeRedirectRequest` strips the hop's own.
         attemptRequest =
           hopContext &&
           isRetryIntercepted &&
@@ -4066,6 +4075,13 @@ export class BaseHTTPClient {
           };
         }
 
+        // An attempt given up on while it had a body to send is not retried: the adapter
+        // that ignored its abort may still be writing that body, and nothing tells the
+        // client when it stops - the settle wait has no outcome to wait on - so a retry
+        // would send the body a second time beside it. A bodiless one has nothing left
+        // going out and is retried as any timeout is.
+        const isUploadAbandoned = isAbandoned && (sentBody ?? null) !== null;
+
         // Network / adapter / per-attempt timeout — retry if policy allows. A throw
         // carries no adapter response, so delivery is unproven - and a timed-out answer
         // (one that arrived after the timer fired) proves it but is still a timeout.
@@ -4073,6 +4089,7 @@ export class BaseHTTPClient {
         if (
           policy &&
           !cancelSignal.aborted &&
+          !isUploadAbandoned &&
           (allowNonIdempotentRetry ||
             IDEMPOTENT_METHODS.has(sentRequest.method))
         ) {
@@ -4185,19 +4202,24 @@ export class BaseHTTPClient {
 
           isRetriesExhausted = true;
         } else {
-          // A throw (or a timed-out answer) leaves the method rule as the only thing
-          // that can have suppressed a policy-eligible retry here.
+          // A throw (or a timed-out answer) leaves the method rule and an abandoned
+          // upload as the only things that can have suppressed a policy-eligible retry
+          // here. The method rule is named first: it would have stopped the retry anyway.
+          const isRetrySuppressible =
+            isRetryAvailable() && !cancelSignal.aborted;
           const isSuppressedByMethod =
-            isRetryAvailable() &&
-            !cancelSignal.aborted &&
+            isRetrySuppressible &&
             !allowNonIdempotentRetry &&
             !IDEMPOTENT_METHODS.has(sentRequest.method);
+          const retrySuppressedReason = isSuppressedByMethod
+            ? ('non_idempotent_method' as const)
+            : isRetrySuppressible && isUploadAbandoned
+              ? ('upload_unsettled' as const)
+              : undefined;
 
           emitAttemptEnd({
             willRetry: false,
-            ...(isSuppressedByMethod
-              ? { retrySuppressedReason: 'non_idempotent_method' as const }
-              : {}),
+            ...(retrySuppressedReason ? { retrySuppressedReason } : {}),
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
             status: 0,
@@ -5967,7 +5989,6 @@ function comparableHost(url: string): string {
 /** The copy of a hop's body a retry phase's interceptors were handed; see `copyRequestBody`. */
 interface RetryBodyCopy {
   isTaken: boolean;
-  value: unknown;
   didFail: boolean;
 }
 
@@ -6000,14 +6021,6 @@ function copyRequestBody(body: unknown): unknown {
   return cloneBodyValue(body);
 }
 
-/** The headers that describe a body, which go with it when it is restored. */
-const BODY_DESCRIBING_HEADERS = [
-  'content-type',
-  'content-length',
-  'content-encoding',
-  'content-language',
-] as const;
-
 /** Whether a body sends nothing: none, an empty string, or no bytes. */
 function isEmptyRequestBody(body: unknown): boolean {
   return (
@@ -6022,16 +6035,22 @@ function isEmptyRequestBody(body: unknown): boolean {
  * A retry-phase interceptor's request for a cross-origin redirect hop, without anything
  * the interceptor added that could carry a credential to the hop's host: every header
  * named neither on the request the chain was handed (`inputHeaderNames`, taken before it
- * ran) nor on the cross-origin safelist, and every change to the URL or the body. A
- * header the hop already carried keeps the value the interceptor gave it.
+ * ran) nor on the cross-origin safelist, and every change to the body and to the URL but
+ * an upgrade to `https:`. A header the hop already carried keeps the value the
+ * interceptor gave it.
  *
- * The URL is the hop's own (`hopRequest`): its path, query, fragment, scheme, port and
- * userinfo alike, since a token travels in a query string as readily as in a header and
- * none of them can be told apart from one. So is the body - the hop's own value, not the
- * copy the interceptors were handed, whatever they did to it - unless they removed it or
- * left it empty, which sends nothing. The hop's own body goes with the hop's own headers
- * that describe it (`BODY_DESCRIBING_HEADERS`), whether the interceptors replaced it,
- * edited their copy, or left it alone: theirs describe a body that is not sent.
+ * The URL is the hop's own (`hopRequest`): its path, query, fragment, port and userinfo
+ * alike, since a token travels in a query string as readily as in a header and none of
+ * them can be told apart from one. The one change kept is an upgrade from `http:` to
+ * `https:` that leaves the port as it was - each scheme's default, or the same port
+ * number - which carries nothing to the host and only protects what is sent (see
+ * `upgradedHopURL`); a downgrade, or any other change of scheme or port, is not.
+ *
+ * The body is the hop's own value too, not the copy the interceptors were handed,
+ * whatever they did to it - unless they removed it or left it empty, which sends
+ * nothing. The hop's own body goes with the hop's own headers that describe it
+ * (`BODY_DESCRIBING_HEADERS`), whether the interceptors replaced it, edited their copy,
+ * or left it alone: theirs describe a body that is not sent.
  */
 function withoutAddedCrossOriginCredentials(
   request: ResolvedRequest,
@@ -6039,11 +6058,10 @@ function withoutAddedCrossOriginCredentials(
   hopRequest: ResolvedRequest,
 ): ResolvedRequest {
   const isBodyDropped = isEmptyRequestBody(request.body);
-  const bodyHeaders: ReadonlySet<string> = new Set(BODY_DESCRIBING_HEADERS);
   // Names are already lowercase: the result is a snapshot (see `snapshotInterceptedRequest`).
   const headers: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(request.headers)) {
-    if (!isBodyDropped && bodyHeaders.has(name)) {
+    if (!isBodyDropped && BODY_DESCRIBING_HEADERS.has(name)) {
       continue;
     }
 
@@ -6062,8 +6080,42 @@ function withoutAddedCrossOriginCredentials(
 
   return {
     ...request,
-    requestURL: hopRequest.requestURL,
+    requestURL: upgradedHopURL(hopRequest.requestURL, request.requestURL),
     headers,
     body: isBodyDropped ? request.body : hopRequest.body,
   };
+}
+
+/**
+ * A cross-origin hop's own URL, upgraded to `https:` when a retry-phase interceptor asked
+ * for exactly that: the hop is `http:`, the interceptor's URL is `https:` on the same host
+ * (the caller has already compared them), and the port is unchanged - both each scheme's
+ * default, or the same port number on both, however the URL writes it (`https://h:443` is
+ * read as `https://h`, `http://h:80` as `http://h`). Everything else of the hop's URL -
+ * path, query, userinfo - stays its own, as it does for any other change; so does a URL
+ * that cannot be read.
+ */
+function upgradedHopURL(hopURL: string, interceptedURL: string): string {
+  try {
+    const hop = new URL(hopURL);
+    const intercepted = new URL(interceptedURL);
+
+    if (hop.protocol !== 'http:' || intercepted.protocol !== 'https:') {
+      return hopURL;
+    }
+
+    const isDefaultPorts = hop.port === '' && intercepted.port === '';
+    const hopPort = hop.port === '' ? '80' : hop.port;
+    const interceptedPort = intercepted.port === '' ? '443' : intercepted.port;
+    if (!isDefaultPorts && hopPort !== interceptedPort) {
+      return hopURL;
+    }
+
+    hop.protocol = 'https:';
+    // Set again: a scheme change drops a port that is the new scheme's default.
+    hop.port = isDefaultPorts ? '' : hopPort;
+    return hop.href;
+  } catch {
+    return hopURL;
+  }
 }

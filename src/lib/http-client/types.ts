@@ -458,12 +458,18 @@ export interface AttemptEndEvent {
    * - `non_idempotent_method` — a non-idempotent method (`POST`, `PATCH`, any method
    *   but `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT` and `DELETE`) with no proof the request
    *   went undelivered. Set `retryNonIdempotentMethods` to allow it.
+   * - `upload_unsettled` — the attempt timed out with a body to send, and its adapter
+   *   ignored the abort and had not settled a second later, so the client gave up on
+   *   it while the adapter may still be sending that body: a retry would send it twice.
    *
    * Exists so a suppressed retry is self-explaining: `willRetry: false` alone is
    * indistinguishable from a policy declining.
    */
   retrySuppressedReason?:
-    'adapter_veto' | 'stream_error' | 'non_idempotent_method';
+    | 'adapter_veto'
+    | 'stream_error'
+    | 'non_idempotent_method'
+    | 'upload_unsettled';
   /** Present only when a retry has been scheduled after this attempt. */
   nextRetryDelayMS?: number;
   /** Epoch ms for the scheduled retry, when a retry has been scheduled. */
@@ -762,9 +768,11 @@ export interface HTTPClientError {
    * policy declined because all of its attempts were spent - the request would
    * have been tried again with budget left. False when the last failure is one no
    * retry follows whatever the budget (an adapter veto, a stream error other than a
-   * body that only failed to decode, a non-idempotent method, a non-retryable status). The last attempt may still
-   * have received a response: a retryable status whose body then could not be
-   * read ends as an `adapter_error` with its status.
+   * body that only failed to decode, a non-idempotent method, a non-retryable status,
+   * an attempt with a body given up on after its adapter ignored the abort - see
+   * `retrySuppressedReason: 'upload_unsettled'`). The last attempt may still have
+   * received a response: a retryable status whose body then could not be read ends as
+   * an `adapter_error` with its status.
    */
   isRetriesExhausted: boolean;
   /**

@@ -2404,3 +2404,67 @@ describe('MockAdapter - PR review round 56', () => {
     );
   });
 });
+
+test('PR review round 59: a route body that is a Proxy over an ArrayBuffer is refused, not sent as no bytes; one over a Uint8Array is still delivered', async () => {
+  const proxiedView = new Proxy(new Uint8Array([4, 5, 6]), {});
+  const adapter = new MockAdapter();
+  adapter.routes.get('/buffer', () => ({
+    status: 200,
+    body: new Proxy(new Uint8Array([1, 2, 3]).buffer, {}),
+  }));
+  adapter.routes.get('/view', () => ({
+    status: 200,
+    body: proxiedView,
+  }));
+
+  const rejection = await adapter
+    .send(makeAdapterRequest({ requestURL: '/buffer' }))
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+  expect((rejection as Error).message).toMatch(
+    /Unsupported mock response body type/,
+  );
+  // The route's mistake: not retried.
+  expect(
+    (rejection as Record<string, unknown>)[
+      NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+    ],
+  ).toBe(true);
+
+  // Delivered as it is, as the size checks the round-6/7 tests cover expect.
+  const view = await adapter.send(makeAdapterRequest({ requestURL: '/view' }));
+  expect(view.body).toBe(proxiedView);
+});
+
+test('PR review round 59: a body the mock refuses is not labelled JSON on a HEAD route or under a simulated stream error', async () => {
+  const adapter = new MockAdapter();
+  const proxiedBuffer = () => new Proxy(new Uint8Array([1, 2]).buffer, {});
+  adapter.routes.head('/buffer', () => ({
+    status: 200,
+    body: proxiedBuffer(),
+  }));
+  adapter.routes.get('/cut', () => ({
+    status: 200,
+    body: proxiedBuffer(),
+    streamError: true,
+  }));
+  adapter.routes.head('/json', () => ({ status: 200, body: { a: 1 } }));
+
+  const head = await adapter.send(
+    makeAdapterRequest({ requestURL: '/buffer', method: 'HEAD' }),
+  );
+  expect(head.headers['content-type']).toBeUndefined();
+
+  const cut = await adapter.send(makeAdapterRequest({ requestURL: '/cut' }));
+  expect(cut.isStreamError).toBe(true);
+  expect(cut.headers['content-type']).toBeUndefined();
+
+  // A JSON body is still labelled on a HEAD route.
+  const json = await adapter.send(
+    makeAdapterRequest({ requestURL: '/json', method: 'HEAD' }),
+  );
+  expect(json.headers['content-type']).toBe('application/json');
+});

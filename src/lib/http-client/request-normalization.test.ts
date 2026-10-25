@@ -12147,14 +12147,22 @@ test("PR review round 57: an abandoned adapter's upload progress does not hold t
   };
   globalThis.addEventListener('error', onGlobalError);
   try {
-    const response = await new HTTPClient({
+    const client = new HTTPClient({
       adapter,
       baseURL: 'http://x.test',
       timeout: 50,
       retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
-    })
+    });
+    // The abandoned attempt is bodiless - one with a body is not retried (PR review round
+    // 59) - and is handed the progress hook because the caller asked for progress; the
+    // retry carries the body whose settle wait is watched.
+    client.addRequestInterceptor(
+      (request) => ({ ...request, body: { a: 1 } }),
+      { phases: ['retry'] },
+    );
+    const response = await client
       .put('/upload')
-      .json({ a: 1 })
+      .onUploadProgress(() => {})
       .send();
 
     expect(sends).toBe(2);
@@ -13366,4 +13374,310 @@ test('PR review round 58: a factory that answered a cancel leaves an abandoned a
 
   expect(sends()).toBe(2);
   expect(builder.error?.code).toBe('timeout');
+});
+
+test('PR review round 59: a retry interceptor may upgrade a cross-origin http hop to https, and nothing else of its URL', async () => {
+  const cases: Array<{
+    target: string;
+    rewrite: (url: URL) => void;
+    expected: string;
+  }> = [
+    // The upgrade alone, with the default ports.
+    {
+      target: 'http://evil.example/next?hop=1',
+      rewrite: (url) => {
+        url.protocol = 'https:';
+      },
+      expected: 'https://evil.example/next?hop=1',
+    },
+    // An unchanged explicit port is kept; the rest of the URL is the hop's own.
+    {
+      target: 'http://evil.example:8080/next?hop=1',
+      rewrite: (url) => {
+        url.protocol = 'https:';
+        url.searchParams.set('access_token', 'SECRET');
+        url.username = 'user';
+      },
+      expected: 'https://evil.example:8080/next?hop=1',
+    },
+    // The same port number, however each URL writes it.
+    {
+      target: 'http://evil.example:443/next',
+      rewrite: (url) => {
+        url.protocol = 'https:';
+      },
+      expected: 'https://evil.example/next',
+    },
+    {
+      target: 'http://evil.example/next',
+      rewrite: (url) => {
+        url.protocol = 'https:';
+        url.port = '80';
+      },
+      expected: 'https://evil.example:80/next',
+    },
+    // An upgrade that also changes the port is discarded.
+    {
+      target: 'http://evil.example/next',
+      rewrite: (url) => {
+        url.protocol = 'https:';
+        url.port = '8443';
+      },
+      expected: 'http://evil.example/next',
+    },
+    // A downgrade is discarded.
+    {
+      target: 'https://evil.example/next',
+      rewrite: (url) => {
+        url.protocol = 'http:';
+      },
+      expected: 'https://evil.example/next',
+    },
+  ];
+
+  for (const { target, rewrite, expected } of cases) {
+    // As `crossOriginReplayAdapter`, matching the target by hostname: an upgrade may
+    // write its port differently.
+    const sentToTarget: AdapterRequest[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request) => {
+        const url = new URL(request.requestURL);
+        if (url.hostname === 'api.example') {
+          return Promise.resolve({
+            status: 307,
+            headers: { location: target },
+            body: null,
+          });
+        }
+        sentToTarget.push(request);
+        return Promise.resolve({
+          status: sentToTarget.length === 1 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: crossOriginRetryPolicy,
+    });
+    client.addRequestInterceptor(
+      (request) => {
+        const url = new URL(request.requestURL);
+        rewrite(url);
+        return {
+          ...request,
+          requestURL: url.href,
+          headers: { ...request.headers, authorization: 'Bearer SECRET' },
+        };
+      },
+      { phases: ['retry'] },
+    );
+
+    const response = await client.get('https://api.example/start').send();
+
+    expect(response.status).toBe(200);
+    expect(sentToTarget).toHaveLength(2);
+    expect(sentToTarget[0]?.requestURL).toBe(target);
+    expect(sentToTarget[1]?.requestURL).toBe(expected);
+    // The headers rule is unchanged by an upgrade.
+    expect(sentToTarget[1]?.headers).not.toHaveProperty('authorization');
+  }
+});
+
+test('PR review round 59: bodyContainsKeys matches a cross-origin hop body as it does a same-origin one', async () => {
+  class Inner {
+    public x = 1;
+  }
+
+  // One interceptor per request: what a later one's filter reads is the result of the
+  // one before it, whatever that returned.
+  const matched = async (target: string): Promise<string[]> => {
+    const calls: string[] = [];
+    for (const key of ['opt', 'inner.x', 'inner']) {
+      const { adapter, sentToTarget } = crossOriginReplayAdapter(target);
+      const client = new HTTPClient({
+        adapter,
+        followRedirects: true,
+        retryPolicy: crossOriginRetryPolicy,
+      });
+      client.addRequestInterceptor(
+        (request) => {
+          calls.push(key);
+          return request;
+        },
+        { phases: ['retry'], bodyContainsKeys: [key] },
+      );
+
+      await client
+        .put('https://api.example/start')
+        .json({ inner: new Inner(), opt: undefined })
+        .send();
+
+      expect(sentToTarget).toHaveLength(2);
+    }
+    return calls;
+  };
+
+  const sameOrigin = await matched('https://api.example/next');
+  const crossOrigin = await matched('https://evil.example/next');
+
+  // A key holding `undefined` is a key; a class instance is not traversed.
+  expect(sameOrigin).toEqual(['opt', 'inner']);
+  expect(crossOrigin).toEqual(sameOrigin);
+});
+
+test('PR review round 59: an abandoned attempt that had a body is not retried; a bodiless one is', async () => {
+  const run = async (
+    send: (client: HTTPClient) => ReturnType<HTTPClient['get']>,
+  ) => {
+    let sends = 0;
+    // Ignores its abort and never settles.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () => {
+        sends++;
+        return new Promise<AdapterResponse>(() => {});
+      },
+    };
+    const ends: Array<{ willRetry: boolean; reason: unknown }> = [];
+    const builder = send(
+      new HTTPClient({
+        adapter,
+        baseURL: 'http://x.test',
+        timeout: 50,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+      }),
+    ).onAttemptEnd((event) => {
+      ends.push({
+        willRetry: event.willRetry,
+        reason: event.retrySuppressedReason,
+      });
+    });
+    const response = await builder.send();
+    return { sends, ends, response };
+  };
+
+  const bodied = await run((client) => client.put('/a').json({ a: 1 }));
+  expect(bodied.sends).toBe(1);
+  expect(bodied.ends).toEqual([
+    { willRetry: false, reason: 'upload_unsettled' },
+  ]);
+  expect(bodied.response.isTimeout).toBe(true);
+
+  const bodiless = await run((client) => client.get('/a'));
+  expect(bodiless.sends).toBe(2);
+  expect(bodiless.ends[0]).toEqual({ willRetry: true, reason: undefined });
+  expect(bodiless.response.isTimeout).toBe(true);
+}, 15_000);
+
+test('PR review round 59: an abandoned POST with a body reports non_idempotent_method, the rule that would have stopped it anyway', async () => {
+  let sends = 0;
+  const ends: unknown[] = [];
+  const builder = new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: () => {
+        sends++;
+        return new Promise<AdapterResponse>(() => {});
+      },
+    },
+    baseURL: 'http://x.test',
+    timeout: 50,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  })
+    .post('/a')
+    .json({ a: 1 })
+    .onAttemptEnd((event) => {
+      ends.push(event.retrySuppressedReason);
+    });
+  const response = await builder.send();
+
+  expect(sends).toBe(1);
+  expect(ends).toEqual(['non_idempotent_method']);
+  expect(response.isTimeout).toBe(true);
+  expect(builder.error?.isRetriesExhausted).toBe(false);
+});
+
+test("PR review round 59: a parent client's declining filter reads a cross-origin hop's own body, and the sub-client's first matching interceptor gets the copy", async () => {
+  class Inner {
+    public x = 1;
+  }
+  const { adapter, sentToTarget } = crossOriginReplayAdapter(
+    'https://evil.example/next',
+  );
+  const parent = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  const calls: string[] = [];
+  // Matches the copy, where `inner` is a plain object, but not the hop's own body.
+  parent.addRequestInterceptor(
+    (request) => {
+      calls.push('parent');
+      return request;
+    },
+    { phases: ['retry'], bodyContainsKeys: ['inner.x'] },
+  );
+  const child = parent.createSubClient();
+  // Matches the hop's own body, where `opt` holds `undefined`, but not the copy.
+  child.addRequestInterceptor(
+    (request) => {
+      calls.push('child');
+      (request.body as Record<string, unknown>).token = 'SECRET';
+      return request;
+    },
+    { phases: ['retry'], bodyContainsKeys: ['opt'] },
+  );
+  const body = { inner: new Inner(), opt: undefined as unknown };
+
+  await child.put('https://api.example/start').json(body).send();
+
+  expect(calls).toEqual(['child']);
+  expect(sentToTarget).toHaveLength(2);
+  // The edit went to the copy: the hop sends its own body, and the caller's is untouched.
+  expect(sentToTarget[1]?.body).toBe(JSON.stringify({ inner: { x: 1 } }));
+  expect(body).not.toHaveProperty('token');
+});
+
+test('PR review round 59: an abandoned attempt whose retry interceptor removed the body is retried', async () => {
+  let sends = 0;
+  const sentBodies: unknown[] = [];
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: (request) => {
+        sends++;
+        sentBodies.push(request.body);
+        if (sends === 1) {
+          return Promise.resolve({
+            status: 503,
+            headers: {},
+            body: null,
+            requestBodySettled: Promise.resolve(undefined),
+          });
+        }
+        // The bodiless retry hangs, ignoring its abort; the next one answers.
+        return sends === 2
+          ? new Promise<AdapterResponse>(() => {})
+          : Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    },
+    baseURL: 'http://x.test',
+    timeout: 50,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+  client.addRequestInterceptor((request) => ({ ...request, body: undefined }), {
+    phases: ['retry'],
+  });
+
+  const response = await client.put('/a').json({ a: 1 }).send();
+
+  expect(sends).toBe(3);
+  expect(sentBodies[0]).not.toBeNull();
+  expect(sentBodies[1]).toBeNull();
+  expect(response.status).toBe(200);
 });

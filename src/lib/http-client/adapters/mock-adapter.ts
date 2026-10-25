@@ -1214,15 +1214,17 @@ function serializeResponseBody(response: MockResponse): Uint8Array | null {
 }
 
 /**
- * Whether a route's body is bytes the mock sends as they are: a `Uint8Array` or an
- * `ArrayBuffer` - this realm's by `instanceof` (a `Proxy` over one included, which the
+ * Whether a route's body is bytes the mock sends as they are: a `Uint8Array` - this
+ * realm's by `instanceof` (a `Proxy` over one included, delivered as it is, which the
  * size check then measures as it would an adapter's), or another realm's (jsdom, a `vm`
- * context) by its internal slot, as the size check beside it measures it.
+ * context) by its internal slot, as the size check beside it measures it - or an
+ * `ArrayBuffer` from any realm by its internal slot alone. A `Proxy` over an
+ * `ArrayBuffer` has no slot: copying its bytes reads none, so it is refused as an
+ * unsupported body rather than sent as an empty one.
  */
 function isRouteBinaryBody(body: unknown): body is Uint8Array | ArrayBuffer {
   return (
     body instanceof Uint8Array ||
-    body instanceof ArrayBuffer ||
     (typeof body === 'object' &&
       body !== null &&
       (typedArrayNameOf(body) === 'Uint8Array' ||
@@ -1230,13 +1232,19 @@ function isRouteBinaryBody(body: unknown): body is Uint8Array | ArrayBuffer {
   );
 }
 
+/**
+ * The type a route body is labelled with when the route sets none: `json` only for a body
+ * `serializeResponseBody` sends as JSON. Bytes, and a body it refuses (a `Proxy` over an
+ * `ArrayBuffer`, a `Map`), are labelled nothing - a HEAD route or a simulated stream error
+ * never serializes the body, and those must not call it JSON either.
+ */
 function inferContentType(body: unknown): ContentType {
   if (typeof body === 'string') {
     return 'text';
-  } else if (isRouteBinaryBody(body)) {
-    return 'binary';
-  } else {
+  } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
     return 'json';
+  } else {
+    return 'binary';
   }
 }
 

@@ -558,7 +558,7 @@ describe('the copy the next interceptor sees', () => {
   });
 });
 
-test('PR review round 58: prepareRequest runs once, before the first interceptor of the phase reads the request, and only then', async () => {
+test('PR review round 58: prepareRequest runs once, after the filter and before the function of the first interceptor the phase calls, and only then', async () => {
   const mgr = new RequestInterceptorManager();
   const seen: unknown[] = [];
   mgr.add(
@@ -568,12 +568,21 @@ test('PR review round 58: prepareRequest runs once, before the first interceptor
     },
     { phases: ['initial'] },
   );
+  // Filters read the request as handed over (PR review round 59): this one is not
+  // matched by the prepared body, and is not called.
+  mgr.add(
+    (request) => {
+      seen.push(['prepared-filter', request.body]);
+      return request;
+    },
+    { phases: ['retry'], bodyContainsKeys: ['copied'] },
+  );
   mgr.add(
     (request) => {
       seen.push(['filtered', request.body]);
       return request;
     },
-    { phases: ['retry'], bodyContainsKeys: ['copied'] },
+    { phases: ['retry'], bodyContainsKeys: ['original'] },
   );
   mgr.add(
     (request) => {
@@ -596,7 +605,7 @@ test('PR review round 58: prepareRequest runs once, before the first interceptor
   );
 
   expect(prepared).toBe(1);
-  // The filter read the prepared body too.
+  // The filter read the original body; the functions the prepared one.
   expect(seen).toEqual([
     ['filtered', { copied: true }],
     ['retry', { copied: true }],
@@ -607,6 +616,20 @@ test('PR review round 58: prepareRequest runs once, before the first interceptor
   await mgr.snapshot()(
     makeRequest({ body: { original: true } }),
     { type: 'redirect', hop: 1, from: 'a', to: 'b', statusCode: 301 },
+    makeContext(),
+    { prepareRequest },
+  );
+  expect(prepared).toBe(1);
+
+  // Nor does one whose interceptors' filters all decline the request.
+  const filteredOut = new RequestInterceptorManager();
+  filteredOut.add((request) => request, {
+    phases: ['retry'],
+    bodyContainsKeys: ['copied'],
+  });
+  await filteredOut.snapshot()(
+    makeRequest({ body: { original: true } }),
+    { type: 'retry', attempt: 2, maxAttempts: 2 },
     makeContext(),
     { prepareRequest },
   );
