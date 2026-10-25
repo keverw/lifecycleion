@@ -590,13 +590,17 @@ export class BaseHTTPClient {
       );
     }
 
-    if (filter?.label !== undefined) {
-      assertLabelArgument(filter.label, 'listRequests');
+    // Read once, as `scope` is: a getter answering differently on each read was checked
+    // as one label and listed by another.
+    const label = filter?.label;
+
+    if (label !== undefined) {
+      assertLabelArgument(label, 'listRequests');
     }
 
     return this._tracker.list({
       clientID: scope === 'own' ? this._clientID : undefined,
-      label: filter?.label,
+      label,
     });
   }
 

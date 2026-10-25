@@ -12,7 +12,6 @@ import {
   extractFetchHeaders,
   isCrossOrigin,
   matchesFilter,
-  matchesHostPattern,
   readHostPattern,
   mergeHeaders,
   parseContentType,
@@ -32,6 +31,7 @@ import {
   STREAM_ABORT_STATUS_KEY,
 } from './consts';
 import { CookieJar } from './cookie-jar';
+import { matchesHostPattern } from './test-helpers/host-pattern';
 import {
   isBrowserRestrictedHeader,
   materializeRequestHeaders,
@@ -14144,4 +14144,38 @@ test("PR review round 63: an internal throw after a later hop's bodied attempt r
   expect(sent[1]?.requestURL).toBe('http://x.test/next');
   expect(response.isFailed).toBe(true);
   expect(response).not.toHaveProperty('requestBodySettled');
+});
+
+test('PR review round 63b: listRequests reads its filter label once', async () => {
+  const releases: Array<() => void> = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      new Promise<AdapterResponse>((resolve) => {
+        releases.push(() => resolve({ status: 200, headers: {}, body: null }));
+      }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'http://x.test' });
+  const pending = [
+    client.get('/a').label('poll').send(),
+    client.get('/b').label('other').send(),
+  ];
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  let reads = 0;
+  const filter = {
+    get label(): string | undefined {
+      reads++;
+      return reads === 1 ? 'poll' : undefined;
+    },
+  };
+  const listed = client.listRequests(filter);
+
+  expect(reads).toBe(1);
+  expect(listed.requests.map((request) => request.label)).toEqual(['poll']);
+
+  for (const release of releases) {
+    release();
+  }
+  await Promise.all(pending);
 });

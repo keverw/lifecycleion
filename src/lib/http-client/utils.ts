@@ -567,21 +567,6 @@ export function getBrowserResolutionBase(): string | undefined {
 }
 
 /**
- * Normalizes header keys to lowercase.
- */
-export function normalizeHeaders(
-  headers: Record<string, string>,
-): Record<string, string> {
-  const result: Record<string, string> = {};
-
-  for (const [key, value] of Object.entries(headers)) {
-    defineEntry(result, lowerCaseHeaderName(key), value);
-  }
-
-  return result;
-}
-
-/**
  * What is wrong with `candidate` as a request method - completing "the method …" - or
  * `undefined` when nothing is. A method is a non-empty string of RFC 9110 token
  * characters; every adapter refuses anything else, but only at dispatch, where a
@@ -1361,23 +1346,6 @@ export function extractHostname(url: string): string {
   } catch {
     return '';
   }
-}
-
-/**
- * Wildcard hostname matching by `matchesWildcardDomain`'s rules.
- *
- * - `*` — global wildcard, matches any valid hostname including apex domains
- * - `*.example.com` — matches exactly one subdomain label (`api.example.com`) but not deeper levels or the apex
- * - `**.example.com` — matches one or more subdomain labels (`api.example.com`, `a.b.example.com`) but not the apex
- * - Exact patterns (no `*`) — normalized comparison, case-insensitive
- * - PSL tail guard active: `*.com`, `**.co.uk`, etc. never match
- * - Pseudo-TLD suffix wildcards are rejected just like PSL tails (`*.localhost`, `*.local`, etc.)
- */
-export function matchesHostPattern(hostname: string, pattern: string): boolean {
-  return matchesReadHostPattern(
-    new CheckedHost(hostname),
-    readHostPattern(pattern),
-  );
 }
 
 /** One `hosts` pattern read once, by {@link readHostPattern}. */

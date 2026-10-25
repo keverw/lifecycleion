@@ -9,11 +9,9 @@ import {
   isBrowserEnvironment,
   matchesFilter,
   matchesFilterPhase,
-  matchesHostPattern,
   mergeHeaders,
   mergeObservedHeaders,
   normalizeAdapterResponseHeaders,
-  normalizeHeaders,
   parseContentType,
   resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
@@ -22,6 +20,7 @@ import {
   stripCrossOriginURLCredentials,
 } from './utils';
 import { materializeRequestHeaders } from './internal/header-utils';
+import { matchesHostPattern } from './test-helpers/host-pattern';
 
 const originalXMLHttpRequest = (globalThis as Record<string, unknown>)
   .XMLHttpRequest;
@@ -289,24 +288,6 @@ describe('stripCrossOriginURLCredentials', () => {
     expect(
       stripCrossOriginURLCredentials('//cdn.test/a/../asset', 'not a URL'),
     ).toBe('//cdn.test/a/../asset');
-  });
-});
-
-describe('normalizeHeaders', () => {
-  test('lowercases all keys', () => {
-    expect(normalizeHeaders({ 'Content-Type': 'application/json' })).toEqual({
-      'content-type': 'application/json',
-    });
-  });
-
-  test('preserves values unchanged', () => {
-    expect(normalizeHeaders({ Authorization: 'Bearer TOKEN' })).toEqual({
-      authorization: 'Bearer TOKEN',
-    });
-  });
-
-  test('handles empty object', () => {
-    expect(normalizeHeaders({})).toEqual({});
   });
 });
 

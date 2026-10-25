@@ -85,9 +85,11 @@ export interface AdapterRequest {
    * `NodeAdapter` and `FetchAdapter` also refuse a `Content-Length` already over it
    * before the body is read, where that length counts the bytes handed over.
    *
-   * `undefined` or `Infinity` means no limit, as does any value that is not a positive
-   * number. A body piped to `streamResponse` is not held, so it is not limited. Set by
-   * `HTTPClient` from `maxResponseBytes`.
+   * A positive integer, or `Infinity` (or absent) for no limit. Any other value - `0`,
+   * `NaN`, a string - and a getter that throws are refused: the adapter rejects with a
+   * non-retryable error rather than read it as no limit. A body piped to
+   * `streamResponse` is not held, so it is not limited. Set by `HTTPClient` from
+   * `maxResponseBytes`.
    */
   maxResponseBytes?: number;
 }
@@ -771,9 +773,10 @@ export interface HTTPClientError {
    * policy declined because all of its attempts were spent - the request would
    * have been tried again with budget left. False when the last failure is one no
    * retry follows whatever the budget (an adapter veto, a stream error other than a
-   * body that only failed to decode, a non-idempotent method, a non-retryable status,
-   * an attempt with a non-empty body given up on after its adapter ignored the abort - see
-   * `retrySuppressedReason: 'upload_unsettled'`). The last attempt may still have
+   * buffered body that only failed to decode or ran past `maxResponseBytes` - none of
+   * it reached the caller, so its status decides - a non-idempotent method, a
+   * non-retryable status, an attempt with a non-empty body given up on after its
+   * adapter ignored the abort - see `retrySuppressedReason: 'upload_unsettled'`). The last attempt may still have
    * received a response: a retryable status whose body then could not be read ends as
    * an `adapter_error` with its status.
    */
