@@ -142,6 +142,12 @@ import {
   adoptResult,
   UnreadableReturn,
 } from '../internal/adopt-promise';
+import {
+  attachIntrinsicReactions,
+  noop,
+  observeRejection,
+} from '../internal/promise-reactions';
+import { isObjectLike } from '../internal/is-object-like';
 
 type RemoveFn = () => void;
 
@@ -1157,6 +1163,10 @@ export class BaseHTTPClient {
         let hopCount = 0;
         // The body each hop's last attempt sent, as the caller gave it; see `sentBody`.
         const sentBody: { value: unknown } = { value: undefined };
+        // The upload outcome the response reports; see the dispatch parameter.
+        const latestUpload: {
+          outcome: Promise<Error | undefined> | undefined;
+        } = { outcome: undefined };
         // Tracks the last global attempt number across all hops and retries,
         // so the next hop's attempts continue the sequence (e.g. 1,2,3 on
         // initial request → 4,5 on first redirect hop → 6 on second hop).
@@ -1177,6 +1187,7 @@ export class BaseHTTPClient {
               cancelEntry(trackedRequest, reason);
             },
             sentBody,
+            latestUpload,
             credentialScope,
             timeout,
             maxResponseBytes,
@@ -1199,30 +1210,29 @@ export class BaseHTTPClient {
           const { adapterResponse, wasCancelled, wasTimeout } = attemptResult;
 
           /**
-           * This attempt's upload outcome, wherever it ended up.
+           * The upload outcome the request reports so far, wherever it ended up.
            *
-           * Two sources because there are two shapes: an attempt that *threw* carries it
-           * on the result, and one that resolved carries it on the adapter response. Read
-           * here rather than off the response the request ends with: most terminal
-           * redirect branches below build their `HTTPResponse` with
-           * `adapterResponse: null` - a redirect the caller disabled, a loop, an
-           * interceptor that threw, a cancel between hops - so that response has no field
-           * of its own to read. An early `3xx` mid-upload is exactly the shape where it is
-           * not empty.
+           * Kept by the attempt runner (see `latestUpload`) rather than read off this
+           * hop's result: an attempt that *threw* carries it on the result, one that
+           * resolved on the adapter response, and most terminal redirect branches below
+           * build their `HTTPResponse` with `adapterResponse: null` - a redirect the
+           * caller disabled, a loop, an interceptor that threw, a cancel between hops - so
+           * that response has no field of its own to read. An early `3xx` mid-upload is
+           * exactly the shape where it is not empty.
            */
           //
-          // Carried across hops, not recomputed per hop. A followed `301`/`302`/`303`
-          // rewrites a `POST` to a bodiless `GET`, so the final hop has no writer and
-          // nothing of its own to report - and reading only that hop answered
-          // `undefined`, the documented "the body went out" value, for exactly the
-          // early-ack `POST` -> `302` -> `GET` shape this field exists for. The latest
-          // hop that had a body is the answer: a `307`/`308` resends the body and its
-          // own outcome is the one that reached the final response, while a bodiless
-          // hop after it changes nothing about what the upload did.
-          uploadOutcome =
-            attemptResult.requestBodySettled ??
-            adapterResponse?.requestBodySettled ??
-            uploadOutcome;
+          // Carried across hops and attempts, not recomputed per hop: the latest attempt
+          // that had a body is the answer. A followed `301`/`302`/`303` rewrites a `POST`
+          // to a bodiless `GET`, so the final hop has no writer and nothing of its own to
+          // report - and reading only that hop answered `undefined`, the documented "the
+          // body went out" value, for exactly the early-ack `POST` -> `302` -> `GET` shape
+          // this field exists for. A `307`/`308` resends the body and its own outcome is
+          // the one that reached the final response, while a bodiless hop or retry after
+          // it changes nothing about what the upload did. A bodied attempt that reported
+          // none - one given up on with its adapter still out, or a custom adapter's
+          // untagged throw - leaves none, rather than an earlier hop's "the body went out"
+          // for an upload whose fate nobody knows.
+          uploadOutcome = latestUpload.outcome;
           lastAttemptNumber = attemptResult.attemptCount;
           isRetriesExhausted = attemptResult.isRetriesExhausted;
           completedAttemptCount = attemptResult.attemptCount;
@@ -2252,6 +2262,13 @@ export class BaseHTTPClient {
      * which is theirs to change.
      */
     sentBody: { value: unknown };
+    /**
+     * The upload outcome the response reports: the latest attempt's that had a body, or
+     * that reported one. Cleared when a bodied attempt is dispatched, so one that reports
+     * none - abandoned, or a custom adapter's untagged throw - leaves none, never an
+     * earlier attempt's or hop's; a bodiless attempt leaves it as it was.
+     */
+    latestUpload: { outcome: Promise<Error | undefined> | undefined };
     /** Latest destination explicitly selected by the caller or a retry interceptor. */
     credentialScope: { url: string };
     /** Per-attempt timeout in ms. Each attempt gets its own independent timer — NOT a total deadline across all retries. */
@@ -2597,6 +2614,35 @@ export class BaseHTTPClient {
         // Taken before the chain runs: an interceptor may write into the headers it was
         // handed, which would otherwise make a header it added look like one it was given.
         const retryInputHeaderNames = new Set(Object.keys(retryInputHeaders));
+        // On a redirect hop to an origin the caller never chose, the interceptors are
+        // handed a copy of the hop's body (see `copyRequestBody`), taken only once one is
+        // about to read the request: the hop's own is the caller's value, and an
+        // interceptor that added a field to it in place - `request.body.token = ...;
+        // return request` - changed the caller's body and sent that field to the host
+        // the server chose, past the check below, which compares identities. A hop on
+        // the caller's own origin hands over the hop's body as it is, at no cost.
+        const retryBodyCopy: RetryBodyCopy | undefined =
+          hopContext !== undefined &&
+          isCrossOrigin(credentialScope.url, baseRequest.requestURL)
+            ? { isTaken: false, value: undefined, didFail: false }
+            : undefined;
+        const prepareRetryRequest =
+          retryBodyCopy === undefined
+            ? undefined
+            : (request: InterceptedRequest): InterceptedRequest => {
+                // Once per phase: a parent client's chain may have taken it already.
+                if (retryBodyCopy.isTaken) {
+                  return request;
+                }
+                retryBodyCopy.isTaken = true;
+                try {
+                  retryBodyCopy.value = copyRequestBody(request.body);
+                } catch (error) {
+                  retryBodyCopy.didFail = true;
+                  throw error;
+                }
+                return { ...request, body: retryBodyCopy.value };
+              };
 
         try {
           const retryRun = await this._runInterceptors(
@@ -2610,6 +2656,7 @@ export class BaseHTTPClient {
             (failed) => {
               failedRetryRequest = failed;
             },
+            prepareRetryRequest,
           );
 
           // Snapshotted as the initial phase in `_execute` does, and skipped on the
@@ -2631,9 +2678,13 @@ export class BaseHTTPClient {
           }
         } catch (error) {
           // Terminal failure — no further attempts. _execute notifies error observers
-          // with phase `final` (same as all settled errors), not `retry`.
+          // with phase `final` (same as all settled errors), not `retry`. A body that
+          // could not be copied is the body's failure, as one that cannot be serialized
+          // is, not an interceptor's.
           return endBeforeDispatch(failedRetryRequest, {
-            errorCode: 'interceptor_error',
+            errorCode: retryBodyCopy?.didFail
+              ? 'request_setup_error'
+              : 'interceptor_error',
             adapterCause: normalizeError(error),
           });
         }
@@ -2658,20 +2709,26 @@ export class BaseHTTPClient {
         // `hosts` filter otherwise handed its token to whatever host the server redirected
         // to, the moment that host answered `503`. A header the hop already carried keeps
         // the value the interceptor gives it: a redirect-phase interceptor added it for a
-        // target it trusts, and refreshing it is that interceptor's business. A host the
-        // interceptor names itself is an explicit choice of destination, as the credential
-        // scope reads it below, so it is left alone. Stripped silently, as
-        // `_sanitizeRedirectRequest` strips the hop's own.
+        // target it trusts, and refreshing it is that interceptor's business. Nor may they
+        // put one anywhere else that reaches that host: the hop goes out with its own URL -
+        // an `?access_token=` added to it went along - and its own body, a field added to
+        // a `307`/`308` replay included. A host the interceptor names itself is an
+        // explicit choice of destination, as the credential scope reads it below, so it is
+        // left alone. So is a hop the server kept on the caller's own origin, which is no
+        // origin the caller never chose, and a retry the interceptor sends back to exactly
+        // that origin. Stripped silently, as `_sanitizeRedirectRequest` strips the hop's
+        // own.
         attemptRequest =
           hopContext &&
           isRetryIntercepted &&
           comparableHost(baseRequest.requestURL) ===
             comparableHost(retryIntercept.requestURL) &&
+          isCrossOrigin(credentialScope.url, baseRequest.requestURL) &&
           isCrossOrigin(credentialScope.url, retryIntercept.requestURL)
             ? withoutAddedCrossOriginCredentials(
                 retryIntercept,
                 retryInputHeaderNames,
-                baseRequest.requestURL,
+                baseRequest,
               )
             : retryIntercept;
       }
@@ -2753,6 +2810,11 @@ export class BaseHTTPClient {
 
       // This attempt's own outcome takes over from here; see the declaration.
       previousUploadOutcome = undefined;
+      // And it is the response's from here, whether or not it reports one: an upload
+      // whose fate the adapter never told is not an earlier attempt's that it did.
+      if ((sentBody ?? null) !== null) {
+        params.latestUpload.outcome = undefined;
+      }
 
       const onUploadProgress = options.onUploadProgress;
       const onDownloadProgress = options.onDownloadProgress;
@@ -2789,20 +2851,33 @@ export class BaseHTTPClient {
       // adapter's second hop was already "quiet" for the whole of the first.
       uploadActivity.at = performance.now();
 
+      // Whether this attempt handed its body to the caller's stream: a stream error after
+      // that is no whole answer - part of the body is in the caller's sink - whatever the
+      // adapter reports, so it is never retried or followed as a failed decode.
+      let didCallStreamFactory = false;
+      // What the factory answered, so an attempt abandoned after it started a stream - a
+      // sink, or one still on its way - is not retried either (see the catch below): a
+      // retry would open a second sink for the request. A factory that threw, or answered
+      // `null` or a cancel, at once or through its promise, started none. What an answer
+      // is gets decided only once the attempt is abandoned (see
+      // `tearDownStreamFactoryAnswer`), so an attempt that is not reads nothing of it
+      // beside the adapter's own reads.
+      let streamFactoryState: StreamFactoryState = 'none';
+      let streamFactoryAnswer: object | undefined;
+      // The status the adapter announced to the factory, for the stream error an
+      // abandoned attempt ends as.
+      let streamFactoryStatus = 0;
+      // Set once the attempt has given up on the adapter (see `awaitAdapterSend`): the
+      // hooks it was handed are dead from then on, so an adapter that calls them late
+      // reaches none of the caller's, opens no sink beside a retry's, and does not make
+      // the next attempt's upload look active to the settle wait.
+      let isAbandoned = false;
+
       try {
         // Adopted, not awaited as it is: `HTTPAdapter` is a public extension point, and
         // an adapter answering with a native promise carrying its own `constructor` and
         // a no-op `then` would hang the request, its rejection unhandled. See
         // `adoptPromise()`.
-        // Whether this attempt handed its body to the caller's stream: a stream error after
-        // that is no whole answer - part of the body is in the caller's sink - whatever
-        // the adapter reports, so it is never retried or followed as a failed decode.
-        let didCallStreamFactory = false;
-        // Set once the attempt has given up on the adapter (see `awaitAdapterSend`): the
-        // hooks it was handed are dead from then on, so an adapter that calls them late
-        // reaches none of the caller's, opens no sink beside a retry's, and does not make
-        // the next attempt's upload look active to the settle wait.
-        let isAbandoned = false;
         const streamResponse = options.streamResponse;
         const adapterPromise = adoptPromise(
           this._adapter.send({
@@ -2827,7 +2902,40 @@ export class BaseHTTPClient {
                       return null;
                     }
                     didCallStreamFactory = true;
-                    return Reflect.apply(streamResponse, this, args);
+                    const announcedStatus = readObjectMember(args[0], 'status');
+                    if (
+                      typeof announcedStatus === 'number' &&
+                      Number.isInteger(announcedStatus) &&
+                      announcedStatus >= 100 &&
+                      announcedStatus <= 999
+                    ) {
+                      streamFactoryStatus = announcedStatus;
+                    }
+                    const returned: unknown = Reflect.apply(
+                      streamResponse,
+                      this,
+                      args,
+                    );
+                    const watched = watchStreamFactoryAnswer(
+                      returned,
+                      (answer) => {
+                        // A promise's answer. Once the attempt is abandoned the state
+                        // has been read, and a sink arriving then is torn down at once.
+                        if (isAbandoned) {
+                          if (answer !== undefined) {
+                            tearDownStreamFactoryAnswer(answer);
+                          }
+                        } else if (answer === undefined) {
+                          streamFactoryState = 'none';
+                        } else {
+                          streamFactoryState = 'answered';
+                          streamFactoryAnswer = answer;
+                        }
+                      },
+                    );
+                    streamFactoryState = watched.state;
+                    streamFactoryAnswer = watched.answer;
+                    return returned as ReturnType<typeof streamResponse>;
                   }
                 : streamResponse,
             // attemptNumber and requestID are passed so NodeAdapter can populate
@@ -2894,6 +3002,18 @@ export class BaseHTTPClient {
               : timeoutController.signal.reason,
           () => {
             isAbandoned = true;
+            // The adapter that ignored the abort will not tear down the sink it was
+            // writing to, as a well-behaved one does on a timeout or cancel, so the
+            // client does - the caller's `'close'` and `'error'` listeners on it run -
+            // after a timeout or a cancel alike.
+            if (
+              streamFactoryState === 'answered' &&
+              streamFactoryAnswer !== undefined
+            ) {
+              streamFactoryState =
+                tearDownStreamFactoryAnswer(streamFactoryAnswer);
+              streamFactoryAnswer = undefined;
+            }
             // A late answer's upload outcome, or one tagged on a late rejection, is
             // adopted only to observe it: nothing reads it, and a rejection of it is not
             // left unhandled. Both helpers read through guards and never throw.
@@ -2921,6 +3041,7 @@ export class BaseHTTPClient {
         );
         if (rawUploadOutcome !== undefined) {
           responseUploadOutcome = adoptRequestBodySettled(rawUploadOutcome);
+          params.latestUpload.outcome = responseUploadOutcome;
         }
         const headers = rawAdapterResponse.headers;
         // Advisory as well, and read under the same rule: it only feeds observers (see
@@ -3096,22 +3217,21 @@ export class BaseHTTPClient {
         // `_buildResponse` reads as one, nor a browser's opaque redirect where redirects
         // are off, which is the answer `redirect_disabled` reports. With redirects on,
         // that redirect has nowhere to go and is the transport failure below.
-        if (
+        const isLateTransportFailure =
           isTimedOut &&
           (adapterResponse.isTransportError === true ||
             (adapterResponse.status === 0 &&
               adapterResponse.isStreamError !== true &&
               (adapterResponse.wasRedirectDetected !== true ||
                 this._config.followRedirects))) &&
-          adapterResponse.isRetryable !== false
-        ) {
-          throw timeoutController.signal.reason;
-        }
-
-        clearTimeout(timeoutID);
+          adapterResponse.isRetryable !== false;
 
         // Store Set-Cookie before retry/backoff so the next attempt matches browsers
-        // and curl (cookies from error responses apply to follow-up requests).
+        // and curl (cookies from error responses apply to follow-up requests). A late
+        // transport failure's too: the adapter did answer, within the grace an attempt
+        // waits for it after the timer, and the answer's `Set-Cookie` is stored as an
+        // in-time one's is. Only an abandoned attempt's answer is ignored, and that one
+        // never reaches here.
         if (cookieJar) {
           try {
             cookieJar.processResponseHeaders(
@@ -3119,11 +3239,21 @@ export class BaseHTTPClient {
               sentRequest.requestURL,
             );
           } catch (jarError) {
-            // Still the answered response's adapter_error below, named for the jar.
-            didCookieJarFail = true;
-            throw jarError;
+            // The timeout wins, as it does over a jar failure on a stream the timer
+            // cut: the attempt is reported as the timeout it is.
+            if (!isLateTransportFailure) {
+              // Still the answered response's adapter_error below, named for the jar.
+              didCookieJarFail = true;
+              throw jarError;
+            }
           }
         }
+
+        if (isLateTransportFailure) {
+          throw timeoutController.signal.reason;
+        }
+
+        clearTimeout(timeoutID);
 
         // Browser-only path: adapter returned status 0 but flagged a redirect
         // (FetchAdapter opaque redirect or XHR auto-follow).
@@ -3427,6 +3557,9 @@ export class BaseHTTPClient {
          */
         const uploadOutcome =
           responseUploadOutcome ?? getRequestBodySettled(error);
+        if (uploadOutcome !== undefined) {
+          params.latestUpload.outcome = uploadOutcome;
+        }
 
         // Before any classification: if the adapter attached the response it had
         // already received, the Set-Cookie on those headers belongs in the jar.
@@ -3463,8 +3596,9 @@ export class BaseHTTPClient {
           } catch (jarError) {
             // A cancel or timeout wins: here the stream was cut, by the cancel or the
             // attempt's timer, so the branches below report that outcome and the jar's
-            // failure is not reported. (On the resolved path the answer was whole, so a
-            // jar failure there is the answered response's adapter_error, timer or not.)
+            // failure is not reported. (On the resolved path a whole answer's jar failure
+            // is the answered response's adapter_error, timer or not - except a transport
+            // failure answered after the timer fired, which is the timeout there too.)
             // A factory's own cancel is a cancel too.
             if (!cancelSignal.aborted && !isTimedOut && !isFactoryCancel) {
               // The jar threw on headers the server did send, so this ends as the
@@ -3541,6 +3675,55 @@ export class BaseHTTPClient {
             ...(signalReason !== undefined
               ? { cancelReason: signalReason }
               : {}),
+          };
+        }
+
+        // An attempt given up on once its factory had started a stream is the cut stream
+        // it left behind, not a timeout to retry: the answer's headers had arrived and
+        // part of its body may be in the caller's sink, so a retry would open a second
+        // sink for the same request. A sink still on its way counts, as it may yet open. Ended as the stream error a well-behaved adapter reports when
+        // the timer cuts a stream, with the status it announced to the factory. A cancel
+        // stays the cancel it is, below.
+        if (
+          isAbandoned &&
+          streamFactoryState !== 'none' &&
+          !cancelSignal.aborted
+        ) {
+          const streamCause = normalizeError(error);
+
+          emitAttemptEnd({
+            willRetry: false,
+            ...(isRetryAvailable() &&
+            RETRYABLE_STATUS_CODES.has(streamFactoryStatus)
+              ? { retrySuppressedReason: 'stream_error' as const }
+              : {}),
+            nextRetryDelayMS: undefined,
+            nextRetryAt: undefined,
+            status: streamFactoryStatus,
+          });
+
+          return {
+            adapterResponse: {
+              status: streamFactoryStatus,
+              ...derivedRedirectFields(
+                sentRequest.requestURL,
+                streamFactoryStatus,
+                {},
+              ),
+              headers: {},
+              body: null,
+              isStreamed: true,
+              isStreamError: true,
+              streamErrorCode: 'stream_response_error',
+              errorCause: streamCause,
+            },
+            sentRequest,
+            attemptCount: attemptNumber,
+            wasCancelled: false,
+            wasTimeout: isTimedOut,
+            isRetriesExhausted: false,
+            errorCode: 'stream_response_error',
+            adapterCause: streamCause,
           };
         }
 
@@ -4468,6 +4651,8 @@ export class BaseHTTPClient {
      * so the phase reports from it as from a chain result its own copy fails on.
      */
     onCopyFailure: (request: InterceptedRequest) => void,
+    /** See `InterceptorChainOptions.prepareRequest`: shared by both chains, so it decides once. */
+    prepareRequest?: (request: InterceptedRequest) => InterceptedRequest,
   ): Promise<
     | { result: R; isIntercepted: false }
     | { result: InterceptedRequest | InterceptorCancel; isIntercepted: true }
@@ -4509,6 +4694,7 @@ export class BaseHTTPClient {
         onInterceptorCalled: () => {
           didParentCallInterceptor = true;
         },
+        ...(prepareRequest ? { prepareRequest } : {}),
       });
 
       if (isInterceptorCancel(current) || isCancelled()) {
@@ -4527,6 +4713,7 @@ export class BaseHTTPClient {
         isCancelled,
         isInterceptorResult: didParentCallInterceptor,
         onCopyFailure,
+        ...(prepareRequest ? { prepareRequest } : {}),
       }),
       isIntercepted: true,
     };
@@ -5470,6 +5657,99 @@ function stableUploadError(value: unknown): Error {
   return wrapped;
 }
 
+/**
+ * Where a `streamResponse` factory's answer stands: it started no stream (`none` - it threw,
+ * or answered something other than an object, or its promise did, or rejected), its
+ * answer is in hand (`answered`, not yet looked at), or it has not answered yet
+ * (`pending` - a promise not yet settled, or a thenable the client does not follow).
+ */
+type StreamFactoryState = 'none' | 'pending' | 'answered';
+
+/**
+ * Watch a `streamResponse` factory's answer, reading nothing of it: the adapter reads it -
+ * once, as a cancel or a sink - and a second read of a getter could answer otherwise. An
+ * object returned as it is is the answer at once; a plain native promise - an `async`
+ * factory's - is observed through the native `then`, and `onAnswer` is handed the object
+ * it fulfills with, or `undefined` for anything else or a rejection. What is not a plain
+ * native promise is classified only at abandonment (see `tearDownStreamFactoryAnswer`),
+ * where a thenable the client does not follow is told apart: following it here too would
+ * call its `then` twice.
+ */
+function watchStreamFactoryAnswer(
+  returned: unknown,
+  onAnswer: (answer: object | undefined) => void,
+): { state: StreamFactoryState; answer?: object } {
+  if (!isObjectLike(returned)) {
+    return { state: 'none' };
+  }
+
+  let isPlainPromise: boolean;
+  try {
+    isPlainPromise =
+      Reflect.getPrototypeOf(returned) === Promise.prototype &&
+      !Object.hasOwn(returned, 'then') &&
+      !Object.hasOwn(returned, 'constructor');
+  } catch {
+    // A proxy's trap threw: nothing here can tell what it is.
+    return { state: 'pending' };
+  }
+
+  if (!isPlainPromise) {
+    return { state: 'answered', answer: returned };
+  }
+
+  try {
+    attachIntrinsicReactions<unknown>(
+      returned,
+      (value) => {
+        onAnswer(isObjectLike(value) ? value : undefined);
+      },
+      // The adapter reports the factory's rejection; this only reads that it started
+      // nothing.
+      () => {
+        onAnswer(undefined);
+      },
+    );
+  } catch {
+    // Not observable through the native `then`; the adapter follows it alone.
+  }
+
+  return { state: 'pending' };
+}
+
+/**
+ * Tear down what a `streamResponse` factory answered an abandoned attempt with, as
+ * `NodeAdapter` does to a sink when a request is cancelled or times out mid-stream:
+ * `destroy()`, best-effort. A cancel (`{ cancel: true }`) opened no sink and started no
+ * stream (`none`); a thenable the client does not follow is left alone, its sink unknown
+ * (`pending`). Read only here, once the adapter that ignored the abort is given up on.
+ */
+function tearDownStreamFactoryAnswer(answer: object): StreamFactoryState {
+  if (readObjectMember(answer, 'cancel') === true) {
+    return 'none';
+  }
+
+  if (typeof readObjectMember(answer, 'then') === 'function') {
+    return 'pending';
+  }
+
+  const destroy = readObjectMember(answer, 'destroy');
+  if (typeof destroy === 'function') {
+    try {
+      const result: unknown = Reflect.apply(destroy, answer, []);
+      // An async `destroy` that rejects is contained as one that throws is: left
+      // alone, its rejection was unhandled - fatal under Node's default.
+      if (isObjectLike(result)) {
+        observeRejection(adoptPromise(result), noop);
+      }
+    } catch {
+      // Best-effort cleanup only; the attempt's own outcome is what is reported.
+    }
+  }
+
+  return 'answered';
+}
+
 /** How a wait on the previous attempt's upload ended. */
 type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
 
@@ -5684,32 +5964,106 @@ function comparableHost(url: string): string {
   return extractHostname(url).toLowerCase().replace(/\.$/, '');
 }
 
+/** The copy of a hop's body a retry phase's interceptors were handed; see `copyRequestBody`. */
+interface RetryBodyCopy {
+  isTaken: boolean;
+  value: unknown;
+  didFail: boolean;
+}
+
 /**
- * A retry-phase interceptor's request for a cross-origin redirect hop, without the
- * credentials the interceptor added to it: every header named neither on the request the
- * chain was handed (`inputHeaderNames`, taken before it ran) nor on the cross-origin
- * safelist, and URL userinfo the hop's own URL (`inputURL`) did not carry. What the hop
- * already carried keeps the value the interceptor gave it.
+ * A request body as a value the caller does not hold: a JSON body as the data it
+ * serializes to, read back - so it serializes to the same text, every nested `toJSON`
+ * already applied, where a structural copy would lose them - and bytes or form data as
+ * the client's own copy (see `cloneBodyValue`). A string, `null` or `undefined` cannot be
+ * changed in place and is returned as it is.
+ *
+ * A JSON body whose top-level `toJSON` answers something other than an object or an
+ * array - `null`, a string, a number, nothing - reads back as that value, which is no
+ * JSON body: a string is sent as text, `null` as no body at all, and a number is refused.
+ * Such a copy is wrapped as a plain object whose own `toJSON` answers it, so it is still
+ * a JSON body and serializes to exactly the text the caller's does. There is nothing in
+ * it to edit in place, and the caller's value is not handed over either.
+ */
+function copyRequestBody(body: unknown): unknown {
+  if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
+    const text: unknown = JSON.stringify(body);
+    // A top-level `toJSON` that answers `undefined` serializes to nothing.
+    const parsed: unknown =
+      typeof text === 'string' ? JSON.parse(text) : undefined;
+
+    return Array.isArray(parsed) || isPlainJSONBodyObject(parsed)
+      ? parsed
+      : { toJSON: () => parsed };
+  }
+
+  return cloneBodyValue(body);
+}
+
+/** The headers that describe a body, which go with it when it is restored. */
+const BODY_DESCRIBING_HEADERS = [
+  'content-type',
+  'content-length',
+  'content-encoding',
+  'content-language',
+] as const;
+
+/** Whether a body sends nothing: none, an empty string, or no bytes. */
+function isEmptyRequestBody(body: unknown): boolean {
+  return (
+    body === undefined ||
+    body === null ||
+    body === '' ||
+    (body instanceof Uint8Array && body.byteLength === 0)
+  );
+}
+
+/**
+ * A retry-phase interceptor's request for a cross-origin redirect hop, without anything
+ * the interceptor added that could carry a credential to the hop's host: every header
+ * named neither on the request the chain was handed (`inputHeaderNames`, taken before it
+ * ran) nor on the cross-origin safelist, and every change to the URL or the body. A
+ * header the hop already carried keeps the value the interceptor gave it.
+ *
+ * The URL is the hop's own (`hopRequest`): its path, query, fragment, scheme, port and
+ * userinfo alike, since a token travels in a query string as readily as in a header and
+ * none of them can be told apart from one. So is the body - the hop's own value, not the
+ * copy the interceptors were handed, whatever they did to it - unless they removed it or
+ * left it empty, which sends nothing. The hop's own body goes with the hop's own headers
+ * that describe it (`BODY_DESCRIBING_HEADERS`), whether the interceptors replaced it,
+ * edited their copy, or left it alone: theirs describe a body that is not sent.
  */
 function withoutAddedCrossOriginCredentials(
   request: ResolvedRequest,
   inputHeaderNames: ReadonlySet<string>,
-  inputURL: string,
+  hopRequest: ResolvedRequest,
 ): ResolvedRequest {
+  const isBodyDropped = isEmptyRequestBody(request.body);
+  const bodyHeaders: ReadonlySet<string> = new Set(BODY_DESCRIBING_HEADERS);
   // Names are already lowercase: the result is a snapshot (see `snapshotInterceptedRequest`).
   const headers: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(request.headers)) {
+    if (!isBodyDropped && bodyHeaders.has(name)) {
+      continue;
+    }
+
     if (inputHeaderNames.has(name) || CROSS_ORIGIN_SAFE_HEADERS.has(name)) {
       headers[name] = value;
     }
   }
 
+  if (!isBodyDropped) {
+    for (const name of BODY_DESCRIBING_HEADERS) {
+      if (Object.hasOwn(hopRequest.headers, name)) {
+        headers[name] = hopRequest.headers[name];
+      }
+    }
+  }
+
   return {
     ...request,
-    requestURL:
-      stripURLCredentials(inputURL) === inputURL
-        ? stripURLCredentials(request.requestURL)
-        : request.requestURL,
+    requestURL: hopRequest.requestURL,
     headers,
+    body: isBodyDropped ? request.body : hopRequest.body,
   };
 }

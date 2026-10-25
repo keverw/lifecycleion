@@ -76,6 +76,15 @@ export interface InterceptorChainOptions {
    * - from the request it passed, untouched.
    */
   onInterceptorCalled?: () => void;
+  /**
+   * Called once, as the first interceptor this phase reaches is about to read the
+   * request, and its answer read in place of the request: the client hands interceptors
+   * on a redirect hop to an origin the caller never chose a copy of the hop's body this
+   * way, so one that edits the body in place edits neither the caller's value nor what
+   * that hop sends. A request no interceptor reads is never prepared, so a phase with
+   * nothing registered for it pays nothing.
+   */
+  prepareRequest?: (request: InterceptedRequest) => InterceptedRequest;
 }
 
 async function runInterceptors(
@@ -90,11 +99,14 @@ async function runInterceptors(
     isInterceptorResult = false,
     onCopyFailure,
     onInterceptorCalled,
+    prepareRequest,
   }: InterceptorChainOptions,
 ): Promise<InterceptedRequest | InterceptorCancel> {
   let current = request;
   /** Whether `current` is an interceptor's result, not yet copied. */
   let isCurrentUncopied = isInterceptorResult;
+  /** Whether `prepareRequest` is still to be called. */
+  let isUnprepared = prepareRequest !== undefined;
 
   for (const { fn, filter } of interceptors) {
     // A cancel made by an earlier interceptor, or while it ran, ends the chain: the request
@@ -127,6 +139,12 @@ async function runInterceptors(
         throw error;
       }
       isCurrentUncopied = false;
+    }
+
+    // Before the filter too: it reads the body for `bodyContainsKeys`.
+    if (isUnprepared && prepareRequest !== undefined) {
+      isUnprepared = false;
+      current = prepareRequest(current);
     }
 
     if (

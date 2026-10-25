@@ -557,3 +557,58 @@ describe('the copy the next interceptor sees', () => {
     });
   });
 });
+
+test('PR review round 58: prepareRequest runs once, before the first interceptor of the phase reads the request, and only then', async () => {
+  const mgr = new RequestInterceptorManager();
+  const seen: unknown[] = [];
+  mgr.add(
+    (request) => {
+      seen.push(['initial-only', request.body]);
+      return request;
+    },
+    { phases: ['initial'] },
+  );
+  mgr.add(
+    (request) => {
+      seen.push(['filtered', request.body]);
+      return request;
+    },
+    { phases: ['retry'], bodyContainsKeys: ['copied'] },
+  );
+  mgr.add(
+    (request) => {
+      seen.push(['retry', request.body]);
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+  let prepared = 0;
+  const prepareRequest = (request: InterceptedRequest): InterceptedRequest => {
+    prepared++;
+    return { ...request, body: { copied: true } };
+  };
+
+  const result = await mgr.snapshot()(
+    makeRequest({ body: { original: true } }),
+    { type: 'retry', attempt: 2, maxAttempts: 2 },
+    makeContext(),
+    { prepareRequest },
+  );
+
+  expect(prepared).toBe(1);
+  // The filter read the prepared body too.
+  expect(seen).toEqual([
+    ['filtered', { copied: true }],
+    ['retry', { copied: true }],
+  ]);
+  expect(isInterceptorCancel(result)).toBe(false);
+
+  // A phase no interceptor is registered for never prepares.
+  await mgr.snapshot()(
+    makeRequest({ body: { original: true } }),
+    { type: 'redirect', hop: 1, from: 'a', to: 'b', statusCode: 301 },
+    makeContext(),
+    { prepareRequest },
+  );
+  expect(prepared).toBe(1);
+});

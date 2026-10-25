@@ -9000,7 +9000,13 @@ test.each(['query', 'path', 'fragment', 'origin'] as const)(
     expect(response.status).toBe(200);
     expect(requests).toHaveLength(3);
     expect(requests[1].initialURL).toBe('https://original.example/');
-    expect(requests[2].requestURL).not.toBe(requests[1].requestURL);
+    // Only a new host is sent where the interceptor rewrote it: on a hop to an origin the
+    // caller never chose, a rewrite that keeps the server's host is discarded.
+    if (rewrite === 'origin') {
+      expect(requests[2].requestURL).not.toBe(requests[1].requestURL);
+    } else {
+      expect(requests[2].requestURL).toBe(requests[1].requestURL);
+    }
     expect(requests[2].initialURL).toBe(
       rewrite === 'origin'
         ? 'https://caller-selected.example/resource'
