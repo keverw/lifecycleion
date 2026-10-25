@@ -14012,3 +14012,136 @@ test('PR review round 61: a retry interceptor that empties the body leaves the u
     expect(outcome?.message).toBe('cut');
   }
 });
+
+test('PR review round 63: a retry interceptor that drops a cross-origin 307 replay sends none of the headers that describe a body', async () => {
+  for (const variant of [
+    { body: undefined, addedHeaders: {}, contentType: undefined },
+    // An empty string goes out with the client's own type for a string, as anywhere else.
+    {
+      body: '',
+      addedHeaders: { 'content-type': 'application/json' },
+      contentType: 'text/plain; charset=utf-8',
+    },
+  ]) {
+    const { adapter, sentToTarget } = crossOriginReplayAdapter(
+      'https://evil.example/next',
+    );
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: crossOriginRetryPolicy,
+    });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        headers: { ...request.headers, ...variant.addedHeaders },
+        body: variant.body,
+      }),
+      { phases: ['retry'] },
+    );
+
+    const response = await client
+      .put('https://api.example/start')
+      .headers({
+        'content-type': 'application/octet-stream',
+        'content-encoding': 'gzip',
+        'content-language': 'en',
+      })
+      .body('payload')
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(sentToTarget).toHaveLength(2);
+    expect(sentToTarget[0]?.headers['content-encoding']).toBe('gzip');
+    const retryHeaders: Record<string, string | string[] | undefined> =
+      sentToTarget[1]?.headers ?? {};
+    expect(retryHeaders['content-type']).toBe(variant.contentType);
+    for (const name of [
+      'content-length',
+      'content-encoding',
+      'content-language',
+      'content-location',
+    ]) {
+      expect(retryHeaders).not.toHaveProperty(name);
+    }
+  }
+});
+
+test('PR review round 63: a retry interceptor on a cross-origin hop with no body to send keeps the headers that describe it', async () => {
+  for (const body of [undefined, '', new Uint8Array(0)]) {
+    const { adapter, sentToTarget } = crossOriginReplayAdapter(
+      'https://evil.example/next',
+    );
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: crossOriginRetryPolicy,
+    });
+    client.addRequestInterceptor((request) => request, { phases: ['retry'] });
+
+    let builder = client.put('https://api.example/start').headers({
+      'content-type': 'application/json',
+      'content-language': 'en',
+    });
+    if (body !== undefined) {
+      builder = builder.body(body);
+    }
+    const response = await builder.send();
+
+    expect(response.status).toBe(200);
+    expect(sentToTarget).toHaveLength(2);
+    const [first, retry] = sentToTarget;
+    expect(retry?.headers['content-type']).toBe(first?.headers['content-type']);
+    expect(retry?.headers['content-language']).toBe('en');
+  }
+});
+
+test("PR review round 63: an internal throw after a later hop's bodied attempt reports that attempt's upload outcome, not an earlier hop's", async () => {
+  const cut = new Error('cut');
+  const sent: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sent.push(request);
+      return Promise.resolve<AdapterResponse>(
+        sent.length === 1
+          ? {
+              status: 307,
+              headers: { location: '/next' },
+              body: null,
+              requestBodySettled: Promise.resolve(cut),
+            }
+          : // The replay's answer reports no upload outcome.
+            { status: 503, headers: {}, body: null },
+      );
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://x.test',
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  });
+  // A failure of the client's own code that escapes the attempt runner, after the replay
+  // went out: composing the retry's signal (the third attempt's) throwing.
+  const internals = client as unknown as {
+    _composeSignals: (...args: unknown[]) => AbortSignal;
+  };
+  const composeSignals = internals._composeSignals.bind(client);
+  let composed = 0;
+  internals._composeSignals = (...args) => {
+    composed++;
+    if (composed === 3) {
+      throw new Error('internal');
+    }
+    return composeSignals(...args);
+  };
+
+  const response = await client.put('/start').json({ a: 1 }).send();
+
+  expect(composed).toBe(3);
+  expect(sent).toHaveLength(2);
+  expect(sent[1]?.requestURL).toBe('http://x.test/next');
+  expect(response.isFailed).toBe(true);
+  expect(response).not.toHaveProperty('requestBodySettled');
+});

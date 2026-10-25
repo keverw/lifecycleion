@@ -931,8 +931,8 @@ interface PhaseFilter {
    * are materialized as `http://localhost/...`, browser adapters resolve
    * against `window.location`, and non-mock adapters still require absolute
    * URLs at validation time. For an observer the scheme check is skipped when
-   * `requestURL` is absent; an interceptor handed a request with none (an earlier
-   * interceptor dropped it) matches no `schemes` filter.
+   * `requestURL` is absent. An interceptor is always handed one: an earlier
+   * interceptor's result without it fails the request as `interceptor_error`.
    */
   schemes?: ('http' | 'https')[];
 }

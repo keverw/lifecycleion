@@ -909,12 +909,36 @@ export class BaseHTTPClient {
       let completedAttemptCount = 0;
 
       /**
-       * The upload's outcome from the latest hop that had a body. Set inside the redirect
-       * loop below, and attached to the response where `finalResponse` is taken - or, for
-       * a throw out of the loop, in the `catch` around it - rather than by each terminal
-       * branch. Declared here so both can see it.
+       * The upload outcome the request reports so far, wherever it ended up: kept by the
+       * attempt runner (see its `latestUpload` parameter) across the redirect loop below,
+       * and attached to the response where `finalResponse` is taken - or, for a throw out
+       * of the loop, in the `catch` around it - rather than by each terminal branch.
+       * Declared here so both can see it, and read there rather than copied out after
+       * each hop, so a throw out of the runner itself reports the attempt it got to.
+       *
+       * Kept by the runner rather than read off a hop's result: an attempt that *threw*
+       * has no adapter response to carry it, and most terminal redirect branches below
+       * build their `HTTPResponse` with `adapterResponse: null` - a redirect the caller
+       * disabled, a loop, an interceptor that threw, a cancel between hops - so that
+       * response has no field of its own to read. An early `3xx` mid-upload is exactly
+       * the shape where it is not empty.
        */
-      let uploadOutcome: Promise<Error | undefined> | undefined;
+      //
+      // Carried across hops and attempts, not recomputed per hop: the latest attempt
+      // that had a body is the answer. A followed `301`/`302`/`303` rewrites a `POST`
+      // to a bodiless `GET`, so the final hop has no writer and nothing of its own to
+      // report - and reading only that hop answered `undefined`, the documented "the
+      // body went out" value, for exactly the early-ack `POST` -> `302` -> `GET` shape
+      // this field exists for. A `307`/`308` resends the body and its own outcome is
+      // the one that reached the final response, while a bodiless hop or retry after
+      // it changes nothing about what the upload did. A bodied attempt given up on
+      // with its adapter still out reports that its upload's fate is unknown, and one
+      // that reported none - a custom adapter's untagged throw - leaves none, rather
+      // than an earlier hop's "the body went out" for an upload whose fate nobody
+      // knows.
+      const latestUpload: {
+        outcome: Promise<Error | undefined> | undefined;
+      } = { outcome: undefined };
 
       /**
        * The request's URL as the initial-phase interceptors left it - `url` until they
@@ -1186,10 +1210,6 @@ export class BaseHTTPClient {
         let hopCount = 0;
         // The body each hop's last attempt sent, as the caller gave it; see `sentBody`.
         const sentBody: { value: unknown } = { value: undefined };
-        // The upload outcome the response reports; see the dispatch parameter.
-        const latestUpload: {
-          outcome: Promise<Error | undefined> | undefined;
-        } = { outcome: undefined };
         // Tracks the last global attempt number across all hops and retries,
         // so the next hop's attempts continue the sequence (e.g. 1,2,3 on
         // initial request → 4,5 on first redirect hop → 6 on second hop).
@@ -1231,32 +1251,6 @@ export class BaseHTTPClient {
           });
 
           const { adapterResponse, wasCancelled, wasTimeout } = attemptResult;
-
-          /**
-           * The upload outcome the request reports so far, wherever it ended up.
-           *
-           * Kept by the attempt runner (see `latestUpload`) rather than read off this
-           * hop's result: an attempt that *threw* has no adapter response to carry it,
-           * and most terminal redirect branches below build their `HTTPResponse` with
-           * `adapterResponse: null` - a redirect the caller disabled, a loop, an
-           * interceptor that threw, a cancel between hops - so that response has no
-           * field of its own to read. An early `3xx` mid-upload is
-           * exactly the shape where it is not empty.
-           */
-          //
-          // Carried across hops and attempts, not recomputed per hop: the latest attempt
-          // that had a body is the answer. A followed `301`/`302`/`303` rewrites a `POST`
-          // to a bodiless `GET`, so the final hop has no writer and nothing of its own to
-          // report - and reading only that hop answered `undefined`, the documented "the
-          // body went out" value, for exactly the early-ack `POST` -> `302` -> `GET` shape
-          // this field exists for. A `307`/`308` resends the body and its own outcome is
-          // the one that reached the final response, while a bodiless hop or retry after
-          // it changes nothing about what the upload did. A bodied attempt given up on
-          // with its adapter still out reports that its upload's fate is unknown, and one
-          // that reported none - a custom adapter's untagged throw - leaves none, rather
-          // than an earlier hop's "the body went out" for an upload whose fate nobody
-          // knows.
-          uploadOutcome = latestUpload.outcome;
           lastAttemptNumber = attemptResult.attemptCount;
           isRetriesExhausted = attemptResult.isRetriesExhausted;
           completedAttemptCount = attemptResult.attemptCount;
@@ -2002,7 +1996,7 @@ export class BaseHTTPClient {
             redirectHistory,
             isNetworkErrorOverride: false,
           }),
-          uploadOutcome,
+          latestUpload.outcome,
         );
 
         const normalizedError = isCancelled
@@ -2096,7 +2090,7 @@ export class BaseHTTPClient {
       //
       // The upload outcome goes on here, once, for every terminal branch above: see
       // `withRequestBodySettled`.
-      response = withRequestBodySettled(response, uploadOutcome);
+      response = withRequestBodySettled(response, latestUpload.outcome);
       const finalResponse = response;
       // Set before the final observers run, with the state and error: an observer reading
       // the builder saw a settled state and a `null` response.
@@ -5890,7 +5884,7 @@ function awaitAdapterSend<T>(
  * has gone silent for that long, never one that is still moving however long it takes.
  * `requestBodySettled` is documented as settling in bounded time, and `NodeAdapter`'s does
  * - its stall watchdog sees to that - but `HTTPAdapter` is a public extension point, and
- * a custom adapter that set the field and never settled it held a followed `307`/`308`,
+ * a custom adapter that set the field and never settled it held every followed redirect,
  * or a retry, until the caller aborted: no timeout, no error, nothing on any channel. An
  * adapter that reports no progress at all gets the bound from dispatch. `0` disables
  * it exactly as it disables the per-attempt timer. What happens at
@@ -6114,19 +6108,24 @@ function sendsRequestBody(body: unknown): boolean {
  * whatever they did to it - unless they removed it or left it empty, which sends
  * nothing (see `emptyRequestBody`). The hop's own body goes with the hop's own headers
  * that describe it (`BODY_DESCRIBING_HEADERS`), whether the interceptors replaced it,
- * edited their copy, or left it alone: theirs describe a body that is not sent.
+ * edited their copy, or left it alone: theirs describe a body that is not sent. A body
+ * they dropped goes with none of them, the hop's or the interceptors', as a hop
+ * rewritten to `GET` drops them with its body. A hop with no body to send has nothing
+ * to drop, so it goes as it was, its own headers included.
  */
 function withoutAddedCrossOriginCredentials(
   request: ResolvedRequest,
   inputHeaderNames: ReadonlySet<string>,
   hopRequest: ResolvedRequest,
 ): ResolvedRequest {
-  const droppedBody = emptyRequestBody(request.body);
+  const droppedBody = sendsRequestBody(hopRequest.body)
+    ? emptyRequestBody(request.body)
+    : undefined;
   const isBodyDropped = droppedBody !== undefined;
   // Names are already lowercase: the result is a snapshot (see `snapshotInterceptedRequest`).
   const headers: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(request.headers)) {
-    if (!isBodyDropped && BODY_DESCRIBING_HEADERS.has(name)) {
+    if (BODY_DESCRIBING_HEADERS.has(name)) {
       continue;
     }
 
