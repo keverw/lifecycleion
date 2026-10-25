@@ -13681,3 +13681,159 @@ test('PR review round 59: an abandoned attempt whose retry interceptor removed t
   expect(sentBodies[1]).toBeNull();
   expect(response.status).toBe(200);
 });
+
+test('PR review round 60: a retry body that cannot be read fails a cross-origin redirect hop as a same-origin one, its attempt ended', async () => {
+  for (const target of [
+    'https://api.example/next',
+    'https://evil.example/next',
+  ]) {
+    const { adapter, sentToTarget } = crossOriginReplayAdapter(target);
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: crossOriginRetryPolicy,
+    });
+    // A `FormData` by its prototype, whose entries no `FormData` method can read.
+    const form = new FormData();
+    form.append('field', 'value');
+    client.addRequestInterceptor(
+      (request) => ({ ...request, body: new Proxy(form, {}) }),
+      { phases: ['retry'] },
+    );
+    const started: number[] = [];
+    const ended: number[] = [];
+
+    const builder = client
+      .put('https://api.example/start')
+      .json({ a: 1 })
+      .onAttemptStart((event) => started.push(event.attemptNumber))
+      .onAttemptEnd((event) => ended.push(event.attemptNumber));
+    const response = await builder.send();
+
+    expect(response.status).toBe(0);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(sentToTarget).toHaveLength(1);
+    expect(started).toEqual([1, 2, 3]);
+    expect(ended).toEqual([1, 2, 3]);
+  }
+});
+
+test('PR review round 60: a cross-origin retry whose body cannot be read reports the hop request, not what the interceptor added', async () => {
+  const { adapter, sentToTarget } = crossOriginReplayAdapter(
+    'https://evil.example/next',
+  );
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  const form = new FormData();
+  form.append('field', 'value');
+  client.addRequestInterceptor(
+    (request) => {
+      const url = new URL(request.requestURL);
+      url.searchParams.set('access_token', 'SECRET');
+      return {
+        ...request,
+        requestURL: url.href,
+        headers: { ...request.headers, authorization: 'Bearer SECRET' },
+        body: new Proxy(form, {}),
+      };
+    },
+    { phases: ['retry'] },
+  );
+  const observed: Array<{
+    requestURL: string;
+    headers: Record<string, string | string[]>;
+    rawBody: unknown;
+  }> = [];
+  client.addErrorObserver(
+    (_error, request) => {
+      observed.push({
+        requestURL: request.requestURL,
+        headers: request.headers,
+        rawBody: request.rawBody,
+      });
+    },
+    { hosts: ['evil.example'] },
+  );
+
+  const builder = client.put('https://api.example/start').json({ a: 1 });
+  const response = await builder.send();
+
+  expect(builder.error?.code).toBe('request_setup_error');
+  expect(sentToTarget).toHaveLength(1);
+  expect(response.requestURL).toBe('https://evil.example/next');
+  expect(builder.error?.requestURL).toBe('https://evil.example/next');
+  expect(observed).toHaveLength(1);
+  expect(observed[0]?.requestURL).toBe('https://evil.example/next');
+  expect(observed[0]?.headers).not.toHaveProperty('authorization');
+  // The hop's own JSON body, not the interceptor's form.
+  expect(observed[0]?.rawBody).toEqual({ a: 1 });
+});
+
+test('PR review round 60: a retry interceptor that empties a cross-origin 307 replay into an empty form sends that, not the hop body', async () => {
+  const { adapter, sentToTarget } = crossOriginReplayAdapter(
+    'https://evil.example/next',
+  );
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  client.addRequestInterceptor(
+    (request) => ({ ...request, body: new FormData() }),
+    { phases: ['retry'] },
+  );
+
+  const response = await client
+    .put('https://api.example/start')
+    .json({ a: 1 })
+    .send();
+
+  expect(response.status).toBe(200);
+  expect(sentToTarget).toHaveLength(2);
+  expect(sentToTarget[0]?.body).toBe(JSON.stringify({ a: 1 }));
+  const sentBody = sentToTarget[1]?.body;
+  expect(sentBody).toBeInstanceOf(FormData);
+  expect([...(sentBody as FormData).entries()]).toEqual([]);
+  // The hop's JSON headers do not describe it: a form owns its own type.
+  expect(sentToTarget[1]?.headers).not.toHaveProperty('content-type');
+});
+
+test('PR review round 60: retry bytes that claim to be empty do not reach a cross-origin redirect target', async () => {
+  // A `byteLength` of `0` over bytes that are there.
+  class LyingBytes extends Uint8Array {
+    public override get byteLength(): number {
+      return 0;
+    }
+  }
+  const { adapter, sentToTarget } = crossOriginReplayAdapter(
+    'https://evil.example/next',
+  );
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      body: new LyingBytes(new TextEncoder().encode('SECRET')),
+    }),
+    { phases: ['retry'] },
+  );
+
+  const response = await client
+    .put('https://api.example/start')
+    .json({ a: 1 })
+    .send();
+
+  expect(response.status).toBe(200);
+  expect(sentToTarget).toHaveLength(2);
+  // The hop's own body, with the headers that describe it.
+  expect(sentToTarget[1]?.body).toBe(JSON.stringify({ a: 1 }));
+  expect(sentToTarget[1]?.headers['content-type']).toBe(
+    sentToTarget[0]?.headers['content-type'],
+  );
+});

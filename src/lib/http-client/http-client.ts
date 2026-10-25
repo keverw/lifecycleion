@@ -135,7 +135,10 @@ import {
   isAnsweredBodyOverLimit,
   makeResponseTooLargeError,
 } from './internal/response-limit';
-import { readBinaryByteLength } from '../internal/binary-view';
+import {
+  readBinaryByteLength,
+  typedArrayNameOf,
+} from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
   adoptPromise,
@@ -2726,20 +2729,37 @@ export class BaseHTTPClient {
         // credential scope reads it below, so it is left alone. So is a hop the server
         // kept on the caller's own origin, which is no origin the caller never chose, and
         // a retry the interceptor sends back to exactly that origin. Stripped silently, as
-        // `_sanitizeRedirectRequest` strips the hop's own.
-        attemptRequest =
-          hopContext &&
+        // `_sanitizeRedirectRequest` strips the hop's own. A hop on an origin the caller
+        // never chose is the one whose body was copied for the chain (`retryBodyCopy`).
+        if (
+          retryBodyCopy !== undefined &&
           isRetryIntercepted &&
           comparableHost(baseRequest.requestURL) ===
             comparableHost(retryIntercept.requestURL) &&
-          isCrossOrigin(credentialScope.url, baseRequest.requestURL) &&
           isCrossOrigin(credentialScope.url, retryIntercept.requestURL)
-            ? withoutAddedCrossOriginCredentials(
-                retryIntercept,
-                retryInputHeaderNames,
-                baseRequest,
-              )
-            : retryIntercept;
+        ) {
+          try {
+            attemptRequest = withoutAddedCrossOriginCredentials(
+              retryIntercept,
+              retryInputHeaderNames,
+              baseRequest,
+            );
+          } catch (error) {
+            // Telling whether the interceptors' body sends nothing reads it, and a body
+            // that cannot be read fails here as it fails being built on any other hop:
+            // as the request's setup, with the attempt it already started ended. Reported
+            // as the hop's own request, as a stripped attempt would have gone out: the
+            // interceptors' carries what they added - a token in the URL or a header -
+            // and the response, the error and host-filtered observers would name a
+            // credentialed request to the host the server chose.
+            return endBeforeDispatch(baseRequest, {
+              errorCode: 'request_setup_error',
+              adapterCause: normalizeError(error),
+            });
+          }
+        } else {
+          attemptRequest = retryIntercept;
+        }
       }
 
       // A cancel that landed while the caller's own callbacks ran - an interceptor, a
@@ -6021,14 +6041,39 @@ function copyRequestBody(body: unknown): unknown {
   return cloneBodyValue(body);
 }
 
-/** Whether a body sends nothing: none, an empty string, or no bytes. */
-function isEmptyRequestBody(body: unknown): boolean {
-  return (
-    body === undefined ||
-    body === null ||
-    body === '' ||
-    (body instanceof Uint8Array && body.byteLength === 0)
-  );
+/**
+ * What a cross-origin hop sends for a retry-phase interceptor's body that sends nothing -
+ * none, an empty string, no bytes, or a form with no entries - as `{ body }`, or
+ * `undefined` for any other body. Bytes and a form are answered as an empty one of the
+ * client's own, so what goes out is what was measured: the bytes are measured through the
+ * intrinsic getters (see `readBinaryByteLength`), which a subclass that reports a
+ * `byteLength` of `0` while holding a token cannot answer for, and the form's entries
+ * through `FormData`'s own iterator rather than one the value declares. Throws on a body
+ * those reads refuse, such as a `Proxy` over a form, as building it would.
+ */
+function emptyRequestBody(body: unknown): { body: unknown } | undefined {
+  if (body === undefined || body === null || body === '') {
+    return { body };
+  }
+
+  if (typeof body !== 'object') {
+    return undefined;
+  }
+
+  if (typedArrayNameOf(body) === 'Uint8Array') {
+    return readBinaryByteLength(body) === 0
+      ? { body: new Uint8Array(0) }
+      : undefined;
+  }
+
+  if (
+    body instanceof FormData &&
+    FormData.prototype.entries.call(body).next().done === true
+  ) {
+    return { body: new FormData() };
+  }
+
+  return undefined;
 }
 
 /**
@@ -6048,16 +6093,17 @@ function isEmptyRequestBody(body: unknown): boolean {
  *
  * The body is the hop's own value too, not the copy the interceptors were handed,
  * whatever they did to it - unless they removed it or left it empty, which sends
- * nothing. The hop's own body goes with the hop's own headers that describe it
- * (`BODY_DESCRIBING_HEADERS`), whether the interceptors replaced it, edited their copy,
- * or left it alone: theirs describe a body that is not sent.
+ * nothing (see `emptyRequestBody`). The hop's own body goes with the hop's own headers
+ * that describe it (`BODY_DESCRIBING_HEADERS`), whether the interceptors replaced it,
+ * edited their copy, or left it alone: theirs describe a body that is not sent.
  */
 function withoutAddedCrossOriginCredentials(
   request: ResolvedRequest,
   inputHeaderNames: ReadonlySet<string>,
   hopRequest: ResolvedRequest,
 ): ResolvedRequest {
-  const isBodyDropped = isEmptyRequestBody(request.body);
+  const droppedBody = emptyRequestBody(request.body);
+  const isBodyDropped = droppedBody !== undefined;
   // Names are already lowercase: the result is a snapshot (see `snapshotInterceptedRequest`).
   const headers: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(request.headers)) {
@@ -6082,7 +6128,7 @@ function withoutAddedCrossOriginCredentials(
     ...request,
     requestURL: upgradedHopURL(hopRequest.requestURL, request.requestURL),
     headers,
-    body: isBodyDropped ? request.body : hopRequest.body,
+    body: droppedBody !== undefined ? droppedBody.body : hopRequest.body,
   };
 }
 
