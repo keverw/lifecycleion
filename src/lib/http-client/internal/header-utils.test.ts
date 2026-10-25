@@ -4,6 +4,7 @@ import {
   describeRefusedHeader,
   isBrowserRestrictedHeader,
   materializeRequestHeaders,
+  requestHeaderPairs,
 } from './header-utils';
 import { errorText } from '../test-helpers/error-text';
 
@@ -182,5 +183,30 @@ describe('describeRefusedHeader', () => {
     expect(
       describeRefusedHeader('Authorization: Bearer secret-token', 'header'),
     ).toBe('a header name');
+  });
+});
+
+describe('Cookie joining - PR review round 56', () => {
+  test('PR review round 56: empty cookie values and items leave no stray separators', () => {
+    const headers = { cookie: '', Cookie: 'a=1', COOKIE: ['b=2', ''] };
+
+    expect(requestHeaderPairs(headers)).toEqual([['Cookie', 'a=1; b=2']]);
+    expect(materializeRequestHeaders(headers)).toEqual({ Cookie: 'a=1; b=2' });
+    expect(
+      materializeRequestHeaders(headers, { isLowercasingNames: true }),
+    ).toEqual({ cookie: 'a=1; b=2' });
+  });
+
+  test('PR review round 56: a whitespace-only cookie value holds no cookie', () => {
+    const headers = { cookie: [' ', 'a=1', '\t'], Cookie: '  ' };
+
+    expect(requestHeaderPairs(headers)).toEqual([['cookie', 'a=1']]);
+  });
+
+  test('PR review round 56: a cookie header with no cookie in it is not sent at all', () => {
+    const headers = { 'x-a': '1', cookie: '', Cookie: ['', ' '] };
+
+    expect(requestHeaderPairs(headers)).toEqual([['x-a', '1']]);
+    expect(materializeRequestHeaders(headers)).toEqual({ 'x-a': '1' });
   });
 });

@@ -1,4 +1,5 @@
 import {
+  deleteHeader,
   describeRefusedHeader,
   requestHeaderPairs,
   lowerCaseHeaderName,
@@ -7,6 +8,7 @@ import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { knownBodyByteLength } from '../internal/progress';
 import {
+  makeAbortError,
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
@@ -144,6 +146,12 @@ export class XHRAdapter implements HTTPAdapter {
         // Chrome's `DOMException` quotes the value - a token, in an `authorization`. A
         // browser refuses a name only when it is not a token, but an XHR outside one may
         // refuse a token name too, so with a token the part refused is not claimed.
+        //
+        // A caller's `Content-Length` is left to XHR, which frames the body itself, as
+        // FetchAdapter leaves it to `fetch`: a browser refuses to send one, and an XHR
+        // outside a browser sent one that disagreed with the body, so the server waited for
+        // bytes that never came. Taken off the adapter's own copy, in place.
+        deleteHeader(headers, 'content-length');
         for (const [name, value] of requestHeaderPairs(headers)) {
           try {
             xhr.setRequestHeader(name, value);
@@ -174,7 +182,7 @@ export class XHRAdapter implements HTTPAdapter {
       let removeAbortListener = (): void => {};
       if (signal) {
         if (isSignalAborted(signal)) {
-          reject(new DOMException('Request aborted', 'AbortError'));
+          reject(makeAbortError());
           return;
         }
 
@@ -526,7 +534,7 @@ export class XHRAdapter implements HTTPAdapter {
       // than an unexpected abort (non-retryable cancel).
       xhr.addEventListener('timeout', () => {
         reject(
-          Object.assign(new DOMException('Request timed out', 'AbortError'), {
+          Object.assign(makeAbortError('Request timed out'), {
             [XHR_BROWSER_TIMEOUT_FLAG]: true,
           }),
         );
@@ -543,7 +551,7 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        const abortError = new DOMException('Request aborted', 'AbortError');
+        const abortError = makeAbortError();
         reject(
           answeredBeforeAbort === undefined
             ? abortError
@@ -573,7 +581,7 @@ export class XHRAdapter implements HTTPAdapter {
       try {
         if (isSignalAborted(signal)) {
           removeAbortListener();
-          reject(new DOMException('Request aborted', 'AbortError'));
+          reject(makeAbortError());
           return;
         }
 

@@ -150,12 +150,17 @@ export function assertNoBrowserRestrictedHeaders(
   }
 }
 
+/** Empty, or only the whitespace `fetch` trims from a header value (tab, LF, CR, space). */
+const HTTP_WHITESPACE_ONLY = /^[\t\n\r ]*$/;
+
 /**
  * Every spelling of `Cookie` among `entries` as the one field NodeAdapter and MockAdapter
  * send - {@link materializeRequestHeaders}' rule, for the adapters that build their own:
  * each value read as {@link presentHeaderValue} reads it (an unset one, or an array with
- * no items, left out), items and spellings joined with `; `, under the first set
- * spelling's name. `undefined` when none is set.
+ * no items, left out), items and spellings joined with `; `, under the first spelling
+ * with a cookie in it. A value or item that is empty, or only whitespace, holds no cookie
+ * and is left out, so it leaves no stray `; ` behind. `undefined` when none holds one: no
+ * `Cookie` header is sent.
  */
 export function joinCookieHeader(
   entries: ReadonlyArray<readonly [string, unknown]>,
@@ -171,8 +176,13 @@ export function joinCookieHeader(
     if (present === undefined) {
       continue;
     }
-    name ??= key;
-    parts.push(Array.isArray(present) ? present.join('; ') : present);
+    for (const item of Array.isArray(present) ? present : [present]) {
+      if (HTTP_WHITESPACE_ONLY.test(item)) {
+        continue;
+      }
+      name ??= key;
+      parts.push(item);
+    }
   }
 
   return name === undefined ? undefined : { name, value: parts.join('; ') };
@@ -226,7 +236,7 @@ export function materializeRequestHeaders(
   const isLowercasingNames = options.isLowercasingNames === true;
   const entries = Object.entries(headers);
   // `Cookie` by the one rule every adapter joins it with (see `joinCookieHeader`), put in
-  // where its first set spelling stands.
+  // under the first spelling that holds a cookie.
   const cookie = joinCookieHeader(entries);
 
   for (const [key, value] of entries) {

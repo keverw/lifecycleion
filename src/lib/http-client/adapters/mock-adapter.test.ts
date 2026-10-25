@@ -1,4 +1,5 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
+import vm from 'node:vm';
 import { MockAdapter } from './mock-adapter';
 import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
 import type { MockAdapterConfig, MockFormData } from './mock-adapter';
@@ -2336,3 +2337,70 @@ for (const source of ['handler', 'error handler'] as const) {
     });
   }
 }
+
+describe('MockAdapter - PR review round 56', () => {
+  test("PR review round 56: a route body of bytes from another realm is sent as this realm's Uint8Array", async () => {
+    const adapter = new MockAdapter();
+    const foreignBytes = vm.runInNewContext(
+      'new Uint8Array([1, 2, 3, 255])',
+    ) as Uint8Array;
+    const foreignBuffer = vm.runInNewContext(
+      'new Uint8Array([4, 5]).buffer',
+    ) as ArrayBuffer;
+    expect(foreignBytes instanceof Uint8Array).toBe(false);
+    expect(foreignBuffer instanceof ArrayBuffer).toBe(false);
+
+    adapter.routes.get('/bytes', () => ({ status: 200, body: foreignBytes }));
+    adapter.routes.get('/buffer', () => ({ status: 200, body: foreignBuffer }));
+
+    const bytesResponse = await adapter.send(
+      makeAdapterRequest({ requestURL: '/bytes' }),
+    );
+    expect(bytesResponse.body).toBeInstanceOf(Uint8Array);
+    expect(Array.from(bytesResponse.body as Uint8Array)).toEqual([
+      1, 2, 3, 255,
+    ]);
+    expect(bytesResponse.headers['content-type']).toBeUndefined();
+
+    const bufferResponse = await adapter.send(
+      makeAdapterRequest({ requestURL: '/buffer' }),
+    );
+    expect(bufferResponse.body).toBeInstanceOf(Uint8Array);
+    expect(Array.from(bufferResponse.body as Uint8Array)).toEqual([4, 5]);
+    expect(bufferResponse.headers['content-type']).toBeUndefined();
+  });
+
+  test("PR review round 56: a HEAD route's bytes from another realm are not typed as JSON", async () => {
+    const adapter = new MockAdapter();
+    const foreignBytes = vm.runInNewContext(
+      'new Uint8Array([1])',
+    ) as Uint8Array;
+    adapter.routes.head('/bytes', () => ({ status: 200, body: foreignBytes }));
+
+    const response = await adapter.send(
+      makeAdapterRequest({ requestURL: '/bytes', method: 'HEAD' }),
+    );
+
+    expect(response.body).toBeNull();
+    expect(response.headers['content-type']).toBeUndefined();
+  });
+
+  test('PR review round 56: a typed array other than a Uint8Array is still refused, from any realm', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/int16', () => ({
+      status: 200,
+      body: vm.runInNewContext('new Int16Array(2)') as unknown,
+    }));
+
+    const rejection = await adapter
+      .send(makeAdapterRequest({ requestURL: '/int16' }))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect((rejection as Error).message).toMatch(
+      /Unsupported mock response body type/,
+    );
+  });
+});

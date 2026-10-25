@@ -16,7 +16,11 @@ import {
   readAdapterRequestFields,
 } from '../internal/request-fields';
 import { defineEntry } from '../../internal/define-entry';
-import { readBinaryByteLength } from '../../internal/binary-view';
+import {
+  arrayBufferKindOf,
+  readBinaryByteLength,
+  typedArrayNameOf,
+} from '../../internal/binary-view';
 import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
 import type { HTTPMethod as RouterHTTPMethod } from 'find-my-way';
@@ -116,8 +120,9 @@ export interface MockResponse {
    * - `undefined` or omitted — no body
    * - `null` — no body
    * - `string` — UTF-8 bytes
-   * - `Uint8Array` — raw bytes unchanged
-   * - `ArrayBuffer` — copied to a `Uint8Array`
+   * - `Uint8Array` — raw bytes unchanged (one from another realm, such as jsdom or a
+   *   `vm` context, copied to this realm's)
+   * - `ArrayBuffer` — viewed as a `Uint8Array`, from any realm
    * - plain object (`Object.prototype` or `null` prototype) — JSON
    * - array — JSON
    */
@@ -1182,10 +1187,14 @@ function serializeResponseBody(response: MockResponse): Uint8Array | null {
 
   if (body === undefined || body === null) {
     return null;
-  } else if (body instanceof Uint8Array) {
-    // Avoid JSON.stringify indexing the buffer into {"0":…,"1":…}.
-    return body;
-  } else if (body instanceof ArrayBuffer) {
+  } else if (isRouteBinaryBody(body)) {
+    // Avoid JSON.stringify indexing the buffer into {"0":…,"1":…}. Delivered as this
+    // realm's `Uint8Array`: a view over an `ArrayBuffer`, the route's own `Uint8Array`
+    // when it is this realm's, and a copy of one from another realm's.
+    if (body instanceof Uint8Array) {
+      return body;
+    }
+
     return new Uint8Array(body);
   } else if (typeof body === 'string') {
     return new TextEncoder().encode(body);
@@ -1204,10 +1213,27 @@ function serializeResponseBody(response: MockResponse): Uint8Array | null {
   );
 }
 
+/**
+ * Whether a route's body is bytes the mock sends as they are: a `Uint8Array` or an
+ * `ArrayBuffer` - this realm's by `instanceof` (a `Proxy` over one included, which the
+ * size check then measures as it would an adapter's), or another realm's (jsdom, a `vm`
+ * context) by its internal slot, as the size check beside it measures it.
+ */
+function isRouteBinaryBody(body: unknown): body is Uint8Array | ArrayBuffer {
+  return (
+    body instanceof Uint8Array ||
+    body instanceof ArrayBuffer ||
+    (typeof body === 'object' &&
+      body !== null &&
+      (typedArrayNameOf(body) === 'Uint8Array' ||
+        arrayBufferKindOf(body) === 'ArrayBuffer'))
+  );
+}
+
 function inferContentType(body: unknown): ContentType {
   if (typeof body === 'string') {
     return 'text';
-  } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
+  } else if (isRouteBinaryBody(body)) {
     return 'binary';
   } else {
     return 'json';

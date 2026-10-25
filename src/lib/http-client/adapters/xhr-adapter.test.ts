@@ -3106,3 +3106,186 @@ describe('XHRAdapter - PR review round 53 follow-up', () => {
     }
   });
 });
+
+/** Runs `fn` with no global `DOMException`, as some runtimes outside a browser have, and restores it. */
+async function withoutDOMException<T>(fn: () => Promise<T>): Promise<T> {
+  const scope = globalThis as Record<string, unknown>;
+  const descriptor = Object.getOwnPropertyDescriptor(scope, 'DOMException');
+  delete scope.DOMException;
+
+  try {
+    return await fn();
+  } finally {
+    if (descriptor !== undefined) {
+      Object.defineProperty(scope, 'DOMException', descriptor);
+    }
+  }
+}
+
+/** How `promise` settles within a few event-loop turns: its rejection, or `'pending'`. */
+async function settlement(promise: Promise<unknown>): Promise<unknown> {
+  return await Promise.race([
+    promise.then(
+      () => 'resolved',
+      (error: unknown) => error,
+    ),
+    new Promise((resolve) => setTimeout(() => resolve('pending'), 50)),
+  ]);
+}
+
+describe('XHRAdapter - PR review round 56', () => {
+  test('PR review round 56: without DOMException, a cancel during the request settles as an AbortError', async () => {
+    await withoutDOMException(async () => {
+      expect(typeof (globalThis as Record<string, unknown>).DOMException).toBe(
+        'undefined',
+      );
+      const controller = new AbortController();
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+      });
+
+      controller.abort();
+      expect(lastXHR.abortCalled).toBe(true);
+      // A real XHR reports a listener's throw and carries on; the fake rethrows it.
+      try {
+        lastXHR.simulateAbort();
+      } catch {
+        // The settlement below is what is checked.
+      }
+
+      const outcome = await settlement(promise);
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as Error).name).toBe('AbortError');
+    });
+  });
+
+  test('PR review round 56: without DOMException, an already-aborted signal rejects as an AbortError', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await withoutDOMException(async () => {
+      const outcome = await settlement(
+        new XHRAdapter().send({
+          requestURL: 'https://api.test/data',
+          method: 'GET',
+          headers: {},
+          signal: controller.signal,
+        }),
+      );
+
+      expect((outcome as Error).name).toBe('AbortError');
+      expect(
+        (outcome as Record<string, unknown>)[
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+        ],
+      ).toBeUndefined();
+    });
+  });
+
+  test('PR review round 56: without DOMException, a cancel from the 0% upload progress callback rejects as an AbortError', async () => {
+    await withoutDOMException(async () => {
+      const controller = new AbortController();
+      const outcome = await settlement(
+        new XHRAdapter().send({
+          requestURL: 'https://api.test/data',
+          method: 'POST',
+          headers: {},
+          body: 'payload',
+          signal: controller.signal,
+          onUploadProgress: () => {
+            controller.abort();
+          },
+        }),
+      );
+
+      expect((outcome as Error).name).toBe('AbortError');
+      expect(
+        (outcome as Record<string, unknown>)[
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+        ],
+      ).toBeUndefined();
+      expect(lastXHR.sentBody).toBeNull();
+    });
+  });
+
+  test('PR review round 56: without DOMException, a browser-fired timeout rejects as an AbortError carrying the timeout flag', async () => {
+    await withoutDOMException(async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+      });
+
+      try {
+        lastXHR.simulateTimeout();
+      } catch {
+        // The settlement below is what is checked.
+      }
+
+      const outcome = await settlement(promise);
+      expect((outcome as Error).name).toBe('AbortError');
+      expect(
+        (outcome as Record<string, unknown>)[XHR_BROWSER_TIMEOUT_FLAG],
+      ).toBe(true);
+    });
+  });
+
+  test('PR review round 56: through the client, a cancel without DOMException ends cancelled', async () => {
+    await withoutDOMException(async () => {
+      const client = new HTTPClient({
+        adapter: new XHRAdapter(),
+        baseURL: 'https://api.test',
+      });
+      const builder = client.get('/data');
+      const sending = builder.send();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      builder.cancel();
+      try {
+        lastXHR.simulateAbort();
+      } catch {
+        // The settlement below is what is checked.
+      }
+
+      const outcome = await Promise.race([
+        sending,
+        new Promise((resolve) => setTimeout(() => resolve('pending'), 50)),
+      ]);
+      expect(outcome).not.toBe('pending');
+      expect((outcome as { isCancelled: boolean }).isCancelled).toBe(true);
+      expect(builder.error?.code).toBe('cancelled');
+    });
+  });
+
+  test("PR review round 56: a caller's Content-Length is not sent", async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: { 'Content-Length': '999', 'x-kept': '1' },
+      body: 'hi',
+    });
+
+    lastXHR.status = 204;
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(lastXHR.requestHeaders['content-length']).toBeUndefined();
+    expect(lastXHR.requestHeaders['x-kept']).toEqual(['1']);
+  });
+
+  test('PR review round 56: an empty Cookie value sends no Cookie header', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: { cookie: '', Cookie: [''] },
+    });
+
+    lastXHR.status = 204;
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(lastXHR.requestHeaders.cookie).toBeUndefined();
+  });
+});

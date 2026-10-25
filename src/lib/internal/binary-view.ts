@@ -60,6 +60,11 @@ const TYPED_ARRAY_LENGTH = Object.getOwnPropertyDescriptor(
   'length',
 )?.get;
 
+const TYPED_ARRAY_TO_STRING_TAG = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  Symbol.toStringTag,
+)?.get;
+
 const DATA_VIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   DataView.prototype,
   'byteLength',
@@ -127,6 +132,28 @@ function callByteLengthGetter(
   }
 
   return byteLength >= 0 ? byteLength : null;
+}
+
+/**
+ * Which kind of typed array `value` is - `'Uint8Array'`, `'Int16Array'` and so on - read
+ * from its internal slot through the intrinsic `Symbol.toStringTag` getter, so from any
+ * realm (a `vm` context's or an iframe's, which `instanceof` misses), and not from a tag
+ * the value or its prototype declares; `undefined` for anything else, a `Proxy` over a
+ * typed array included. A `Buffer` is a `'Uint8Array'`.
+ */
+export function typedArrayNameOf(value: object): string | undefined {
+  if (TYPED_ARRAY_TO_STRING_TAG === undefined) {
+    return undefined;
+  }
+
+  try {
+    const name: unknown = TYPED_ARRAY_TO_STRING_TAG.call(value);
+    return typeof name === 'string' ? name : undefined;
+  } catch {
+    // The getter answers `undefined` rather than throwing for a value that is not one; a
+    // host whose getter throws is read the same way.
+    return undefined;
+  }
 }
 
 /**
