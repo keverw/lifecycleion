@@ -2588,16 +2588,21 @@ export class BaseHTTPClient {
         };
         let retryIntercept: ResolvedRequest | InterceptorCancel;
         let failedRetryRequest: InterceptedRequest = baseRequest;
+        let isRetryIntercepted = false;
+        const retryInputHeaders = this._withInternalRequestHeaders(
+          baseRequest.headers,
+          requestID,
+          attemptNumber,
+        );
+        // Taken before the chain runs: an interceptor may write into the headers it was
+        // handed, which would otherwise make a header it added look like one it was given.
+        const retryInputHeaderNames = new Set(Object.keys(retryInputHeaders));
 
         try {
           const retryRun = await this._runInterceptors(
             {
               ...baseRequest,
-              headers: this._withInternalRequestHeaders(
-                baseRequest.headers,
-                requestID,
-                attemptNumber,
-              ),
+              headers: retryInputHeaders,
             },
             retryPhase,
             { initialURL, redirectHistory, requestID, attemptNumber },
@@ -2609,6 +2614,7 @@ export class BaseHTTPClient {
 
           // Snapshotted as the initial phase in `_execute` does, and skipped on the
           // same condition; see there.
+          isRetryIntercepted = retryRun.isIntercepted;
           if (!retryRun.isIntercepted) {
             retryIntercept = retryRun.result;
           } else if (isInterceptorCancel(retryRun.result)) {
@@ -2645,7 +2651,29 @@ export class BaseHTTPClient {
           });
         }
 
-        attemptRequest = retryIntercept;
+        // On a redirect hop to an origin the caller never chose, the retry-phase
+        // interceptors - the parent client's included, which run in the same chain - may
+        // not add a credential: the hop's own headers were already cut to the cross-origin
+        // safelist, and a token interceptor registered for `['initial', 'retry']` with no
+        // `hosts` filter otherwise handed its token to whatever host the server redirected
+        // to, the moment that host answered `503`. A header the hop already carried keeps
+        // the value the interceptor gives it: a redirect-phase interceptor added it for a
+        // target it trusts, and refreshing it is that interceptor's business. A host the
+        // interceptor names itself is an explicit choice of destination, as the credential
+        // scope reads it below, so it is left alone. Stripped silently, as
+        // `_sanitizeRedirectRequest` strips the hop's own.
+        attemptRequest =
+          hopContext &&
+          isRetryIntercepted &&
+          comparableHost(baseRequest.requestURL) ===
+            comparableHost(retryIntercept.requestURL) &&
+          isCrossOrigin(credentialScope.url, retryIntercept.requestURL)
+            ? withoutAddedCrossOriginCredentials(
+                retryIntercept,
+                retryInputHeaderNames,
+                baseRequest.requestURL,
+              )
+            : retryIntercept;
       }
 
       // A cancel that landed while the caller's own callbacks ran - an interceptor, a
@@ -2770,6 +2798,11 @@ export class BaseHTTPClient {
         // that is no whole answer - part of the body is in the caller's sink - whatever
         // the adapter reports, so it is never retried or followed as a failed decode.
         let didCallStreamFactory = false;
+        // Set once the attempt has given up on the adapter (see `awaitAdapterSend`): the
+        // hooks it was handed are dead from then on, so an adapter that calls them late
+        // reaches none of the caller's, opens no sink beside a retry's, and does not make
+        // the next attempt's upload look active to the settle wait.
+        let isAbandoned = false;
         const streamResponse = options.streamResponse;
         const adapterPromise = adoptPromise(
           this._adapter.send({
@@ -2789,6 +2822,10 @@ export class BaseHTTPClient {
                     this: unknown,
                     ...args: Parameters<typeof streamResponse>
                   ) {
+                    // A cancel, as the factory's own `null` is: no sink is opened.
+                    if (isAbandoned) {
+                      return null;
+                    }
                     didCallStreamFactory = true;
                     return Reflect.apply(streamResponse, this, args);
                   }
@@ -2815,6 +2852,9 @@ export class BaseHTTPClient {
             onUploadProgress:
               onUploadProgress || (sentBody ?? null) !== null
                 ? (e) => {
+                    if (isAbandoned) {
+                      return;
+                    }
                     uploadActivity.at = performance.now();
 
                     if (onUploadProgress) {
@@ -2830,6 +2870,9 @@ export class BaseHTTPClient {
                 : undefined,
             onDownloadProgress: onDownloadProgress
               ? (e) => {
+                  if (isAbandoned) {
+                    return;
+                  }
                   safeHandleCallback('onDownloadProgress', onDownloadProgress, {
                     ...e,
                     attemptNumber,
@@ -2839,7 +2882,33 @@ export class BaseHTTPClient {
               : undefined,
           }),
         );
-        const { value: rawAdapterResponse } = await adapterPromise;
+        // Raced against the attempt's own abort, so a timeout or a cancel ends the attempt
+        // even when the adapter ignores its signal and never settles: awaited bare, neither
+        // ended it, and `send()` hung for good. See `awaitAdapterSend`.
+        const { value: rawAdapterResponse } = await awaitAdapterSend(
+          adapterPromise,
+          attemptSignal,
+          () =>
+            cancelSignal.aborted
+              ? readObjectMember(cancelSignal, 'reason')
+              : timeoutController.signal.reason,
+          () => {
+            isAbandoned = true;
+            // A late answer's upload outcome, or one tagged on a late rejection, is
+            // adopted only to observe it: nothing reads it, and a rejection of it is not
+            // left unhandled. Both helpers read through guards and never throw.
+            void adapterPromise.then(
+              ({ value }) => {
+                void adoptRequestBodySettled(
+                  readObjectMember(value, 'requestBodySettled'),
+                );
+              },
+              (error: unknown) => {
+                void getRequestBodySettled(error);
+              },
+            );
+          },
+        );
         didAdapterResolve = true;
 
         // Observe the upload before any other response getter or normalization can
@@ -3022,9 +3091,18 @@ export class BaseHTTPClient {
         // `isTransportError` for it rather than reject, and that was retried and
         // reported as a network_error with `isTimeout: false`. Raised as the timer's own
         // abort so the catch reads it as the timeout. An adapter veto stays its own.
+        // A bare `status: 0` too, wherever the client reads one as a transport failure
+        // whether or not `isTransportError` says so: not a stream error, which
+        // `_buildResponse` reads as one, nor a browser's opaque redirect where redirects
+        // are off, which is the answer `redirect_disabled` reports. With redirects on,
+        // that redirect has nowhere to go and is the transport failure below.
         if (
           isTimedOut &&
-          adapterResponse.isTransportError === true &&
+          (adapterResponse.isTransportError === true ||
+            (adapterResponse.status === 0 &&
+              adapterResponse.isStreamError !== true &&
+              (adapterResponse.wasRedirectDetected !== true ||
+                this._config.followRedirects))) &&
           adapterResponse.isRetryable !== false
         ) {
           throw timeoutController.signal.reason;
@@ -5402,6 +5480,72 @@ interface UploadActivity {
 }
 
 /**
+ * How long an attempt whose signal has aborted - its timer, or a cancel - still waits for
+ * the adapter's `send()` to settle before ending without it. See {@link awaitAdapterSend}.
+ */
+const ADAPTER_ABORT_GRACE_MS = 1000;
+
+/**
+ * The adapter's `send()`, ended by the attempt's abort if the adapter does not end it.
+ *
+ * A well-behaved adapter answers its signal itself - `NodeAdapter` destroys the request
+ * and rejects - and what it settles with is what the attempt reports: its upload outcome,
+ * a body stream's status and headers, a late answer that reads cleanly. So the abort is
+ * not raced at once, which would lose all of that to whichever reaction ran first; the
+ * adapter gets {@link ADAPTER_ABORT_GRACE_MS} to settle. An adapter `HTTPAdapter` lets
+ * anyone write may ignore the signal and never settle, and awaited bare that held the
+ * request past its timeout and past a `cancel()` for good. Past the grace the attempt
+ * rejects with `reason()` - the timer's `AbortError`, or the cancel's reason - and ends as
+ * that timeout or cancel, with no upload outcome reported, since the adapter gave none.
+ * The adapter's promise stays observed, so a later rejection is not unhandled; a later
+ * answer is ignored. `onAbandon` runs first, so the caller can disarm what it handed
+ * the adapter.
+ */
+function awaitAdapterSend<T>(
+  adapterPromise: Promise<T>,
+  signal: AbortSignal,
+  reason: () => unknown,
+  /** Called when the grace runs out, just before the attempt ends without the adapter. */
+  onAbandon: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let graceID: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      graceID = setTimeout(() => {
+        onAbandon();
+        // The abort's own reason, a cancel's string included, as an adapter that honors
+        // the signal would reject with it: the attempt reads it as that cancel or timeout.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        reject(reason());
+      }, ADAPTER_ABORT_GRACE_MS);
+    };
+    const release = (): void => {
+      signal.removeEventListener('abort', onAbort);
+      clearTimeout(graceID);
+    };
+
+    adapterPromise.then(
+      (value) => {
+        release();
+        resolve(value);
+      },
+      (error: unknown) => {
+        release();
+        // The adapter's rejection as it is, for the attempt to classify.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        reject(error);
+      },
+    );
+
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
+/**
  * Wait for an attempt's upload to settle before the next dispatch - the next redirect hop,
  * or the retry that replaces it.
  *
@@ -5538,4 +5682,34 @@ function getSignalCancelReason(signal: AbortSignal): string | undefined {
  */
 function comparableHost(url: string): string {
   return extractHostname(url).toLowerCase().replace(/\.$/, '');
+}
+
+/**
+ * A retry-phase interceptor's request for a cross-origin redirect hop, without the
+ * credentials the interceptor added to it: every header named neither on the request the
+ * chain was handed (`inputHeaderNames`, taken before it ran) nor on the cross-origin
+ * safelist, and URL userinfo the hop's own URL (`inputURL`) did not carry. What the hop
+ * already carried keeps the value the interceptor gave it.
+ */
+function withoutAddedCrossOriginCredentials(
+  request: ResolvedRequest,
+  inputHeaderNames: ReadonlySet<string>,
+  inputURL: string,
+): ResolvedRequest {
+  // Names are already lowercase: the result is a snapshot (see `snapshotInterceptedRequest`).
+  const headers: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (inputHeaderNames.has(name) || CROSS_ORIGIN_SAFE_HEADERS.has(name)) {
+      headers[name] = value;
+    }
+  }
+
+  return {
+    ...request,
+    requestURL:
+      stripURLCredentials(inputURL) === inputURL
+        ? stripURLCredentials(request.requestURL)
+        : request.requestURL,
+    headers,
+  };
 }

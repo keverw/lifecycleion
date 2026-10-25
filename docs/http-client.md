@@ -310,7 +310,7 @@ interface HTTPResponse<T = unknown> {
 }
 ```
 
-`isFailed` is `true` only for client-level failures, not for HTTP error statuses. A 404 or 500 HTTP response has `isFailed: false` (the server responded and returned a status code). Most failures report `status: 0`, but four can carry a nonzero one: a stream error (see [Stream Errors and Replay](#stream-errors-and-replay)), a `stream_setup_error` (the factory was called for an answer whose headers had arrived), and an `adapter_error` for an answered response the client could not read (see [Error Codes](#error-codes)) keep the real status, and a transport failure an adapter reports with `isTransportError: true` keeps whatever status the adapter gave. Any of them can be `isFailed: true` with a `2xx` or `3xx` status, so check `isFailed` before trusting `status`. A timeout reports `status: 0`; only a body that timed out mid-stream, or one whose stream factory was still setting up, keeps its status. A cancel and a timeout are exclusive: a request cancelled after its timer fired is `isCancelled`, not `isTimeout`. An answer that arrives after its attempt's timer fired - from an adapter that does not stop on abort - is handled as any answer is: delivered if it can be read, an `adapter_error` keeping its status if not.
+`isFailed` is `true` only for client-level failures, not for HTTP error statuses. A 404 or 500 HTTP response has `isFailed: false` (the server responded and returned a status code). Most failures report `status: 0`, but four can carry a nonzero one: a stream error (see [Stream Errors and Replay](#stream-errors-and-replay)), a `stream_setup_error` (the factory was called for an answer whose headers had arrived), and an `adapter_error` for an answered response the client could not read (see [Error Codes](#error-codes)) keep the real status, and a transport failure an adapter reports with `isTransportError: true` keeps whatever status the adapter gave. Any of them can be `isFailed: true` with a `2xx` or `3xx` status, so check `isFailed` before trusting `status`. A timeout reports `status: 0`; only a body that timed out mid-stream, or one whose stream factory was still setting up, keeps its status. A cancel and a timeout are exclusive: a request cancelled after its timer fired is `isCancelled`, not `isTimeout`. An answer that arrives after its attempt's timer fired - from an adapter that does not stop on abort - is handled as any answer is: delivered if it can be read, an `adapter_error` keeping its status if not. That holds while the answer arrives within a second of the timer firing. After that, the attempt has already ended as a timeout (see [AbortSignal Integration](#abortsignal-integration)).
 
 #### Uploads That Outlive the Response
 
@@ -517,11 +517,13 @@ const removeInterceptor = client.addRequestInterceptor(
       },
     };
   },
-  { phases: ['initial', 'retry'] }, // default: ['initial']
+  { phases: ['initial', 'retry'], hosts: ['api.example.com'] }, // phases default: ['initial']
 );
 
 // Later: removeInterceptor()
 ```
+
+The `hosts` filter keeps the token to the API's own host. Without it, the interceptor would run for every host, including a redirect target. On a redirect hop to another origin, the client drops a header that a `retry`-phase interceptor adds, unless it is on the cross-origin allow-list. See [Redirect Handling](#redirect-handling).
 
 The interceptor receives the request and must return the (mutated) request, an `InterceptorCancel` to abort it, or `null` as shorthand for cancelling without a reason:
 
@@ -782,7 +784,10 @@ redirect hops. For a retry-phase interceptor `attempt` is the attempt about to b
 for a retry-phase observer it is the attempt that just failed - so for one retry the
 observer sees `attempt: 1` and the interceptor `attempt: 2`. `maxAttempts` is the highest attempt number available to the current retry
 loop after retries spent on earlier hops. The optional `redirect` field is set when the
-retry is occurring on a post-redirect URL.
+retry is occurring on a post-redirect URL. On such a retry to an origin other than the
+request's caller-selected origin, a header the interceptors add is dropped unless it is on the
+cross-origin allow-list, and so is userinfo they add to the URL. See
+[Redirect Handling](#redirect-handling).
 
 **`redirect` phase** carries `{ type: 'redirect', hop, from, to, statusCode }`.
 
@@ -1053,6 +1058,8 @@ const client = new HTTPClient({
 
 Cross-origin redirects carry only an allow-list of headers: `accept`, `accept-encoding` (the caller's own; NodeAdapter's default one is not carried), `accept-language`, `content-encoding`, `content-language`, `content-type`, `user-agent`, `range` and the conditional headers (`if-range`, `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`). Everything else - `Authorization`, `Cookie`, and any custom header such as `X-API-Key` that might be a credential - is stripped. This is stricter than fetch, which drops only `Authorization`; a redirect-phase interceptor can add a header back for a target it trusts. Cookies are recomputed from the jar for the target.
 
+A retry on that hop follows the same rule. The hop's request is the stripped one, plus whatever the redirect-phase interceptors added. When the `retry`-phase interceptors run on it, including a parent client's, a header they add is dropped unless it is on the allow-list above, and so is userinfo they add to the URL. A header the hop already carried keeps the value they give it, so a credential that a redirect-phase interceptor added for a trusted target can be refreshed on a retry. The headers are dropped silently, as the hop's own are. This applies while the hop is on an origin other than the request's [caller-selected origin](#nodeadapter), the scope URL credentials and TLS identity follow: the URL the caller addressed, or a host a retry interceptor chose by rewriting the URL. A retry interceptor that rewrites the URL to another host selects that host, so its headers are kept there. Rewriting only the path, scheme or port keeps the server's choice of host and selects nothing, so the rule still applies. The `Cookie` header comes from the jar when one is configured. Without a jar, a `Cookie` header a retry interceptor adds is dropped like any other.
+
 A `307` or `308` replays the body, a `GET`'s included, with its `Content-Type` and `Content-Encoding`, across origins too. A hop rewritten to `GET`, and any `303` (a `GET` that carried a body included), drops the body and those headers, with `Content-Language` and `Content-Location`.
 
 With `NodeAdapter`, URL-based Basic auth follows the resolved redirect URL: from `https://user:pass@example.com/start`, a relative `Location: /next` retains those credentials, while an absolute `Location: https://example.com/next` without userinfo does not. An explicitly supplied `Authorization` header still carries through same-origin redirects.
@@ -1161,7 +1168,7 @@ controller.abort();
 controller.abort('user_navigated_away');
 ```
 
-The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.). Either one will abort the request and set `isCancelled: true`. The per-attempt timeout is independent. It fires its own abort but sets `isTimeout: true` instead. Whatever an adapter's `send()` rejects with after that abort and before it has answered, or an `isTransportError` response it resolves then, is the attempt's timeout, so a custom adapter need not reject with an `AbortError`. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`.
+The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.). Either one will abort the request and set `isCancelled: true`. The per-attempt timeout is independent. It fires its own abort but sets `isTimeout: true` instead. Whatever an adapter's `send()` rejects with after that abort and before it has answered, or a transport-failure response it resolves then (`isTransportError: true`, or a bare `status: 0` that is not a stream error, nor a detected redirect with `followRedirects` off), is the attempt's timeout, so a custom adapter need not reject with an `AbortError`. An adapter that ignores the abort is waited for one second after it, whether the abort came from the timer or a cancel. If `send()` has not settled by then, the attempt ends as that timeout or cancel without it, with no `requestBodySettled` reported for the attempt. The `onUploadProgress` and `onDownloadProgress` hooks and the `streamResponse` factory handed to that adapter are disarmed: a late call reaches none of yours, and a late factory call is answered `null`, so no sink is opened. A later answer is ignored, and a later rejection is not left unhandled. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`.
 
 ### Abort Listeners That Throw
 

@@ -11677,3 +11677,742 @@ test('PR review round 45: each MockAdapter cookie option field is read once', as
     sameSite: 1,
   });
 });
+
+/**
+ * A server pair for a cross-origin hop: `https://api.example/start` redirects to `target`,
+ * whose first answer is a `503` and every later one a `200`. Records what each request to
+ * a host other than `api.example` sent.
+ */
+function crossOriginRetryAdapter(target: string): {
+  adapter: HTTPAdapter;
+  sentToTarget: AdapterRequest[];
+  sentToAPI: AdapterRequest[];
+} {
+  const sentToTarget: AdapterRequest[] = [];
+  const sentToAPI: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      if (new URL(request.requestURL).host === 'api.example') {
+        sentToAPI.push(request);
+        return Promise.resolve(
+          request.requestURL.endsWith('/start')
+            ? { status: 302, headers: { location: target }, body: null }
+            : {
+                status: sentToAPI.length === 2 ? 503 : 200,
+                headers: {},
+                body: null,
+              },
+        );
+      }
+      sentToTarget.push(request);
+      return Promise.resolve({
+        status: sentToTarget.length === 1 ? 503 : 200,
+        headers: {},
+        body: null,
+      });
+    },
+  };
+  return { adapter, sentToTarget, sentToAPI };
+}
+
+const crossOriginRetryPolicy = {
+  strategy: 'fixed',
+  maxRetryAttempts: 1,
+  delayMS: 0,
+} as const;
+
+test('PR review round 57: a retry interceptor does not send its credentials to a cross-origin redirect target', async () => {
+  const { adapter, sentToTarget, sentToAPI } = crossOriginRetryAdapter(
+    'https://evil.example/next',
+  );
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  // One that writes into the request it was handed and returns it. First, so it is
+  // handed the request the chain began with.
+  client.addRequestInterceptor(
+    (request) => {
+      (request.headers as Record<string, string>)['x-api-key'] = 'KEY';
+      return request;
+    },
+    { phases: ['initial', 'retry'] },
+  );
+  // The documented token interceptor, with no `hosts` filter.
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: {
+        ...request.headers,
+        authorization: 'Bearer SECRET',
+        cookie: 'session=1',
+        accept: 'application/json',
+      },
+    }),
+    { phases: ['initial', 'retry'] },
+  );
+  // And one that puts credentials into the URL.
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      requestURL: request.requestURL.replace('://', '://user:pass@'),
+    }),
+    { phases: ['retry'] },
+  );
+
+  const response = await client.get('https://api.example/start').send();
+
+  expect(response.status).toBe(200);
+  expect(sentToAPI[0]?.headers.authorization).toBe('Bearer SECRET');
+  expect(sentToAPI[0]?.headers['x-api-key']).toBe('KEY');
+  expect(sentToTarget).toHaveLength(2);
+  for (const sent of sentToTarget) {
+    expect(sent.headers).not.toHaveProperty('authorization');
+    expect(sent.headers).not.toHaveProperty('x-api-key');
+    expect(sent.headers).not.toHaveProperty('cookie');
+    expect(new URL(sent.requestURL).username).toBe('');
+    expect(new URL(sent.requestURL).password).toBe('');
+  }
+  // A safelisted header the retry interceptor sets is still sent.
+  expect(sentToTarget[1]?.headers.accept).toBe('application/json');
+});
+
+test("PR review round 57: a parent client's retry interceptor does not send its credentials to a cross-origin redirect target", async () => {
+  const { adapter, sentToTarget, sentToAPI } = crossOriginRetryAdapter(
+    'https://evil.example/next',
+  );
+  const parent = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  parent.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: { ...request.headers, authorization: 'Bearer SECRET' },
+    }),
+    { phases: ['initial', 'retry'] },
+  );
+  const sub = parent.createSubClient({});
+  sub.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: { ...request.headers, 'x-sub': '1' },
+    }),
+    { phases: ['retry'] },
+  );
+
+  const response = await sub.get('https://api.example/start').send();
+
+  expect(response.status).toBe(200);
+  expect(sentToAPI[0]?.headers.authorization).toBe('Bearer SECRET');
+  expect(sentToTarget).toHaveLength(2);
+  for (const sent of sentToTarget) {
+    expect(sent.headers).not.toHaveProperty('authorization');
+    expect(sent.headers).not.toHaveProperty('x-sub');
+  }
+});
+
+test('PR review round 57: a credential a redirect interceptor gave a trusted target survives a retry there, and can be refreshed', async () => {
+  const { adapter, sentToTarget } = crossOriginRetryAdapter(
+    'https://trusted.example/next',
+  );
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: { ...request.headers, 'x-trusted-token': 'T1' },
+    }),
+    { phases: ['redirect'], hosts: ['trusted.example'] },
+  );
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: {
+        ...request.headers,
+        ...(request.headers['x-trusted-token'] !== undefined
+          ? { 'x-trusted-token': 'T2' }
+          : {}),
+        'x-new': 'dropped',
+      },
+    }),
+    { phases: ['retry'] },
+  );
+
+  const response = await client.get('https://api.example/start').send();
+
+  expect(response.status).toBe(200);
+  expect(sentToTarget.map((sent) => sent.headers['x-trusted-token'])).toEqual([
+    'T1',
+    'T2',
+  ]);
+  expect(sentToTarget[1]?.headers).not.toHaveProperty('x-new');
+});
+
+test("PR review round 57: a retry interceptor's headers are sent on a same-origin redirect hop", async () => {
+  const { adapter, sentToAPI } = crossOriginRetryAdapter(
+    'https://api.example/next',
+  );
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: {
+        ...request.headers,
+        authorization: 'Bearer SECRET',
+        'x-api-key': 'KEY',
+      },
+    }),
+    { phases: ['retry'] },
+  );
+
+  const response = await client.get('https://api.example/start').send();
+
+  expect(response.status).toBe(200);
+  // /start, /next (503), /next retried.
+  expect(sentToAPI).toHaveLength(3);
+  expect(sentToAPI[2]?.headers.authorization).toBe('Bearer SECRET');
+  expect(sentToAPI[2]?.headers['x-api-key']).toBe('KEY');
+});
+
+test('PR review round 57: a retry interceptor that names the host itself on a redirect hop sends its headers there', async () => {
+  const { adapter, sentToTarget } = crossOriginRetryAdapter(
+    'https://evil.example/next',
+  );
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      requestURL: 'https://failover.example/next',
+      headers: { ...request.headers, authorization: 'Bearer FAILOVER' },
+    }),
+    { phases: ['retry'] },
+  );
+
+  await client.get('https://api.example/start').send();
+
+  expect(sentToTarget.map((sent) => new URL(sent.requestURL).host)).toEqual([
+    'evil.example',
+    'failover.example',
+  ]);
+  expect(sentToTarget[0]?.headers).not.toHaveProperty('authorization');
+  expect(sentToTarget[1]?.headers.authorization).toBe('Bearer FAILOVER');
+});
+
+/** An adapter whose `send()` never settles on its own and ignores its abort signal. */
+function unresponsiveAdapter(): {
+  adapter: HTTPAdapter;
+  pending: Array<{
+    resolve: (response: AdapterResponse) => void;
+    reject: (error: unknown) => void;
+  }>;
+} {
+  const pending: Array<{
+    resolve: (response: AdapterResponse) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+  return {
+    pending,
+    adapter: {
+      getType: () => 'node',
+      send: () =>
+        new Promise<AdapterResponse>((resolve, reject) => {
+          pending.push({ resolve, reject });
+        }),
+    },
+  };
+}
+
+test('PR review round 57: an adapter that never settles is ended by the per-attempt timeout', async () => {
+  const { adapter, pending } = unresponsiveAdapter();
+  const ends: Array<{ status: number; willRetry: boolean }> = [];
+  const builder = new HTTPClient({ adapter, baseURL: 'http://x.test' })
+    .get('/hang')
+    .timeout(50)
+    .onAttemptEnd((event) => {
+      ends.push({ status: event.status, willRetry: event.willRetry });
+    });
+
+  const response = await builder.send();
+
+  expect(response.isTimeout).toBe(true);
+  expect(response.isCancelled).toBe(false);
+  expect(builder.error?.code).toBe('timeout');
+  expect(ends).toEqual([{ status: 0, willRetry: false }]);
+  expect(pending).toHaveLength(1);
+
+  // A late answer or rejection is ignored, and the rejection is not left unhandled.
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    pending[0]?.reject(new Error('late'));
+    await sleep(20);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  expect(unhandled).toEqual([]);
+  expect(response.isTimeout).toBe(true);
+});
+
+test('PR review round 57: a timeout of an adapter that never settles is retried as a timeout', async () => {
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => {
+      sends++;
+      return sends === 1
+        ? new Promise<AdapterResponse>(() => {})
+        : Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const response = await new HTTPClient({
+    adapter,
+    baseURL: 'http://x.test',
+    timeout: 50,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  })
+    .get('/hang')
+    .send();
+
+  expect(sends).toBe(2);
+  expect(response.status).toBe(200);
+});
+
+test('PR review round 57: cancel() ends a request whose adapter never settles', async () => {
+  const { adapter, pending } = unresponsiveAdapter();
+  const builder = new HTTPClient({
+    adapter,
+    baseURL: 'http://x.test',
+    timeout: 0,
+  }).get('/hang');
+
+  const sending = builder.send();
+  await sleep(20);
+  expect(builder.cancel('stop')).toBe('cancelled');
+  const response = await sending;
+
+  expect(response.isCancelled).toBe(true);
+  expect(response.isTimeout).toBe(false);
+  expect(builder.error?.code).toBe('cancelled');
+  expect(builder.error?.cancelReason).toBe('stop');
+
+  // A late answer changes nothing.
+  pending[0]?.resolve({ status: 200, headers: {}, body: null });
+  await sleep(10);
+  expect(builder.state).toBe('cancelled');
+});
+
+test('PR review round 57: a bare status 0 answered after the timer fired is a timeout, as an isTransportError one is', async () => {
+  for (const isTransportError of [undefined, true]) {
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request) => {
+        sends++;
+        return new Promise((resolve) => {
+          request.signal?.addEventListener('abort', () => {
+            resolve({
+              status: 0,
+              headers: {},
+              body: null,
+              ...(isTransportError ? { isTransportError } : {}),
+            });
+          });
+        });
+      },
+    };
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://x.test',
+      timeout: 30,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    }).get('/a');
+    const response = await builder.send();
+
+    expect(sends).toBe(2);
+    expect(response.isTimeout).toBe(true);
+    expect(response.isNetworkError).toBe(false);
+    expect(builder.error?.code).toBe('timeout');
+  }
+});
+
+test('PR review round 57: the hooks handed to an adapter the attempt gave up on do nothing, and its late upload outcome is observed', async () => {
+  const handed: AdapterRequest[] = [];
+  let resolveLate: ((response: AdapterResponse) => void) | undefined;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      handed.push(request);
+      return new Promise<AdapterResponse>((resolve) => {
+        resolveLate = resolve;
+      });
+    },
+  };
+  const calls: string[] = [];
+  const builder = new HTTPClient({ adapter, baseURL: 'http://x.test' })
+    .put('/upload')
+    .json({ a: 1 })
+    .timeout(50)
+    .onUploadProgress(() => calls.push('upload'))
+    .onDownloadProgress(() => calls.push('download'))
+    .streamResponse(() => {
+      calls.push('factory');
+      return null;
+    });
+
+  const response = await builder.send();
+  expect(response.isTimeout).toBe(true);
+
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const request = handed[0];
+    const progress = { loaded: 1, total: 2, progress: 0.5 };
+    request?.onUploadProgress?.(progress);
+    request?.onDownloadProgress?.(progress);
+    const sink = await request?.streamResponse?.(
+      {
+        status: 200,
+        headers: {},
+        url: request.requestURL,
+        attempt: 1,
+        requestID: builder.requestID,
+      },
+      { signal: new AbortController().signal },
+    );
+    expect(sink).toBeNull();
+
+    resolveLate?.({
+      status: 200,
+      headers: {},
+      body: null,
+      requestBodySettled: Promise.reject(new Error('late upload')),
+    });
+    await sleep(20);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+
+  expect(calls).toEqual([]);
+  expect(unhandled).toEqual([]);
+});
+
+test("PR review round 57: an abandoned adapter's upload progress does not hold the next attempt's settle wait open", async () => {
+  let sends = 0;
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sends++;
+      if (sends === 1) {
+        // Hung, and still reporting upload progress long after it was given up on.
+        ticker = setInterval(() => {
+          request.onUploadProgress?.({ loaded: 1, total: 2, progress: 0.5 });
+        }, 5);
+        return new Promise<AdapterResponse>(() => {});
+      }
+      // An early 503 whose upload never settles: the settle wait's stall bound ends it.
+      return Promise.resolve({
+        status: 503,
+        headers: {},
+        body: null,
+        requestBodySettled: new Promise<Error | undefined>(() => {}),
+      });
+    },
+  };
+  const reports: Event[] = [];
+  const onGlobalError = (event: Event): void => {
+    reports.push(event);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://x.test',
+      timeout: 50,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    })
+      .put('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(sends).toBe(2);
+    expect(response.isTimeout).toBe(true);
+    expect(reports).toHaveLength(1);
+  } finally {
+    clearInterval(ticker);
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
+test('PR review round 57: a status-0 stream error answered after the timer fired is not turned into a timeout', async () => {
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sends++;
+      return new Promise((resolve) => {
+        request.signal?.addEventListener('abort', () => {
+          resolve({
+            status: 0,
+            headers: {},
+            body: null,
+            isStreamError: true,
+            streamErrorCode: 'stream_response_error',
+          });
+        });
+      });
+    },
+  };
+  const builder = new HTTPClient({
+    adapter,
+    baseURL: 'http://x.test',
+    timeout: 30,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  }).get('/a');
+  const response = await builder.send();
+
+  expect(sends).toBe(1);
+  expect(response.isTimeout).toBe(false);
+  expect(response.isStreamError).toBe(true);
+  expect(builder.error?.code).toBe('stream_response_error');
+});
+
+test('PR review round 57: a status-0 detected redirect answered after the timer fired is a timeout only where redirects are followed', async () => {
+  for (const isFollowing of [true, false]) {
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request) => {
+        sends++;
+        return new Promise((resolve) => {
+          request.signal?.addEventListener('abort', () => {
+            resolve({
+              status: 0,
+              headers: {},
+              body: null,
+              wasRedirectDetected: true,
+            });
+          });
+        });
+      },
+    };
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://x.test',
+      timeout: 30,
+      followRedirects: isFollowing,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    }).get('/a');
+    const response = await builder.send();
+
+    if (isFollowing) {
+      expect(sends).toBe(2);
+      expect(response.isTimeout).toBe(true);
+      expect(builder.error?.code).toBe('timeout');
+    } else {
+      expect(sends).toBe(1);
+      expect(response.isTimeout).toBe(false);
+      expect(builder.error?.code).toBe('redirect_disabled');
+    }
+  }
+});
+
+test('PR review round 57: a retry interceptor rewriting only the path or scheme of a cross-origin hop selects nothing', async () => {
+  for (const rewrite of [
+    (url: string) => url.replace('/next', '/other'),
+    (url: string) => url.replace('https://', 'http://'),
+  ]) {
+    const { adapter, sentToTarget } = crossOriginRetryAdapter(
+      'https://evil.example/next',
+    );
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: crossOriginRetryPolicy,
+    });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        requestURL: rewrite(request.requestURL),
+        headers: { ...request.headers, authorization: 'Bearer SECRET' },
+      }),
+      { phases: ['retry'] },
+    );
+
+    await client.get('https://api.example/start').send();
+
+    expect(sentToTarget).toHaveLength(2);
+    expect(sentToTarget[1]?.requestURL).toBe(
+      rewrite('https://evil.example/next'),
+    );
+    expect(sentToTarget[1]?.headers).not.toHaveProperty('authorization');
+  }
+});
+
+test("PR review round 57: a retry interceptor's token reaches the caller's origin again after a hop away and back", async () => {
+  const sent: AdapterRequest[] = [];
+  let backAttempts = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sent.push(request);
+      const url = new URL(request.requestURL);
+      if (url.pathname === '/start') {
+        return Promise.resolve({
+          status: 302,
+          headers: { location: 'https://b.example/bounce' },
+          body: null,
+        });
+      }
+      if (url.host === 'b.example') {
+        return Promise.resolve({
+          status: 302,
+          headers: { location: 'https://api.example/back' },
+          body: null,
+        });
+      }
+      backAttempts++;
+      return Promise.resolve({
+        status: backAttempts === 1 ? 503 : 200,
+        headers: {},
+        body: null,
+      });
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: { ...request.headers, authorization: 'Bearer SECRET' },
+    }),
+    { phases: ['initial', 'retry'] },
+  );
+
+  const response = await client.get('https://api.example/start').send();
+
+  expect(response.status).toBe(200);
+  expect(sent.map((request) => new URL(request.requestURL).pathname)).toEqual([
+    '/start',
+    '/bounce',
+    '/back',
+    '/back',
+  ]);
+  expect(sent[1]?.headers).not.toHaveProperty('authorization');
+  expect(sent[2]?.headers).not.toHaveProperty('authorization');
+  expect(sent[3]?.headers.authorization).toBe('Bearer SECRET');
+});
+
+test('PR review round 57: a host a retry interceptor chose does not carry its headers to a later redirect elsewhere', async () => {
+  const sent: AdapterRequest[] = [];
+  let failoverAttempts = 0;
+  let thirdAttempts = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sent.push(request);
+      const host = new URL(request.requestURL).host;
+      if (host === 'api.example') {
+        return Promise.resolve({
+          status: 302,
+          headers: { location: 'https://evil.example/next' },
+          body: null,
+        });
+      }
+      if (host === 'evil.example') {
+        return Promise.resolve({ status: 503, headers: {}, body: null });
+      }
+      if (host === 'failover.example') {
+        failoverAttempts++;
+        return Promise.resolve({
+          status: 302,
+          headers: { location: 'https://third.example/x' },
+          body: null,
+        });
+      }
+      thirdAttempts++;
+      return Promise.resolve({
+        status: thirdAttempts === 1 ? 503 : 200,
+        headers: {},
+        body: null,
+      });
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+  });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      requestURL: request.requestURL.startsWith('https://evil.example')
+        ? 'https://failover.example/next'
+        : request.requestURL,
+      headers: { ...request.headers, authorization: 'Bearer SECRET' },
+    }),
+    { phases: ['retry'] },
+  );
+
+  const response = await client.get('https://api.example/start').send();
+
+  expect(response.status).toBe(200);
+  expect(failoverAttempts).toBe(1);
+  expect(sent.map((request) => new URL(request.requestURL).host)).toEqual([
+    'api.example',
+    'evil.example',
+    'failover.example',
+    'third.example',
+    'third.example',
+  ]);
+  expect(sent[2]?.headers.authorization).toBe('Bearer SECRET');
+  expect(sent[4]?.headers).not.toHaveProperty('authorization');
+});
+
+test('PR review round 57: an adapter that honors its signal is not held by the abort grace', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/slow', async () => {
+    await sleep(5_000);
+    return { status: 200 };
+  });
+  const client = new HTTPClient({ adapter, baseURL: 'http://mock.test' });
+
+  let startedAt = performance.now();
+  const timedOut = await client.get('/slow').timeout(50).send();
+  expect(timedOut.isTimeout).toBe(true);
+  expect(performance.now() - startedAt).toBeLessThan(150);
+
+  startedAt = performance.now();
+  const builder = client.get('/slow').timeout(0);
+  const sending = builder.send();
+  await sleep(20);
+  builder.cancel('stop');
+  const cancelled = await sending;
+  expect(cancelled.isCancelled).toBe(true);
+  expect(performance.now() - startedAt).toBeLessThan(120);
+});
