@@ -710,7 +710,10 @@ export interface HTTPResponse<T = unknown> {
    * for an `Error`. Only `NodeAdapter` reports it today: `FetchAdapter` cannot,
    * since `fetch()` exposes neither upload progress nor the moment the body finished,
    * and on an adapter that does not set it the client does not wait before a
-   * followed redirect hop or a retry.
+   * followed redirect hop or a retry. An attempt that had a body to send (not an empty
+   * string, empty bytes or an empty form) that the client gave up on, its adapter
+   * having ignored the abort, resolves it with an `Error` saying the upload's outcome is
+   * unknown, whatever the adapter.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }
@@ -769,7 +772,7 @@ export interface HTTPClientError {
    * have been tried again with budget left. False when the last failure is one no
    * retry follows whatever the budget (an adapter veto, a stream error other than a
    * body that only failed to decode, a non-idempotent method, a non-retryable status,
-   * an attempt with a body given up on after its adapter ignored the abort - see
+   * an attempt with a non-empty body given up on after its adapter ignored the abort - see
    * `retrySuppressedReason: 'upload_unsettled'`). The last attempt may still have
    * received a response: a retryable status whose body then could not be read ends as
    * an `adapter_error` with its status.

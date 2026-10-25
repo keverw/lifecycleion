@@ -218,6 +218,13 @@ const COOKIE_JAR_FAILURE_MESSAGE =
   'Cookie jar failed to process response headers';
 
 /**
+ * The upload outcome an attempt given up on with a body to send reports: the adapter that
+ * ignored its abort never said what became of the body, so its fate is unknown.
+ */
+const ABANDONED_UPLOAD_MESSAGE =
+  "The request body's upload outcome is unknown: the adapter did not settle after the attempt was aborted, and the client gave up on it";
+
+/**
  * The adapter-answer fields read through the receiver when the answer does not own them
  * (a class instance's prototype getters). `headers`, `effectiveRequestHeaders` and
  * `requestBodySettled` are read on their own before these.
@@ -1244,10 +1251,11 @@ export class BaseHTTPClient {
           // body went out" value, for exactly the early-ack `POST` -> `302` -> `GET` shape
           // this field exists for. A `307`/`308` resends the body and its own outcome is
           // the one that reached the final response, while a bodiless hop or retry after
-          // it changes nothing about what the upload did. A bodied attempt that reported
-          // none - one given up on with its adapter still out, or a custom adapter's
-          // untagged throw - leaves none, rather than an earlier hop's "the body went out"
-          // for an upload whose fate nobody knows.
+          // it changes nothing about what the upload did. A bodied attempt given up on
+          // with its adapter still out reports that its upload's fate is unknown, and one
+          // that reported none - a custom adapter's untagged throw - leaves none, rather
+          // than an earlier hop's "the body went out" for an upload whose fate nobody
+          // knows.
           uploadOutcome = latestUpload.outcome;
           lastAttemptNumber = attemptResult.attemptCount;
           isRetriesExhausted = attemptResult.isRetriesExhausted;
@@ -2273,8 +2281,9 @@ export class BaseHTTPClient {
     /**
      * The upload outcome the response reports: the latest attempt's that had a body, or
      * that reported one. Cleared when a bodied attempt is dispatched, so one that reports
-     * none - abandoned, or a custom adapter's untagged throw - leaves none, never an
-     * earlier attempt's or hop's; a bodiless attempt leaves it as it was.
+     * none - a custom adapter's untagged throw - leaves none, never an earlier attempt's
+     * or hop's; one given up on reports its upload's fate unknown, and a bodiless attempt
+     * leaves it as it was.
      */
     latestUpload: { outcome: Promise<Error | undefined> | undefined };
     /** Latest destination explicitly selected by the caller or a retry interceptor. */
@@ -2562,6 +2571,7 @@ export class BaseHTTPClient {
           cancelReason?: string;
         },
         knownBodies?: AttemptBodies | 'unbuildable',
+        reportedURL?: string,
       ) => {
         clearTimeout(timeoutID);
         if (outcome.wasCancelled) {
@@ -2580,7 +2590,7 @@ export class BaseHTTPClient {
             requestID,
             // The hop's own URL when the pending request's cannot be read, so the
             // response, the error and host-filtered observers name a real one.
-            { fallbackURL: baseRequest.requestURL },
+            { fallbackURL: baseRequest.requestURL, reportedURL },
             knownBodies,
           ),
           attemptCount: attemptNumber,
@@ -2655,6 +2665,25 @@ export class BaseHTTPClient {
                 }
                 return { ...request, body };
               };
+        // Whether a retry-phase request with this URL is held to the hop's own URL, body
+        // and headers (see below): on a hop to an origin the caller never chose, one the
+        // interceptors left on the hop's host and did not send back to the caller's own
+        // origin. A URL that is not a string, or names no host, chose no destination.
+        const isHeldToHop = (requestURL: unknown): boolean => {
+          if (retryBodyCopy === undefined) {
+            return false;
+          }
+
+          if (typeof requestURL !== 'string') {
+            return true;
+          }
+
+          const host = comparableHost(requestURL);
+          return (
+            (host === '' || host === comparableHost(baseRequest.requestURL)) &&
+            isCrossOrigin(credentialScope.url, requestURL)
+          );
+        };
 
         try {
           const retryRun = await this._runInterceptors(
@@ -2692,13 +2721,32 @@ export class BaseHTTPClient {
           // Terminal failure — no further attempts. _execute notifies error observers
           // with phase `final` (same as all settled errors), not `retry`. A body that
           // could not be copied is the body's failure, as one that cannot be serialized
-          // is, not an interceptor's.
-          return endBeforeDispatch(failedRetryRequest, {
-            errorCode: retryBodyCopy?.didFail
-              ? 'request_setup_error'
-              : 'interceptor_error',
-            adapterCause: normalizeError(error),
-          });
+          // is, not an interceptor's. On a hop held to its own request, reported as that
+          // request, as a stripped attempt would have gone out: the interceptors' carries
+          // what they added - a token in the URL or a header - and the response, the error
+          // and host-filtered observers would name a credentialed request to the host the
+          // server chose. The URL is read once and the one read is reported, so a getter
+          // answering differently on a second read cannot name the hop with what the
+          // interceptors added.
+          const failedRetryURL = readObjectMember(
+            failedRetryRequest,
+            'requestURL',
+          );
+          const isHeld = isHeldToHop(failedRetryURL);
+
+          return endBeforeDispatch(
+            isHeld ? baseRequest : failedRetryRequest,
+            {
+              errorCode: retryBodyCopy?.didFail
+                ? 'request_setup_error'
+                : 'interceptor_error',
+              adapterCause: normalizeError(error),
+            },
+            undefined,
+            !isHeld && typeof failedRetryURL === 'string'
+              ? failedRetryURL
+              : undefined,
+          );
         }
 
         if (isInterceptorCancel(retryIntercept)) {
@@ -2731,13 +2779,7 @@ export class BaseHTTPClient {
         // a retry the interceptor sends back to exactly that origin. Stripped silently, as
         // `_sanitizeRedirectRequest` strips the hop's own. A hop on an origin the caller
         // never chose is the one whose body was copied for the chain (`retryBodyCopy`).
-        if (
-          retryBodyCopy !== undefined &&
-          isRetryIntercepted &&
-          comparableHost(baseRequest.requestURL) ===
-            comparableHost(retryIntercept.requestURL) &&
-          isCrossOrigin(credentialScope.url, retryIntercept.requestURL)
-        ) {
+        if (isRetryIntercepted && isHeldToHop(retryIntercept.requestURL)) {
           try {
             attemptRequest = withoutAddedCrossOriginCredentials(
               retryIntercept,
@@ -2839,9 +2881,11 @@ export class BaseHTTPClient {
 
       // This attempt's own outcome takes over from here; see the declaration.
       previousUploadOutcome = undefined;
+      // Whether this attempt has a body to send, read once; see `sendsRequestBody`.
+      const isBodySent = sendsRequestBody(sentBody);
       // And it is the response's from here, whether or not it reports one: an upload
       // whose fate the adapter never told is not an earlier attempt's that it did.
-      if ((sentBody ?? null) !== null) {
+      if (isBodySent) {
         params.latestUpload.outcome = undefined;
       }
 
@@ -3584,8 +3628,16 @@ export class BaseHTTPClient {
          * body made it, and an absent field answers `undefined`, which is what a
          * *completed* upload resolves with.
          */
-        const uploadOutcome =
-          responseUploadOutcome ?? getRequestBodySettled(error);
+        //
+        // An attempt given up on while it had a body to send reports that its fate is
+        // unknown (see `ABANDONED_UPLOAD_MESSAGE`): the adapter that ignored its abort may
+        // still be writing the body, and nothing tells the client when it stops. The
+        // thrown value is the abort's own reason then, not the adapter's, so it carries
+        // no outcome of the adapter's to read. It is not retried either; see below.
+        const isUploadAbandoned = isAbandoned && isBodySent;
+        const uploadOutcome = isUploadAbandoned
+          ? Promise.resolve(new Error(ABANDONED_UPLOAD_MESSAGE))
+          : (responseUploadOutcome ?? getRequestBodySettled(error));
         if (uploadOutcome !== undefined) {
           params.latestUpload.outcome = uploadOutcome;
         }
@@ -4095,12 +4147,12 @@ export class BaseHTTPClient {
           };
         }
 
-        // An attempt given up on while it had a body to send is not retried: the adapter
-        // that ignored its abort may still be writing that body, and nothing tells the
-        // client when it stops - the settle wait has no outcome to wait on - so a retry
-        // would send the body a second time beside it. A bodiless one has nothing left
-        // going out and is retried as any timeout is.
-        const isUploadAbandoned = isAbandoned && (sentBody ?? null) !== null;
+        // An attempt given up on while it had a body to send (`isUploadAbandoned`) is not
+        // retried: the adapter that ignored its abort may still be writing that body, and
+        // nothing tells the client when it stops - the settle wait has no outcome of the
+        // adapter's to wait on - so a retry would send the body a second time beside it. A
+        // bodiless one, an empty body included, has nothing left going out and is retried
+        // as any timeout is.
 
         // Network / adapter / per-attempt timeout — retry if policy allows. A throw
         // carries no adapter response, so delivery is unproven - and a timed-out answer
@@ -5818,7 +5870,8 @@ const ADAPTER_ABORT_GRACE_MS = 1000;
  * anyone write may ignore the signal and never settle, and awaited bare that held the
  * request past its timeout and past a `cancel()` for good. Past the grace the attempt
  * rejects with `reason()` - the timer's `AbortError`, or the cancel's reason - and ends as
- * that timeout or cancel, with no upload outcome reported, since the adapter gave none.
+ * that timeout or cancel; an attempt with a body reports its upload's fate unknown, since
+ * the adapter gave none (see `ABANDONED_UPLOAD_MESSAGE`).
  * The adapter's promise stays observed, so a later rejection is not unhandled; a later
  * answer is ignored. `onAbandon` runs first, so the caller can disarm what it handed
  * the adapter.
@@ -6074,6 +6127,16 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
   }
 
   return undefined;
+}
+
+/**
+ * Whether an attempt's body, as the client serialized it, sends anything: by the rule
+ * `emptyRequestBody` reads a body by - none, an empty string, no bytes, or a form with no
+ * entries sends nothing. The client's own copy (see `buildAttemptBodies`), so the reads
+ * cannot throw.
+ */
+function sendsRequestBody(body: unknown): boolean {
+  return emptyRequestBody(body) === undefined;
 }
 
 /**

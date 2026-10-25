@@ -1226,8 +1226,9 @@ test('PR review round 48: with no observer registered no body is parsed back or 
     expect(calls).toBe(4);
     expect(hookEvents).toHaveLength(8);
     expect(parse).toHaveBeenCalledTimes(0);
-    // Once per request: the copy sent, taken from the caller's form.
-    expect(entries).toHaveBeenCalledTimes(2);
+    // Twice per request: the copy sent, taken from the caller's form, and one look at
+    // whether that copy sends anything.
+    expect(entries).toHaveBeenCalledTimes(4);
   } finally {
     parse.mockRestore();
     entries.mockRestore();
@@ -1297,8 +1298,9 @@ test("PR review round 48: an observer's body and rawBody are plain data fields, 
       true,
       'replaced',
     ]);
-    // The copy sent and the observers' one copy, the spread taking none.
-    expect(entries).toHaveBeenCalledTimes(2);
+    // The copy sent, one look at whether it sends anything, and the observers' one
+    // copy, the spread taking none.
+    expect(entries).toHaveBeenCalledTimes(3);
   } finally {
     entries.mockRestore();
   }
@@ -12687,7 +12689,7 @@ test('PR review round 58: an attempt abandoned after its stream factory was call
   }
 });
 
-test('PR review round 58: a 307 hop whose bodied attempt is abandoned reports no upload outcome, not the previous hop one', async () => {
+test("PR review round 58: a 307 hop whose bodied attempt is abandoned reports its upload's outcome unknown, not the previous hop one", async () => {
   let sends = 0;
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -12715,10 +12717,12 @@ test('PR review round 58: a 307 hop whose bodied attempt is abandoned reports no
 
   expect(sends).toBe(2);
   expect(response.isTimeout).toBe(true);
-  expect(response).not.toHaveProperty('requestBodySettled');
+  const outcome = await response.requestBodySettled;
+  expect(outcome).toBeInstanceOf(Error);
+  expect(outcome?.message).toContain('unknown');
 });
 
-test('PR review round 58: a retry whose bodied attempt is abandoned reports no upload outcome, not the previous attempt one', async () => {
+test("PR review round 58: a retry whose bodied attempt is abandoned reports its upload's outcome unknown, not the previous attempt one", async () => {
   let sends = 0;
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -12746,7 +12750,9 @@ test('PR review round 58: a retry whose bodied attempt is abandoned reports no u
 
   expect(sends).toBe(2);
   expect(response.isTimeout).toBe(true);
-  expect(response).not.toHaveProperty('requestBodySettled');
+  const outcome = await response.requestBodySettled;
+  expect(outcome).toBeInstanceOf(Error);
+  expect(outcome?.message).toContain('unknown');
 });
 
 test('PR review round 58: a retry interceptor that drops the body leaves the upload outcome of the attempt that had one', async () => {
@@ -13836,4 +13842,173 @@ test('PR review round 60: retry bytes that claim to be empty do not reach a cros
   expect(sentToTarget[1]?.headers['content-type']).toBe(
     sentToTarget[0]?.headers['content-type'],
   );
+});
+
+test("PR review round 61: an abandoned attempt with a body reports its upload's outcome unknown, not none", async () => {
+  const run = async (
+    send: (client: HTTPClient) => ReturnType<HTTPClient['get']>,
+  ) => {
+    // Ignores its abort and never settles.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () => new Promise<AdapterResponse>(() => {}),
+    };
+    return send(
+      new HTTPClient({ adapter, baseURL: 'http://x.test', timeout: 50 }),
+    ).send();
+  };
+
+  const bodied = await run((client) => client.put('/a').json({ a: 1 }));
+  expect(bodied.isTimeout).toBe(true);
+  expect(bodied.requestBodySettled).toBeInstanceOf(Promise);
+  const outcome = await bodied.requestBodySettled;
+  expect(outcome).toBeInstanceOf(Error);
+  expect(outcome?.message).toContain('unknown');
+
+  const bodiless = await run((client) => client.get('/a'));
+  expect(bodiless.isTimeout).toBe(true);
+  expect(bodiless).not.toHaveProperty('requestBodySettled');
+}, 15_000);
+
+test('PR review round 61: a custom adapter throw that carries no upload outcome still reports none', async () => {
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => Promise.reject(new Error('boom')),
+  };
+  const response = await new HTTPClient({ adapter, baseURL: 'http://x.test' })
+    .put('/a')
+    .json({ a: 1 })
+    .send();
+
+  expect(response.isFailed).toBe(true);
+  expect(response).not.toHaveProperty('requestBodySettled');
+});
+
+test("PR review round 61: a cross-origin retry the client refuses reports the hop's request, not what the interceptor added", async () => {
+  for (const requestURL of [
+    // An unsupported body, on the hop's own URL with a token added.
+    (hopURL: string) => {
+      const url = new URL(hopURL);
+      url.searchParams.set('access_token', 'SECRET');
+      return url.href;
+    },
+    // A URL the client refuses, naming no host.
+    () => '/next?access_token=SECRET',
+  ]) {
+    const { adapter, sentToTarget } = crossOriginReplayAdapter(
+      'https://evil.example/next',
+    );
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: crossOriginRetryPolicy,
+    });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        requestURL: requestURL(request.requestURL),
+        headers: { ...request.headers, authorization: 'Bearer SECRET' },
+        body: new URLSearchParams({ token: 'SECRET' }),
+      }),
+      { phases: ['retry'] },
+    );
+    const observed: Array<{
+      requestURL: string;
+      headers: Record<string, string | string[]>;
+    }> = [];
+    client.addErrorObserver(
+      (_error, request) => {
+        observed.push({
+          requestURL: request.requestURL,
+          headers: request.headers,
+        });
+      },
+      { hosts: ['evil.example'] },
+    );
+
+    const builder = client.put('https://api.example/start').json({ a: 1 });
+    const response = await builder.send();
+
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(sentToTarget).toHaveLength(1);
+    expect(response.requestURL).toBe('https://evil.example/next');
+    expect(builder.error?.requestURL).toBe('https://evil.example/next');
+    expect(observed).toHaveLength(1);
+    expect(observed[0]?.requestURL).toBe('https://evil.example/next');
+    expect(observed[0]?.headers).not.toHaveProperty('authorization');
+  }
+});
+
+test('PR review round 61: an abandoned attempt whose body sends nothing is retried, and reports no upload outcome', async () => {
+  for (const body of ['', new Uint8Array(0), new FormData()]) {
+    let sends = 0;
+    // Ignores its abort and never settles.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () => {
+        sends++;
+        return new Promise<AdapterResponse>(() => {});
+      },
+    };
+    const ends: Array<{ willRetry: boolean; reason: unknown }> = [];
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://x.test',
+      timeout: 50,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    })
+      .put('/a')
+      .body(body)
+      .onAttemptEnd((event) => {
+        ends.push({
+          willRetry: event.willRetry,
+          reason: event.retrySuppressedReason,
+        });
+      })
+      .send();
+
+    expect(sends).toBe(2);
+    expect(ends[0]).toEqual({ willRetry: true, reason: undefined });
+    expect(response.isTimeout).toBe(true);
+    expect(response).not.toHaveProperty('requestBodySettled');
+  }
+}, 30_000);
+
+test('PR review round 61: a retry interceptor that empties the body leaves the upload outcome of the attempt that had one', async () => {
+  for (const emptyBody of ['', new Uint8Array(0), new FormData()]) {
+    const sent: AdapterRequest[] = [];
+    const cut = new Error('cut');
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request) => {
+        sent.push(request);
+        return Promise.resolve(
+          sent.length === 1
+            ? {
+                status: 503,
+                headers: {},
+                body: null,
+                requestBodySettled: Promise.resolve(cut),
+              }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://x.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    client.addRequestInterceptor(
+      (request) => ({ ...request, body: emptyBody }),
+      { phases: ['retry'] },
+    );
+
+    const response = await client.put('/a').json({ a: 1 }).send();
+
+    expect(sent).toHaveLength(2);
+    expect(response.status).toBe(200);
+    const outcome = await response.requestBodySettled;
+    expect(outcome?.message).toBe('cut');
+  }
 });
