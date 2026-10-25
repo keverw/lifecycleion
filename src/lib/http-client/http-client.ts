@@ -4650,7 +4650,7 @@ export class BaseHTTPClient {
       // second time; it is reported as it came, as one that fails to build here is.
       if (knownBodies === undefined) {
         try {
-          observed = buildAttemptBodies(rawBody, true).observed;
+          observed = buildAttemptBodies(rawBody, true, false).observed;
         } catch {
           // Reported as it came, below.
         }
@@ -4950,6 +4950,7 @@ function snapshotClientConfigFields(config: SubClientConfig) {
 function buildAttemptBodies(
   rawBody: unknown,
   isObserved: boolean,
+  isSent = true,
 ): AttemptBodies {
   // Validate first so unsupported object-like values (URLSearchParams, Blob, etc.) fail
   // explicitly instead of being stringified into `{}`.
@@ -4993,7 +4994,9 @@ function buildAttemptBodies(
 
   if (isObserved) {
     if (body instanceof Uint8Array || body instanceof FormData) {
-      const copy = cloneBodyValue(body) as typeof body;
+      // For a body that will never be sent (a snapshot of a request that ended first),
+      // the client's own copy is the observers' already: nothing else holds it.
+      const copy = isSent ? (cloneBodyValue(body) as typeof body) : body;
       observed = { body: copy, rawBody: copy };
     } else {
       // A string, or nothing: `rawBody` is what the caller gave, `undefined` included.

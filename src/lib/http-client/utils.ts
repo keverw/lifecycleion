@@ -1348,7 +1348,7 @@ export function isPlainJSONBodyObject(
 ): value is Record<string, unknown> {
   // The header record's rule, so a plain object is one in either place - another
   // realm's (a `vm` context's) included. It is sent as `JSON.stringify` serializes it;
-  // see `buildObservedAttemptBodies`.
+  // see `buildAttemptBodies`.
   return isPlainRecord(value);
 }
 
