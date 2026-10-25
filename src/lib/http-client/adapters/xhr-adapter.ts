@@ -16,6 +16,7 @@ import {
 } from '../internal/request-fields';
 import { tooLargeAnswer, hasResponseBody } from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
+import { readUnknownMember } from '../../internal/read-member';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -24,6 +25,7 @@ import type {
 } from '../types';
 import {
   derivedRedirectFields,
+  isCrossOrigin,
   keepFirstJoinedLocation,
   resolveBrowserDispatchURL,
   stripURLCredentials,
@@ -330,7 +332,9 @@ export class XHRAdapter implements HTTPAdapter {
       // Set when this adapter aborted the XHR itself over a body past `maxResponseBytes`,
       // so the `abort` event that follows is not reported as a cancel.
       let didExceedMaxResponseBytes = false;
-      const midDownloadLimit = maxEncodedResponseBytes(maxResponseBytes);
+      // Whether the bytes progress counts are the body's own (see `isKnownUncodedBody`):
+      // read once, when they first pass the limit.
+      let isBodyKnownUncoded: boolean | undefined;
 
       // Fallback: upload.load didn't fire (no request body, or the browser skipped the
       // event). Callers always see a 100% upload event, unless upload.progress already
@@ -369,19 +373,23 @@ export class XHRAdapter implements HTTPAdapter {
 
       xhr.addEventListener('progress', (event) => {
         // Stopped as soon as the download passes the limit, rather than once the whole
-        // body has been buffered. `loaded` counts the bytes as they arrived - encoded,
-        // for a compressed body, which run a little past its decoded size only when it is
-        // incompressible: framing, a few bytes a block. Whether one was compressed cannot
-        // always be read (a cross-origin response hides `Content-Encoding`), so every body
-        // is stopped once its bytes pass the limit by more than that, and `load` checks
-        // the decoded size exactly.
+        // body has been buffered - when the bytes counted are the body's own. For a
+        // compressed body `loaded` may count encoded or decoded bytes, as the runtime
+        // has it (Chrome counts decoded, Firefox and React Native's Android networking
+        // encoded), and encoded bytes have no fixed bound on the decoded size either way.
+        // So only a body known to carry no coding is stopped here; one that is or may be
+        // compressed is left to `load`, which checks the decoded size exactly.
         if (didExceedMaxResponseBytes) {
           return;
         }
 
-        if (event.loaded > midDownloadLimit) {
-          refuseTooLargeBody();
-          return;
+        if (event.loaded > maxResponseBytes) {
+          isBodyKnownUncoded ??= isKnownUncodedBody(xhr, answeredURL);
+
+          if (isBodyKnownUncoded) {
+            refuseTooLargeBody();
+            return;
+          }
         }
 
         const { progress, total } = readProgressEvent(event);
@@ -452,7 +460,8 @@ export class XHRAdapter implements HTTPAdapter {
         finishUploadProgress();
 
         // The body as handed over can be larger than the bytes progress counted - a
-        // compressed response is counted encoded there - and a browser need not report
+        // runtime may count a compressed response encoded there, and a body that is or
+        // may be compressed is not stopped on them - and a runtime need not report
         // progress at all, so the whole body is checked once more here.
         if (body !== null && body.length > maxResponseBytes) {
           resolve(
@@ -584,13 +593,65 @@ export class XHRAdapter implements HTTPAdapter {
 // ---------------------------------------------------------------------------
 
 /**
- * The most encoded bytes a body within `maxResponseBytes` decoded can arrive as: the
- * limit, plus what a coding adds to incompressible input - gzip's and deflate's stored
- * blocks 5 bytes in 65,535, brotli's and zstd's less, a header and trailer - with room
- * to spare: a tenth of a percent, and a kilobyte.
+ * Whether the response body is known to carry no content coding, so the bytes XHR
+ * progress counts are the decoded body's own. Known only from a `Content-Encoding` of
+ * `identity` (or empty) the adapter can read, or from none at all on a browser response
+ * that would show one: the request and the response URL both same-origin with the page.
+ * A browser hides `Content-Encoding` on a cross-origin response unless the server lists
+ * it in `Access-Control-Expose-Headers` - a cross-origin request redirected back to the
+ * page's origin included - and outside a browser (no page origin) a runtime may decode
+ * the body itself and drop the header (React Native's Android networking does), so
+ * there its absence proves nothing and the body is taken as possibly coded.
  */
-function maxEncodedResponseBytes(maxResponseBytes: number): number {
-  return maxResponseBytes + Math.ceil(maxResponseBytes / 1000) + 1024;
+function isKnownUncodedBody(xhr: XMLHttpRequest, answeredURL: string): boolean {
+  const contentEncoding = parseXHRResponseHeaders(xhr.getAllResponseHeaders())[
+    'content-encoding'
+  ];
+
+  if (contentEncoding !== undefined) {
+    return (contentEncoding as string)
+      .split(',')
+      .every((token) => ['', 'identity'].includes(token.trim().toLowerCase()));
+  }
+
+  const pageOrigin = readPageOrigin();
+
+  return (
+    pageOrigin !== undefined &&
+    !isCrossOrigin(pageOrigin, answeredURL) &&
+    !isCrossOrigin(pageOrigin, xhr.responseURL || answeredURL)
+  );
+}
+
+/**
+ * The origin of the page or worker running the request, which a browser holds a response
+ * to for CORS: its `origin` (`'null'` in a sandboxed frame, which matches none), else its
+ * `location`'s. `undefined` where there is neither, as outside a browser. Read through
+ * guarded accessors, as the resolution base is.
+ */
+function readPageOrigin(): string | undefined {
+  for (const scope of [
+    globalThis,
+    readUnknownMember(globalThis, 'window'),
+    readUnknownMember(globalThis, 'self'),
+  ]) {
+    const origin = readUnknownMember(scope, 'origin');
+
+    if (typeof origin === 'string') {
+      return origin;
+    }
+
+    const locationOrigin = readUnknownMember(
+      readUnknownMember(scope, 'location'),
+      'origin',
+    );
+
+    if (typeof locationOrigin === 'string') {
+      return locationOrigin;
+    }
+  }
+
+  return undefined;
 }
 
 /**

@@ -212,6 +212,71 @@ function textBody(text: string): ArrayBuffer {
   return buf;
 }
 
+/** Runs `fn` with the global `key` set to `value`, and restores it after. */
+async function withGlobal<T>(
+  key: string,
+  value: unknown,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const scope = globalThis as Record<string, unknown>;
+  const didHaveKey = Object.hasOwn(scope, key);
+  const originalValue = scope[key];
+  scope[key] = value;
+
+  try {
+    return await fn();
+  } finally {
+    if (didHaveKey) {
+      scope[key] = originalValue;
+    } else {
+      delete scope[key];
+    }
+  }
+}
+
+/**
+ * Runs `fn` with `globalThis.origin` set to `origin`, as a page's or worker's is, and
+ * restores it after.
+ */
+async function withPageOrigin<T>(
+  origin: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return await withGlobal('origin', origin, fn);
+}
+
+/**
+ * Sends a `GET` under a 1,000-byte limit, reports 1,001 bytes of a body with no
+ * `Content-Encoding`, then loads 1,000 - whether the adapter stopped it on the way in
+ * shows in `abortCalled`.
+ */
+async function sendPastLimitWithoutCoding(
+  requestURL: string,
+  responseURL = '',
+): Promise<{ abortCalled: boolean; streamErrorCode: string | undefined }> {
+  const promise = new XHRAdapter().send({
+    requestURL,
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 1000,
+  });
+
+  const xhr = lastXHR;
+  xhr.readyState = 3;
+  xhr.status = 200;
+  xhr.responseURL = responseURL;
+  xhr.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+  xhr.simulateDownloadProgress(1001, 0);
+  xhr.response = textBody('x'.repeat(1000));
+  xhr.simulateLoad();
+  const response = await promise;
+
+  return {
+    abortCalled: xhr.abortCalled,
+    streamErrorCode: response.streamErrorCode,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -504,6 +569,8 @@ describe('XHRAdapter', () => {
     });
 
     lastXHR.status = 200;
+    // Known to carry no coding, so its bytes are the body's own.
+    lastXHR.getAllResponseHeadersResult = 'content-encoding: identity\r\n';
     lastXHR.simulateDownloadProgress(5000, 5000);
     const response = await promise;
 
@@ -536,7 +603,8 @@ describe('XHRAdapter', () => {
     };
 
     lastXHR.status = 200;
-    lastXHR.getAllResponseHeadersResult = 'x-kept: yes\r\n';
+    lastXHR.getAllResponseHeadersResult =
+      'x-kept: yes\r\ncontent-encoding: identity\r\n';
     lastXHR.simulateDownloadProgress(5000, 5000);
     const response = await promise;
 
@@ -902,43 +970,25 @@ describe('XHRAdapter', () => {
     expect(response.status).toBe(200);
   });
 
-  test('PR review round 28: a compressed body well past the limit is still refused mid-download', async () => {
-    const promise = new XHRAdapter().send({
-      requestURL: 'https://api.test/x',
-      method: 'GET',
-      headers: {},
-      maxResponseBytes: 1000,
-    });
-
-    lastXHR.readyState = 3;
-    lastXHR.status = 200;
-    lastXHR.getAllResponseHeadersResult =
-      'content-type: text/plain\r\ncontent-encoding: gzip\r\n';
-    // Far past what a coding adds to incompressible data: refused now, not at `load`.
-    lastXHR.simulateDownloadProgress(50_000, 0);
-    const response = await promise;
-
-    expect(response.streamErrorCode).toBe('response_too_large');
-    expect(lastXHR.abortCalled).toBe(true);
-  });
-
   test('PR review round 29: a body whose coding is hidden is not refused by its encoded bytes', async () => {
-    const promise = new XHRAdapter().send({
-      requestURL: 'https://other.test/x',
-      method: 'GET',
-      headers: {},
-      maxResponseBytes: 1000,
-    });
+    const response = await withPageOrigin('https://app.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://other.test/x',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+      });
 
-    // Cross-origin, `Content-Encoding` not exposed: a few bytes over encoded, within
-    // the limit decoded.
-    lastXHR.readyState = 3;
-    lastXHR.status = 200;
-    lastXHR.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
-    lastXHR.simulateDownloadProgress(1020, 0);
-    lastXHR.response = new TextEncoder().encode('x'.repeat(1000)).buffer;
-    lastXHR.simulateLoad();
-    const response = await promise;
+      // Cross-origin, `Content-Encoding` not exposed: a few bytes over encoded, within
+      // the limit decoded.
+      lastXHR.readyState = 3;
+      lastXHR.status = 200;
+      lastXHR.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+      lastXHR.simulateDownloadProgress(1020, 0);
+      lastXHR.response = new TextEncoder().encode('x'.repeat(1000)).buffer;
+      lastXHR.simulateLoad();
+      return await promise;
+    });
 
     expect(response.isStreamError).toBeUndefined();
     expect(response.status).toBe(200);
@@ -2799,7 +2849,8 @@ describe('XHRAdapter - maxResponseBytes', () => {
     });
     const xhr = lastXHR;
     xhr.status = 503;
-    xhr.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+    xhr.getAllResponseHeadersResult =
+      'content-type: text/plain\r\ncontent-encoding: identity\r\n';
     // As a real XHR does: reset to UNSENT and fire `abort` synchronously.
     xhr.abort = () => {
       xhr.abortCalled = true;
@@ -2809,7 +2860,7 @@ describe('XHRAdapter - maxResponseBytes', () => {
     };
 
     xhr.simulateDownloadProgress(60, 0);
-    // Past the limit and the slack a coding may add (see `maxEncodedResponseBytes`).
+    // Past the limit, on a body known to carry no coding.
     xhr.simulateDownloadProgress(2000, 0);
     // A late event after the abort changes nothing.
     xhr.simulateDownloadProgress(3000, 0);
@@ -2867,6 +2918,191 @@ describe('XHRAdapter - maxResponseBytes', () => {
       expect(new TextDecoder().decode(response.body as Uint8Array)).toBe(
         'hello world',
       );
+    }
+  });
+});
+
+describe('XHRAdapter - PR review round 53', () => {
+  test('PR review round 53: a compressed body many times its decoded size on the wire is delivered when it decodes within the limit', async () => {
+    const response = await withPageOrigin('https://api.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/stream',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+      });
+
+      lastXHR.readyState = 3;
+      lastXHR.status = 200;
+      lastXHR.getAllResponseHeadersResult =
+        'content-type: text/plain\r\ncontent-encoding: gzip\r\n';
+      // Gzip flushed after every byte: 512 decoded bytes arrive as 3,604.
+      lastXHR.simulateDownloadProgress(3604, 0);
+      lastXHR.response = textBody('x'.repeat(512));
+      lastXHR.simulateLoad();
+      return await promise;
+    });
+
+    expect(lastXHR.abortCalled).toBe(false);
+    expect(response.isStreamError).toBeUndefined();
+    expect(response.status).toBe(200);
+    expect((response.body as Uint8Array).length).toBe(512);
+  });
+
+  test('PR review round 53: a body known to carry no coding is refused as soon as its bytes pass the limit', async () => {
+    const cases: Array<[string, string, string]> = [
+      // Same-origin, no `Content-Encoding`: none was applied.
+      ['https://api.test', 'https://api.test/big', ''],
+      [
+        'https://api.test',
+        'https://api.test/big',
+        'content-encoding: identity\r\n',
+      ],
+      // Cross-origin, with `Content-Encoding` exposed.
+      [
+        'https://app.test',
+        'https://api.test/big',
+        'content-encoding: identity\r\n',
+      ],
+    ];
+
+    for (const [pageOrigin, requestURL, encodingLine] of cases) {
+      const progress: number[] = [];
+      const response = await withPageOrigin(pageOrigin, async () => {
+        const promise = new XHRAdapter().send({
+          requestURL,
+          method: 'GET',
+          headers: {},
+          maxResponseBytes: 1000,
+          onDownloadProgress: (event) => {
+            progress.push(event.loaded);
+          },
+        });
+
+        lastXHR.readyState = 3;
+        lastXHR.status = 200;
+        lastXHR.getAllResponseHeadersResult = `content-type: text/plain\r\n${encodingLine}`;
+        lastXHR.simulateDownloadProgress(1000, 0);
+        // One byte past the limit, no slack.
+        lastXHR.simulateDownloadProgress(1001, 0);
+        // Settles the request either way; refused above, this changes nothing.
+        lastXHR.response = textBody('x'.repeat(1001));
+        lastXHR.simulateLoad();
+        return await promise;
+      });
+
+      expect(lastXHR.abortCalled).toBe(true);
+      expect(response.streamErrorCode).toBe('response_too_large');
+      expect(response.status).toBe(200);
+      expect(progress).toEqual([1000]);
+    }
+  });
+
+  test('PR review round 53: a compressed body is not cut on its encoded bytes, and is refused at load when it decodes past the limit', async () => {
+    const progress: number[] = [];
+    const response = await withPageOrigin('https://api.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+        onDownloadProgress: (event) => {
+          progress.push(event.loaded);
+        },
+      });
+
+      lastXHR.readyState = 3;
+      lastXHR.status = 200;
+      lastXHR.getAllResponseHeadersResult =
+        'content-type: text/plain\r\ncontent-encoding: br, identity\r\n';
+      lastXHR.simulateDownloadProgress(5000, 0);
+      lastXHR.response = textBody('x'.repeat(1500));
+      lastXHR.simulateLoad();
+      return await promise;
+    });
+
+    expect(lastXHR.abortCalled).toBe(false);
+    expect(progress[0]).toBe(5000);
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(response.status).toBe(200);
+  });
+
+  test('PR review round 53: a cross-origin body whose coding is hidden is not cut mid-download', async () => {
+    // A cross-origin page, and a sandboxed one (`'null'`, the same origin as none).
+    for (const pageOrigin of ['https://app.test', 'null']) {
+      const response = await withPageOrigin(pageOrigin, async () => {
+        const promise = new XHRAdapter().send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+          maxResponseBytes: 1000,
+        });
+
+        lastXHR.readyState = 3;
+        lastXHR.status = 200;
+        lastXHR.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+        lastXHR.simulateDownloadProgress(3604, 0);
+        lastXHR.response = textBody('x'.repeat(1000));
+        lastXHR.simulateLoad();
+        return await promise;
+      });
+
+      expect(lastXHR.abortCalled).toBe(false);
+      expect(response.isStreamError).toBeUndefined();
+      expect(response.status).toBe(200);
+    }
+  });
+});
+
+describe('XHRAdapter - PR review round 53 follow-up', () => {
+  test('PR review round 53: with no page origin, an absent Content-Encoding is not taken as none - the runtime may have decoded the body and dropped it', async () => {
+    // React Native's Android networking counts bytes off the wire, still gzip, and hands
+    // over the body decoded with `Content-Encoding` removed.
+    const result = await sendPastLimitWithoutCoding('https://api.test/x');
+
+    expect(result.abortCalled).toBe(false);
+    expect(result.streamErrorCode).toBeUndefined();
+  });
+
+  test('PR review round 53: a cross-origin request redirected back to the page origin is not cut on its bytes', async () => {
+    const result = await withPageOrigin('https://app.test', async () => {
+      return await sendPastLimitWithoutCoding(
+        'https://api.test/x',
+        'https://app.test/y',
+      );
+    });
+
+    // Not stopped mid-download; reported as the redirect the browser followed.
+    expect(result.abortCalled).toBe(false);
+  });
+
+  test('PR review round 53: a same-origin request whose response URL is on another origin is not cut on its bytes', async () => {
+    const result = await withPageOrigin('https://api.test', async () => {
+      return await sendPastLimitWithoutCoding(
+        'https://api.test/x',
+        'https://other.test/y',
+      );
+    });
+
+    expect(result.abortCalled).toBe(false);
+  });
+
+  test('PR review round 53: the page origin is read from location, and from window and self, as a worker or page has it', async () => {
+    const shapes: Array<[string, unknown]> = [
+      // A worker's shape: `location.origin`, no `origin`.
+      ['location', { origin: 'https://api.test' }],
+      ['window', { origin: 'https://api.test' }],
+      ['self', { location: { origin: 'https://api.test' } }],
+    ];
+
+    for (const [key, value] of shapes) {
+      const result = await withGlobal(key, value, async () => {
+        return await sendPastLimitWithoutCoding('https://api.test/x');
+      });
+
+      // Same-origin, so the absent header is proof: stopped on the way in.
+      expect(result.abortCalled).toBe(true);
+      expect(result.streamErrorCode).toBe('response_too_large');
     }
   });
 });
