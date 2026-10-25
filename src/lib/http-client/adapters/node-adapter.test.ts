@@ -8601,3 +8601,258 @@ test('PR review round 52: an aborted compressed download lets go of a sink whose
     server.close();
   }
 });
+
+test('PR review round 54: an early-ack upload of a large File part goes out in full while the server reads on', async () => {
+  // Node and Bun stop emitting `'drain'` on a request whose response has ended while the
+  // upload has not, though each write's callback still runs. The writer waited for both,
+  // and every `File` chunk is larger than the request's high-water mark, so the first one
+  // written after the `200` had been read waited for good. Five seconds later the stall
+  // watchdog cut the body short - "stalled after the response arrived", on the host's
+  // `'error'` channel - with the server still reading it.
+  const fileSize = 16 * 1024 * 1024;
+  let receivedBody:
+    Promise<{ body: Buffer; contentLength: string }> | undefined;
+
+  const server = http.createServer((req, res) => {
+    // Answered at once, in full - the client reads a complete response - then read on, a
+    // little slowly, so that response has ended on the client while the upload is still
+    // going. `res.end()` waits for the body: Bun's server stops delivering a request body
+    // whose response has ended.
+    res.writeHead(200, { 'content-length': '2' });
+    res.write('ok');
+
+    receivedBody = new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+
+      req.on('data', (chunk: Buffer) => {
+        chunks.push(chunk);
+        req.pause();
+        setTimeout(() => req.resume(), 2);
+      });
+      req.on('end', () => {
+        res.end();
+        resolve({
+          body: Buffer.concat(chunks),
+          contentLength: req.headers['content-length'] ?? '',
+        });
+      });
+      req.on('error', reject);
+    });
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as { port: number };
+  const reports: ErrorEvent[] = [];
+  const onError = (event: Event): void => {
+    reports.push(event as ErrorEvent);
+    event.preventDefault();
+  };
+
+  globalThis.addEventListener('error', onError);
+
+  try {
+    const fd = new FormData();
+    fd.append(
+      'file',
+      new File([new Uint8Array(fileSize).fill(0x61)], 'big.bin'),
+    );
+
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/upload`,
+      method: 'POST',
+      headers: {},
+      body: fd,
+    });
+
+    expect(response.status).toBe(200);
+
+    const outcome = await Promise.race([
+      response.requestBodySettled,
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 8_000)),
+    ]);
+
+    expect(outcome).toBeUndefined();
+    expect(reports.length).toBe(0);
+
+    const { body, contentLength } = await (receivedBody as Promise<{
+      body: Buffer;
+      contentLength: string;
+    }>);
+
+    expect(body.length).toBe(Number(contentLength));
+    expect(body.length).toBeGreaterThan(fileSize);
+    expect(
+      /--[^\r\n]+--\r\n$/.test(body.subarray(-100).toString('latin1')),
+    ).toBe(true);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    server.close();
+  }
+}, 20000);
+
+test('PR review round 54: a FormData part whose getter throws in the sizing pass is refused as non-retryable', async () => {
+  // The sizing pass reads the caller's `name`, `type` and `size` before any byte is
+  // written, and it was not guarded as the part's `stream()` is: a throw there reached
+  // the adapter untagged and settled as `status: 0` with `isTransportError`, so an
+  // idempotent `PUT` was retried to fail the same way each time. Called on the adapter
+  // directly: `HTTPClient` copies a `FormData` before sending it, and Bun's `append` turns
+  // a `File` subclass into a plain `File`, which would leave nothing here to throw.
+  const failure = new Error('type getter failed');
+
+  class ThrowingTypeFile extends File {
+    public override get type(): string {
+      throw failure;
+    }
+  }
+
+  let requests = 0;
+  const server = http.createServer((req, res) => {
+    requests++;
+    req.resume();
+    req.on('end', () => res.end('ok'));
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as { port: number };
+
+  try {
+    const fd = new FormData();
+    const part = new ThrowingTypeFile([new Uint8Array(4)], 'part.bin');
+
+    // Yielded as it is, for the same reason.
+    Object.defineProperty(fd, 'entries', {
+      value: function* (): Generator<[string, FormDataEntryValue]> {
+        yield ['file', part];
+      },
+    });
+
+    let outcome: unknown;
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/doc`,
+        method: 'PUT',
+        headers: {},
+        body: fd,
+      });
+
+      outcome = response;
+    } catch (error) {
+      outcome = error;
+    }
+
+    expect(outcome).toBeInstanceOf(Error);
+
+    const error = outcome as Error & Record<string, unknown>;
+
+    expect(error[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(error.message).toBe('Request body source could not be read');
+    expect(error.cause).toBe(failure);
+    expect(requests).toBe(0);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('PR review round 54: the socket gets its full grace after a source read that ends just before a watchdog tick', async () => {
+  // The watchdog's window ran from its last tick, not from when the writer turned to the
+  // socket. A source read that ended a moment before the tick left the chunk it produced
+  // only that moment to be accepted, and the upload was destroyed as stalled with the
+  // socket given a fraction of its five seconds.
+  const SOURCE_DELAY_MS = 4_700;
+  const SOCKET_DELAY_MS = 1_000;
+  let fileChunks = 0;
+
+  const req = new MockClientRequest((data, callback) => {
+    // The chunk the slow read produced - the part's second - accepted a second after it
+    // was written, past the tick that falls 300 ms into its wait.
+    if (data instanceof Uint8Array && ++fileChunks === 2) {
+      setTimeout(() => callback?.(null), SOCKET_DELAY_MS);
+
+      return false;
+    }
+
+    callback?.(null);
+
+    return true;
+  });
+  const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
+
+  const requestSpy = spyOn(http, 'request').mockImplementation(
+    (_options, callback) => {
+      const cb = callback as ((res: http.IncomingMessage) => void) | undefined;
+
+      // Answered at once, in full: the watchdog is armed as the response closes.
+      setTimeout(() => {
+        cb?.(res as unknown as http.IncomingMessage);
+        queueMicrotask(() => {
+          res.emit('data', Buffer.from('ok'));
+          res.emit('end');
+          res.emit('close');
+        });
+      }, 10);
+
+      return req as unknown as http.ClientRequest;
+    },
+  );
+
+  // One chunk at once, then one after a read that ends just before the first tick.
+  const streamSpy = spyOn(Blob.prototype, 'stream').mockImplementation(
+    function (this: Blob) {
+      let step = 0;
+
+      return new ReadableStream<Uint8Array<ArrayBuffer>>(
+        {
+          async pull(controller) {
+            step++;
+
+            if (step === 1) {
+              controller.enqueue(new Uint8Array(4));
+            } else if (step === 2) {
+              await new Promise((resolve) =>
+                setTimeout(resolve, SOURCE_DELAY_MS),
+              );
+              controller.enqueue(new Uint8Array(4));
+            } else {
+              controller.close();
+            }
+          },
+        },
+        { highWaterMark: 0 },
+      );
+    },
+  );
+
+  try {
+    const fd = new FormData();
+    fd.append('file', new Blob([new Uint8Array(8)]), 'slow.bin');
+
+    const response = await new NodeAdapter().send({
+      requestURL: 'http://example.test/upload',
+      method: 'POST',
+      headers: {},
+      body: fd,
+    });
+
+    expect(response.status).toBe(200);
+
+    const outcome = await Promise.race([
+      response.requestBodySettled,
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 9_000)),
+    ]);
+
+    expect(outcome).toBeUndefined();
+    expect(req.destroyed).toBe(false);
+    expect(req.ended).toBe(true);
+  } finally {
+    streamSpy.mockRestore();
+    requestSpy.mockRestore();
+  }
+}, 20000);

@@ -260,7 +260,7 @@ describe('writeRequestBodyChunked', () => {
     expect(callbackOrder).toEqual([0, 1]);
   });
 
-  test('rejects if req emits close while waiting for drain', async () => {
+  test('rejects if req emits close while waiting for the write callback', async () => {
     // It used to resolve, and that reported an upload that had not happened. Even here -
     // where the first chunk's callback fired, so those bytes were accepted - the second
     // chunk is never written, and `node-adapter` follows a resolve with `req.end()`, so a
@@ -274,13 +274,8 @@ describe('writeRequestBodyChunked', () => {
     req.destroyed = false;
     req.setHeader = () => {};
 
-    let writeIndex = 0;
-    req.write = (_data, callback) => {
-      const index = writeIndex++;
-      callback?.(null);
-      // First write returns false to trigger backpressure path
-      return index !== 0;
-    };
+    // Backpressured, with the callback held back: the chunk is not yet accepted.
+    req.write = () => false;
 
     const writePromise = writeRequestBodyChunked(data, req);
     await Promise.resolve();
@@ -340,22 +335,16 @@ describe('writeRequestBodyChunked', () => {
     // not the write that armed them was backpressured.
     expect(req.listenerCount('close')).toBe(0);
     expect(req.listenerCount('error')).toBe(0);
-    expect(req.listenerCount('drain')).toBe(0);
   });
 
-  test('rejects if req emits error while waiting for drain', async () => {
+  test('rejects if req emits error while waiting for the write callback', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const req = new EventEmitter() as EventEmitter &
       RequestBodyWritable & { destroyed: boolean };
     req.destroyed = false;
     req.setHeader = () => {};
 
-    let writeIndex = 0;
-    req.write = (_data, callback) => {
-      const index = writeIndex++;
-      callback?.(null);
-      return index !== 0;
-    };
+    req.write = () => false;
 
     const writePromise = writeRequestBodyChunked(data, req);
     await Promise.resolve();
@@ -372,9 +361,10 @@ describe('writeRequestBodyChunked', () => {
     expect(caught?.message).toBe('socket hang up');
   });
 
-  test('waits for drain before writing the next chunk', async () => {
+  test('waits for the write callback before writing the next chunk', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const writeOrder: number[] = [];
+    const callbacks: Array<(error?: Error | null) => void> = [];
     const req = new EventEmitter() as EventEmitter &
       RequestBodyWritable & { destroyed: boolean };
     req.destroyed = false;
@@ -382,36 +372,78 @@ describe('writeRequestBodyChunked', () => {
 
     let writeIndex = 0;
     req.write = (_data, callback) => {
-      const index = writeIndex++;
-      writeOrder.push(index);
-      callback?.(null);
-      return index !== 0;
+      writeOrder.push(writeIndex++);
+      if (callback) {
+        callbacks.push(callback);
+      }
+      return true;
     };
 
     const writePromise = writeRequestBodyChunked(data, req);
 
     await Promise.resolve();
 
+    // One chunk in flight until the writable accepts it.
     expect(writeOrder).toEqual([0]);
 
-    req.emit('drain');
-    await writePromise;
+    callbacks[0](null);
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(writeOrder).toEqual([0, 1]);
+
+    callbacks[1](null);
+    await writePromise;
+  });
+
+  test('PR review round 54: a backpressured chunk is accepted on its callback, with no drain', async () => {
+    // Node and Bun stop emitting `'drain'` on a request whose early response has ended
+    // while the upload goes on, though the write callbacks keep coming. Waiting for the
+    // drain as well parked the writer for good on the first chunk that asked for one, and
+    // the adapter's stall watchdog then cut short a body the server was still reading.
+    const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 3, 0xaa);
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    let writes = 0;
+    req.write = (_data, callback) => {
+      writes++;
+      // Every write asks for a drain that never comes; the callback still runs.
+      setImmediate(() => callback?.(null));
+      return false;
+    };
+
+    const loaded: number[] = [];
+    const outcome = await Promise.race([
+      writeRequestBodyChunked(data, req, (e) => {
+        loaded.push(e.loaded);
+      }).then(() => 'resolved'),
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 200)),
+    ]);
+
+    expect(outcome).toBe('resolved');
+    expect(writes).toBe(3);
+    expect(loaded.at(-1)).toBe(data.length);
+    expect(req.listenerCount('close')).toBe(0);
+    expect(req.listenerCount('error')).toBe(0);
   });
 });
 
 describe('writeChunkWithBackpressure', () => {
   test('PR review round 42: an onAccepted that throws rejects the write rather than leaving it pending', async () => {
     // Settled and with its listeners off before `onAccepted` ran, a throw from it left the
-    // promise pending for good - and, from `'drain'`, escaped out of the emit.
+    // promise pending for good - and, from the write callback, escaped as an uncaught
+    // exception.
     const req = new EventEmitter() as EventEmitter &
       RequestBodyWritable & { destroyed: boolean };
     req.destroyed = false;
     req.setHeader = () => {};
-    // Accepted at once, and backpressured: the chunk settles on `'drain'`.
+    // Backpressured, and accepted once the callback runs.
+    let accept: ((error?: Error | null) => void) | undefined;
     req.write = (_data, callback) => {
-      callback?.(null);
+      accept = callback;
       return false;
     };
 
@@ -424,10 +456,9 @@ describe('writeChunkWithBackpressure', () => {
       (error: unknown) => error,
     );
 
-    expect(() => req.emit('drain')).not.toThrow();
+    expect(() => accept?.(null)).not.toThrow();
     expect(await outcome).toBe(failure);
     expect(req.listenerCount('close')).toBe(0);
     expect(req.listenerCount('error')).toBe(0);
-    expect(req.listenerCount('drain')).toBe(0);
   });
 });

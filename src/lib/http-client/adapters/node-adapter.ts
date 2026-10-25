@@ -980,6 +980,13 @@ export class NodeAdapter implements HTTPAdapter {
          */
         let sourceWaitSince: number | undefined;
 
+        /**
+         * When the body writer last came back from its source, so the socket's own grace
+         * starts there rather than at a tick that landed mid-read; see
+         * {@link watchForStalledUpload}.
+         */
+        let sourceWaitEndedAt: number | undefined;
+
         /** Whether a post-response write failure has already been reported and scheduled. */
         let didReportWriteErrorAfterResponse = false;
         /**
@@ -998,8 +1005,8 @@ export class NodeAdapter implements HTTPAdapter {
          * Destroy an upload the server has stopped reading, once the response is in.
          *
          * The two cases an early response splits into look identical from here for the first
-         * instant. A proxy that answers `413` and stops reading leaves the write parked under
-         * backpressure that will never drain, and `req.end()` only ever runs on the write
+         * instant. A proxy that answers `413` and stops reading leaves the write parked on a
+         * callback that will never come, and `req.end()` only ever runs on the write
          * path's success - so without this the socket is held, unfinished and unusable, until
          * the server's own timeout. An endpoint that acks a streaming upload early and *goes
          * on consuming it* looks the same at the moment the answer lands, and destroying it
@@ -1019,7 +1026,8 @@ export class NodeAdapter implements HTTPAdapter {
          * is waiting on the source, and that wait is given {@link UPLOAD_SOURCE_STALL_GRACE_MS}
          * instead: long, because a disk read that has not answered in a minute is stuck rather
          * than slow, and bounded, because a source that never answers is the parked writer
-         * the hang below was fixed for.
+         * the hang below was fixed for. When the read comes back, the socket's grace starts
+         * over from that moment: the writer has only then turned to the socket.
          */
         const watchForStalledUpload = (): void => {
           let bytesAtLastTick = uploadedBytesSeen;
@@ -1048,6 +1056,25 @@ export class NodeAdapter implements HTTPAdapter {
               arm();
 
               return;
+            }
+
+            // The socket's grace runs from when the writer turned to it. A source read that
+            // ended part-way through this window - after a tick that landed mid-read, or
+            // between two ticks - left the chunk it produced only the rest of the window to
+            // be accepted, and a healthy upload was destroyed as stalled with the socket
+            // given a fraction of its grace. Watched on for what remains of it.
+            if (
+              uploadedBytesSeen === bytesAtLastTick &&
+              sourceWaitSince === undefined &&
+              sourceWaitEndedAt !== undefined
+            ) {
+              const socketWaitMS = performance.now() - sourceWaitEndedAt;
+
+              if (socketWaitMS < UPLOAD_STALL_GRACE_MS) {
+                arm(UPLOAD_STALL_GRACE_MS - socketWaitMS);
+
+                return;
+              }
             }
 
             if (uploadedBytesSeen === bytesAtLastTick) {
@@ -1121,8 +1148,8 @@ export class NodeAdapter implements HTTPAdapter {
             arm();
           };
 
-          const arm = (): void => {
-            const timer = setTimeout(tick, UPLOAD_STALL_GRACE_MS);
+          const arm = (delayMS = UPLOAD_STALL_GRACE_MS): void => {
+            const timer = setTimeout(tick, delayMS);
 
             // Never a reason for the process to stay up: the response has already been
             // delivered by the time this is armed.
@@ -2396,7 +2423,12 @@ export class NodeAdapter implements HTTPAdapter {
               boundary,
               reportUploadProgress,
               (isWaiting) => {
-                sourceWaitSince = isWaiting ? performance.now() : undefined;
+                if (isWaiting) {
+                  sourceWaitSince = performance.now();
+                } else {
+                  sourceWaitSince = undefined;
+                  sourceWaitEndedAt = performance.now();
+                }
               },
             ),
           );
@@ -2467,13 +2499,13 @@ export class NodeAdapter implements HTTPAdapter {
  * down. See `watchForStalledUpload`.
  *
  * Progress here is coarse: `writeRequestBodyChunked` reports once per accepted
- * {@link REQUEST_BODY_CHUNK_SIZE} chunk, after both the write callback and any `'drain'`,
- * so a receiver that has answered and then goes quiet for a moment - busy with what it
- * already has, or a TCP window that closed while it works - reports nothing for the whole
- * pause. Anything shorter than a pause like that cuts a body the server was still reading,
- * which is the failure this watchdog exists to avoid, not to cause; at one second a
- * two-second pause truncated an 8 MiB upload at 6.8 MiB and handed the caller the early
- * status as a clean success.
+ * {@link REQUEST_BODY_CHUNK_SIZE} chunk, once its write callback has run, so a receiver
+ * that has answered and then goes quiet for a moment - busy with what it already has, or a
+ * TCP window that closed while it works - reports nothing for the whole pause. Anything
+ * shorter than a pause like that cuts a body the server was still reading, which is the
+ * failure this watchdog exists to avoid, not to cause; at one second a two-second pause
+ * truncated an 8 MiB upload at 6.8 MiB and handed the caller the early status as a clean
+ * success.
  *
  * Five seconds is past any such pause on a connection that is still alive. What is left
  * is a bound rather than a promise: a receiver that stops reading for longer than this

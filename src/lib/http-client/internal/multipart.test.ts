@@ -1,5 +1,6 @@
 // cspell:ignore résumé
 import { EventEmitter } from 'node:events';
+import * as vm from 'node:vm';
 import { describe, expect, test, spyOn } from 'bun:test';
 import {
   calculateMultipartFormDataSize,
@@ -8,6 +9,8 @@ import {
   serializeMultipartFormData,
 } from './multipart';
 import type { RequestBodyWritable } from './request-body-writable';
+import { REQUEST_BODY_CHUNK_SIZE } from './request-body-writer';
+import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
 
 interface CapturedWrite {
   data: Buffer;
@@ -773,7 +776,7 @@ describe('serializeMultipartFormData', () => {
     expect(callbackOrder).toEqual(writeOrder);
   });
 
-  test('rejects when req emits close during backpressure wait', async () => {
+  test('rejects when req emits close while a write waits for its callback', async () => {
     // It used to resolve, and that reported parts as written when the stream had not
     // accepted them - leaving a multipart body without its closing `--boundary--`
     // delimiter while this side called the upload a success. A truncated write is a failed
@@ -786,12 +789,8 @@ describe('serializeMultipartFormData', () => {
     req.destroyed = false;
     req.setHeader = () => {};
 
-    let writeIndex = 0;
-    req.write = (_data, callback) => {
-      const index = writeIndex++;
-      callback?.(null);
-      return index !== 0;
-    };
+    // Backpressured, with the callback held back: the write is not yet accepted.
+    req.write = () => false;
 
     const boundary = generateMultipartBoundary();
     const writePromise = serializeMultipartFormData(fd, req, boundary);
@@ -853,18 +852,16 @@ describe('serializeMultipartFormData', () => {
 
     expect(req.listenerCount('close')).toBe(0);
     expect(req.listenerCount('error')).toBe(0);
-    expect(req.listenerCount('drain')).toBe(0);
   });
 
   test('no upload progress is reported after the write has already rejected', async () => {
     // `maybeResolve` does more than resolve: it advances `uploadedBytes` and fires
     // `onProgress`. Its sibling in `request-body-writer` keeps an `isSettled` guard and
     // this one did not, which only started to matter once `onClose` began *rejecting*.
-    // Under backpressure a `'drain'` can arrive before the write callback - so `cleanup`
-    // has not run and the listeners are still attached - then `'close'` rejects the
-    // upload, and the write callback lands afterwards and reports progress for a request
-    // already surfaced to the caller as a transport error, counting bytes the stream
-    // never accepted.
+    // With the write callback still outstanding - so `cleanup` has not run and the
+    // listeners are still attached - `'close'` rejects the upload, and the write callback
+    // lands afterwards and reports progress for a request already surfaced to the caller
+    // as a transport error, counting bytes the stream never accepted.
     const fd = new FormData();
     fd.append('field', 'value');
 
@@ -899,8 +896,7 @@ describe('serializeMultipartFormData', () => {
 
     await Promise.resolve();
 
-    // `'drain'` first, while the write callback is still outstanding.
-    req.emit('drain');
+    // `'close'` while the write callback is still outstanding.
     req.emit('close');
 
     let caught: Error | undefined;
@@ -925,7 +921,7 @@ describe('serializeMultipartFormData', () => {
     expect(progress.length).toBe(afterRejection);
   });
 
-  test('rejects when req emits error during backpressure wait', async () => {
+  test('rejects when req emits error while a write waits for its callback', async () => {
     const fd = new FormData();
     fd.append('field', 'value');
 
@@ -934,12 +930,8 @@ describe('serializeMultipartFormData', () => {
     req.destroyed = false;
     req.setHeader = () => {};
 
-    let writeIndex = 0;
-    req.write = (_data, callback) => {
-      const index = writeIndex++;
-      callback?.(null);
-      return index !== 0;
-    };
+    // Backpressured, with the callback held back: the write is not yet accepted.
+    req.write = () => false;
 
     const boundary = generateMultipartBoundary();
     const writePromise = serializeMultipartFormData(fd, req, boundary);
@@ -958,7 +950,7 @@ describe('serializeMultipartFormData', () => {
     expect(caught?.message).toBe('socket hang up');
   });
 
-  test('rejects immediately when req.destroyed at time drain listeners are registered', async () => {
+  test('rejects immediately when req.destroyed at time its listeners are registered', async () => {
     // It used to resolve, and that reported parts as written when the stream had not
     // accepted them - leaving a multipart body without its closing `--boundary--`
     // delimiter while this side called the upload a success. A truncated write is a failed
@@ -1127,7 +1119,7 @@ describe('serializeMultipartFormData', () => {
     );
   });
 
-  test('waits for drain before writing the next multipart chunk', async () => {
+  test('waits for the write callback before writing the next multipart chunk', async () => {
     const fd = new FormData();
     fd.append('field', 'value');
 
@@ -1137,13 +1129,15 @@ describe('serializeMultipartFormData', () => {
     req.setHeader = () => {};
 
     const writeOrder: number[] = [];
+    const callbacks: Array<(error?: Error | null) => void> = [];
     let writeIndex = 0;
 
     req.write = (_data, callback) => {
-      const index = writeIndex++;
-      writeOrder.push(index);
-      callback?.(null);
-      return index !== 0;
+      writeOrder.push(writeIndex++);
+      if (callback) {
+        callbacks.push(callback);
+      }
+      return true;
     };
 
     const boundary = generateMultipartBoundary();
@@ -1153,10 +1147,49 @@ describe('serializeMultipartFormData', () => {
 
     expect(writeOrder).toEqual([0]);
 
-    req.emit('drain');
-    await writePromise;
+    // Accept each write as it comes; one is in flight at a time.
+    while (callbacks.length > 0) {
+      const callback = callbacks.shift();
+      callback?.(null);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(callbacks.length).toBeLessThanOrEqual(1);
+    }
 
+    await writePromise;
     expect(writeOrder.length).toBeGreaterThan(1);
+  });
+
+  test('PR review round 54: a backpressured File chunk is accepted on its callback, with no drain', async () => {
+    // Every `Blob.stream()` chunk Node yields is larger than a request's high-water mark,
+    // so every one asks for a drain - and Node and Bun stop emitting `'drain'` once an
+    // early response has ended. Waiting for it as well parked the writer on the first
+    // chunk, and the adapter's stall watchdog then cut the upload short.
+    const fd = new FormData();
+    fd.append('file', new File([new Uint8Array(3 * 1024 * 1024)], 'big.bin'));
+
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    const chunks: Buffer[] = [];
+    req.write = (data, callback) => {
+      chunks.push(Buffer.from(data));
+      // Asks for a drain that never comes; the callback still runs.
+      setImmediate(() => callback?.(null));
+      return false;
+    };
+
+    const boundary = generateMultipartBoundary();
+    const outcome = await Promise.race([
+      serializeMultipartFormData(fd, req, boundary).then(() => 'resolved'),
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 500)),
+    ]);
+
+    expect(outcome).toBe('resolved');
+    expect(
+      Buffer.concat(chunks).toString('latin1').endsWith(`--${boundary}--\r\n`),
+    ).toBe(true);
   });
 });
 
@@ -1376,4 +1409,593 @@ test('PR review round 37: a chunk within its part but past the body total is ref
   expect(getBody().toString()).toContain('filename="bbbb"');
   expect(getBody().includes(Buffer.from([7]))).toBe(false);
   expect(wasGrownPartCancelled).toBe(true);
+});
+
+describe('PR review round 54: caller values the writer cannot use are refused as non-retryable', () => {
+  // A `FormData` yielding the part as it is: Bun's `append` copies a `File` subclass into a
+  // plain `File`, which would leave nothing to misbehave.
+  const formWith = (part: unknown): FormData => {
+    const fd = new FormData();
+
+    Object.defineProperty(fd, 'entries', {
+      value: function* (): Generator<[string, unknown]> {
+        yield ['file', part];
+      },
+    });
+
+    return fd;
+  };
+
+  const failureOf = async (
+    fd: FormData,
+  ): Promise<{ error: Error; written: number }> => {
+    const { req, writes } = makeCapture();
+    let caught: unknown;
+
+    try {
+      await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(
+      (caught as Record<string, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
+
+    return { error: caught as Error, written: writes.length };
+  };
+
+  test('a part whose type getter throws', async () => {
+    const failure = new Error('type getter failed');
+
+    class ThrowingTypeFile extends File {
+      public override get type(): string {
+        throw failure;
+      }
+    }
+
+    const { error, written } = await failureOf(
+      formWith(new ThrowingTypeFile([new Uint8Array(4)], 'a.bin')),
+    );
+
+    // Refused in the sizing pass, before anything was written.
+    expect(written).toBe(0);
+    expect(error.message).toBe('Request body source could not be read');
+    expect(error.cause).toBe(failure);
+  });
+
+  test('a part whose type is not a string', async () => {
+    class NumericTypeFile extends File {
+      public override get type(): string {
+        return 42 as unknown as string;
+      }
+    }
+
+    const { error, written } = await failureOf(
+      formWith(new NumericTypeFile([new Uint8Array(4)], 'a.bin')),
+    );
+
+    expect(written).toBe(0);
+    expect(error.message).toBe('Request body source could not be read');
+    expect(String((error.cause as Error).message)).not.toContain('42');
+  });
+
+  test('a part whose size is not a byte count', async () => {
+    class FractionalSizeFile extends File {
+      public override get size(): number {
+        return 1.5;
+      }
+    }
+
+    const { error, written } = await failureOf(
+      formWith(new FractionalSizeFile([new Uint8Array(4)], 'a.bin')),
+    );
+
+    expect(written).toBe(0);
+    expect(error.message).toBe('Request body source could not be read');
+  });
+
+  test('an entries() that throws', async () => {
+    const failure = new Error('entries failed');
+    const fd = new FormData();
+
+    Object.defineProperty(fd, 'entries', {
+      value: () => {
+        throw failure;
+      },
+    });
+
+    const { error, written } = await failureOf(fd);
+
+    expect(written).toBe(0);
+    expect(error.cause).toBe(failure);
+  });
+
+  test('a stream() that yields a chunk that is not a Uint8Array', async () => {
+    class NumberStreamFile extends File {
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue(42 as unknown as Uint8Array<ArrayBuffer>);
+            controller.close();
+          },
+        });
+      }
+    }
+
+    const { error } = await failureOf(
+      formWith(new NumberStreamFile([new Uint8Array(4)], 'a.bin')),
+    );
+
+    expect(error.message).toBe(
+      'Request body source produced a chunk that is not a Uint8Array',
+    );
+  });
+});
+
+describe('PR review round 54: source chunks and entries the writing pass reads', () => {
+  test('a stream() that yields the whole part as one chunk is written in REQUEST_BODY_CHUNK_SIZE slices', async () => {
+    // Node's `Blob.stream()` yields an in-memory `Blob` as a single chunk. Written as one
+    // `req.write`, a 64 MiB `File` reported no progress between 0 and 100%, and the
+    // adapter's stall watchdog - which reads that progress - destroyed an upload the
+    // server had acked early and was still reading.
+    const size = 1024 * 1024 + 7;
+    const source = new Uint8Array(size).map((_, index) => index % 251);
+
+    class OneChunkFile extends File {
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue(source);
+            controller.close();
+          },
+        });
+      }
+    }
+
+    const fd = new FormData();
+
+    Object.defineProperty(fd, 'entries', {
+      value: function* (): Generator<[string, unknown]> {
+        yield ['file', new OneChunkFile([source], 'one.bin')];
+      },
+    });
+
+    const { req, writes, getBody } = makeCapture();
+    const progress: number[] = [];
+
+    await serializeMultipartFormData(
+      fd,
+      req,
+      generateMultipartBoundary(),
+      (e) => {
+        progress.push(e.loaded);
+      },
+    );
+
+    expect(
+      writes.every((write) => write.data.length <= REQUEST_BODY_CHUNK_SIZE),
+    ).toBe(true);
+    expect(progress.length).toBeGreaterThan(size / REQUEST_BODY_CHUNK_SIZE);
+    expect(getBody().includes(Buffer.from(source))).toBe(true);
+  });
+
+  test('a chunk made in another realm is written as the bytes it is', async () => {
+    // `instanceof Uint8Array` is false for bytes from another realm - a `vm` context, or
+    // Jest's node environment, whose `Blob.stream()` chunks come from the host - and the
+    // refusal of chunks that are not bytes turned those away too.
+    const foreign = vm.runInNewContext(
+      'new Uint8Array([1, 2, 3])',
+    ) as Uint8Array<ArrayBuffer>;
+
+    expect(foreign instanceof Uint8Array).toBe(false);
+
+    class ForeignChunkFile extends File {
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue(foreign);
+            controller.close();
+          },
+        });
+      }
+    }
+
+    const fd = new FormData();
+
+    Object.defineProperty(fd, 'entries', {
+      value: function* (): Generator<[string, unknown]> {
+        yield ['file', new ForeignChunkFile([new Uint8Array(3)], 'f.bin')];
+      },
+    });
+
+    const { req, getBody } = makeCapture();
+
+    await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+
+    expect(getBody().includes(Buffer.from([1, 2, 3]))).toBe(true);
+  });
+
+  test('an entries() generator that throws part-way through the writing pass is refused as non-retryable', async () => {
+    // The sizing pass's `entries()` was guarded; the writing pass walked its own call with
+    // `for...of`, so a generator that answered the first pass and threw on the second went
+    // out untagged, as a transport error.
+    const failure = new Error('entries failed');
+    let calls = 0;
+    const fd = new FormData();
+
+    Object.defineProperty(fd, 'entries', {
+      value: function* (): Generator<[string, unknown]> {
+        calls++;
+        yield ['a', 'one'];
+
+        if (calls > 1) {
+          throw failure;
+        }
+
+        yield ['b', 'two'];
+      },
+    });
+
+    const { req } = makeCapture();
+    let caught: unknown;
+
+    try {
+      await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(
+      (caught as Record<string, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
+    expect((caught as Error).cause).toBe(failure);
+  });
+});
+
+describe('PR review round 54: source chunks are counted and sliced as the bytes they hold', () => {
+  // A `File` whose `stream()` yields exactly `chunks`, with a `size` of `size`, in a
+  // `FormData` that yields it as it is (Bun's `append` copies a `File` subclass).
+  const formWithChunks = (
+    chunks: Uint8Array[],
+    size = chunks.reduce((total, chunk) => total + chunk.length, 0),
+  ): FormData => {
+    class ChunkedFile extends File {
+      public override get size(): number {
+        return size;
+      }
+
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          start(controller) {
+            for (const chunk of chunks) {
+              controller.enqueue(chunk as Uint8Array<ArrayBuffer>);
+            }
+
+            controller.close();
+          },
+        });
+      }
+    }
+
+    const fd = new FormData();
+
+    Object.defineProperty(fd, 'entries', {
+      value: function* (): Generator<[string, unknown]> {
+        yield ['file', new ChunkedFile([], 'chunked.bin')];
+      },
+    });
+
+    return fd;
+  };
+
+  const send = async (
+    fd: FormData,
+    capture = makeCapture(),
+  ): Promise<{
+    capture: ReturnType<typeof makeCapture>;
+    progress: number[];
+    error: unknown;
+  }> => {
+    const progress: number[] = [];
+    let failure: unknown;
+
+    try {
+      await serializeMultipartFormData(
+        fd,
+        capture.req,
+        generateMultipartBoundary(),
+        (e) => {
+          progress.push(e.loaded);
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    return { capture, progress, error: failure };
+  };
+
+  test.each([
+    ['an exact multiple of the slice size', 2 * REQUEST_BODY_CHUNK_SIZE],
+    ['a single byte', 1],
+    ['one byte past a slice', REQUEST_BODY_CHUNK_SIZE + 1],
+  ])(
+    'a chunk of %s is written whole, in slices, with progress ending at Content-Length',
+    async (_label, length) => {
+      const chunk = new Uint8Array(length).fill(0x7a);
+      const { capture, progress, error } = await send(formWithChunks([chunk]));
+
+      expect(error).toBeUndefined();
+
+      const fileWrites = capture.writes.filter((write) =>
+        write.data.every((byte) => byte === 0x7a),
+      );
+
+      expect(fileWrites.map((write) => write.data.length)).toEqual(
+        Array.from(
+          { length: Math.ceil(length / REQUEST_BODY_CHUNK_SIZE) },
+          (_, index) =>
+            Math.min(
+              REQUEST_BODY_CHUNK_SIZE,
+              length - index * REQUEST_BODY_CHUNK_SIZE,
+            ),
+        ),
+      );
+      expect(progress.at(-1)).toBe(Number(capture.headers['content-length']));
+      expect(capture.getBody().length).toBe(
+        Number(capture.headers['content-length']),
+      );
+    },
+  );
+
+  test('an empty chunk writes nothing and the part still completes', async () => {
+    const { capture, progress, error } = await send(
+      formWithChunks([new Uint8Array(0), new Uint8Array(3).fill(0x7a)]),
+    );
+
+    expect(error).toBeUndefined();
+    expect(capture.writes.some((write) => write.data.length === 0)).toBe(false);
+    expect(progress.at(-1)).toBe(Number(capture.headers['content-length']));
+  });
+
+  test('a stream destroyed between slices stops the part and fails the write', async () => {
+    const capture = makeCapture();
+    const { req } = capture;
+    const write = req.write.bind(req);
+    let fileSlices = 0;
+
+    req.write = (data, callback) => {
+      const isFileSlice =
+        typeof data !== 'string' && data.length === REQUEST_BODY_CHUNK_SIZE;
+
+      const canContinue = write(data, callback);
+
+      if (isFileSlice && ++fileSlices === 1) {
+        (req as { destroyed: boolean }).destroyed = true;
+      }
+
+      return canContinue;
+    };
+
+    const { error } = await send(
+      formWithChunks([new Uint8Array(4 * REQUEST_BODY_CHUNK_SIZE)]),
+      capture,
+    );
+
+    expect((error as Error).message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+    expect(fileSlices).toBe(1);
+  });
+
+  test('a subclass whose subarray throws is still written, from a plain view of its bytes', async () => {
+    const failure = new Error('subarray failed');
+
+    class ThrowingSubarray extends Uint8Array {
+      public override subarray(): Uint8Array<ArrayBuffer> {
+        throw failure;
+      }
+    }
+
+    const { capture, progress, error } = await send(
+      formWithChunks([new ThrowingSubarray(3).fill(0x7a)]),
+    );
+
+    // The chunk's own `subarray` is never called: it is sliced as a plain view.
+    expect(error).toBeUndefined();
+    expect(progress.at(-1)).toBe(Number(capture.headers['content-length']));
+    expect(capture.getBody().includes(Buffer.from('zzz'))).toBe(true);
+  });
+
+  test('a subclass whose byteLength lies is counted by its real bytes', async () => {
+    class ShortLength extends Uint8Array {
+      public override get byteLength(): number {
+        return 1;
+      }
+    }
+
+    const { capture, progress, error } = await send(
+      formWithChunks([new ShortLength(3).fill(0x7a)], 3),
+    );
+
+    expect(error).toBeUndefined();
+    expect(progress.at(-1)).toBe(Number(capture.headers['content-length']));
+    expect(capture.getBody().length).toBe(
+      Number(capture.headers['content-length']),
+    );
+  });
+
+  test('a subclass whose byteLength understates it is refused before a byte past its part', async () => {
+    // Node's `Buffer.byteLength` reads the getter too, so a chunk that said 1 passed the
+    // part's size check and the budget check, and put 16 KiB on the wire past a part of 4.
+    class ShortLength extends Uint8Array {
+      public override get byteLength(): number {
+        return 1;
+      }
+    }
+
+    const { capture, error } = await send(
+      formWithChunks(
+        [new ShortLength(2 * REQUEST_BODY_CHUNK_SIZE).fill(0x7a)],
+        4,
+      ),
+    );
+
+    expect((error as Error).message).toBe(
+      `Request body source did not match its Content-Length: part expected 4 bytes, produced more - 0 written and a further ${String(2 * REQUEST_BODY_CHUNK_SIZE)} refused`,
+    );
+    expect(
+      (error as Record<string, unknown>)[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG],
+    ).toBe(true);
+    expect(capture.getBody().includes(0x7a)).toBe(false);
+  });
+
+  test.each([
+    ['a part that outgrows its size', 'overrun'],
+    ['a stream destroyed mid-body', 'destroy'],
+  ])(
+    'the entries iterator is closed on an early exit: %s',
+    async (_label, exit) => {
+      const closed: boolean[] = [];
+      let calls = 0;
+
+      class FiveBytes extends File {
+        public override get size(): number {
+          return exit === 'overrun' ? 1 : 5;
+        }
+
+        public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(5));
+              controller.close();
+            },
+          });
+        }
+      }
+
+      const fd = new FormData();
+
+      Object.defineProperty(fd, 'entries', {
+        value: function* (): Generator<[string, unknown]> {
+          const call = calls++;
+
+          closed[call] = false;
+
+          try {
+            yield ['file', new FiveBytes([], 'a.bin')];
+            yield ['b', 'c'];
+          } finally {
+            closed[call] = true;
+          }
+        },
+      });
+
+      const capture = makeCapture();
+
+      if (exit === 'destroy') {
+        const { req } = capture;
+        const write = req.write.bind(req);
+
+        req.write = (data, callback) => {
+          const canContinue = write(data, callback);
+
+          if (typeof data !== 'string') {
+            (req as { destroyed: boolean }).destroyed = true;
+          }
+
+          return canContinue;
+        };
+      }
+
+      const { error } = await send(fd, capture);
+
+      expect(error).toBeInstanceOf(Error);
+      // The sizing pass's `for...of` and the writing pass's own walk both.
+      expect(closed).toEqual([true, true]);
+    },
+  );
+
+  // Sizing pass first (a real `for...of`), then the writing pass's own walk.
+  const formWithWritingPass = (
+    writingPass: () => Iterator<[string, unknown]>,
+  ): FormData => {
+    const fd = new FormData();
+    let calls = 0;
+
+    Object.defineProperty(fd, 'entries', {
+      value: (): Iterator<[string, unknown]> =>
+        calls++ === 0
+          ? ([['a', 'b']] as Array<[string, unknown]>)[Symbol.iterator]()
+          : writingPass(),
+    });
+
+    return fd;
+  };
+
+  test('PR review round 54: a return() that rejects on an early exit is not left unhandled', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const capture = makeCapture();
+      const { req } = capture;
+      const write = req.write.bind(req);
+
+      req.write = (data, callback) => {
+        (req as { destroyed: boolean }).destroyed = true;
+
+        return write(data, callback);
+      };
+
+      const { error } = await send(
+        formWithWritingPass(
+          () =>
+            ({
+              next: () => ({ done: false, value: ['a', 'b'] }),
+              return: () => Promise.reject(new Error('return rejected')),
+            }) as unknown as Iterator<[string, unknown]>,
+        ),
+        capture,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(error).toBeInstanceOf(Error);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  test('PR review round 54: a step that is not an object is refused without closing its iterator', async () => {
+    let returnCalls = 0;
+    const { error } = await send(
+      formWithWritingPass(
+        () =>
+          ({
+            next: () => 5,
+            return: () => {
+              returnCalls++;
+              return { done: true, value: undefined };
+            },
+          }) as unknown as Iterator<[string, unknown]>,
+      ),
+    );
+
+    expect(
+      (error as Record<string, unknown>)[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG],
+    ).toBe(true);
+    expect(returnCalls).toBe(0);
+  });
 });
