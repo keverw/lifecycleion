@@ -4960,7 +4960,8 @@ function buildAttemptBodies(
   // another realm's `Date`) is honored - and the observers' copy is parsed back from the
   // bytes sent. A deep copy taken beside the serialization read the caller's value a
   // second time: a getter, or a change in between, made `rawBody` differ from what went
-  // out. Parsed for each attempt, so an observer that changes its copy changes no other.
+  // out. Parsed for each attempt, so an observer that changes it changes no other
+  // attempt's - every observer of one attempt shares the one copy.
   if (Array.isArray(rawBody) || isPlainJSONBodyObject(rawBody)) {
     const { body, contentType } = serializeBody(rawBody);
 
