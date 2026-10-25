@@ -15,7 +15,8 @@ import { isHeaderSafeCookieText } from './internal/cookie-text';
 // `_` and a hyphen anywhere in a label are allowed as the URL parser allows them, and as
 // `normalizeStoredDomain` keeps them: docker-compose service names (`my_service`) and
 // hosts like `-edge.example.com` set cookies the jar otherwise discarded.
-const HOSTNAME_PATTERN = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
+// One trailing dot is allowed, as `normalizeStoredDomain` keeps it (`localhost.`).
+const HOSTNAME_PATTERN = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*\.?$/;
 
 /**
  * `maxAge` and `expires` held to {@link MAX_COOKIE_LIFETIME_SECONDS} from `createdAt`:
@@ -292,7 +293,10 @@ export class CookieJar {
    * a persisted jar that was edited or tampered with.
    *
    * Valid domains include: hostnames (example.com, localhost, myapp.test),
-   * IPv4 (127.0.0.1), and IPv6 ([::1]).
+   * IPv4 (127.0.0.1), and IPv6 ([::1]). One trailing dot is kept as part of the host:
+   * `example.com.` is stored, sent and cleared apart from `example.com`, as a request host
+   * keeps it (RFC 6265bis §5.1.2). An IPv4 address with one (`127.0.0.1.`) is refused,
+   * since the URL parser reads it as the address and no request host is that string.
    *
    * For server responses use parseSetCookieHeader — it also enforces PSL
    * validation and domain-suffix checks on top of the syntax check here.
@@ -454,7 +458,8 @@ export class CookieJar {
 
   /**
    * Returns all domains that have cookies stored, with a count per domain.
-   * Domains are stored in canonical form (lowercase hostnames; normalized IP literals).
+   * Domains are stored in canonical form (lowercase hostnames; normalized IP literals),
+   * a trailing dot kept: `example.com.` is listed apart from `example.com`.
    */
   public getStoredDomains(): Array<{ domain: string; count: number }> {
     const counts = new Map<string, number>();
@@ -867,6 +872,10 @@ export class CookieJar {
    * `maxAge` would not save it. `setCookie` refuses those the way it refuses a bad domain.
    * A `null` `maxAge` or `createdAt` reads as absent, as a `null` `expires` does.
    *
+   * A `domain` with a trailing dot is restored as written, as `setCookie` stores it: a
+   * persisted `example.com.` cookie goes only to `example.com.` and hosts under it, not
+   * to `example.com`. Folding it would send a cookie to a host that never set it.
+   *
    * @returns How many cookies were restored. Compare against `data.cookies.length` to learn
    *          whether any were refused.
    * @throws {TypeError} When `data.cookies` is not an array or holds a non-object. The
@@ -961,15 +970,19 @@ export class CookieJar {
     return JSON.stringify([name, domain, path, isHostOnly]);
   }
 
-  /** Canonical form for stored cookie domains: no leading dot, ASCII/IDNA DNS names;
-   *  canonical IP literals. RFC 6265 treats a leading dot as ignored, and persisted jars
-   *  from browser-oriented implementations commonly retain it. */
+  /**
+   * Canonical form for stored cookie domains: no leading dot, ASCII/IDNA DNS names;
+   * canonical IP literals. RFC 6265 treats a leading dot as ignored, and persisted jars
+   * from browser-oriented implementations commonly retain it.
+   *
+   * One trailing dot is kept, as the URL parser keeps it in a request host: RFC 6265bis
+   * §5.1.2 canonicalizes a host without removing it and §5.1.3 domain-matches strings as
+   * they are, so `example.com.` is a different host from `example.com`, as browsers treat
+   * it. A second trailing dot names no host and is refused.
+   */
   private normalizeStoredDomain(domain: string): string {
     domain = toAsciiDots(domain);
-    const withoutLeadingDot = domain.startsWith('.') ? domain.slice(1) : domain;
-    const raw = withoutLeadingDot.endsWith('.')
-      ? withoutLeadingDot.slice(0, -1)
-      : withoutLeadingDot;
+    const raw = domain.startsWith('.') ? domain.slice(1) : domain;
     const ip = this.tryCanonicalIPLiteral(raw);
 
     if (ip !== null) {
@@ -978,7 +991,7 @@ export class CookieJar {
 
     // Keep malformed whitespace and repeated trailing dots invalid rather than
     // letting the general domain helper trim them into a different scope.
-    if (raw.trim() !== raw || raw.endsWith('.')) {
+    if (raw.trim() !== raw || raw.endsWith('..')) {
       return '';
     }
 
@@ -999,24 +1012,20 @@ export class CookieJar {
           verifyDNSLength: false,
         },
       );
-      // A trailing dot mapping exposed (`example.com.` and a soft hyphen): dropped as the
-      // one trailing dot if none was written, so the cookie is stored for `example.com`
-      // and not beside it under `example.com.`; refused as a second if one was. A leading
-      // one exposed the same way (a soft hyphen, then `.example.com`) is refused on
-      // purpose, below, as domain-utils refuses it: an empty first label is no host, and
-      // only a dot actually written is the leading dot RFC 6265 ignores.
-      // Not when mapping exposed a leading dot too: the call below would strip it as a
-      // written one.
-      if (ascii?.endsWith('.')) {
-        return raw === withoutLeadingDot &&
-          !ascii.endsWith('..') &&
-          !ascii.startsWith('.')
-          ? this.normalizeStoredDomain(ascii.slice(0, -1))
-          : '';
+
+      // A dot mapping exposed at either end: a second trailing one (`example.com.` and a
+      // soft hyphen, then `.`) names no host, and a leading one (a soft hyphen, then
+      // `.example.com`) is refused on purpose, as domain-utils refuses it: an empty first
+      // label is no host, and only a dot actually written is the leading dot RFC 6265
+      // ignores. One trailing dot exposed this way is kept, as the URL parser keeps it.
+      if (ascii?.startsWith('.') || ascii?.endsWith('..')) {
+        return '';
       }
 
       // IDNA alone permits URL delimiters in non-strict mode. Reject anything
       // that URL parsing would interpret as credentials, a port, a path, or an escape.
+      // That parse also refuses an IPv4 address with a trailing dot (`127.0.0.1.`): the
+      // URL parser reads it as the address, so no request host is ever that string.
       return ascii &&
         checkDNSLength(ascii) &&
         new URL(`http://${ascii}/`).hostname === ascii
@@ -1206,7 +1215,10 @@ export class CookieJar {
   }
 
   /** Returns the apex (registered) domain for bucketing.
-   *  Falls back to hostname for IPs and local hostnames like localhost. */
+   *  Falls back to hostname for IPs and local hostnames like localhost.
+   *  A trailing dot is kept on the apex (`www.example.com.` is under `example.com.`), so
+   *  a trailing-dot host's cookies are a domain of their own, as they are on the send
+   *  path, and `clear()` by `domain` reaches one form and not the other. */
   private apexFor(hostname: string): string {
     const ip = this.tryCanonicalIPLiteral(hostname);
 
@@ -1214,7 +1226,11 @@ export class CookieJar {
       return ip;
     }
 
-    return this.publicSuffixes.apexFor(hostname);
+    const apex = this.publicSuffixes.apexFor(hostname);
+
+    return hostname.endsWith('.') && apex !== '' && !apex.endsWith('.')
+      ? `${apex}.`
+      : apex;
   }
 
   private getOrCreateBucket(apex: string): Map<string, Cookie> {

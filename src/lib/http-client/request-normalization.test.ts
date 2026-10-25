@@ -7598,12 +7598,24 @@ test('round 137: MockAdapter groups request header names in ASCII case only', as
   expect(seen).toEqual(['a']);
 });
 
-test('round 137: a cookie domain whose trailing dot only IDNA mapping exposes is stored as the domain', () => {
+test('round 137: a cookie domain whose trailing dot only IDNA mapping exposes is stored as the URL parser reads it', () => {
   const jar = new CookieJar();
   jar.setCookie({ name: 'sid', value: 'a', domain: 'example.com' });
+  // The URL parser reads `example.com.` and a soft hyphen as `example.com.`, a host of
+  // its own (PR review round 51), so the jar files it there.
   jar.setCookie({ name: 'sid', value: 'b', domain: 'example.com.\u00AD' });
-  expect(jar.getStoredDomains()).toEqual([{ domain: 'example.com', count: 1 }]);
-  expect(jar.getCookieHeaderString('https://example.com/')).toBe('sid=b');
+  expect(jar.getStoredDomains()).toEqual([
+    { domain: 'example.com', count: 1 },
+    { domain: 'example.com.', count: 1 },
+  ]);
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('sid=a');
+  expect(jar.getCookieHeaderString('https://example.com.\u00AD/')).toBe(
+    'sid=b',
+  );
+  // A second trailing dot exposed the same way names no host.
+  expect(
+    jar.setCookie({ name: 'sid', value: 'c', domain: 'example.com.\u00AD.' }),
+  ).toBe(false);
 });
 
 test('round 137: NodeAdapter refuses an Expect header; a decode failure during stream setup keeps its cause', async () => {

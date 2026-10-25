@@ -1668,23 +1668,24 @@ describe('CookieJar', () => {
       ).toBe('shared');
     });
 
-    test('canonicalizes a trailing root dot for domain and host-only cookies', () => {
+    test('keeps a trailing root dot as part of the host for domain and host-only cookies', () => {
       const domainCookie = new CookieJar();
 
       // A real domain cookie: `localhost` is a public suffix, so `Domain=localhost` is
       // stored host-only and never reached this path.
       domainCookie.parseSetCookieHeader(
-        'session=domain; Domain=example.com; Path=/',
+        'session=domain; Domain=example.com.; Path=/',
         'https://www.example.com./',
       );
 
       expect(domainCookie.getAllCookies()[0]?.hostOnly).toBe(false);
       expect(
-        domainCookie.getCookieFor('session', 'https://www.example.com/')?.value,
+        domainCookie.getCookieFor('session', 'https://api.example.com./')
+          ?.value,
       ).toBe('domain');
       expect(
-        domainCookie.getCookieFor('session', 'https://api.example.com/')?.value,
-      ).toBe('domain');
+        domainCookie.getCookieFor('session', 'https://www.example.com/'),
+      ).toBeUndefined();
 
       const hostOnlyCookie = new CookieJar();
 
@@ -1694,8 +1695,11 @@ describe('CookieJar', () => {
       );
 
       expect(
-        hostOnlyCookie.getCookieFor('session', 'https://example.com/')?.value,
+        hostOnlyCookie.getCookieFor('session', 'https://example.com./')?.value,
       ).toBe('host');
+      expect(
+        hostOnlyCookie.getCookieFor('session', 'https://example.com/'),
+      ).toBeUndefined();
     });
 
     test('an override on one jar does not reach another', () => {
@@ -3277,4 +3281,179 @@ test('an edge-hyphen host whose stand-in would read as a public suffix still get
   jar.parseSetCookieHeader('t=1; Domain=prgmr.com', 'https://a.-en.prgmr.com/');
 
   expect(jar.getCookieHeaderString('https://www.prgmr.com/')).toBe('t=1');
+});
+
+// RFC 6265bis §5.1.2 canonicalizes a request host without removing a trailing dot (the
+// URL parser keeps it), and §5.1.3 domain-matches strings as they are: `example.com.` is
+// a different host from `example.com`, as browsers treat it.
+describe('PR review round 51: a trailing dot is part of the host', () => {
+  test('PR review round 51: a host-only cookie is not sent to the other form of its host', () => {
+    const jar = new CookieJar();
+
+    jar.parseSetCookieHeader('b=2', 'https://www.example.com/');
+    jar.parseSetCookieHeader('c=3', 'https://www.example.com./');
+
+    expect(jar.getCookieHeaderString('https://www.example.com/')).toBe('b=2');
+    expect(jar.getCookieHeaderString('https://WWW.EXAMPLE.COM./')).toBe('c=3');
+  });
+
+  test('PR review round 51: a domain cookie is not sent to trailing-dot hosts under it, nor the reverse', () => {
+    const jar = new CookieJar();
+
+    jar.parseSetCookieHeader(
+      'plain=1; Domain=example.com',
+      'https://www.example.com/',
+    );
+    jar.parseSetCookieHeader(
+      'dotted=1; Domain=example.com.',
+      'https://www.example.com./',
+    );
+
+    expect(jar.getCookieHeaderString('https://a.example.com/')).toBe('plain=1');
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('plain=1');
+    expect(jar.getCookieHeaderString('https://a.example.com./')).toBe(
+      'dotted=1',
+    );
+    expect(jar.getCookieHeaderString('https://example.com./')).toBe('dotted=1');
+    expect(jar.getStoredDomains()).toEqual([
+      { domain: 'example.com', count: 1 },
+      { domain: 'example.com.', count: 1 },
+    ]);
+  });
+
+  test('PR review round 51: a Domain attribute must be a suffix of the request host as written', () => {
+    const jar = new CookieJar();
+
+    // `www.example.com.` does not end in `.example.com`, and `www.example.com` does not
+    // end in `.example.com.`: neither domain-matches, so both cookies are ignored.
+    jar.parseSetCookieHeader(
+      'a=1; Domain=example.com',
+      'https://www.example.com./',
+    );
+    jar.parseSetCookieHeader(
+      'b=1; Domain=example.com.',
+      'https://www.example.com/',
+    );
+
+    expect(jar.getAllCookies()).toEqual([]);
+
+    // A `Max-Age=0` from the other form deletes nothing.
+    jar.parseSetCookieHeader('sid=1', 'https://example.com/');
+    jar.parseSetCookieHeader('sid=; Max-Age=0', 'https://example.com./');
+
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('sid=1');
+  });
+
+  test('PR review round 51: a trailing-dot public suffix is still refused, and kept host-only for itself', () => {
+    const jar = new CookieJar({ publicSuffixes: { add: ['corp.internal'] } });
+
+    for (const [header, url] of [
+      ['a=1; Domain=com.', 'https://www.example.com./'],
+      ['a=1; Domain=co.uk.', 'https://www.example.co.uk./'],
+      ['a=1; Domain=github.io.', 'https://evil.github.io./'],
+      ['a=1; Domain=corp.internal.', 'https://evil.corp.internal./'],
+      ['a=1; Domain=localhost.', 'http://evil.localhost./'],
+    ]) {
+      jar.parseSetCookieHeader(header, url);
+    }
+
+    expect(jar.getAllCookies()).toEqual([]);
+
+    // Naming the request host itself is accepted host-only (RFC 6265bis §5.7), for that
+    // host alone.
+    jar.parseSetCookieHeader('own=1; Domain=localhost.', 'http://localhost./');
+    jar.parseSetCookieHeader(
+      'own=2; Domain=corp.internal.',
+      'https://corp.internal./',
+    );
+
+    expect(jar.getAllCookies().map((cookie) => cookie.hostOnly)).toEqual([
+      true,
+      true,
+    ]);
+    expect(jar.getCookieHeaderString('http://localhost./')).toBe('own=1');
+    expect(jar.getCookieHeaderString('http://localhost/')).toBe('');
+    expect(jar.getCookieHeaderString('http://a.localhost./')).toBe('');
+    expect(jar.getCookieHeaderString('https://corp.internal./')).toBe('own=2');
+    expect(jar.getCookieHeaderString('https://corp.internal/')).toBe('');
+    expect(jar.getCookieHeaderString('https://a.corp.internal./')).toBe('');
+  });
+
+  test('PR review round 51: an IPv4 address with a trailing dot is no stored domain', () => {
+    const jar = new CookieJar();
+
+    // The URL parser reads `127.0.0.1.` as the address, so its cookies are the address's.
+    jar.parseSetCookieHeader('host=1', 'http://127.0.0.1./');
+    // An IPv4 address with a trailing dot is refused as a domain before any comparison.
+    jar.parseSetCookieHeader('attr=1; Domain=127.0.0.1.', 'http://127.0.0.1/');
+
+    expect(jar.getCookieHeaderString('http://127.0.0.1/')).toBe('host=1');
+    expect(
+      jar.setCookie({ name: 'set', value: '1', domain: '127.0.0.1.' }),
+    ).toBe(false);
+    expect(jar.getStoredDomains()).toEqual([{ domain: '127.0.0.1', count: 1 }]);
+  });
+
+  test('PR review round 51: setCookie, fromJSON and clear keep the two forms apart', () => {
+    const jar = new CookieJar();
+
+    expect(
+      jar.fromJSON({
+        cookies: [
+          { name: 'plain', value: '1', domain: 'example.com', createdAt: 1 },
+          { name: 'dotted', value: '1', domain: 'example.com.', createdAt: 1 },
+          {
+            name: 'host',
+            value: '1',
+            domain: 'www.example.com.',
+            hostOnly: true,
+            createdAt: 1,
+          },
+        ],
+      }),
+    ).toBe(3);
+    expect(
+      jar.setCookie({ name: 'two', value: '1', domain: 'example.com..' }),
+    ).toBe(false);
+    expect(
+      jar.setCookie({ name: 'local', value: '1', domain: 'localhost.' }),
+    ).toBe(true);
+
+    expect(jar.getCookieHeaderString('https://www.example.com/')).toBe(
+      'plain=1',
+    );
+    expect(jar.getCookieHeaderString('https://www.example.com./')).toBe(
+      'dotted=1; host=1',
+    );
+    expect(jar.getCookieHeaderString('http://localhost/')).toBe('');
+    expect(jar.getCookieHeaderString('http://localhost./')).toBe('local=1');
+
+    expect(jar.clear('www.example.com', 'hostname')).toBe(0);
+    expect(jar.clear('www.example.com.', 'hostname')).toBe(1);
+    expect(jar.clear('example.com', 'domain')).toBe(1);
+    expect(jar.getCookieHeaderString('https://www.example.com./')).toBe(
+      'dotted=1',
+    );
+    expect(jar.clear('example.com.', 'domain')).toBe(1);
+    expect(jar.getStoredDomains()).toEqual([
+      { domain: 'localhost.', count: 1 },
+    ]);
+  });
+
+  test('PR review round 51: a Secure cookie is left alone by its own host only', () => {
+    const jar = new CookieJar();
+
+    jar.parseSetCookieHeader('sid=secure; Secure', 'https://www.example.com./');
+    // The same host over `http:` may not replace it (RFC 6265bis §5.7)...
+    jar.parseSetCookieHeader('sid=plant', 'http://www.example.com./');
+    // ...while the other form is another host, whose cookie is never sent beside it.
+    jar.parseSetCookieHeader('sid=other', 'http://www.example.com/');
+
+    expect(jar.getCookieHeaderString('https://www.example.com./')).toBe(
+      'sid=secure',
+    );
+    expect(jar.getCookieHeaderString('http://www.example.com/')).toBe(
+      'sid=other',
+    );
+  });
 });
