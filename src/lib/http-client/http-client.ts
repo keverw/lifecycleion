@@ -1236,11 +1236,11 @@ export class BaseHTTPClient {
            * The upload outcome the request reports so far, wherever it ended up.
            *
            * Kept by the attempt runner (see `latestUpload`) rather than read off this
-           * hop's result: an attempt that *threw* carries it on the result, one that
-           * resolved on the adapter response, and most terminal redirect branches below
-           * build their `HTTPResponse` with `adapterResponse: null` - a redirect the
-           * caller disabled, a loop, an interceptor that threw, a cancel between hops - so
-           * that response has no field of its own to read. An early `3xx` mid-upload is
+           * hop's result: an attempt that *threw* has no adapter response to carry it,
+           * and most terminal redirect branches below build their `HTTPResponse` with
+           * `adapterResponse: null` - a redirect the caller disabled, a loop, an
+           * interceptor that threw, a cancel between hops - so that response has no
+           * field of its own to read. An early `3xx` mid-upload is
            * exactly the shape where it is not empty.
            */
           //
@@ -2356,12 +2356,6 @@ export class BaseHTTPClient {
      * client has already reported as timed out.
      */
     abortAttempt?: () => void;
-    /**
-     * The request body's outcome for an attempt that *threw*, where there is no
-     * adapter response to carry it. Read off the tagged error; absent when the
-     * request had no body writer at all. See {@link REQUEST_BODY_SETTLED_KEY}.
-     */
-    requestBodySettled?: Promise<Error | undefined>;
   }> {
     const {
       request: baseRequest,
@@ -2406,20 +2400,6 @@ export class BaseHTTPClient {
       this._config.retryNonIdempotentMethods;
     let attemptNumber = startAttempt - 1;
     let isRetriesExhausted = false;
-
-    /**
-     * The upload outcome of the attempt a retry is replacing.
-     *
-     * `adapterResponse` is scoped to one iteration, so at the top of the next - where the
-     * retry-phase interceptors run - the previous attempt's `requestBodySettled` was out
-     * of reach, and an interceptor that cancelled or threw there returned a result with
-     * no upload outcome at all. Absent reads as the documented "the body went out in
-     * full", for an upload the adapter may have early-acked and then torn down. Kept
-     * here, as the cancel-during-delay exits already keep it, so every terminal exit
-     * carries it. Cleared once a fresh attempt is dispatched: its own outcome then
-     * supersedes it.
-     */
-    let previousUploadOutcome: Promise<Error | undefined> | undefined;
 
     while (true) {
       attemptNumber++;
@@ -2581,9 +2561,6 @@ export class BaseHTTPClient {
 
         return {
           adapterResponse: null,
-          ...(previousUploadOutcome
-            ? { requestBodySettled: previousUploadOutcome }
-            : {}),
           sentRequest: this._bestEffortAttemptRequestFromPending(
             pendingRequest,
             { timeout, maxResponseBytes },
@@ -2879,8 +2856,6 @@ export class BaseHTTPClient {
         );
       }
 
-      // This attempt's own outcome takes over from here; see the declaration.
-      previousUploadOutcome = undefined;
       // Whether this attempt has a body to send, read once; see `sendsRequestBody`.
       const isBodySent = sendsRequestBody(sentBody);
       // And it is the response's from here, whether or not it reports one: an upload
@@ -3492,7 +3467,6 @@ export class BaseHTTPClient {
               timeout,
               () => uploadActivity.at,
             );
-            previousUploadOutcome = adapterResponse.requestBodySettled;
 
             // A deadline fails the request as a timeout, for the reason the redirect
             // path gives: the retry would put the body on the wire beside an upload
@@ -3510,15 +3484,6 @@ export class BaseHTTPClient {
 
               return {
                 adapterResponse: null,
-                // Carried off the response this attempt did get, as the throw path
-                // below carries it off the error. With `adapterResponse` nulled, the hop
-                // loop has nowhere else to read it, and a bodied request cancelled while
-                // waiting to retry a `503` answered `undefined` - the documented "the
-                // body went out" - for an upload the adapter may have early-acked and
-                // then torn down.
-                ...(adapterResponse.requestBodySettled
-                  ? { requestBodySettled: adapterResponse.requestBodySettled }
-                  : {}),
                 sentRequest: observedSentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: wait === 'cancelled',
@@ -3623,10 +3588,10 @@ export class BaseHTTPClient {
          *
          * `requestBodySettled` rides on the response object on every path the adapter
          * resolves. A throw has no response object, so the adapter tags the error
-         * instead and every failure result below carries it through - a cancel, a
-         * timeout and a transport failure are exactly when a caller asks whether its
-         * body made it, and an absent field answers `undefined`, which is what a
-         * *completed* upload resolves with.
+         * instead, and the outcome read off it is kept in `latestUpload` for the
+         * response - a cancel, a timeout and a transport failure are exactly when a
+         * caller asks whether its body made it, and an absent field answers
+         * `undefined`, which is what a *completed* upload resolves with.
          */
         //
         // An attempt given up on while it had a body to send reports that its fate is
@@ -3694,7 +3659,6 @@ export class BaseHTTPClient {
 
               return {
                 adapterResponse: null,
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 sentRequest: sentRequestForObservedAdapterError(
                   sentRequest,
                   error,
@@ -3746,7 +3710,6 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: null,
-            ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             sentRequest: reportedSentRequest,
             attemptCount: attemptNumber,
             wasCancelled: true,
@@ -3838,7 +3801,6 @@ export class BaseHTTPClient {
             const signalReason = getSignalCancelReason(cancelSignal);
             return {
               adapterResponse: null,
-              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               sentRequest: sentRequestForObservedAdapterError(
                 sentRequest,
                 error,
@@ -3983,7 +3945,6 @@ export class BaseHTTPClient {
             const signalReason = getSignalCancelReason(cancelSignal);
             return {
               adapterResponse: null,
-              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               sentRequest: reportedSentRequest,
               attemptCount: attemptNumber,
               wasCancelled: true,
@@ -4030,7 +3991,6 @@ export class BaseHTTPClient {
 
               return {
                 adapterResponse: null,
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 sentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: true,
@@ -4084,7 +4044,6 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: null,
-            ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             sentRequest: sentRequestForObservedAdapterError(
               sentRequest,
               error,
@@ -4242,7 +4201,6 @@ export class BaseHTTPClient {
               timeout,
               () => uploadActivity.at,
             );
-            previousUploadOutcome = uploadOutcome;
 
             if (wait !== 'settled') {
               const signalReason =
@@ -4257,7 +4215,6 @@ export class BaseHTTPClient {
 
               return {
                 adapterResponse: null,
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
                 sentRequest: reportedSentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: wait === 'cancelled',
@@ -4300,7 +4257,6 @@ export class BaseHTTPClient {
 
         return {
           adapterResponse: null,
-          ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
           sentRequest: reportedSentRequest,
           attemptCount: attemptNumber,
           wasCancelled: false,

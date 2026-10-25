@@ -1233,10 +1233,13 @@ function isRouteBinaryBody(body: unknown): body is Uint8Array | ArrayBuffer {
 }
 
 /**
- * The type a route body is labelled with when the route sets none: `json` only for a body
- * `serializeResponseBody` sends as JSON. Bytes, and a body it refuses (a `Proxy` over an
- * `ArrayBuffer`, a `Map`), are labelled nothing - a HEAD route or a simulated stream error
- * never serializes the body, and those must not call it JSON either.
+ * The type a route body is labelled with when the route sets none: `text` for a string,
+ * `json` for an array or a plain object, and `binary` for anything else - bytes, and a
+ * body it refuses (a `Proxy` over an `ArrayBuffer`, a `Map`). The caller sets no
+ * `content-type` for `binary`, so those are labelled nothing - a HEAD route or a
+ * simulated stream error never serializes the body, and those must not call it JSON
+ * either. `toJSON` is not called here, so an object whose top-level `toJSON` answers
+ * `undefined` is still labelled `json`, though nothing is then sent.
  */
 function inferContentType(body: unknown): ContentType {
   if (typeof body === 'string') {
