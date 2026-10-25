@@ -2048,3 +2048,61 @@ test('PR review round 37: an empty document.baseURI falls back to location, as t
     }
   }
 });
+
+describe('FetchAdapter - PR review round 65', () => {
+  /** A `fetch` answering with a stream of `chunks`, read under a response limit. */
+  async function readChunks(chunks: Uint8Array[]): Promise<Uint8Array> {
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              for (const chunk of chunks) {
+                controller.enqueue(chunk);
+              }
+              controller.close();
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+    });
+
+    return response.body as Uint8Array;
+  }
+
+  test('PR review round 65: a lone chunk that owns its buffer is the body as it is, not copied', async () => {
+    const chunk = new Uint8Array([1, 2, 3]);
+    const body = await readChunks([chunk]);
+
+    expect(body).toBe(chunk);
+  });
+
+  test('PR review round 65: a lone chunk that shares its buffer, or is a Buffer, is copied into a plain array of its own', async () => {
+    const shared = new Uint8Array([9, 1, 2, 3, 9]);
+    for (const chunk of [shared.subarray(1, 4), Buffer.from([1, 2, 3])]) {
+      const body = await readChunks([chunk]);
+
+      expect(body).not.toBe(chunk);
+      expect(Object.getPrototypeOf(body)).toBe(Uint8Array.prototype);
+      expect(body.buffer.byteLength).toBe(3);
+      expect([...body]).toEqual([1, 2, 3]);
+    }
+  });
+
+  test('PR review round 65: several chunks are joined in order', async () => {
+    const body = await readChunks([
+      new Uint8Array([1, 2]),
+      new Uint8Array([3]),
+      new Uint8Array([4, 5]),
+    ]);
+
+    expect([...body]).toEqual([1, 2, 3, 4, 5]);
+  });
+});

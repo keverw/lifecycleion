@@ -265,9 +265,14 @@ export class XHRAdapter implements HTTPAdapter {
       // it as a fallback for environments that skip upload.load entirely.
       let didUploadComplete = false;
 
-      // The body's own size, measured once: `0` for none or an empty one, `undefined`
-      // where it cannot be known up front (a `FormData`).
-      const bodyByteLength = knownBodyByteLength(requestBody);
+      // The body's own size, read once where that costs nothing: `0` for none or an empty
+      // one, `undefined` where it cannot be known up front (a `FormData`). Text with any
+      // characters is at least a byte, so it is counted only by the final upload event,
+      // and only when the browser reported nothing.
+      const isTextBody = typeof requestBody === 'string' && requestBody !== '';
+      const bodyByteLength = isTextBody
+        ? undefined
+        : knownBodyByteLength(requestBody);
 
       // The one final upload event, however the upload ends: the bytes the browser
       // reported, or the body's own size where it reported none - `0` for an empty
@@ -284,7 +289,9 @@ export class XHRAdapter implements HTTPAdapter {
         // of the two - `total: 0`, or `loaded: 0`. An upload a server answered partway
         // through cannot be told from a finished one here, as FetchAdapter cannot.
         const bytes =
-          Math.max(uploadedBytes, uploadTotalBytes) || (bodyByteLength ?? 0);
+          Math.max(uploadedBytes, uploadTotalBytes) ||
+          ((isTextBody ? knownBodyByteLength(requestBody) : bodyByteLength) ??
+            0);
         guardedUploadProgress?.({ loaded: bytes, total: bytes, progress: 1 });
       };
 

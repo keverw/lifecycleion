@@ -14179,3 +14179,42 @@ test('PR review round 63b: listRequests reads its filter label once', async () =
   }
   await Promise.all(pending);
 });
+
+test('PR review round 65: a retry interceptor on a cross-origin hop keeps a __proto__ header the hop carried', async () => {
+  for (const value of ['v', ['a', 'b']]) {
+    const { adapter, sentToTarget } = crossOriginReplayAdapter(
+      'https://evil.example/next',
+    );
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: crossOriginRetryPolicy,
+    });
+    // The redirect phase adds it for the hop, so the hop carries it into the retry.
+    client.addRequestInterceptor(
+      (request) => {
+        const headers = { ...request.headers };
+        Object.defineProperty(headers, '__proto__', {
+          value,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+        return { ...request, headers };
+      },
+      { phases: ['redirect'] },
+    );
+    client.addRequestInterceptor((request) => request, { phases: ['retry'] });
+
+    const response = await client.get('https://api.example/start').send();
+
+    expect(response.status).toBe(200);
+    expect(sentToTarget).toHaveLength(2);
+    for (const sent of sentToTarget) {
+      expect(Object.getPrototypeOf(sent.headers)).toBe(Object.prototype);
+      expect(
+        Object.getOwnPropertyDescriptor(sent.headers, '__proto__')?.value,
+      ).toEqual(value);
+    }
+  }
+});

@@ -3379,4 +3379,36 @@ describe('XHRAdapter - PR review round 64', () => {
       { loaded: 5, progress: 1 },
     ]);
   });
+
+  test("PR review round 65: a Blob body's size is read once, deciding the listeners and its final upload event", async () => {
+    for (const size of [0, 7]) {
+      let reads = 0;
+      const body = new (class extends Blob {
+        public override get size(): number {
+          reads++;
+          return size;
+        }
+      })();
+      const uploads: Array<{ loaded: number; progress: number }> = [];
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'POST',
+        headers: {},
+        // A Blob reaches an adapter driven directly, as XHR sends one natively.
+        body: body as unknown as AdapterRequest['body'],
+        onUploadProgress: (event) => {
+          uploads.push({ loaded: event.loaded, progress: event.progress });
+        },
+      });
+
+      expect(uploadListenerCount(lastXHR)).toBe(size === 0 ? 0 : 2);
+
+      lastXHR.status = 204;
+      lastXHR.simulateLoad();
+      await promise;
+
+      expect(reads).toBe(1);
+      expect(uploads.at(-1)).toEqual({ loaded: size, progress: 1 });
+    }
+  });
 });

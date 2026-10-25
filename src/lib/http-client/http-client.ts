@@ -6134,14 +6134,14 @@ function withoutAddedCrossOriginCredentials(
     }
 
     if (inputHeaderNames.has(name) || CROSS_ORIGIN_SAFE_HEADERS.has(name)) {
-      headers[name] = value;
+      defineEntry(headers, name, value);
     }
   }
 
   if (!isBodyDropped) {
     for (const name of BODY_DESCRIBING_HEADERS) {
       if (Object.hasOwn(hopRequest.headers, name)) {
-        headers[name] = hopRequest.headers[name];
+        defineEntry(headers, name, hopRequest.headers[name]);
       }
     }
   }
