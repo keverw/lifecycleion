@@ -11,6 +11,7 @@ import * as https from 'node:https';
 import * as tls from 'node:tls';
 import type { Socket } from 'node:net';
 import { Writable } from 'node:stream';
+import * as zlib from 'node:zlib';
 import { NodeAdapter } from './node-adapter';
 import type { NodeAdapterConfig } from './node-adapter';
 import { HTTPClient } from '../http-client';
@@ -2957,6 +2958,218 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       requestSpy.mockRestore();
     }
   }, 30000);
+
+  // A request that says it closed when it is destroyed, as a real `ClientRequest` does -
+  // whether this adapter destroyed it or the peer closed the connection under it.
+  class ClosingMockClientRequest extends MockClientRequest {
+    public override destroy(): this {
+      if (!this.destroyed) {
+        this.destroyed = true;
+        process.nextTick(() => this.emit('close'));
+      }
+
+      return this;
+    }
+  }
+
+  // One chunk at once, then nothing ever again: a source parked inside `read()`.
+  const spyOnStalledBlobStream = (): ReturnType<typeof spyOn> =>
+    spyOn(Blob.prototype, 'stream').mockImplementation(function (this: Blob) {
+      const half = Math.floor(this.size / 2);
+
+      return new ReadableStream<Uint8Array<ArrayBuffer>>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(half));
+        },
+      });
+    });
+
+  const raceHung = async <T>(
+    promise: Promise<T> | undefined,
+    ms: number,
+  ): Promise<T | 'hung'> =>
+    await Promise.race([
+      promise as Promise<T>,
+      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), ms)),
+    ]);
+
+  test('PR review round 52: a response torn down while the writer waits on its source settles the upload', async () => {
+    // The adapter destroys the request itself here - a body over `maxResponseBytes` - and a
+    // writer parked inside `Blob.stream()`'s `read()` has no pending `req.write` for that
+    // destroy to reject. Nothing woke it, so `requestBodySettled` never settled: the
+    // watchdog stood down on a destroyed request, and the client waits on that promise
+    // before a retry or redirect.
+    const req = new ClosingMockClientRequest();
+    const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        // Once the writer has parked on its source.
+        setTimeout(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.alloc(64));
+          });
+        }, 20);
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+    const streamSpy = spyOnStalledBlobStream();
+
+    try {
+      const fd = new FormData();
+      fd.append('file', new Blob([new Uint8Array(8)]), 'stalled.bin');
+
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/upload',
+        method: 'POST',
+        headers: {},
+        body: fd,
+        maxResponseBytes: 16,
+      });
+
+      expect(response.streamErrorCode).toBe('response_too_large');
+      expect(req.destroyed).toBe(true);
+
+      const outcome = await raceHung(response.requestBodySettled, 2_000);
+
+      expect(outcome).toBeInstanceOf(Error);
+    } finally {
+      streamSpy.mockRestore();
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('PR review round 52: a peer that closes while the writer waits on its source settles the upload', async () => {
+    // The same parked writer, with the request destroyed from the other side: the server
+    // answered in full and then closed the connection, which raises no `'error'` at all.
+    const req = new ClosingMockClientRequest();
+    const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        setTimeout(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('ok'));
+            res.emit('end');
+            res.emit('close');
+            req.destroy();
+          });
+        }, 20);
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+    const streamSpy = spyOnStalledBlobStream();
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      const fd = new FormData();
+      fd.append('file', new Blob([new Uint8Array(8)]), 'stalled.bin');
+
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/upload',
+        method: 'POST',
+        headers: {},
+        body: fd,
+      });
+
+      expect(response.status).toBe(200);
+
+      const outcome = await raceHung(response.requestBodySettled, 2_000);
+
+      expect(outcome).toBeInstanceOf(Error);
+      // A late upload failure, on the host channel as every other one is.
+      expect(reports.length).toBe(1);
+      expect(reports[0]?.error).toBe(outcome);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      streamSpy.mockRestore();
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('PR review round 52: the stall watchdog still bounds a destroyed upload whose writer never hears of it', async () => {
+    // A request destroyed with no `'close'` reaching the writer: the watchdog used to stand
+    // down on `req.destroyed` with the outcome still open, so the source grace it documents
+    // bounded nothing. It now settles once that grace runs out. The adapter tore this one
+    // down itself, so nothing is reported to the host.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        setTimeout(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.alloc(64));
+            // The torn-down response closes, which is what arms the watchdog.
+            res.emit('close');
+          });
+        }, 20);
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+    const streamSpy = spyOnStalledBlobStream();
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    let nowSpy: { mockRestore: () => void } | undefined;
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      const fd = new FormData();
+      fd.append('file', new Blob([new Uint8Array(8)]), 'stalled.bin');
+
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/upload',
+        method: 'POST',
+        headers: {},
+        body: fd,
+        maxResponseBytes: 16,
+      });
+
+      expect(response.streamErrorCode).toBe('response_too_large');
+
+      // Past the source grace by the watchdog's first look. See
+      // `UPLOAD_SOURCE_STALL_GRACE_MS`.
+      const realNow = performance.now();
+      nowSpy = spyOn(performance, 'now').mockImplementation(
+        () => realNow + 61_000,
+      );
+
+      const outcome = await raceHung(response.requestBodySettled, 8_000);
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect(reports).toEqual([]);
+    } finally {
+      nowSpy?.mockRestore();
+      globalThis.removeEventListener('error', onError);
+      streamSpy.mockRestore();
+      requestSpy.mockRestore();
+    }
+  }, 15000);
 
   test('a socket error while the streamResponse factory is still opening settles', async () => {
     // The one window where "the response side always settles on its own" is not true.
@@ -8320,5 +8533,71 @@ test('a response arriving after the signal aborted does not call the streamRespo
     expect(factoryCalls).toBe(0);
   } finally {
     requestSpy.mockRestore();
+  }
+});
+
+test('PR review round 52: an aborted compressed download lets go of a sink whose destroy says nothing', async () => {
+  // The abort releases the decoded body, and a destroyed one delivered nothing more - not
+  // even the `'close'` a destroyed raw response still emits - so the pipe into the sink
+  // never settled and never took its listeners off. A hand-written sink whose `destroy()`
+  // emits no `'close'` of its own kept this request's `'drain'`, `'error'` and `'close'`
+  // listeners for good, one set per aborted download.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-encoding': 'gzip',
+    });
+
+    // Some of the body, flushed, and then the connection held open.
+    const gzip = zlib.createGzip();
+    gzip.pipe(res);
+    gzip.write(Buffer.alloc(1024, 1));
+    gzip.flush();
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+
+  const { port } = server.address() as { port: number };
+  const controller = new AbortController();
+  const sink = Object.assign(new EventEmitter(), {
+    write: (_chunk: unknown, callback?: (error?: Error | null) => void) => {
+      callback?.();
+      controller.abort();
+      return true;
+    },
+    end: (callback?: () => void) => {
+      callback?.();
+    },
+    destroy: () => undefined,
+  });
+
+  try {
+    const outcome = await new NodeAdapter()
+      .send({
+        requestURL: `http://127.0.0.1:${String(port)}/`,
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+        streamResponse: () => sink as unknown as WritableLike,
+      })
+      .then(
+        () => 'resolved',
+        (error: unknown) => (error as Error).name,
+      );
+
+    expect(outcome).toBe('AbortError');
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // What an uncompressed download leaves: the bounded late-error absorber, nothing of
+    // this request's own.
+    expect(sink.listenerCount('drain')).toBe(0);
+    expect(sink.listenerCount('error')).toBe(1);
+    expect(sink.listenerCount('close')).toBe(1);
+  } finally {
+    server.closeAllConnections();
+    server.close();
   }
 });

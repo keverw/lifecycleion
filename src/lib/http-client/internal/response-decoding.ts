@@ -159,6 +159,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private isDestroyed = false;
   private didFailDecoding = false;
   private didLastDecoderClose = false;
+  private didEmitClose = false;
   private isPaused = false;
   /**
    * An empty body's `'end'` held while paused, as a raw `IncomingMessage` holds it, and
@@ -330,6 +331,19 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       this.res.destroy();
     } catch {
       // Already gone.
+    }
+
+    // Still `'close'`, a tick on, as a destroyed `IncomingMessage` still emits it: the
+    // raw response's own `'close'` is dropped above, so a reader waiting on it - a streamed
+    // download's pipe into a sink - was never told the body was over, and never took its
+    // listeners off that sink. Once, and nothing else is delivered.
+    if (!this.didEmitClose) {
+      process.nextTick(() => {
+        if (!this.didEmitClose) {
+          this.didEmitClose = true;
+          this.emit('close');
+        }
+      });
     }
   }
 
@@ -616,6 +630,10 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     // the reader has let go.
     if (event === 'error' && this.listenerCount('error') === 0) {
       return;
+    }
+
+    if (event === 'close') {
+      this.didEmitClose = true;
     }
 
     this.emit(event, ...args);

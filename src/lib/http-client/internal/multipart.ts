@@ -309,6 +309,18 @@ export async function serializeMultipartFormData(
           let isDone: boolean;
           let chunk: Uint8Array | undefined;
 
+          // A stream torn down while this read is outstanding - by the caller's side after
+          // the response, or by the peer closing - has no pending `write` to reject, so
+          // nothing would wake this writer: it stayed parked on a source that may never
+          // answer, holding the file open and leaving the upload unsettled. Cancelling the
+          // reader ends the read as done, and the `req.destroyed` checks below take it from
+          // there.
+          const cancelOnClose = (): void => {
+            void cancelReaderQuietly(reader);
+          };
+
+          req.once('close', cancelOnClose);
+
           try {
             ({ done: isDone, value: chunk } = await reader.read());
           } catch (error) {
@@ -318,6 +330,7 @@ export async function serializeMultipartFormData(
             // and first boundary each time.
             throw sourceReadFailure(error);
           } finally {
+            req.off('close', cancelOnClose);
             onSourceWait?.(false);
           }
 

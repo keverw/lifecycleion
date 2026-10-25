@@ -368,7 +368,9 @@ disabled-timeout behavior. Do not pass an expired `deadline - Date.now()` direct
 
 `NodeAdapter` also watches uploads left running after an early response closes. It checks
 socket progress at roughly five-second intervals and allows a pending multipart source
-read roughly sixty seconds before declaring it stalled. These adapter safeguards are
+read roughly sixty seconds before declaring it stalled. A connection that closes, or that
+the adapter tears down, while a multipart source read is pending cancels that read and
+settles the upload outcome with a failure. These adapter safeguards are
 separate from the client's timeout. Continuing progress does not waive the normal
 per-attempt response deadline.
 

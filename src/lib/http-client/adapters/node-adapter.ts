@@ -1025,7 +1025,16 @@ export class NodeAdapter implements HTTPAdapter {
           let bytesAtLastTick = uploadedBytesSeen;
 
           const tick = (): void => {
-            if (!isWritingBody || req.writableEnded || req.destroyed) {
+            if (!isWritingBody || req.writableEnded) {
+              return;
+            }
+
+            // Destroyed - by this adapter's teardown or by the peer closing - is not done
+            // with while the outcome is still open. The writer usually notices the close and
+            // settles it itself; one that never hears of it, parked on a source read with no
+            // pending `req.write` to reject, is the hang this watchdog bounds, so it is
+            // watched on and settled below once its grace runs out.
+            if (req.destroyed && upload.settle === null) {
               return;
             }
 
@@ -1081,8 +1090,12 @@ export class NodeAdapter implements HTTPAdapter {
               // it, so this tick still runs and would otherwise say "stalled" over an
               // upload already reported as reset. The settle and the destroy still happen
               // here: the first is a no-op the second time, the second is the teardown
-              // that deadline was going to do anyway.
-              if (!didReportWriteErrorAfterResponse) {
+              // that deadline was going to do anyway. Not for an upload this adapter tore
+              // down itself, which `reportWriteErrorAfterResponse` does not report either.
+              if (
+                !didReportWriteErrorAfterResponse &&
+                !didTearDownAfterResponse
+              ) {
                 didReportWriteErrorAfterResponse = true;
 
                 try {
@@ -1968,15 +1981,22 @@ export class NodeAdapter implements HTTPAdapter {
 
               activeBufferedResponse = undefined;
 
+              // Copied once, into a fresh array: `Buffer.concat` and a copy of its result
+              // held the body twice over. Empty bytes for a body that arrived empty, as
+              // FetchAdapter and XHRAdapter hand one over; `null` for an answer with no
+              // body (`HEAD`, `204`, `205`, `304`), as they hand that over.
+              const responseBody = hasBody
+                ? concatChunks(chunks, loadedBytes)
+                : null;
+
+              // The pieces let go once copied: an early-ack upload still running keeps
+              // this closure alive, and held the body twice over until it finished.
+              chunks.length = 0;
+
               settleResponse({
                 status,
                 headers,
-                // Copied once, into a fresh array: `Buffer.concat` and a copy of its
-                // result held the body twice over.
-                // Empty bytes for a body that arrived empty, as FetchAdapter and
-                // XHRAdapter hand one over; `null` for an answer with no body (`HEAD`,
-                // `204`, `205`, `304`), as they hand that over.
-                body: hasBody ? concatChunks(chunks, loadedBytes) : null,
+                body: responseBody,
               });
             });
 
