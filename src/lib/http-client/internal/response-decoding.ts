@@ -46,6 +46,14 @@ export interface ResponseBodySource {
    * reports once the raw body has already ended. Returns the unsubscribe.
    */
   onFailure?(listener: (error: Error) => void): () => void;
+  /**
+   * Whether this body destroyed the response under it before it had finished arriving,
+   * over a failure of its own - a decoding failure, or a coding chain refused as too long -
+   * which takes the connection with it. An upload still running on that connection then
+   * fails because of the adapter's own teardown, not the network's. A release is not
+   * counted: whoever released the body knows why.
+   */
+  didDestroyUnfinishedResponse?(): boolean;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the emitter signature
   on(event: string, listener: (...args: any[]) => void): unknown;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the emitter signature
@@ -158,6 +166,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private isReading = false;
   private isDestroyed = false;
   private didFailDecoding = false;
+  private hasDestroyedUnfinishedResponse = false;
   private didLastDecoderClose = false;
   private didEmitClose = false;
   private isPaused = false;
@@ -193,6 +202,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       res.on('close', () => {
         this.deliver('close');
       });
+
+      this.hasDestroyedUnfinishedResponse = isLiveUnfinishedResponse(res);
 
       try {
         res.destroy();
@@ -276,6 +287,10 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     return () => {
       this.failureSubscriptions.delete(subscription);
     };
+  }
+
+  public didDestroyUnfinishedResponse(): boolean {
+    return this.hasDestroyedUnfinishedResponse;
   }
 
   public heldError(): Error | undefined {
@@ -483,6 +498,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
 
     this.didFailDecoding = true;
+    // Read before the error is delivered, whose listener may destroy the response itself.
+    this.hasDestroyedUnfinishedResponse = isLiveUnfinishedResponse(this.res);
     this.deliver('error', markDecodeError(error));
     this.destroyDecoders();
 
@@ -1082,8 +1099,17 @@ interface FailureSubscription {
   told: boolean;
 }
 
+/**
+ * Whether destroying `res` now would take its connection down with it: it is still up and
+ * has not finished arriving. One finished leaves the connection alone, and one already
+ * destroyed - a peer close racing the failure - was not this module's doing.
+ */
+function isLiveUnfinishedResponse(res: http.IncomingMessage): boolean {
+  return !res.destroyed && !(res.complete && res.readableEnded);
+}
+
 /** Whether `error` is a decoding failure this module tagged (see `markDecodeError`). */
-function isDecodeFailure(error: Error): boolean {
+export function isDecodeFailure(error: Error): boolean {
   return (
     (error as unknown as Record<PropertyKey, unknown>)[
       RESPONSE_DECODE_ERROR_KEY

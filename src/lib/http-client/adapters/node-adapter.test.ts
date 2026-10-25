@@ -8856,3 +8856,338 @@ test('PR review round 54: the socket gets its full grace after a source read tha
     requestSpy.mockRestore();
   }
 }, 20000);
+
+for (const [label, contentEncoding] of [
+  ['a decode failure', 'gzip'],
+  ['a coding chain refused as too long', 'gzip, gzip, gzip, gzip, gzip, gzip'],
+] as const) {
+  test(`PR review round 55: ${label} during an early-ack upload is not reported as an upload failure`, async () => {
+    // The decoded body destroys its response when the body fails to decode, or when its
+    // coding chain is refused, and with the response still arriving that takes the socket -
+    // and the upload still running on it - down too. The writer's failure then reached the
+    // host's `'error'` channel as a late upload failure, for a connection this adapter had
+    // torn down itself.
+    const server = http.createServer((req, res) => {
+      req.on('data', () => {
+        req.pause();
+        setTimeout(() => req.resume(), 5);
+      });
+      req.on('error', () => {});
+      // Labelled gzip, sent plain, and large enough that the raw response has not finished
+      // arriving when the first chunk fails to decode.
+      res.writeHead(503, {
+        'content-encoding': contentEncoding,
+        'content-type': 'text/plain',
+      });
+      res.end('z'.repeat(4 * 1024 * 1024));
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'PUT',
+        headers: {},
+        body: 'x'.repeat(8 * 1024 * 1024),
+      });
+
+      expect(response.status).toBe(503);
+      expect(response.isStreamError).toBe(true);
+
+      const outcome = await Promise.race([
+        response.requestBodySettled,
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 4_000)),
+      ]);
+
+      expect(outcome).not.toBe('hung');
+      // Anything late has had its turn.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(reports.length).toBe(0);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      server.closeAllConnections();
+      server.close();
+    }
+  }, 10000);
+}
+
+test('PR review round 55: a decode failure on a body that arrived whole while a stream factory sets up is not reported as an upload failure', async () => {
+  // The body arrives in full and then fails to decode, with an async factory still
+  // opening its sink. The setup failure that follows destroys the request - which cuts
+  // the upload still running on a connection that was otherwise fine - so that upload
+  // failure is this adapter's own teardown and is not reported to the host.
+  const server = http.createServer((req, res) => {
+    req.on('data', () => {
+      req.pause();
+      setTimeout(() => req.resume(), 10);
+    });
+    req.on('error', () => {});
+    res.writeHead(200, { 'content-encoding': 'gzip' });
+    res.end('not gzip at all');
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as { port: number };
+  const reports: ErrorEvent[] = [];
+  const onError = (event: Event): void => {
+    reports.push(event as ErrorEvent);
+    event.preventDefault();
+  };
+
+  globalThis.addEventListener('error', onError);
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/upload`,
+      method: 'PUT',
+      headers: {},
+      body: 'x'.repeat(8 * 1024 * 1024),
+      streamResponse: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        return new Writable({
+          write(_chunk, _encoding, callback) {
+            callback();
+          },
+        });
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+
+    const outcome = await Promise.race([
+      response.requestBodySettled,
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 4_000)),
+    ]);
+
+    expect(outcome).not.toBe('hung');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(reports.length).toBe(0);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    server.closeAllConnections();
+    server.close();
+  }
+}, 10000);
+
+test('PR review round 55: a reset while a stream factory sets up is reported as an upload failure, as it is for a buffered body', async () => {
+  // A socket reset with the upload still running is the network's failure, and a reset
+  // on a buffered body put it on the host's `'error'` channel. The same reset while an
+  // async factory was still opening its sink was handled as this adapter's own teardown
+  // and said nothing.
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/octet-stream' });
+    res.write('partial');
+    // Read a little and then stop, so the upload is still going when the socket goes.
+    req.once('data', () => {
+      req.pause();
+      setTimeout(() => req.socket.destroy(), 20);
+    });
+    req.on('error', () => {});
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as { port: number };
+  const reports: ErrorEvent[] = [];
+  const onError = (event: Event): void => {
+    reports.push(event as ErrorEvent);
+    event.preventDefault();
+  };
+
+  globalThis.addEventListener('error', onError);
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/upload`,
+      method: 'PUT',
+      headers: {},
+      body: 'x'.repeat(8 * 1024 * 1024),
+      streamResponse: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        return new Writable({
+          write(_chunk, _encoding, callback) {
+            callback();
+          },
+        });
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+
+    const outcome = await Promise.race([
+      response.requestBodySettled,
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 4_000)),
+    ]);
+
+    expect(outcome).toBeInstanceOf(Error);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(reports.length).toBe(1);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    server.closeAllConnections();
+    server.close();
+  }
+}, 10000);
+
+test('PR review round 55: an abort after the body arrived takes the pipe off a sink whose end never calls back', async () => {
+  // A hand-written sink whose `end` has not called back, and whose `destroy()` emits no
+  // `'close'`: the abort destroyed it and answered the request, but the pipe waited for
+  // that `'close'` to settle, so its listeners stayed on the sink and the response task
+  // stayed pending for as long as the sink lived.
+  const server = http.createServer((_req, res) => {
+    res.end('the whole body');
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as { port: number };
+  const controller = new AbortController();
+  const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+  const listenerCount = (event: string): number =>
+    listeners.get(event)?.size ?? 0;
+  const sink = {
+    write(_chunk: unknown, callback?: (error?: Error | null) => void): boolean {
+      callback?.(null);
+
+      return true;
+    },
+    end(): void {
+      // Never calls back; the caller gives up once the body is in.
+      setTimeout(() => controller.abort(), 10);
+    },
+    destroy(): void {},
+    on(event: string, listener: (...args: unknown[]) => void): unknown {
+      let set = listeners.get(event);
+
+      if (set === undefined) {
+        set = new Set();
+        listeners.set(event, set);
+      }
+
+      set.add(listener);
+
+      return sink;
+    },
+    off(event: string, listener: (...args: unknown[]) => void): unknown {
+      listeners.get(event)?.delete(listener);
+
+      return sink;
+    },
+  };
+
+  try {
+    let outcome: unknown;
+
+    try {
+      outcome = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/download`,
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+        streamResponse: () => sink as unknown as WritableLike,
+      });
+    } catch (error) {
+      outcome = error;
+    }
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).name).toBe('AbortError');
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Only the late-error absorber is left, which takes itself off on its own deadline.
+    expect(listenerCount('drain')).toBe(0);
+    expect(listenerCount('error')).toBeLessThanOrEqual(1);
+    expect(listenerCount('close')).toBeLessThanOrEqual(1);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('PR review round 55: the stall watchdog timer is cleared once an early-ack upload finishes', async () => {
+  // The watchdog armed as the early response closed was left pending when the writer
+  // finished. Its tick would only have returned, but until then it held the request's
+  // whole scope - the delivered response body among it - for up to five seconds.
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-length': '2' });
+    res.write('ok');
+    req.on('data', () => {
+      req.pause();
+      setTimeout(() => req.resume(), 2);
+    });
+    req.on('end', () => res.end());
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as { port: number };
+  const watchdogTimers: unknown[] = [];
+  const cleared = new Set<unknown>();
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const setTimeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(((
+    handler: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    const timer = realSetTimeout(handler, delay, ...args);
+
+    if (delay === 5_000) {
+      watchdogTimers.push(timer);
+    }
+
+    return timer;
+  }) as typeof setTimeout);
+  const clearTimeoutSpy = spyOn(globalThis, 'clearTimeout').mockImplementation(
+    ((timer?: Parameters<typeof clearTimeout>[0]) => {
+      cleared.add(timer);
+      realClearTimeout(timer);
+    }) as typeof clearTimeout,
+  );
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/upload`,
+      method: 'PUT',
+      headers: {},
+      body: 'x'.repeat(4 * 1024 * 1024),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.requestBodySettled).toBeUndefined();
+    // Armed as the response closed with the upload still going, and cleared with it.
+    expect(watchdogTimers.length).toBeGreaterThan(0);
+    expect(cleared.has(watchdogTimers.at(-1))).toBe(true);
+  } finally {
+    setTimeoutSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
+    server.closeAllConnections();
+    server.close();
+  }
+}, 10000);

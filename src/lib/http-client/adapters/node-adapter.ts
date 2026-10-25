@@ -46,6 +46,7 @@ import { writeRequestBodyChunked } from '../internal/request-body-writer';
 import {
   ACCEPTED_CONTENT_ENCODINGS,
   createResponseBodySource,
+  isDecodeFailure,
   type ResponseBodySource,
 } from '../internal/response-decoding';
 import {
@@ -953,6 +954,12 @@ export class NodeAdapter implements HTTPAdapter {
          * compressed body that had arrived whole went on inflating after the request settled.
          */
         let releaseResponseBody: (() => void) | undefined;
+        /**
+         * Whether the response body tore its unfinished response - and so the connection -
+         * down over a failure of its own: a decoding failure, a coding chain refused as too
+         * long. See {@link isOwnTeardownAfterResponse}.
+         */
+        let didResponseBodyDestroyResponse: (() => boolean) | undefined;
 
         /**
          * Whether a body writer is still running.
@@ -987,6 +994,9 @@ export class NodeAdapter implements HTTPAdapter {
          */
         let sourceWaitEndedAt: number | undefined;
 
+        /** The stall watchdog's pending tick, cleared once the writer is done; see {@link watchForStalledUpload}. */
+        let stallWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
+
         /** Whether a post-response write failure has already been reported and scheduled. */
         let didReportWriteErrorAfterResponse = false;
         /**
@@ -997,9 +1007,30 @@ export class NodeAdapter implements HTTPAdapter {
         let didTearDownAfterResponse = false;
         const tearDownAfterResponse = (): void => {
           didTearDownAfterResponse = true;
+          releaseConnectionAfterResponse();
+        };
+
+        /**
+         * The same teardown, for a connection that already failed on its own - a socket
+         * error or a response cut short while a stream factory was still opening its sink.
+         * Not marked as this adapter's: the upload failure that follows is the network's,
+         * and is reported as it is when the same reset lands on a buffered body.
+         */
+        const releaseConnectionAfterResponse = (): void => {
           releaseResponseBody?.();
           destroyRequestQuietly(req);
         };
+
+        /**
+         * Whether this adapter ended the connection itself after the response arrived:
+         * one of the teardowns above, or a decoded body that destroyed its response over a
+         * decoding failure. Either one fails an upload still running on that connection,
+         * and that failure settles `requestBodySettled` without being reported to the
+         * host as a transport failure.
+         */
+        const isOwnTeardownAfterResponse = (): boolean =>
+          didTearDownAfterResponse ||
+          didResponseBodyDestroyResponse?.() === true;
 
         /**
          * Destroy an upload the server has stopped reading, once the response is in.
@@ -1033,6 +1064,8 @@ export class NodeAdapter implements HTTPAdapter {
           let bytesAtLastTick = uploadedBytesSeen;
 
           const tick = (): void => {
+            stallWatchdogTimer = undefined;
+
             if (!isWritingBody || req.writableEnded) {
               return;
             }
@@ -1121,7 +1154,7 @@ export class NodeAdapter implements HTTPAdapter {
               // down itself, which `reportWriteErrorAfterResponse` does not report either.
               if (
                 !didReportWriteErrorAfterResponse &&
-                !didTearDownAfterResponse
+                !isOwnTeardownAfterResponse()
               ) {
                 didReportWriteErrorAfterResponse = true;
 
@@ -1154,6 +1187,7 @@ export class NodeAdapter implements HTTPAdapter {
             // Never a reason for the process to stay up: the response has already been
             // delivered by the time this is armed.
             timer.unref?.();
+            stallWatchdogTimer = timer;
           };
 
           arm();
@@ -1222,6 +1256,15 @@ export class NodeAdapter implements HTTPAdapter {
          */
         const endBodyWrite = (failure?: unknown): void => {
           isWritingBody = false;
+
+          // The stall watchdog has nothing left to watch. Its next tick would only return,
+          // but until then the timer held this whole executor - the delivered response
+          // body among it - for up to a grace window after the upload had ended.
+          if (stallWatchdogTimer !== undefined) {
+            clearTimeout(stallWatchdogTimer);
+            stallWatchdogTimer = undefined;
+          }
+
           settleBodyOutcome(failure);
         };
 
@@ -1412,7 +1455,7 @@ export class NodeAdapter implements HTTPAdapter {
 
           // The adapter's own teardown caused this failure, and the request is already
           // destroyed and answered: only the upload outcome is left to settle.
-          if (didTearDownAfterResponse) {
+          if (isOwnTeardownAfterResponse()) {
             settleBodyOutcome(failure);
 
             return;
@@ -1583,6 +1626,8 @@ export class NodeAdapter implements HTTPAdapter {
                 : undefined,
             );
             releaseResponseBody = release;
+            didResponseBodyDestroyResponse = () =>
+              body.didDestroyUnfinishedResponse?.() === true;
 
             // --- Response streaming (NodeAdapter-only feature) ---
             //
@@ -1685,7 +1730,18 @@ export class NodeAdapter implements HTTPAdapter {
                     // exist to prevent - and a socket already gone can answer
                     // `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes, which is
                     // precisely the state this is reached in.
-                    tearDownAfterResponse();
+                    //
+                    // A decoding failure is this adapter's own teardown, whether or not the
+                    // response had finished arriving: the destroy here is what cuts an
+                    // upload still running on a connection that was otherwise fine. Any
+                    // other failure - a socket error, a response cut short - is the
+                    // connection failing on its own, and an upload still running on it is
+                    // reported as it is for a buffered body.
+                    if (isDecodeFailure(error)) {
+                      tearDownAfterResponse();
+                    } else {
+                      releaseConnectionAfterResponse();
+                    }
                     settleResponse({
                       status,
                       headers,
@@ -1857,6 +1913,7 @@ export class NodeAdapter implements HTTPAdapter {
                 body,
                 sink,
                 totalBytes,
+                streamAbort.signal,
                 guardedDownloadProgress,
               );
 
@@ -1988,7 +2045,9 @@ export class NodeAdapter implements HTTPAdapter {
             body.on('end', () => {
               // Nothing for a response the request no longer has: a cancel or timeout that
               // landed after the last chunk already failed it, and Node still emits `'end'`.
+              // What it gathered is let go, as on every other way out.
               if (activeBufferedResponse === undefined) {
+                chunks.length = 0;
                 return;
               }
 
@@ -2033,6 +2092,13 @@ export class NodeAdapter implements HTTPAdapter {
               message: string,
               cause?: Error,
             ): void => {
+              // The pieces let go, as `'end'` lets them go: an early-ack upload still
+              // running keeps this closure alive, and a body that failed part-way - a
+              // decoding failure near its end - was held whole until the upload finished.
+              // Also on the guarded way out, for a response a cancel or timeout already
+              // answered: its abort listener cannot reach these.
+              chunks.length = 0;
+
               if (!activeBufferedResponse) {
                 return;
               }
@@ -2142,6 +2208,11 @@ export class NodeAdapter implements HTTPAdapter {
               !pendingStreamSetup.isResponseComplete()
             ) {
               pendingStreamSetup.failOnSocketError(normalizeError(error));
+
+              // And the upload failure reported, as it is below for a buffered body.
+              if (upload.settle !== null) {
+                reportWriteErrorAfterResponse(error);
+              }
 
               return;
             }
@@ -2544,6 +2615,7 @@ async function streamResponseBody(
   res: ResponseBodySource,
   writable: WritableLike,
   totalBytes: number,
+  stopSignal: AbortSignal,
   onProgress?: (e: AdapterProgressEvent) => void,
 ): Promise<StreamResponseBodyResult> {
   return await new Promise((resolve) => {
@@ -2597,6 +2669,7 @@ async function streamResponseBody(
       res.off('error', onResponseError);
       res.off('aborted', onResponseAborted);
       res.off('close', onResponseClose);
+      stopSignal.removeEventListener('abort', onStop);
     };
 
     const settle = (result: StreamResponseBodyResult): void => {
@@ -2841,6 +2914,17 @@ async function streamResponseBody(
       settle({ code: 'stream_response_error', cause: streamError });
     };
 
+    // The request is over - cancelled or timed out - and has already been answered. Settled
+    // here rather than left to the sink: a hand-written one whose `end` has not called back
+    // and whose `destroy()` emits no `'close'` would otherwise leave this pipe open, its
+    // listeners on the sink and the response task pending, for as long as the sink lived.
+    const onStop = (): void => {
+      settle({
+        code: 'stream_response_error',
+        cause: new Error('Response stream aborted'),
+      });
+    };
+
     // A sink that failed before a byte was handed to it - one its factory destroyed with
     // an error - settles with that error at once, the response never resumed: written to,
     // it fails only with a destroyed-stream error that hides the real one. Claimed, so the
@@ -2866,6 +2950,7 @@ async function streamResponseBody(
     attachWritableListener(writable, 'drain', onWritableDrain);
     attachWritableListener(writable, 'error', onWritableError);
     attachWritableListener(writable, 'close', onWritableClose);
+    stopSignal.addEventListener('abort', onStop, { once: true });
 
     res.on('data', onResponseData);
     res.on('end', onResponseEnd);

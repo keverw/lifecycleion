@@ -384,8 +384,12 @@ rest of the body for a while (`lingering_close`, on by default), but a server th
 not linger can make the upload fail as a transport error (`status: 0`) on Node, where
 writing into the reset connection fails before the buffered answer is read. Bun reads the
 answer first. Such a failure is retried as any transport failure is, for an idempotent
-method. Failures detected after
-an early response are also reported on the global `'error'` channel. A timeout while the
+method. Failures detected after an early response are also reported on the global
+`'error'` channel, including a connection reset while a `streamResponse` factory is still
+opening its sink. An upload cut short because the adapter itself ended the connection - a
+cancel or timeout, a stream factory that declined or failed, a streaming sink that
+failed, a response body over `maxResponseBytes` or one that fails to decode - settles
+`requestBodySettled` with that failure but is not reported there. A timeout while the
 client waits to dispatch another hop is a separate request failure.
 
 ### Content-Type Detection and Body Parsing
