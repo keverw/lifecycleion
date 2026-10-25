@@ -265,10 +265,13 @@ export class XHRAdapter implements HTTPAdapter {
       // it as a fallback for environments that skip upload.load entirely.
       let didUploadComplete = false;
 
+      // The body's own size, measured once: `0` for none or an empty one, `undefined`
+      // where it cannot be known up front (a `FormData`).
+      const bodyByteLength = knownBodyByteLength(requestBody);
+
       // The one final upload event, however the upload ends: the bytes the browser
       // reported, or the body's own size where it reported none - `0` for an empty
-      // string, as FetchAdapter reports it - not a stand-in `1`. Measured once, and only
-      // when the browser reported nothing.
+      // string, as FetchAdapter reports it - not a stand-in `1`.
       const emitFinalUpload = (): void => {
         if (didFireUpload100) {
           return;
@@ -281,8 +284,7 @@ export class XHRAdapter implements HTTPAdapter {
         // of the two - `total: 0`, or `loaded: 0`. An upload a server answered partway
         // through cannot be told from a finished one here, as FetchAdapter cannot.
         const bytes =
-          Math.max(uploadedBytes, uploadTotalBytes) ||
-          (knownBodyByteLength(requestBody) ?? 0);
+          Math.max(uploadedBytes, uploadTotalBytes) || (bodyByteLength ?? 0);
         guardedUploadProgress?.({ loaded: bytes, total: bytes, progress: 1 });
       };
 
@@ -291,8 +293,14 @@ export class XHRAdapter implements HTTPAdapter {
       // event still fires when the request ends. One whose getter or `addEventListener`
       // throws fails the same way on every attempt, so it is refused as non-retryable, as a
       // send the XHR refuses is - and, never sent, takes the abort listener off itself.
+      //
+      // Listened on only for a body with bytes to send. A listener on `upload` makes a
+      // browser preflight a cross-origin request - the XHR standard exempts a request with
+      // no body, but not every engine need honour that - and a body of no bytes has no
+      // upload to report on: its final event, `0` bytes, fires when the request ends.
       try {
-        const upload: XMLHttpRequestUpload | null | undefined = xhr.upload;
+        const upload: XMLHttpRequestUpload | null | undefined =
+          bodyByteLength === 0 ? undefined : xhr.upload;
 
         if (upload) {
           upload.addEventListener('progress', (event) => {
@@ -547,6 +555,8 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         if (followedRedirectBeforeAbort !== undefined) {
+          // An answer, as on `load`: the final upload event fires for it there too.
+          finishUploadProgress();
           resolve(browserRedirectResponse(followedRedirectBeforeAbort));
           return;
         }

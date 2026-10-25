@@ -2468,3 +2468,88 @@ test('PR review round 59: a body the mock refuses is not labelled JSON on a HEAD
   );
   expect(json.headers['content-type']).toBe('application/json');
 });
+
+describe('MockAdapter - PR review round 64', () => {
+  test('PR review round 64: a route status that is not a number is described by its type, not echoed', async () => {
+    const adapter = new MockAdapter();
+    let didCallToString = false;
+    adapter.routes.get('/string', () => ({
+      status: '200 secret-token' as unknown as number,
+    }));
+    adapter.routes.get('/object', () => ({
+      status: {
+        toString: () => {
+          didCallToString = true;
+          return '200 secret-token';
+        },
+      } as unknown as number,
+    }));
+
+    for (const requestURL of ['/string', '/object']) {
+      const rejection = await adapter
+        .send(makeAdapterRequest({ requestURL }))
+        .then(
+          () => undefined,
+          (error: unknown) => error as Error,
+        );
+
+      expect(rejection?.message).toMatch(
+        /^MockAdapter route returned status (string|object); a response status is an integer from 100 to 999/,
+      );
+      expect(rejection?.message).not.toContain('secret-token');
+    }
+    expect(didCallToString).toBe(false);
+
+    // A number is still printed.
+    adapter.routes.get('/number', () => ({ status: 1000 }));
+    const rejection = await adapter
+      .send(makeAdapterRequest({ requestURL: '/number' }))
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+    expect(rejection?.message).toContain('returned status 1000;');
+  });
+
+  test('PR review round 64: an abort during the response delay rejects as every other abort does', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/slow', () => ({ status: 200, delay: 1000 }));
+    adapter.routes.get('/fast', () => ({ status: 200 }));
+
+    const duringDelay = new AbortController();
+    setTimeout(() => duringDelay.abort(), 10);
+    const delayRejection = await adapter
+      .send(
+        makeAdapterRequest({
+          requestURL: '/slow',
+          signal: duringDelay.signal,
+        }),
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+
+    // The same as an abort before the route runs.
+    const beforeRoute = new AbortController();
+    beforeRoute.abort();
+    const earlyRejection = await adapter
+      .send(
+        makeAdapterRequest({
+          requestURL: '/fast',
+          signal: beforeRoute.signal,
+        }),
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+
+    expect(delayRejection?.name).toBe('AbortError');
+    expect(Object.getPrototypeOf(delayRejection)).toBe(Error.prototype);
+    expect(Object.getPrototypeOf(delayRejection)).toBe(
+      Object.getPrototypeOf(earlyRejection),
+    );
+    expect(delayRejection?.message).toBe(earlyRejection?.message);
+  });
+});

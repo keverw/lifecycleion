@@ -3289,3 +3289,94 @@ describe('XHRAdapter - PR review round 56', () => {
     expect(lastXHR.requestHeaders.cookie).toBeUndefined();
   });
 });
+
+describe('XHRAdapter - PR review round 64', () => {
+  /** The listeners registered on the fake XHR's `upload`, by event type. */
+  function uploadListenerCount(xhr: FakeXHR): number {
+    const handlers = (
+      xhr.upload as unknown as { handlers: Record<string, unknown[]> }
+    ).handlers;
+
+    return Object.values(handlers).reduce(
+      (count, list) => count + list.length,
+      0,
+    );
+  }
+
+  test('PR review round 64: a request with no body to send listens on no upload, and still ends with its final upload event', async () => {
+    for (const body of [undefined, '', new Uint8Array(0)]) {
+      const uploads: Array<{
+        loaded: number;
+        total: number;
+        progress: number;
+      }> = [];
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: body === undefined ? 'GET' : 'POST',
+        headers: {},
+        body,
+        onUploadProgress: (event) => {
+          uploads.push({
+            loaded: event.loaded,
+            total: event.total,
+            progress: event.progress,
+          });
+        },
+      });
+
+      expect(uploadListenerCount(lastXHR)).toBe(0);
+
+      lastXHR.status = 204;
+      lastXHR.simulateLoad();
+      await promise;
+
+      expect(uploads).toEqual([
+        { loaded: 0, total: 0, progress: 0 },
+        { loaded: 0, total: 0, progress: 1 },
+      ]);
+    }
+  });
+
+  test('PR review round 64: a request with a body to send listens on its upload', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+    });
+
+    expect(uploadListenerCount(lastXHR)).toBe(2);
+
+    lastXHR.status = 204;
+    lastXHR.simulateLoad();
+    await promise;
+  });
+
+  test('PR review round 64: an abort after a redirect the browser followed ends with the final upload event', async () => {
+    const controller = new AbortController();
+    const uploads: Array<{ loaded: number; progress: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/redir',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+      signal: controller.signal,
+      onUploadProgress: (event) => {
+        uploads.push({ loaded: event.loaded, progress: event.progress });
+      },
+    });
+
+    lastXHR.readyState = 3;
+    lastXHR.status = 200;
+    lastXHR.responseURL = 'https://api.test/slow';
+    controller.abort();
+    lastXHR.simulateAbort();
+
+    const response = await promise;
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(uploads).toEqual([
+      { loaded: 0, progress: 0 },
+      { loaded: 5, progress: 1 },
+    ]);
+  });
+});

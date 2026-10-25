@@ -548,7 +548,17 @@ export class MockAdapter implements HTTPAdapter {
       // Use abort-aware sleep when a signal is present so cancellation throws
       // immediately rather than waiting for the full delay to elapse.
       if (signal) {
-        await sleepAbortable(delay, signal);
+        try {
+          await sleepAbortable(delay, signal);
+        } catch (error) {
+          // The sleep's own abort, rejected as every other abort here is rather than as
+          // the internal error class.
+          if (isInternalAbortError(error)) {
+            throwAbortError();
+          }
+
+          throw error;
+        }
       } else {
         await sleep(delay);
       }
@@ -616,7 +626,7 @@ export class MockAdapter implements HTTPAdapter {
       const { status } = mockResponse;
       if (!Number.isInteger(status) || status < 100 || status > 999) {
         throw new TypeError(
-          `MockAdapter route returned status ${String(status)}; a response status is an integer from 100 to 999 (use transportError for a network failure)`,
+          `MockAdapter route returned status ${typeof status === 'number' ? String(status) : typeof status}; a response status is an integer from 100 to 999 (use transportError for a network failure)`,
         );
       }
     });

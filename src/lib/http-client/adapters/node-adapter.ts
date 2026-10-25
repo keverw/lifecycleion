@@ -495,6 +495,7 @@ export class NodeAdapter implements HTTPAdapter {
       fields;
     // Read once per request, as the rest of the config is: see `decompress`.
     const isDecompressing = this._config.decompress !== false;
+    const socketPath = this._config.socketPath;
 
     // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
     // URL fails the same way on every attempt. In its own words, without the parser's
@@ -617,7 +618,7 @@ export class NodeAdapter implements HTTPAdapter {
       options.auth = urlOptions.auth;
     }
 
-    if (this._config.socketPath && !isCrossOriginHop) {
+    if (socketPath && !isCrossOriginHop) {
       // Unix socket: the TCP connection goes to the socket path, not the host.
       // We still need options.path so the HTTP request line has the right path.
       // Preserve the URL host/port too so Node generates the correct Host
@@ -631,7 +632,7 @@ export class NodeAdapter implements HTTPAdapter {
       // changed, turning a redirect into a request the caller never made against the very
       // socket it configured. The hop still happens, over TCP to the host the `Location`
       // actually names, which is where that redirect would have gone without a socket.
-      options.socketPath = this._config.socketPath;
+      options.socketPath = socketPath;
       options.hostname = urlOptions.hostname;
       options.port = urlOptions.port;
       options.path = urlOptions.path;
@@ -653,8 +654,11 @@ export class NodeAdapter implements HTTPAdapter {
       // custom CA trust store. An empty one is refused rather than skipped: skipped, it
       // fell back to the public roots - a client meant to trust one private CA, whose
       // loader came back empty, then trusted every public one.
+      // Each read once, so the value checked is the value sent.
       const trustedCA = this._config.ca;
-      const mtlsCA = this._config.mtls?.ca;
+      const mtls = this._config.mtls;
+      const mtlsCA = mtls?.ca;
+      const servername = this._config.servername;
       assertTrustAnchors(trustedCA, 'ca');
       assertTrustAnchors(mtlsCA, 'mtls.ca');
       // `mtls.ca` adds to `ca` rather than replacing it, so a client that trusts a partner
@@ -679,11 +683,11 @@ export class NodeAdapter implements HTTPAdapter {
       // cross-origin hop: it names the host the caller configured, and sending it to
       // another host would both mislead that host's SNI routing and verify its
       // certificate against a name it was never meant to carry.
-      if (this._config.servername && !isCrossOriginHop) {
-        httpsOptions.servername = this._config.servername;
+      if (servername && !isCrossOriginHop) {
+        httpsOptions.servername = servername;
       }
 
-      if (this._config.mtls) {
+      if (mtls) {
         // mTLS: present the client certificate and default server verification to true.
         // The caller's explicit `rejectUnauthorized: false` may still override that
         // default below; client authentication and server verification are independent.
@@ -694,8 +698,8 @@ export class NodeAdapter implements HTTPAdapter {
         // remote server's choice, not the caller's, and must not be able to make this
         // adapter authenticate to a third party.
         if (!isCrossOriginHop) {
-          httpsOptions.cert = this._config.mtls.cert;
-          httpsOptions.key = this._config.mtls.key;
+          httpsOptions.cert = mtls.cert;
+          httpsOptions.key = mtls.key;
         }
 
         httpsOptions.rejectUnauthorized = true;
@@ -1418,6 +1422,18 @@ export class NodeAdapter implements HTTPAdapter {
         const classifiedBody = classifyRequestBody(request.body);
         if (classifiedBody !== undefined) {
           openBodyOutcome();
+        } else if (request.body !== undefined && request.body !== null) {
+          // Refused rather than dropped: anything else - an `ArrayBuffer`, a `Blob`, a plain
+          // object, another realm's `FormData` - went out as no body at all, and the request
+          // succeeded without it. `HTTPClient` serializes bodies first; this is the adapter
+          // called directly. Here, before the 0% upload event and before the request is
+          // created, so a request refused before it is sent reports no upload start and
+          // opens no connection, as in FetchAdapter and XHRAdapter.
+          const refusal = new TypeError(
+            'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+          );
+          markNonRetryableAdapterError(refusal);
+          throw refusal;
         }
 
         /**
@@ -2517,21 +2533,12 @@ export class NodeAdapter implements HTTPAdapter {
           runBodyWrite(() =>
             writeRequestBodyChunked(bytes, req, reportUploadProgress),
           );
-        } else if (request.body === undefined || request.body === null) {
-          // No body — fire 100% upload immediately and end the request. (A caller's
-          // `Content-Length` was taken off the request; see `dropBodilessContentLength`.)
+        } else {
+          // No body (any other was refused above) — fire 100% upload immediately and end
+          // the request. (A caller's `Content-Length` was taken off the request; see
+          // `dropBodilessContentLength`.)
           reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
           req.end();
-        } else {
-          // Refused rather than dropped: anything else - an `ArrayBuffer`, a `Blob`, a plain
-          // object, another realm's `FormData` - went out as no body at all, and the request
-          // succeeded without it. `HTTPClient` serializes bodies first; this is the adapter
-          // called directly.
-          const refusal = new TypeError(
-            'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
-          );
-          markNonRetryableAdapterError(refusal);
-          throw refusal;
         }
       } catch (error) {
         // This adapter's own refusal goes out as it is; anything else may be the caller's
@@ -3456,21 +3463,28 @@ function normalizeCRL(
   // HTTPS request - a string by its text, a buffer by its bytes, compared against a copy
   // of what was given. Never by identity: an array or buffer is the caller's to change in
   // place, and one kept by identity could keep a revoked certificate's list current.
+  //
+  // An array's entries are each read once, into one of this adapter's own, and that copy
+  // is what is compared, normalized and kept: read again for the cache key, an entry
+  // whose getter answers differently left a key that was never validated.
+  const given = snapshotCRLInput(crl);
   const last = lastParsedCRLs.get(owner);
-  if (last !== undefined && isSameCRLInput(last.input, crl)) {
+  if (last !== undefined && isSameCRLInput(last.input, given)) {
     // A buffer that normalized to itself is passed on as itself again - the one now
     // given, which holds the same bytes - rather than as the copy kept here. Only when it
     // starts at the start of its memory, as normalizing it would have required: one at
     // an offset (a `subarray`) is copied there, since Bun's `tls` reads a view from the
     // start of its memory - and the copy kept here is that copy.
-    return last.isPassedThrough && Buffer.isBuffer(crl) && crl.byteOffset === 0
-      ? crl
+    return last.isPassedThrough &&
+      Buffer.isBuffer(given) &&
+      given.byteOffset === 0
+      ? given
       : last.normalized;
   }
 
-  const normalized = Array.isArray(crl)
-    ? crl.flatMap((entry) => normalizeCRLEntry(entry))
-    : normalizeCRLEntry(crl);
+  const normalized = Array.isArray(given)
+    ? given.flatMap((entry) => normalizeCRLEntry(entry))
+    : normalizeCRLEntry(given);
 
   // An empty array adds no CRL, so revocation would be off while `crl` is set - a cached
   // list emptied by a failed refresh, a filter that matched nothing. Refused as `''` is.
@@ -3490,8 +3504,8 @@ function normalizeCRL(
   // reused for something else.
   // One copy, not two: a value that normalized to itself keeps its input copy as its
   // normalized form too.
-  const input = copyCRLInput(crl);
-  const isPassedThrough = normalized === crl;
+  const input = copyCRLInput(given);
+  const isPassedThrough = normalized === given;
   const owned = isPassedThrough
     ? (input as string | Buffer)
     : Array.isArray(normalized)
@@ -3500,6 +3514,28 @@ function normalizeCRL(
   lastParsedCRLs.set(owner, { input, normalized: owned, isPassedThrough });
 
   return normalized;
+}
+
+/**
+ * A `crl` value with an array's entries each read once, into an array this adapter owns.
+ * A hole is skipped, as `flatMap` skips it; anything else is left as given.
+ */
+function snapshotCRLInput(
+  crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
+): string | ArrayBufferView | Array<string | ArrayBufferView> {
+  if (!Array.isArray(crl)) {
+    return crl;
+  }
+
+  const entries: Array<string | ArrayBufferView> = [];
+  const length = crl.length;
+  for (let index = 0; index < length; index++) {
+    if (index in crl) {
+      entries.push(crl[index]);
+    }
+  }
+
+  return entries;
 }
 
 /** A normalized CRL entry this adapter owns: a string as is, a buffer copied. */

@@ -7669,6 +7669,30 @@ describe('NodeAdapter — crl option (normalization)', () => {
 
     expect(captured).toBeUndefined();
   });
+
+  test('PR review round 64: each entry of a crl array is read once per request, so the value cached is the value validated', async () => {
+    // Answers one CRL on its first read and another on every read after.
+    let reads = 0;
+    const crl = new Proxy([fixtures.crlEmpty], {
+      get(target, key, receiver) {
+        if (key === '0') {
+          reads++;
+
+          return reads === 1 ? fixtures.crlEmpty : fixtures.crlRevoked;
+        }
+
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+
+    // Once to construct, once for the request.
+    const captured = await captureCRL({ crl });
+
+    expect(reads).toBe(2);
+    // The request's own read, normalized - not the one construction validated, cached
+    // under a key read a second time.
+    expect(captured).toEqual([fixtures.crlRevoked]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -9191,3 +9215,112 @@ test('PR review round 55: the stall watchdog timer is cleared once an early-ack 
     server.close();
   }
 }, 10000);
+
+describe('NodeAdapter - PR review round 64', () => {
+  /** A stand-in `ClientRequest` that fails as soon as it is ended. */
+  const failingRequest = (): http.ClientRequest => {
+    const req = new EventEmitter();
+    const stub = req as unknown as Record<string, unknown>;
+    stub.setHeader = () => {};
+    stub.getHeaders = () => ({});
+    stub.destroy = () => {};
+    stub.end = () => {
+      queueMicrotask(() =>
+        req.emit(
+          'error',
+          Object.assign(new Error('captured'), { code: 'ECONNRESET' }),
+        ),
+      );
+    };
+
+    return req as unknown as http.ClientRequest;
+  };
+
+  test('PR review round 64: an unsupported body is refused before the upload starts and before the request is created', async () => {
+    const httpSpy = spyOn(http, 'request');
+    const httpsSpy = spyOn(https, 'request');
+    try {
+      for (const body of [new ArrayBuffer(4), new Blob(['x']), { a: 1 }]) {
+        const uploads: unknown[] = [];
+        const outcome = await new NodeAdapter()
+          .send({
+            requestURL: 'http://unsupported-body.test/x',
+            method: 'POST',
+            headers: {},
+            body: body as unknown as AdapterRequest['body'],
+            onUploadProgress: (event) => {
+              uploads.push(event);
+            },
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error as Record<PropertyKey, unknown>,
+          );
+
+        expect(String(outcome?.message)).toBe(
+          'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+        );
+        expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+        expect(uploads).toEqual([]);
+      }
+
+      expect(httpSpy).not.toHaveBeenCalled();
+      expect(httpsSpy).not.toHaveBeenCalled();
+    } finally {
+      httpSpy.mockRestore();
+      httpsSpy.mockRestore();
+    }
+  });
+
+  test('PR review round 64: socketPath, servername and mtls are each read once per request', async () => {
+    const reads = { socketPath: 0, servername: 0, mtls: 0 };
+    // Each answers one value on its first read and another on every read after.
+    const config = {
+      get socketPath() {
+        reads.socketPath++;
+
+        return reads.socketPath === 1 ? '/tmp/first.sock' : undefined;
+      },
+      get servername() {
+        reads.servername++;
+
+        return reads.servername === 1 ? 'first.test' : 'second.test';
+      },
+      get mtls() {
+        reads.mtls++;
+
+        return reads.mtls === 1
+          ? { cert: 'first-cert', key: 'first-key' }
+          : { cert: 'second-cert', key: 'second-key' };
+      },
+    } as NodeAdapterConfig;
+    const adapter = new NodeAdapter(config);
+    // Construction checks `mtls.ca`; only the request's reads are counted.
+    reads.mtls = 0;
+
+    let captured: https.RequestOptions | undefined;
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured = options;
+
+      return failingRequest();
+    }) as unknown as typeof https.request);
+
+    try {
+      await adapter.send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(reads).toEqual({ socketPath: 1, servername: 1, mtls: 1 });
+    expect(captured?.socketPath).toBe('/tmp/first.sock');
+    expect(captured?.servername).toBe('first.test');
+    expect(captured?.cert).toBe('first-cert');
+    expect(captured?.key).toBe('first-key');
+  });
+});
