@@ -75,3 +75,27 @@ test('rejects added tenant boundaries beneath removed shared-cookie ancestors', 
       }),
   ).not.toThrow();
 });
+
+test("PR review round 76: override lists are read by index, not through the array's own entries or iterator", () => {
+  const listed = (suffixes: string[], reported: string[]): string[] =>
+    Object.defineProperties(suffixes, {
+      entries: { value: () => reported.entries() },
+      [Symbol.iterator]: { value: () => reported[Symbol.iterator]() },
+    });
+
+  const resolver = new PublicSuffixResolver({
+    add: listed(['corp.internal'], ['other.internal']),
+    remove: listed(['herokuapp.com'], ['github.io']),
+  });
+  expect(resolver.isPublicSuffix('corp.internal')).toBe(true);
+  expect(resolver.isPublicSuffix('other.internal')).toBe(false);
+  expect(resolver.isPublicSuffix('herokuapp.com')).toBe(false);
+  expect(resolver.isPublicSuffix('github.io')).toBe(true);
+
+  // A hole is refused as any entry that is not a string is.
+  const holey = ['corp.internal'];
+  holey[2] = 'x.internal';
+  expect(() => new PublicSuffixResolver({ add: holey })).toThrow(
+    'publicSuffixes.add[1] must be a string (got undefined)',
+  );
+});

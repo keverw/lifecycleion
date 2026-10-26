@@ -16100,3 +16100,87 @@ test("PR review round 75: a retry interceptor's body on a cross-origin hop held 
   }
   expect(await sendHop(Silent.from([1, 2]))).toEqual(dropped);
 });
+
+test('PR review round 76: a Buffer body reaches every request interceptor and observer as a Buffer, and other bytes as a plain Uint8Array', async () => {
+  const contentTypes: unknown[] = [];
+  const { adapter, sent } = roundSeventyTwoBAdapter([
+    { status: 307, location: '/next' },
+    { status: 503 },
+    { status: 200 },
+  ]);
+  const recordingAdapter: HTTPAdapter = {
+    getType: () => adapter.getType(),
+    send: (request) => {
+      contentTypes.push(request.headers['content-type']);
+      return adapter.send(request);
+    },
+  };
+  const client = new HTTPClient({
+    adapter: recordingAdapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    retryPolicy: roundSeventyTwoBRetryPolicy,
+    retryNonIdempotentMethods: true,
+  });
+  const seen: Array<{ phase: string; isBuffer: boolean; text: string }> = [];
+  for (const phase of ['initial', 'redirect', 'retry'] as const) {
+    client.addRequestInterceptor(
+      (request) => {
+        const body = request.body as Buffer;
+        seen.push({
+          phase,
+          isBuffer: Buffer.isBuffer(body),
+          text: body.toString('base64'),
+        });
+        return request;
+      },
+      { phases: [phase] },
+    );
+  }
+  const observed: Array<{ body: boolean; rawBody: boolean }> = [];
+  client.addResponseObserver((_response, request) => {
+    observed.push({
+      body: Buffer.isBuffer(request.body),
+      rawBody: Buffer.isBuffer(request.rawBody),
+    });
+  });
+
+  const buffer = Buffer.from('hello');
+  await client.post('/x').body(buffer).send();
+  expect(seen).toEqual([
+    { phase: 'initial', isBuffer: true, text: 'aGVsbG8=' },
+    { phase: 'redirect', isBuffer: true, text: 'aGVsbG8=' },
+    { phase: 'retry', isBuffer: true, text: 'aGVsbG8=' },
+  ]);
+  expect(observed).toEqual([{ body: true, rawBody: true }]);
+  const hello = Array.from(Buffer.from('hello'));
+  expect(sent).toEqual([hello, hello, hello]);
+  expect(contentTypes).toEqual([
+    'application/octet-stream',
+    'application/octet-stream',
+    'application/octet-stream',
+  ]);
+
+  // Any other bytes - a subclass, or another realm's - are a plain `Uint8Array`.
+  class Tagged extends Uint8Array {}
+  const others: unknown[] = [
+    new Uint8Array([1, 2]),
+    new Tagged([1, 2]),
+    vm.runInNewContext('new Uint8Array([1, 2])'),
+  ];
+  for (const bytes of others) {
+    const handed: unknown[] = [];
+    const plain = new HTTPClient({
+      adapter: roundSeventyTwoBAdapter([]).adapter,
+      baseURL: 'http://api.test',
+    });
+    plain.addRequestInterceptor((request) => {
+      handed.push(request.body);
+      return request;
+    });
+    await plain.post('/x').body(bytes).send();
+    expect(handed).toHaveLength(1);
+    expect(Object.getPrototypeOf(handed[0])).toBe(Uint8Array.prototype);
+    expect(Array.from(handed[0] as Uint8Array)).toEqual([1, 2]);
+  }
+});

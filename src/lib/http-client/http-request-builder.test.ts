@@ -976,3 +976,21 @@ test('PR review round 73: a params array keeps a named key set on it, as qs seri
     'http://api.test/search?a[0]=x&a[extra]=y',
   );
 });
+
+test('PR review round 76: a byte body whose prototype is a Proxy is copied without running its traps', () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  let trapCalls = 0;
+  Object.setPrototypeOf(
+    bytes,
+    new Proxy(Uint8Array.prototype, {
+      getPrototypeOf() {
+        trapCalls++;
+        throw new Error('trap ran');
+      },
+    }),
+  );
+
+  const { builder } = makeBuilder();
+  expect(() => builder.body(bytes)).not.toThrow();
+  expect(trapCalls).toBe(0);
+});

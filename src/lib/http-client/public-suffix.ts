@@ -1,4 +1,5 @@
 import { isPlainRecord } from './internal/plain-record';
+import { copyArrayValue } from './internal/array-copy';
 import { describeValue } from '../internal/describe-value';
 import { parse } from 'tldts';
 import { endsInANumber } from '../domain-utils/helpers';
@@ -140,7 +141,10 @@ function normalizeList(
     throw new TypeError(`publicSuffixes.${listName} must be an array`);
   }
 
-  for (const [index, entry] of entries.entries()) {
+  // Read by index, as every caller list is (see `copyArrayValue`): an `entries` or an
+  // iterator of the array's own could report suffixes it does not hold. A hole reads as
+  // `undefined` and is refused as any non-string entry is.
+  for (const [index, entry] of copyArrayValue(entries).entries()) {
     result.push(normalizeSuffix(entry, listName, index));
   }
 
@@ -296,16 +300,12 @@ export class PublicSuffixResolver {
     // from quietly re-bucketing every unrelated internal name in the jar: the walk would
     // have filed `host.notcorp.acme` under itself and `notcorp.acme` under a second
     // bucket, so a cookie stored from one was invisible to the other.
-    const domain = parse(normalized, { allowPrivateDomains: true }).domain;
-    if (domain !== null) {
-      return domain;
-    }
-
-    // tldts reads no domain for a host with a hyphen at a label's edge
-    // (`-edge.example.com`), which the URL parser accepts and the jar keeps: its hostname
-    // check refuses it. Read again without that check - the suffix lookup itself is the
-    // same - so such a host is under `example.com`, not its own apex: its
-    // `Domain=example.com` cookies are kept and a domain clear of `example.com` reaches it.
+    //
+    // Read without tldts's hostname check, as above. The check only refuses a host - the
+    // suffix lookup is the same either way - and it refuses one with a hyphen at a
+    // label's edge (`-edge.example.com`), which the URL parser accepts and the jar keeps.
+    // Such a host is under `example.com`, not its own apex: its `Domain=example.com`
+    // cookies are kept and a domain clear of `example.com` reaches it.
     return (
       parse(normalized, { allowPrivateDomains: true, validateHostname: false })
         .domain ?? normalized

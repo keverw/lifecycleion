@@ -25,7 +25,7 @@ const jsonTextByCopy = new WeakMap<object, string | undefined>();
  *   number is refused. Such a copy is wrapped as a plain object whose own `toJSON`
  *   answers it, so it is still a JSON body and serializes to exactly the text the
  *   caller's does.
- * - Bytes are copied, into this realm (see `cloneBodyValue`).
+ * - Bytes are copied, into this realm; a `Buffer` as a `Buffer` (see `copyBytes`).
  * - Form data is a new form with the same entries; a `Blob` or `File` entry is kept as
  *   it is, being immutable.
  * - A string, `null` or `undefined` cannot be changed in place and is returned as it is.
@@ -182,7 +182,25 @@ function copyFormData(form: FormData): FormData {
   return cloned;
 }
 
+/**
+ * Bytes copied into this realm, read through their internal slots so another realm's are
+ * copied too. This realm's `Buffer` stays a `Buffer` - a view over the copy, so nothing of
+ * the caller's, not its `valueOf` or `length`, is consulted - so an interceptor's
+ * `toString('base64')` reads the bytes; any other `Uint8Array`, another realm's `Buffer`
+ * or a subclass among them, is a plain `Uint8Array`. A `Buffer` is told by its prototype
+ * being `Buffer.prototype` itself, not by `Buffer.isBuffer`, whose `instanceof` walks a
+ * prototype chain the caller may have put a `Proxy` in (and a polyfill's reads a
+ * property). Where there is no `Buffer`, as in a browser, every copy is a plain one.
+ */
 function copyBytes(bytes: Uint8Array): Uint8Array {
-  // Read through its internal slots, so another realm's is copied into this one's.
-  return new Uint8Array(bytes);
+  const copy = new Uint8Array(bytes);
+
+  if (
+    typeof Buffer !== 'undefined' &&
+    Object.getPrototypeOf(bytes) === Buffer.prototype
+  ) {
+    return Buffer.from(copy.buffer, copy.byteOffset, copy.byteLength);
+  }
+
+  return copy;
 }
