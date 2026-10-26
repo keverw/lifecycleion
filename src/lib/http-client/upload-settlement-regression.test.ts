@@ -1,7 +1,19 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { HTTPClient } from './http-client';
-import { REQUEST_BODY_SETTLED_KEY } from './consts';
-import type { AdapterResponse, HTTPAdapter } from './types';
+import {
+  BUILT_IN_NETWORK_SEND_KEY,
+  REQUEST_BODY_SETTLED_KEY,
+  UPLOAD_SOURCE_STALL_GRACE_MS,
+  UPLOAD_SOURCE_WAIT_LISTENER_KEY,
+} from './consts';
+import { readUploadSourceWaitListener } from './internal/upload-source-wait';
+import type { HTTPRequestBuilder } from './http-request-builder';
+import type {
+  AdapterRequest,
+  AdapterResponse,
+  HTTPAdapter,
+  HTTPResponse,
+} from './types';
 
 test.each([
   ['resolved', 'noop'],
@@ -640,3 +652,544 @@ test.each([
     expect(Object.getOwnPropertyNames(outcome)).not.toContain('then');
   },
 );
+
+/** A one-entry form, the only body the client hands a source-wait listener with. */
+function formBody(): FormData {
+  const form = new FormData();
+  form.append('file', new Blob([new Uint8Array(8)]), 'f.bin');
+
+  return form;
+}
+
+for (const staleWait of ['left open', 'reported late'] as const) {
+  test(`a source wait an earlier attempt ${staleWait === 'left open' ? 'left open' : 'reports late'} does not hold the next attempt's upload wait`, async () => {
+    // While the adapter says its writer is waiting on its source, the wait before the next
+    // dispatch does not count the time as silence. That is the latest attempt's writer
+    // only: the first attempt's says it is waiting - and never says it is done, as a writer
+    // whose outcome the watchdog settled need not, or says it again once the next attempt
+    // is out - and the second attempt's upload, which never settles, must still time out.
+    let attempts = 0;
+    let firstRequest: AdapterRequest | undefined;
+    let didHaveListener = false;
+    const reports: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        attempts++;
+
+        if (attempts === 1) {
+          firstRequest = request;
+          didHaveListener = readUploadSourceWaitListener(request) !== undefined;
+
+          if (staleWait === 'left open') {
+            readUploadSourceWaitListener(request)?.(true);
+          }
+
+          return Promise.resolve({
+            status: 503,
+            headers: {},
+            body: null,
+            requestBodySettled: Promise.resolve(undefined),
+          });
+        }
+
+        if (staleWait === 'reported late' && firstRequest !== undefined) {
+          readUploadSourceWaitListener(firstRequest)?.(true);
+        }
+
+        return Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: new Promise<Error | undefined>(() => {}),
+        });
+      },
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+    try {
+      const response = await orHung(
+        new HTTPClient({ adapter, timeout: 50 })
+          .put('https://example.com/upload')
+          .formData(formBody())
+          .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 }),
+        1_000,
+      );
+
+      expect(didHaveListener).toBe(true);
+      expect(response).not.toBe('hung');
+      expect(attempts).toBe(2);
+      expect(response !== 'hung' && response.isTimeout).toBe(true);
+      expect(reports).toHaveLength(1);
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+  });
+}
+
+/**
+ * Runs `fn` with `performance.now()` answering `offsetMS()` past the real clock, so a grace
+ * measured on it can be moved past rather than waited out.
+ */
+async function withClockOffset<T>(
+  offsetMS: () => number,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const realNow = performance.now.bind(performance);
+  const nowSpy = spyOn(performance, 'now').mockImplementation(
+    () => realNow() + offsetMS(),
+  );
+
+  try {
+    return await fn();
+  } finally {
+    nowSpy.mockRestore();
+  }
+}
+
+/** Collects the host `'error'` reports `fn` causes, and keeps them off the console. */
+async function withHostReports<T>(
+  fn: (reports: ErrorEvent[]) => Promise<T>,
+): Promise<T> {
+  const reports: ErrorEvent[] = [];
+  const onGlobalError = (event: Event): void => {
+    reports.push(event as ErrorEvent);
+    event.preventDefault();
+  };
+
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    return await fn(reports);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+}
+
+/**
+ * Sends `builder`'s request: its response, or `'hung'` if it has not settled within `ms`.
+ * A request given up on is cancelled, and settled, before this returns, so it cannot time
+ * out later and report into the next test's host reports.
+ */
+async function orHung(
+  builder: HTTPRequestBuilder,
+  ms: number,
+): Promise<HTTPResponse | 'hung'> {
+  const sent = builder.send();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    sent,
+    new Promise<'hung'>((resolve) => {
+      timer = setTimeout(() => resolve('hung'), ms);
+    }),
+  ]);
+
+  clearTimeout(timer);
+
+  if (result === 'hung') {
+    builder.cancel('gave up on a hung request');
+    await sent;
+  }
+
+  return result;
+}
+
+for (const shape of ['one wait', 'empty reads'] as const) {
+  test(`an adapter whose source never moves the upload still has its wait end: ${shape}`, async () => {
+    // A source wait counts as activity for no longer than the grace `NodeAdapter` gives
+    // one itself, so the client's bound does not rest on an adapter's word. That grace runs
+    // from the first wait since the upload last made progress: one wait that never ends,
+    // and a source whose reads keep coming back with nothing - waits that end with no
+    // progress between them - both time out once the grace and the stall bound have run
+    // out, the outcome never settling. The clock is moved past the grace rather than
+    // waited out.
+    let attempts = 0;
+    let didHaveListener = false;
+    let clockOffsetMS = 0;
+    const timers: Array<ReturnType<typeof setInterval>> = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        attempts++;
+        const listener = readUploadSourceWaitListener(request);
+        didHaveListener = listener !== undefined;
+        listener?.(true);
+
+        // Past the grace a little after the first wait has begun - between a wait's end
+        // and the next one's start for the empty reads, so no look at the clock falls
+        // between the move and the reports around it.
+        let reads = 0;
+        timers.push(
+          setInterval(() => {
+            reads++;
+            if (shape === 'one wait') {
+              if (reads === 15) {
+                clockOffsetMS = UPLOAD_SOURCE_STALL_GRACE_MS + 1_000;
+              }
+
+              return;
+            }
+
+            listener?.(false);
+            if (reads === 15) {
+              clockOffsetMS = UPLOAD_SOURCE_STALL_GRACE_MS + 1_000;
+            }
+            listener?.(true);
+          }, 10),
+        );
+
+        return Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: new Promise<Error | undefined>(() => {}),
+        });
+      },
+    };
+
+    try {
+      await withClockOffset(
+        () => clockOffsetMS,
+        async () =>
+          await withHostReports(async (reports) => {
+            const response = await orHung(
+              new HTTPClient({ adapter, timeout: 50 })
+                .put('https://example.com/upload')
+                .formData(formBody())
+                .retryPolicy({
+                  strategy: 'fixed',
+                  maxRetryAttempts: 1,
+                  delayMS: 1,
+                }),
+              1_000,
+            );
+
+            expect(didHaveListener).toBe(true);
+            expect(response).not.toBe('hung');
+            expect(attempts).toBe(1);
+            expect(response !== 'hung' && response.isTimeout).toBe(true);
+            expect(reports).toHaveLength(1);
+          }),
+      );
+    } finally {
+      for (const timer of timers) {
+        clearInterval(timer);
+      }
+    }
+  });
+}
+
+test('upload progress counts while the adapter says it is waiting on its source, past the grace too', async () => {
+  // Progress is activity whatever else the adapter has said: an upload that reports
+  // progress throughout a source wait running past the grace is still moving, and the
+  // retry goes out once it settles.
+  let attempts = 0;
+  let clockOffsetMS = 0;
+  let progressTimer: ReturnType<typeof setInterval> | undefined;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request: AdapterRequest): Promise<AdapterResponse> => {
+      attempts++;
+
+      if (attempts > 1) {
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      }
+
+      readUploadSourceWaitListener(request)?.(true);
+      let loaded = 0;
+      progressTimer = setInterval(() => {
+        loaded++;
+        // Past the grace, a few reports in - moved in the same turn as a report, so no
+        // look at the clock falls between the two.
+        if (loaded === 5) {
+          clockOffsetMS = UPLOAD_SOURCE_STALL_GRACE_MS + 1_000;
+        }
+        request.onUploadProgress?.({ loaded, total: 1_000, progress: -1 });
+      }, 10);
+
+      return Promise.resolve({
+        status: 503,
+        headers: {},
+        body: null,
+        requestBodySettled: new Promise<Error | undefined>((resolve) => {
+          setTimeout(() => {
+            clearInterval(progressTimer);
+            resolve(undefined);
+          }, 300);
+        }),
+      });
+    },
+  };
+
+  try {
+    await withClockOffset(
+      () => clockOffsetMS,
+      async () =>
+        await withHostReports(async (reports) => {
+          const response = await new HTTPClient({ adapter, timeout: 50 })
+            .put('https://example.com/upload')
+            .formData(formBody())
+            .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+            .send();
+
+          expect(response.isTimeout).toBe(false);
+          expect(response.status).toBe(200);
+          expect(attempts).toBe(2);
+          expect(reports).toHaveLength(0);
+        }),
+    );
+  } finally {
+    clearInterval(progressTimer);
+  }
+});
+
+test('slow source reads that each return bytes add up past the grace without the upload being cut', async () => {
+  // The grace a source wait counts within runs from the first wait since the upload last
+  // made progress, and progress ends that run. An upload of many slow reads, each
+  // answering with bytes the adapter reports as progress, is still moving however long
+  // the reads add up to: each read is a wait of its own, longer than the stall bound and
+  // counted as activity, and the retry goes out once the upload settles. Each read is
+  // moved twenty seconds on the clock as it answers - five of them, past the grace.
+  let attempts = 0;
+  let clockOffsetMS = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request: AdapterRequest): Promise<AdapterResponse> => {
+      attempts++;
+
+      if (attempts > 1) {
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      }
+
+      const listener = readUploadSourceWaitListener(request);
+
+      return Promise.resolve({
+        status: 503,
+        headers: {},
+        body: null,
+        requestBodySettled: (async (): Promise<Error | undefined> => {
+          for (let read = 1; read <= 5; read++) {
+            listener?.(true);
+            // Longer than the stall bound, in real time.
+            await new Promise((resolve) => setTimeout(resolve, 120));
+            clockOffsetMS += 20_000;
+            listener?.(false);
+            request.onUploadProgress?.({
+              loaded: read,
+              total: 5,
+              progress: read / 5,
+            });
+          }
+
+          return undefined;
+        })(),
+      });
+    },
+  };
+
+  await withClockOffset(
+    () => clockOffsetMS,
+    async () =>
+      await withHostReports(async (reports) => {
+        const response = await new HTTPClient({ adapter, timeout: 50 })
+          .put('https://example.com/upload')
+          .formData(formBody())
+          .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+          .send();
+
+        expect(clockOffsetMS).toBeGreaterThan(UPLOAD_SOURCE_STALL_GRACE_MS);
+        expect(response.isTimeout).toBe(false);
+        expect(response.status).toBe(200);
+        expect(attempts).toBe(2);
+        expect(reports).toHaveLength(0);
+      }),
+  );
+});
+
+test('progress reported while the adapter is still waiting on its source starts the wait over', async () => {
+  // Progress reported during a source wait - with no end of the wait between - is
+  // activity, and the wait goes on from there as a new one, not as silence: the retry
+  // goes out once the upload settles, the wait having outlasted the stall bound after
+  // the report.
+  let attempts = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request: AdapterRequest): Promise<AdapterResponse> => {
+      attempts++;
+
+      if (attempts > 1) {
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      }
+
+      const listener = readUploadSourceWaitListener(request);
+
+      return Promise.resolve({
+        status: 503,
+        headers: {},
+        body: null,
+        requestBodySettled: (async (): Promise<Error | undefined> => {
+          listener?.(true);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          request.onUploadProgress?.({ loaded: 1, total: 2, progress: 0.5 });
+          // Still waiting, for longer than the stall bound.
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          listener?.(false);
+
+          return undefined;
+        })(),
+      });
+    },
+  };
+
+  await withHostReports(async (reports) => {
+    const response = await new HTTPClient({ adapter, timeout: 50 })
+      .put('https://example.com/upload')
+      .formData(formBody())
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+      .send();
+
+    expect(response.isTimeout).toBe(false);
+    expect(response.status).toBe(200);
+    expect(attempts).toBe(2);
+    expect(reports).toHaveLength(0);
+  });
+});
+
+test("an earlier attempt's late upload progress does not keep the next attempt's upload wait open", async () => {
+  // The wait before a dispatch watches the latest attempt's upload. An earlier attempt's
+  // adapter still reporting progress on its own hook once the next attempt is out - a
+  // custom adapter whose first upload goes on - is that upload's, not the next one's, and
+  // the next one's outcome, which never settles, must still time out.
+  let attempts = 0;
+  let firstRequest: AdapterRequest | undefined;
+  let progressTimer: ReturnType<typeof setInterval> | undefined;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request: AdapterRequest): Promise<AdapterResponse> => {
+      attempts++;
+
+      if (attempts === 1) {
+        firstRequest = request;
+
+        return Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(undefined),
+        });
+      }
+
+      let loaded = 0;
+      progressTimer = setInterval(() => {
+        loaded++;
+        firstRequest?.onUploadProgress?.({
+          loaded,
+          total: 1_000,
+          progress: -1,
+        });
+      }, 10);
+
+      return Promise.resolve({
+        status: 503,
+        headers: {},
+        body: null,
+        requestBodySettled: new Promise<Error | undefined>(() => {}),
+      });
+    },
+  };
+
+  try {
+    await withHostReports(async (reports) => {
+      const response = await orHung(
+        new HTTPClient({ adapter, timeout: 50 })
+          .put('https://example.com/upload')
+          .text('body')
+          .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 }),
+        1_000,
+      );
+
+      expect(response).not.toBe('hung');
+      expect(attempts).toBe(2);
+      expect(response !== 'hung' && response.isTimeout).toBe(true);
+      expect(reports).toHaveLength(1);
+    });
+  } finally {
+    clearInterval(progressTimer);
+  }
+});
+
+test('the wait after a thrown attempt leaves an upload waiting on its source alone', async () => {
+  // The retry after an attempt that threw waits on the outcome tagged on the error, as
+  // the retry after an answered one waits on the response's. A source wait the adapter
+  // reports in that time is not silence there either: the retry goes out once the upload
+  // settles, rather than the request failing as a timeout.
+  let attempts = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request: AdapterRequest): Promise<AdapterResponse> => {
+      attempts++;
+
+      if (attempts > 1) {
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      }
+
+      const listener = readUploadSourceWaitListener(request);
+      listener?.(true);
+
+      return Promise.reject(
+        Object.assign(new Error('connection reset'), {
+          [REQUEST_BODY_SETTLED_KEY]: new Promise<Error | undefined>(
+            (resolve) => {
+              setTimeout(() => {
+                listener?.(false);
+                resolve(undefined);
+              }, 300);
+            },
+          ),
+        }),
+      );
+    },
+  };
+
+  await withHostReports(async (reports) => {
+    const response = await new HTTPClient({ adapter, timeout: 50 })
+      .put('https://example.com/upload')
+      .formData(formBody())
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 })
+      .send();
+
+    expect(response.isTimeout).toBe(false);
+    expect(response.status).toBe(200);
+    expect(attempts).toBe(2);
+    expect(reports).toHaveLength(0);
+  });
+});
+
+test('the client hands a source-wait listener with a form body only', async () => {
+  const seen: boolean[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request: AdapterRequest): Promise<AdapterResponse> => {
+      seen.push(readUploadSourceWaitListener(request) !== undefined);
+
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter });
+
+  await client.put('https://example.com/upload').text('body').send();
+  await client.put('https://example.com/upload').formData(formBody()).send();
+
+  expect(seen).toEqual([false, true]);
+});
+
+test('the marks shared between the client and the adapters are global-registry symbols', () => {
+  // The client and each adapter are separate entry points, each bundled with its own copy
+  // of the modules that set and read these marks: only a `Symbol.for` key is the same key
+  // in both copies.
+  expect(Symbol.keyFor(BUILT_IN_NETWORK_SEND_KEY)).toBeString();
+  expect(Symbol.keyFor(UPLOAD_SOURCE_WAIT_LISTENER_KEY)).toBeString();
+});

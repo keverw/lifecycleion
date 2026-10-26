@@ -797,10 +797,11 @@ describe('FetchAdapter', () => {
       headers: { cookie: ['session=abc123', 'theme=dark'] },
     });
 
-    expect(capturedInit?.headers).toBeInstanceOf(Headers);
-    expect((capturedInit?.headers as Headers).get('cookie')).toBe(
-      'session=abc123; theme=dark',
-    );
+    // Joined into one field before it is handed over, so no name repeats and it goes as
+    // a record.
+    expect(capturedInit?.headers).toEqual({
+      cookie: 'session=abc123; theme=dark',
+    });
   });
 
   test('uses manual redirect mode for fetch requests', async () => {

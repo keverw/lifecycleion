@@ -543,7 +543,7 @@ function cancelBodyQuietly(body: unknown): void {
 
 /**
  * The request headers as `fetch` takes them, each value read once: a fresh record, or a
- * `Headers` when a value repeats. Never the caller's own object, which the build check
+ * `Headers` when a name repeats. Never the caller's own object, which the build check
  * and `fetch` would each read again - a getter could answer one and send the other.
  */
 function materializeFetchHeaders(
@@ -551,24 +551,26 @@ function materializeFetchHeaders(
 ): HeadersInit {
   // The `Cookie` field built by NodeAdapter's rule on either path (see
   // `requestHeaderPairs`), so whether it is sent, and how, does not turn on how the other
-  // headers are given.
+  // headers are given. Every choice below is made from these pairs alone.
   const pairs = requestHeaderPairs(headers);
 
-  // A `Headers` whenever a value repeats as an array; a record otherwise.
-  if (!Object.values(headers).some((value) => Array.isArray(value))) {
-    const record: Record<string, string> = {};
-    for (const [name, value] of pairs) {
-      defineEntry(record, name, value);
-    }
-    return record;
-  }
-
-  const materialized = new Headers();
+  // A record holds each name once, so a name that repeats - an array value of more than
+  // one item - takes a `Headers`, which sends every value under it.
+  const record: Record<string, string> = {};
   for (const [name, value] of pairs) {
-    materialized.append(name, value);
+    if (Object.hasOwn(record, name)) {
+      const materialized = new Headers();
+      for (const [pairName, pairValue] of pairs) {
+        materialized.append(pairName, pairValue);
+      }
+
+      return materialized;
+    }
+
+    defineEntry(record, name, value);
   }
 
-  return materialized;
+  return record;
 }
 
 /**

@@ -32,6 +32,7 @@ import type {
 } from '../types';
 import {
   derivedRedirectFields,
+  findBrowserPage,
   isCrossOrigin,
   keepFirstJoinedLocation,
   resolveBrowserDispatchURL,
@@ -685,33 +686,28 @@ function isKnownUncodedBody(
 
 /**
  * The origin of the page or worker running the request, which a browser holds a response
- * to for CORS: its `origin` (`'null'` in a sandboxed frame, which matches none), else its
- * `location`'s. `undefined` where there is neither, as outside a browser. Read through
- * guarded accessors, as the resolution base is.
+ * to for CORS: its global's `origin` (`'null'` in a sandboxed frame, which matches none),
+ * else its `location`'s. The page is the scope whose `location` a relative request URL
+ * falls back to when the document has no base URL of its own (see `findBrowserPage`); a
+ * `<base href>` can resolve the URL elsewhere, but the origin is still that page's.
+ * `undefined` where there is no page, or it names no origin, as outside a browser.
  */
 function readPageOrigin(): string | undefined {
-  for (const scope of [
-    globalThis,
-    readUnknownMember(globalThis, 'window'),
-    readUnknownMember(globalThis, 'self'),
-  ]) {
-    const origin = readUnknownMember(scope, 'origin');
+  const page = findBrowserPage();
 
-    if (typeof origin === 'string') {
-      return origin;
-    }
-
-    const locationOrigin = readUnknownMember(
-      readUnknownMember(scope, 'location'),
-      'origin',
-    );
-
-    if (typeof locationOrigin === 'string') {
-      return locationOrigin;
-    }
+  if (page === undefined) {
+    return undefined;
   }
 
-  return undefined;
+  const origin = readUnknownMember(page.scope, 'origin');
+
+  if (typeof origin === 'string') {
+    return origin;
+  }
+
+  const locationOrigin = readUnknownMember(page.location, 'origin');
+
+  return typeof locationOrigin === 'string' ? locationOrigin : undefined;
 }
 
 /**

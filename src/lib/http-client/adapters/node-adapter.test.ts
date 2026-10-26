@@ -11,9 +11,11 @@ import * as https from 'node:https';
 import * as tls from 'node:tls';
 import type { Socket } from 'node:net';
 import { Writable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import * as zlib from 'node:zlib';
 import { NodeAdapter } from './node-adapter';
+import { isBuiltInNetworkSend } from '../internal/built-in-adapter';
 import type { NodeAdapterConfig } from './node-adapter';
 import { HTTPClient } from '../http-client';
 import { CookieJar } from '../cookie-jar';
@@ -26,6 +28,7 @@ import {
   EFFECTIVE_REQUEST_HEADERS_KEY,
   STREAM_ABORT_HEADERS_KEY,
   STREAM_ABORT_STATUS_KEY,
+  UPLOAD_SOURCE_STALL_GRACE_MS,
 } from '../consts';
 import type {
   AdapterRequest,
@@ -339,6 +342,42 @@ class MockClientRequest extends EventEmitter {
     this.destroyed = true;
     return this;
   }
+}
+
+let separateNodeAdapter: Promise<typeof NodeAdapter> | undefined;
+
+/**
+ * `NodeAdapter` from a bundle of its own, with its own copy of every module it imports, as
+ * a consumer gets it from `lifecycleion/http-client-node` beside `lifecycleion/http-client`
+ * - the entry points are bundled without shared chunks. Imported through a `blob:` URL, so
+ * nothing is written to disk. Built once per run.
+ */
+async function loadSeparatelyBundledNodeAdapter(): Promise<typeof NodeAdapter> {
+  separateNodeAdapter ??= (async () => {
+    const build = await Bun.build({
+      entrypoints: [
+        fileURLToPath(new URL('./node-adapter.ts', import.meta.url)),
+      ],
+      target: 'bun',
+      format: 'esm',
+    });
+    if (!build.success) {
+      throw new Error('NodeAdapter could not be bundled for the test');
+    }
+    const url = URL.createObjectURL(
+      new Blob([await build.outputs[0].text()], { type: 'text/javascript' }),
+    );
+    try {
+      const bundled = (await import(url)) as {
+        NodeAdapter: typeof NodeAdapter;
+      };
+      return bundled.NodeAdapter;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  })();
+
+  return await separateNodeAdapter;
 }
 
 class MockIncomingMessage extends EventEmitter {
@@ -2891,6 +2930,332 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       requestSpy.mockRestore();
     }
   }, 30000);
+
+  for (const [nextDispatch, origin] of [
+    ['retry', 'this module'],
+    ['retry', 'a separate bundle'],
+    ['redirect', 'this module'],
+  ] as const) {
+    test(`HTTPClient's wait before a ${nextDispatch} leaves a writer waiting on a slow source alone, with a NodeAdapter from ${origin}`, async () => {
+      // The client waits for the previous attempt's upload to settle before a retry or a
+      // redirect, bounded by the per-attempt timeout as a stall bound on upload progress.
+      // A writer parked in `Blob.stream()`'s `read()` makes no progress but has not
+      // stalled, and the adapter says so: a multipart `File` on a slow disk - the server
+      // having answered `503`, or `307`, early - is sent again once its upload has
+      // finished, within the source grace the adapter's own watchdog gives it, rather
+      // than failed as a timeout. The client and the adapter are separate entry points,
+      // bundled apart, so a `NodeAdapter` from a bundle of its own is heard as well.
+      const Adapter =
+        origin === 'this module'
+          ? NodeAdapter
+          : await loadSeparatelyBundledNodeAdapter();
+      const requests: MockClientRequest[] = [];
+      let wasFirstUploadEndedAtRetry: boolean | undefined;
+
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+          const req = new MockClientRequest();
+          const isFirst = requests.length === 0;
+
+          if (!isFirst) {
+            wasFirstUploadEndedAtRetry = requests[0]?.ended;
+          }
+
+          requests.push(req);
+
+          const res = new MockIncomingMessage(
+            !isFirst ? 200 : nextDispatch === 'retry' ? 503 : 307,
+            {
+              'content-type': 'text/plain',
+              ...(isFirst && nextDispatch === 'redirect'
+                ? { location: 'http://example.test/moved' }
+                : {}),
+            },
+          );
+
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            queueMicrotask(() => {
+              res.emit('data', Buffer.from('ok'));
+              res.emit('end');
+              res.emit('close');
+            });
+          });
+
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      // The first upload's file answers half its bytes at once and the rest after a gap
+      // well past the per-attempt timeout; the retry's answers at once.
+      let streams = 0;
+      const streamSpy = spyOn(Blob.prototype, 'stream').mockImplementation(
+        function (this: Blob) {
+          const size = this.size;
+          const half = Math.floor(size / 2);
+          const gapMS = streams++ === 0 ? 1_000 : 0;
+
+          return new ReadableStream<Uint8Array<ArrayBuffer>>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(half));
+              setTimeout(() => {
+                controller.enqueue(new Uint8Array(size - half));
+                controller.close();
+              }, gapMS);
+            },
+          });
+        },
+      );
+
+      const reports: unknown[] = [];
+      const onError = (event: Event): void => {
+        reports.push(event);
+        event.preventDefault();
+      };
+
+      globalThis.addEventListener('error', onError);
+
+      try {
+        const fd = new FormData();
+        fd.append('file', new Blob([new Uint8Array(8)]), 'slow.bin');
+
+        const response = await new HTTPClient({
+          adapter: new Adapter(),
+          timeout: 300,
+          followRedirects: nextDispatch === 'redirect',
+        })
+          .put('http://example.test/upload')
+          .formData(fd)
+          .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 10 })
+          .send();
+
+        expect(response.isTimeout).toBe(false);
+        expect(response.status).toBe(200);
+        expect(requests).toHaveLength(2);
+        expect(response.wasRedirectFollowed).toBe(nextDispatch === 'redirect');
+        // Sent again once the first upload had finished, not beside it.
+        expect(wasFirstUploadEndedAtRetry).toBe(true);
+        expect(requests[0]?.destroyed).toBe(false);
+        expect(reports).toHaveLength(0);
+      } finally {
+        globalThis.removeEventListener('error', onError);
+        streamSpy.mockRestore();
+        requestSpy.mockRestore();
+      }
+    });
+  }
+
+  for (const source of ['empty reads', 'a read that never answers'] as const) {
+    test(`the stall watchdog settles an upload whose source moves nothing at the end of the source grace: ${source}`, async () => {
+      // The source grace runs from the first wait since the socket last accepted bytes:
+      // reads that come back with nothing - a `stream()` yielding empty chunks - give the
+      // socket nothing to accept, and do not keep the source in its grace. And while the
+      // writer waits, the watchdog looks again no later than the grace's end, so the
+      // outcome is settled there rather than on the next regular look, up to five seconds
+      // on. The clock is moved to just short of the grace before the response closes.
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'text/plain',
+      });
+      const realNow = performance.now.bind(performance);
+      let clockOffsetMS = 0;
+      const nowSpy = spyOn(performance, 'now').mockImplementation(
+        () => realNow() + clockOffsetMS,
+      );
+
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            // Answered once the writer is parked on its source.
+            setTimeout(() => {
+              clockOffsetMS = UPLOAD_SOURCE_STALL_GRACE_MS - 300;
+              res.emit('data', Buffer.from('ok'));
+              res.emit('end');
+              res.emit('close');
+            }, 100);
+          });
+
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      const streamSpy = spyOn(Blob.prototype, 'stream').mockImplementation(
+        () =>
+          new ReadableStream<Uint8Array<ArrayBuffer>>({
+            pull(controller) {
+              if (source === 'a read that never answers') {
+                return new Promise<void>(() => {});
+              }
+
+              return new Promise<void>((resolve) => {
+                setTimeout(() => {
+                  controller.enqueue(new Uint8Array(0));
+                  resolve();
+                }, 10);
+              });
+            },
+          }),
+      );
+
+      const reports: unknown[] = [];
+      const onError = (event: Event): void => {
+        reports.push(event);
+        event.preventDefault();
+      };
+
+      globalThis.addEventListener('error', onError);
+
+      try {
+        const fd = new FormData();
+        fd.append('file', new Blob([new Uint8Array(8)]), 'stuck.bin');
+
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://example.test/upload',
+          method: 'POST',
+          headers: {},
+          body: fd,
+        });
+
+        expect(response.status).toBe(200);
+
+        // Inside the regular five-second look, with the grace's end a few hundred
+        // milliseconds off.
+        const outcome = await Promise.race([
+          response.requestBodySettled,
+          new Promise<'hung'>((resolve) =>
+            setTimeout(() => resolve('hung'), 2_000),
+          ),
+        ]);
+
+        expect(outcome).toBeInstanceOf(Error);
+        expect((outcome as Error).message).toBe(
+          'Request body source stopped answering after the response arrived',
+        );
+        expect(req.destroyed).toBe(true);
+        expect(reports).toHaveLength(1);
+      } finally {
+        globalThis.removeEventListener('error', onError);
+        streamSpy.mockRestore();
+        requestSpy.mockRestore();
+        nowSpy.mockRestore();
+      }
+    });
+  }
+
+  test('the stall watchdog leaves an upload of slow reads that each return bytes alone past the source grace', async () => {
+    // The source grace runs from the first wait since the socket last accepted bytes, and
+    // accepted bytes end that run: a file read slowly, each read answering with bytes the
+    // socket takes, is still moving however long its reads add up to. Each read is moved
+    // twenty seconds on the clock as it answers, and the response closes - arming the
+    // watchdog - once four have, eighty seconds in; four more follow.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
+    const realNow = performance.now.bind(performance);
+    let clockOffsetMS = 0;
+    const nowSpy = spyOn(performance, 'now').mockImplementation(
+      () => realNow() + clockOffsetMS,
+    );
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    let reads = 0;
+    const streamSpy = spyOn(Blob.prototype, 'stream').mockImplementation(
+      () =>
+        new ReadableStream<Uint8Array<ArrayBuffer>>({
+          pull(controller) {
+            return new Promise<void>((resolve) => {
+              setTimeout(() => {
+                reads++;
+                clockOffsetMS += 20_000;
+                controller.enqueue(new Uint8Array(1));
+
+                if (reads === 4) {
+                  res.emit('data', Buffer.from('ok'));
+                  res.emit('end');
+                  res.emit('close');
+                }
+
+                if (reads === 8) {
+                  controller.close();
+                }
+
+                resolve();
+              }, 30);
+            });
+          },
+        }),
+    );
+
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      const fd = new FormData();
+      fd.append('file', new Blob([new Uint8Array(8)]), 'slow.bin');
+
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/upload',
+        method: 'POST',
+        headers: {},
+        body: fd,
+      });
+
+      expect(response.status).toBe(200);
+
+      const outcome = await Promise.race([
+        response.requestBodySettled,
+        new Promise<'hung'>((resolve) =>
+          setTimeout(() => resolve('hung'), 2_000),
+        ),
+      ]);
+
+      // Completed, not cut: the upload finished once its last read answered.
+      expect(clockOffsetMS).toBeGreaterThan(UPLOAD_SOURCE_STALL_GRACE_MS);
+      expect(outcome).toBeUndefined();
+      expect(req.ended).toBe(true);
+      expect(req.destroyed).toBe(false);
+      expect(reports).toHaveLength(0);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      streamSpy.mockRestore();
+      requestSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  test('a NodeAdapter from a separate bundle is still a built-in network adapter to the client', async () => {
+    // Its `send` is marked on the instance, so the client's copy of the check finds what
+    // the adapter's own copy marked, and hands it a byte body uncopied.
+    const Adapter = await loadSeparatelyBundledNodeAdapter();
+    const adapter = new Adapter();
+
+    expect(Adapter).not.toBe(NodeAdapter);
+    expect(isBuiltInNetworkSend(adapter, Reflect.get(adapter, 'send'))).toBe(
+      true,
+    );
+  });
 
   test('the stall watchdog settles the upload outcome it gives up on', async () => {
     // `endBodyWrite` and `reportWriteErrorAfterResponse` both answer `requestBodySettled`

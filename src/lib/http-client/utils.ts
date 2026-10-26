@@ -595,18 +595,41 @@ export function getBrowserResolutionBase(): string | undefined {
     return documentBase;
   }
 
+  return findBrowserPage()?.href;
+}
+
+/** The page or worker {@link findBrowserPage} finds: its global, its `location`, and that location's `href`. */
+export interface BrowserPage {
+  scope: unknown;
+  location: unknown;
+  href: string;
+}
+
+/**
+ * The page or worker running a request: the first global scope whose `location` has an
+ * `href`, searched in the order `window` - the page's global in a window - then
+ * `globalThis` - the window or the worker itself - then `self`, a worker's name for its
+ * global. `undefined` where none has one, as outside a browser.
+ *
+ * In a browser those scopes are one object wherever more than one exists, so the order
+ * decides only in a runtime that shims them apart. There, everything that reads the page
+ * reads this one: the `location` a relative request URL falls back to when the document
+ * has no base URL of its own (see {@link getBrowserResolutionBase}) and the origin a
+ * response is compared with come from the same scope, never from a scope that has no
+ * `location` at all. A `<base href>` moves the base, not the page: the origin is still
+ * this page's. Read through guarded accessors, as the members read from it are.
+ */
+export function findBrowserPage(): BrowserPage | undefined {
   for (const scope of [
     readUnknownMember(globalThis, 'window'),
     globalThis,
     readUnknownMember(globalThis, 'self'),
   ]) {
-    const href = readUnknownMember(
-      readUnknownMember(scope, 'location'),
-      'href',
-    );
+    const location = readUnknownMember(scope, 'location');
+    const href = readUnknownMember(location, 'href');
 
     if (typeof href === 'string' && href) {
-      return href;
+      return { scope, location, href };
     }
   }
 

@@ -274,6 +274,38 @@ export const STREAM_ABORT_HEADERS_KEY = Symbol.for(
 );
 
 /**
+ * Marks a built-in network adapter - a `NodeAdapter`, `FetchAdapter` or `XHRAdapter` -
+ * with its class's `send`; see `isBuiltInNetworkSend`. And marks the request `HTTPClient`
+ * hands an adapter with the listener for the upload's source waits; see
+ * `listenForUploadSourceWait`. `Symbol.for`, not `Symbol`, for the reason
+ * {@link REQUEST_BODY_SETTLED_KEY} is: the client and each adapter are separate entry
+ * points, bundled without shared chunks, so a consumer importing both has two copies of
+ * the module that sets a mark and the one that reads it - a module-local registry in one
+ * copy would never be found by the other.
+ */
+export const BUILT_IN_NETWORK_SEND_KEY = Symbol.for(
+  'lifecycleion.builtInNetworkSend.v1',
+);
+export const UPLOAD_SOURCE_WAIT_LISTENER_KEY = Symbol.for(
+  'lifecycleion.uploadSourceWaitListener.v1',
+);
+
+/**
+ * How long the body writer may wait on its *source* after the response arrived before
+ * that is called a stall. `NodeAdapter`'s stall watchdog gives a writer parked on a
+ * `Blob.stream()` read this long, and `HTTPClient`'s wait on an attempt's upload counts
+ * a reported source wait as activity for no longer than this.
+ *
+ * Separate from the adapter's socket grace because the two waits mean different things:
+ * a socket that accepted nothing for five seconds has a receiver that stopped, while a
+ * `Blob.stream()` read that has not answered in five seconds has a slow disk under it.
+ * A minute is past any read a live disk answers, and it is a bound rather than a promise
+ * for the same reason the socket grace is: a source that never answers would otherwise
+ * park the writer, the socket and `requestBodySettled` for the life of the process.
+ */
+export const UPLOAD_SOURCE_STALL_GRACE_MS = 60_000;
+
+/**
  * Set on the AbortError thrown by XHRAdapter's defensive `timeout` event
  * listener. Lets HTTPClient classify the error as a timeout (retryable) rather
  * than an unexpected abort (non-retryable cancel).

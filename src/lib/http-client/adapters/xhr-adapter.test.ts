@@ -235,14 +235,18 @@ async function withGlobal<T>(
 }
 
 /**
- * Runs `fn` with `globalThis.origin` set to `origin`, as a page's or worker's is, and
- * restores it after.
+ * Runs `fn` on a page at `origin`, as a page's or worker's global has it - its `origin`
+ * and a `location` there - and restores both after.
  */
 async function withPageOrigin<T>(
   origin: string,
   fn: () => Promise<T>,
 ): Promise<T> {
-  return await withGlobal('origin', origin, fn);
+  return await withGlobal(
+    'location',
+    { href: `${origin}/`, origin },
+    async () => await withGlobal('origin', origin, fn),
+  );
 }
 
 /**
@@ -3092,11 +3096,12 @@ describe('XHRAdapter - PR review round 53 follow-up', () => {
   });
 
   test('PR review round 53: the page origin is read from location, and from window and self, as a worker or page has it', async () => {
+    const location = { href: 'https://api.test/', origin: 'https://api.test' };
     const shapes: Array<[string, unknown]> = [
       // A worker's shape: `location.origin`, no `origin`.
-      ['location', { origin: 'https://api.test' }],
-      ['window', { origin: 'https://api.test' }],
-      ['self', { location: { origin: 'https://api.test' } }],
+      ['location', location],
+      ['window', { origin: 'https://api.test', location }],
+      ['self', { location }],
     ];
 
     for (const [key, value] of shapes) {
@@ -3108,6 +3113,87 @@ describe('XHRAdapter - PR review round 53 follow-up', () => {
       expect(result.abortCalled).toBe(true);
       expect(result.streamErrorCode).toBe('response_too_large');
     }
+  });
+
+  test('the page origin is read from the scope a relative request URL resolves against', async () => {
+    // A runtime that shims `window` apart from `globalThis`, each with a `location` of its
+    // own: the request URL resolves against `window.location`, and the origin it is
+    // compared with is `window`'s too, so a same-origin response is held to the limit.
+    const result = await withGlobal(
+      'window',
+      {
+        location: { href: 'https://api.test/app/', origin: 'https://api.test' },
+      },
+      async () =>
+        await withGlobal(
+          'location',
+          { href: 'https://other.test/', origin: 'https://other.test' },
+          async () => {
+            const sent = await sendPastLimitWithoutCoding('/x');
+
+            return { ...sent, openedURL: lastXHR.openArgs?.url };
+          },
+        ),
+    );
+
+    expect(result.openedURL).toBe('https://api.test/x');
+    expect(result.abortCalled).toBe(true);
+    expect(result.streamErrorCode).toBe('response_too_large');
+  });
+
+  test('a scope with an origin but no location is not the page', async () => {
+    // A shim whose `window` and `globalThis` each carry an `origin` but no
+    // `location`, with the page on a `self` of its own: the request URL resolves against
+    // `self.location`, the first scope with one, and its origin is read from that scope
+    // as well - not from a scope with no page to resolve against, which names another
+    // origin.
+    const result = await withGlobal(
+      'window',
+      { origin: 'https://other.test' },
+      async () =>
+        await withGlobal(
+          'origin',
+          'https://other.test',
+          async () =>
+            await withGlobal(
+              'self',
+              {
+                location: {
+                  href: 'https://api.test/app/',
+                  origin: 'https://api.test',
+                },
+              },
+              async () => {
+                const sent = await sendPastLimitWithoutCoding('/x');
+
+                return { ...sent, openedURL: lastXHR.openArgs?.url };
+              },
+            ),
+        ),
+    );
+
+    expect(result.openedURL).toBe('https://api.test/x');
+    expect(result.abortCalled).toBe(true);
+    expect(result.streamErrorCode).toBe('response_too_large');
+  });
+
+  test("a sandboxed frame's opaque origin matches no response, whatever its location says", async () => {
+    // A sandboxed frame's global has `origin` `'null'` while its `location` still names
+    // the URL it was loaded from. The page's origin is the global's, and `'null'` is the
+    // origin of nothing: a response from the location's own origin is not taken for a
+    // same-origin one, so its bytes are not held to the limit on the way in.
+    const result = await withGlobal(
+      'location',
+      { href: 'https://api.test/frame.html', origin: 'https://api.test' },
+      async () =>
+        await withGlobal(
+          'origin',
+          'null',
+          async () => await sendPastLimitWithoutCoding('https://api.test/x'),
+        ),
+    );
+
+    expect(result.abortCalled).toBe(false);
   });
 });
 

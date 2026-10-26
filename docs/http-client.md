@@ -373,7 +373,12 @@ Cancellation ends the wait. The request's `timeout` bounds inactivity during thi
 including silence since dispatch. Upload-progress reports restart that inactivity clock:
 the client hands an adapter an `onUploadProgress` for every request with a body to watch
 for them, except an `xhr` adapter, which is handed one only for a request that asked for
-upload progress (see [XHRAdapter](#xhradapter)).
+upload progress (see [XHRAdapter](#xhradapter)). With `NodeAdapter`, time its multipart
+writer spends waiting on pending `File` or `Blob` reads counts as activity too, for up to
+the roughly sixty seconds the adapter itself allows them (below), counted from the first
+read since the upload last reported progress - a read that returns no bytes does not start
+that allowance over. Within it, the inactivity clock restarts when a read answers; past it
+the reads are inactivity. Upload progress always counts.
 On expiry, the client returns a timeout, aborts the attempt, and reports the stalled
 settlement through the global `'error'` channel. `timeout: 0`, negative values, and
 `Infinity` disable this client wait bound. A custom adapter that supplies the promise
@@ -383,9 +388,11 @@ throws before dispatch; finite negative values and either infinity retain the do
 disabled-timeout behavior. Do not pass an expired `deadline - Date.now()` directly: a zero or negative result disables the timer, rather than timing out immediately. Check whether the deadline has passed before sending the request.
 
 `NodeAdapter` also watches uploads left running after an early response closes. It checks
-socket progress at roughly five-second intervals and allows a pending multipart source
-read roughly sixty seconds before declaring it stalled; once that read answers, the socket
-again gets the full five seconds to accept what it produced. A connection that closes, or that
+socket progress at roughly five-second intervals and allows pending multipart source reads
+roughly sixty seconds, counted from the first read since the socket last accepted bytes,
+before declaring the upload stalled at the end of that allowance - reads that return no
+bytes do not restart it; once a read answers, the socket again gets the full five seconds
+to accept what it produced. A connection that closes, or that
 the adapter tears down, while a multipart source read is pending cancels that read and
 settles the upload outcome with a failure. These adapter safeguards are
 separate from the client's timeout. Continuing progress does not waive the normal

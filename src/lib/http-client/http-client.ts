@@ -94,6 +94,7 @@ import {
   IDEMPOTENT_METHODS,
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
+  UPLOAD_SOURCE_STALL_GRACE_MS,
 } from './consts';
 import type {
   AttemptEndEvent,
@@ -150,6 +151,7 @@ import {
   serializesToNothing,
 } from './internal/request-body-copy';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
+import { listenForUploadSourceWait } from './internal/upload-source-wait';
 import { formEntries } from './internal/form-entries';
 import { copyArrayValue } from './internal/array-copy';
 import {
@@ -786,7 +788,12 @@ export class BaseHTTPClient {
     // Stamped by the upload-progress wrapper each attempt hands the adapter, and read by
     // the wait on `requestBodySettled` before the next dispatch: the bound on that wait
     // is a *stall* bound, not a deadline, so an upload that is still moving is never cut.
-    const uploadActivity: UploadActivity = { at: performance.now() };
+    const uploadActivity: UploadActivity = {
+      at: performance.now(),
+      sourceStallSince: undefined,
+      sourceWaitEndedAt: undefined,
+      dispatches: 0,
+    };
 
     // Merge headers
     const baseHeaders = mergeHeaders(
@@ -1962,7 +1969,7 @@ export class BaseHTTPClient {
                 adapterResponse.requestBodySettled,
                 cancelSignal,
                 timeout,
-                () => uploadActivity.at,
+                () => lastUploadActivityAt(uploadActivity),
               );
 
               // A cancel that ended the wait ends the request here, before another hop
@@ -2993,8 +3000,12 @@ export class BaseHTTPClient {
       // earlier hop - or, for an adapter that never reports progress, from the start of
       // the request. The wait checks the clock on entry (see
       // `settleUploadBeforeNextDispatch`), and without this stamp a progress-less
-      // adapter's second hop was already "quiet" for the whole of the first.
-      uploadActivity.at = performance.now();
+      // adapter's second hop was already "quiet" for the whole of the first. A source wait
+      // an earlier attempt's writer never came back from is not this attempt's either.
+      // The number is this dispatch's, so a report from an earlier attempt's writer -
+      // progress, or a source wait - still arriving once this one went out is not taken
+      // for this attempt's.
+      const dispatchNumber = noteUploadDispatch(uploadActivity);
 
       // Whether this attempt handed its body to the caller's stream: a stream error after
       // that is no whole answer - part of the body is in the caller's sink - whatever the
@@ -3028,139 +3039,144 @@ export class BaseHTTPClient {
         // Read once, before the request is built as a call reads it, and called as read:
         // whether the body is copied for it is decided by the function handed it.
         const send: unknown = Reflect.get(adapter, 'send');
-        const adapterPromise = adoptPromise(
-          Reflect.apply(send as HTTPAdapter['send'], adapter, [
-            {
-              requestURL: sentRequest.requestURL,
-              method: sentRequest.method,
-              // Its own copy, arrays too: an adapter that changes one in place reaches
-              // neither the request observers are handed nor the next attempt.
-              headers: copyHeaderRecord(sentRequest.headers),
-              body: adapterRequestBody(adapter, send, sentBody),
-              signal: attemptSignal,
-              // Forward the builder's streaming factory to each adapter attempt.
-              // NodeAdapter invokes it only for a 200 response with a body, letting the caller
-              // create attempt-local writable state when a retry happens.
-              // Called on the receiver the adapter calls it on, so a factory reading `this`
-              // reads what it always did.
-              streamResponse:
-                typeof streamResponse === 'function'
-                  ? function (
-                      this: unknown,
-                      ...args: Parameters<typeof streamResponse>
-                    ) {
-                      // A cancel, as the factory's own `null` is: no sink is opened.
-                      if (isAbandoned) {
-                        return null;
-                      }
-                      didCallStreamFactory = true;
-                      const announcedStatus = readObjectMember(
-                        args[0],
-                        'status',
-                      );
-                      if (
-                        typeof announcedStatus === 'number' &&
-                        Number.isInteger(announcedStatus) &&
-                        announcedStatus >= 100 &&
-                        announcedStatus <= 999
-                      ) {
-                        streamFactoryStatus = announcedStatus;
-                      }
-                      const returned: unknown = Reflect.apply(
-                        streamResponse,
-                        this,
-                        args,
-                      );
-                      const watched = watchStreamFactoryAnswer(
-                        returned,
-                        (answer) => {
-                          // A promise's answer. Once the attempt is abandoned the state
-                          // has been read, and a sink arriving then is torn down at once.
-                          if (isAbandoned) {
-                            if (answer !== undefined) {
-                              tearDownStreamFactoryAnswer(answer);
-                            }
-                          } else if (answer === undefined) {
-                            streamFactoryState = 'none';
-                          } else {
-                            streamFactoryState = 'answered';
-                            streamFactoryAnswer = answer;
-                          }
-                        },
-                      );
-                      streamFactoryState = watched.state;
-                      streamFactoryAnswer = watched.answer;
-                      return returned as ReturnType<typeof streamResponse>;
-                    }
-                  : streamResponse,
-              // attemptNumber and requestID are passed so NodeAdapter can populate
-              // StreamResponseInfo without the adapter needing to track attempt state
-              // itself.
-              attemptNumber,
-              requestID: requestID,
-              // Every adapter stops reading a buffered body past it; a streamed one is
-              // not held, so it is not limited. See `AdapterRequest.maxResponseBytes`.
-              maxResponseBytes,
-              // The origin the caller addressed, so an adapter can tell a redirect hop to
-              // another host from the request it was configured for. See
-              // `AdapterRequest.initialURL`.
-              initialURL: credentialScope.url,
-              // Handed over for a bodied request whether or not the caller asked for
-              // progress: the stamp is what lets the wait on `requestBodySettled` tell an
-              // upload that is still moving from one that has stalled. A bodiless request
-              // has no upload to watch, so the adapter is told nothing it was not told before.
-              // Nor is an `xhr` adapter, unless the caller asked: `XHRAdapter` reports no
-              // `requestBodySettled` to wait on, and a hook makes it listen on
-              // `xhr.upload`, which makes a browser preflight a cross-origin upload `fetch`
-              // would send without one. A custom `xhr` adapter that does report one has
-              // its wait bounded flat from dispatch.
-              // The caller's hooks are guarded here, as `onAttemptStart`/`onAttemptEnd`
-              // are, not left to the adapter: a custom adapter that calls them bare had a
-              // throwing hook fail - and retry - a request that succeeded.
-              onUploadProgress:
-                onUploadProgress ||
-                ((sentBody ?? null) !== null && this._adapterType !== 'xhr')
-                  ? (e) => {
-                      if (isAbandoned) {
-                        return;
-                      }
-                      uploadActivity.at = performance.now();
-
-                      if (onUploadProgress) {
-                        safeHandleCallback(
-                          'onUploadProgress',
-                          onUploadProgress,
-                          {
-                            ...e,
-                            attemptNumber,
-                            ...(hopContext
-                              ? { hopNumber: hopContext.hopNumber }
-                              : {}),
-                          },
-                        );
-                      }
-                    }
-                  : undefined,
-              onDownloadProgress: onDownloadProgress
-                ? (e) => {
-                    if (isAbandoned) {
-                      return;
-                    }
-                    safeHandleCallback(
-                      'onDownloadProgress',
-                      onDownloadProgress,
-                      {
-                        ...e,
-                        attemptNumber,
-                        ...(hopContext
-                          ? { hopNumber: hopContext.hopNumber }
-                          : {}),
-                      },
-                    );
+        const adapterRequest: AdapterRequest = {
+          requestURL: sentRequest.requestURL,
+          method: sentRequest.method,
+          // Its own copy, arrays too: an adapter that changes one in place reaches
+          // neither the request observers are handed nor the next attempt.
+          headers: copyHeaderRecord(sentRequest.headers),
+          body: adapterRequestBody(adapter, send, sentBody),
+          signal: attemptSignal,
+          // Forward the builder's streaming factory to each adapter attempt.
+          // NodeAdapter invokes it only for a 200 response with a body, letting the caller
+          // create attempt-local writable state when a retry happens.
+          // Called on the receiver the adapter calls it on, so a factory reading `this`
+          // reads what it always did.
+          streamResponse:
+            typeof streamResponse === 'function'
+              ? function (
+                  this: unknown,
+                  ...args: Parameters<typeof streamResponse>
+                ) {
+                  // A cancel, as the factory's own `null` is: no sink is opened.
+                  if (isAbandoned) {
+                    return null;
                   }
-                : undefined,
-            },
-          ]),
+                  didCallStreamFactory = true;
+                  const announcedStatus = readObjectMember(args[0], 'status');
+                  if (
+                    typeof announcedStatus === 'number' &&
+                    Number.isInteger(announcedStatus) &&
+                    announcedStatus >= 100 &&
+                    announcedStatus <= 999
+                  ) {
+                    streamFactoryStatus = announcedStatus;
+                  }
+                  const returned: unknown = Reflect.apply(
+                    streamResponse,
+                    this,
+                    args,
+                  );
+                  const watched = watchStreamFactoryAnswer(
+                    returned,
+                    (answer) => {
+                      // A promise's answer. Once the attempt is abandoned the state
+                      // has been read, and a sink arriving then is torn down at once.
+                      if (isAbandoned) {
+                        if (answer !== undefined) {
+                          tearDownStreamFactoryAnswer(answer);
+                        }
+                      } else if (answer === undefined) {
+                        streamFactoryState = 'none';
+                      } else {
+                        streamFactoryState = 'answered';
+                        streamFactoryAnswer = answer;
+                      }
+                    },
+                  );
+                  streamFactoryState = watched.state;
+                  streamFactoryAnswer = watched.answer;
+                  return returned as ReturnType<typeof streamResponse>;
+                }
+              : streamResponse,
+          // attemptNumber and requestID are passed so NodeAdapter can populate
+          // StreamResponseInfo without the adapter needing to track attempt state
+          // itself.
+          attemptNumber,
+          requestID: requestID,
+          // Every adapter stops reading a buffered body past it; a streamed one is
+          // not held, so it is not limited. See `AdapterRequest.maxResponseBytes`.
+          maxResponseBytes,
+          // The origin the caller addressed, so an adapter can tell a redirect hop to
+          // another host from the request it was configured for. See
+          // `AdapterRequest.initialURL`.
+          initialURL: credentialScope.url,
+          // Handed over for a bodied request whether or not the caller asked for
+          // progress: the stamp is what lets the wait on `requestBodySettled` tell an
+          // upload that is still moving from one that has stalled. A bodiless request
+          // has no upload to watch, so the adapter is told nothing it was not told before.
+          // Nor is an `xhr` adapter, unless the caller asked: `XHRAdapter` reports no
+          // `requestBodySettled` to wait on, and a hook makes it listen on
+          // `xhr.upload`, which makes a browser preflight a cross-origin upload `fetch`
+          // would send without one. A custom `xhr` adapter that does report one has
+          // its wait bounded flat from dispatch.
+          // The caller's hooks are guarded here, as `onAttemptStart`/`onAttemptEnd`
+          // are, not left to the adapter: a custom adapter that calls them bare had a
+          // throwing hook fail - and retry - a request that succeeded.
+          onUploadProgress:
+            onUploadProgress ||
+            ((sentBody ?? null) !== null && this._adapterType !== 'xhr')
+              ? (e) => {
+                  if (isAbandoned) {
+                    return;
+                  }
+
+                  if (uploadActivity.dispatches === dispatchNumber) {
+                    noteUploadProgress(uploadActivity);
+                  }
+
+                  if (onUploadProgress) {
+                    safeHandleCallback('onUploadProgress', onUploadProgress, {
+                      ...e,
+                      attemptNumber,
+                      ...(hopContext
+                        ? { hopNumber: hopContext.hopNumber }
+                        : {}),
+                    });
+                  }
+                }
+              : undefined,
+          onDownloadProgress: onDownloadProgress
+            ? (e) => {
+                if (isAbandoned) {
+                  return;
+                }
+                safeHandleCallback('onDownloadProgress', onDownloadProgress, {
+                  ...e,
+                  attemptNumber,
+                  ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
+                });
+              }
+            : undefined,
+        };
+        // Told when the adapter's body writer parks on its source and when it comes back,
+        // for the wait on this attempt's upload: a writer waiting on a slow
+        // `Blob.stream()` read reports no progress, and is not stalled. Only for a form:
+        // `NodeAdapter`'s multipart writer is the only one that reads a source as it
+        // goes. See `listenForUploadSourceWait`, and `lastUploadActivityAt` for how long
+        // the client takes the adapter's word. Dead once the attempt is abandoned, as the
+        // progress hook is - the wait it was in is ended there - and once a later attempt
+        // is dispatched: a writer still parked from an earlier one does not make that
+        // attempt's upload look busy.
+        if (sentBody instanceof FormData) {
+          listenForUploadSourceWait(adapterRequest, (isWaiting) => {
+            if (!isAbandoned && uploadActivity.dispatches === dispatchNumber) {
+              noteUploadSourceWait(uploadActivity, isWaiting);
+            }
+          });
+        }
+        const adapterPromise = adoptPromise(
+          Reflect.apply(send as HTTPAdapter['send'], adapter, [adapterRequest]),
         );
         // Raced against the attempt's own abort, so a timeout or a cancel ends the attempt
         // even when the adapter ignores its signal and never settles: awaited bare, neither
@@ -3174,6 +3190,11 @@ export class BaseHTTPClient {
               : timeoutController.signal.reason,
           () => {
             isAbandoned = true;
+            // The listener is dead from here, so a source wait it was told of would never
+            // be told to end: it ends now, as far as the wait on this upload goes.
+            if (uploadActivity.dispatches === dispatchNumber) {
+              noteUploadSourceWait(uploadActivity, false);
+            }
             // The adapter that ignored the abort will not tear down the sink it was
             // writing to, as a well-behaved one does on a timeout or cancel, so the
             // client does - the caller's `'close'` and `'error'` listeners on it run -
@@ -3589,7 +3610,7 @@ export class BaseHTTPClient {
               adapterResponse.requestBodySettled,
               cancelSignal,
               timeout,
-              () => uploadActivity.at,
+              () => lastUploadActivityAt(uploadActivity),
             );
 
             // A deadline fails the request as a timeout, for the reason the redirect
@@ -4316,20 +4337,20 @@ export class BaseHTTPClient {
               cancelSignal,
             );
 
-            // Waited on as the resolve path above waits, and for the same reason. This
-            // used to skip the wait on the grounds that a hop that threw has no socket
-            // left: true of `NodeAdapter`, which destroys the request on an abort or a
-            // per-attempt timeout and settles the outcome at once, so the wait costs
-            // nothing there. Not true of a custom adapter that rejects `send()` while
-            // its upload is still going out - the outcome it tagged the error with is
-            // still open, and without this the backoff elapsed and the next attempt was
-            // dispatched beside it: the double-send the wait exists to prevent. Raced
-            // against the cancel signal, so a caller who gives up during it is not held.
+            // Waited on as the resolve path above waits, and for the same reason, though
+            // the attempt threw. A hop that threw has no socket left with `NodeAdapter`,
+            // which destroys the request on an abort or a per-attempt timeout and
+            // settles the outcome at once, so the wait costs nothing there. A custom
+            // adapter can reject `send()` while its upload is still going out, with the
+            // outcome it tagged the error with still open: dispatching the next attempt
+            // after the backoff alone would put it beside that upload - the double-send
+            // the wait exists to prevent. Raced against the cancel signal, so a caller
+            // who gives up during it is not held.
             const wait = await settleUploadBeforeNextDispatch(
               uploadOutcome,
               cancelSignal,
               timeout,
-              () => uploadActivity.at,
+              () => lastUploadActivityAt(uploadActivity),
             );
 
             if (wait !== 'settled') {
@@ -5998,8 +6019,99 @@ type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
 
 /** When a request's upload last showed activity - dispatched, or reported progress. One per request. */
 interface UploadActivity {
-  /** `performance.now()` of the last upload activity, so a wall-clock step cannot fake a stall or hide one. */
+  /** `performance.now()` of the last dispatch or progress report, so a wall-clock step cannot fake a stall or hide one. */
   at: number;
+  /**
+   * `performance.now()` of when the latest attempt's body writer first parked on its
+   * source - a `Blob.stream()` read still outstanding - since the upload last reported
+   * progress, as `NodeAdapter` reports it through `listenForUploadSourceWait`; `undefined`
+   * when it has not. Kept across waits until progress arrives: a read that comes back with
+   * nothing has moved nothing. See {@link lastUploadActivityAt}.
+   */
+  sourceStallSince: number | undefined;
+  /** When the last of those waits ended, or `undefined` while one is under way. */
+  sourceWaitEndedAt: number | undefined;
+  /** How many attempts have been dispatched, so only the latest one's reports are heard. */
+  dispatches: number;
+}
+
+/** Records a dispatch, which counts as activity and starts afresh; returns its number. */
+function noteUploadDispatch(activity: UploadActivity): number {
+  activity.at = performance.now();
+  activity.sourceStallSince = undefined;
+  activity.sourceWaitEndedAt = undefined;
+  activity.dispatches++;
+
+  return activity.dispatches;
+}
+
+/**
+ * Records an upload-progress report: activity, always, and the end of a run of source
+ * waits - or, reported while the writer is still waiting, the start of a new one.
+ */
+function noteUploadProgress(activity: UploadActivity): void {
+  const now = performance.now();
+  const isAwaitingSource =
+    activity.sourceStallSince !== undefined &&
+    activity.sourceWaitEndedAt === undefined;
+
+  activity.at = now;
+  activity.sourceStallSince = isAwaitingSource ? now : undefined;
+}
+
+/**
+ * Records the writer parking on its source, or coming back from it. A wait that begins
+ * keeps the start of the run it belongs to, however often it is reported; one that ends
+ * is not progress, and starts nothing over.
+ */
+function noteUploadSourceWait(
+  activity: UploadActivity,
+  isWaiting: boolean,
+): void {
+  if (isWaiting) {
+    activity.sourceStallSince ??= performance.now();
+    activity.sourceWaitEndedAt = undefined;
+  } else if (activity.sourceStallSince !== undefined) {
+    activity.sourceWaitEndedAt ??= performance.now();
+  }
+}
+
+/**
+ * When a request's upload last showed activity, for the stall clock in
+ * `settleUploadBeforeNextDispatch`: its last dispatch or progress report, or - when later
+ * - the time its writer spent waiting on its source since then: now while it waits, the
+ * last wait's end between waits. That time counts for no more than
+ * {@link UPLOAD_SOURCE_STALL_GRACE_MS} from the first wait since the last progress.
+ *
+ * Such a writer makes no progress - no bytes are reaching the socket - but it has not
+ * stalled: a multipart `File` on a slow disk can leave a read outstanding for longer than
+ * a per-attempt timeout, and `NodeAdapter`'s own watchdog gives that wait a grace of its
+ * own rather than the socket's. Counted as silence, it would fail as a timeout an upload
+ * the adapter is still letting run.
+ *
+ * Capped at that same grace, counted the way the adapter counts it - from the first wait
+ * since the upload last moved, so a source whose reads keep coming back with nothing has
+ * one grace, not one per read. `NodeAdapter` settles the outcome itself when its grace
+ * runs out, and the client's bound runs out later, by the stall bound past the cap, so a
+ * `NodeAdapter` answering on its own response is settled first. The cap is there for
+ * the rest: an adapter wrapping a `NodeAdapter` that answers with an outcome of its own,
+ * which no watchdog settles, and any adapter that says it is waiting. Past the cap the
+ * wait is silence, and the stall bound runs out on it as on any other. Progress always
+ * counts.
+ */
+function lastUploadActivityAt(activity: UploadActivity): number {
+  const sourceStallSince = activity.sourceStallSince;
+
+  if (sourceStallSince === undefined) {
+    return activity.at;
+  }
+
+  const sourceWaitAt = Math.min(
+    activity.sourceWaitEndedAt ?? performance.now(),
+    sourceStallSince + UPLOAD_SOURCE_STALL_GRACE_MS,
+  );
+
+  return Math.max(activity.at, sourceWaitAt);
 }
 
 /**
@@ -6081,6 +6193,9 @@ function awaitAdapterSend<T>(
  * Bounded by `stallMS`, the request's own per-attempt timeout, as a *stall* bound: the
  * clock restarts every time the upload reports progress, so what fails is an upload that
  * has gone silent for that long, never one that is still moving however long it takes.
+ * A writer waiting on its source is not silent, for up to the grace `NodeAdapter` gives
+ * such a wait itself, and the clock restarts when that wait ends (see
+ * {@link lastUploadActivityAt}).
  * `requestBodySettled` is documented as settling in bounded time, and `NodeAdapter`'s does
  * - its stall watchdog sees to that - but `HTTPAdapter` is a public extension point, and
  * a custom adapter that set the field and never settled it held every followed redirect,

@@ -39,6 +39,7 @@ import {
   STREAM_ABORT_STATUS_KEY,
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
+  UPLOAD_SOURCE_STALL_GRACE_MS,
 } from '../consts';
 import {
   generateMultipartBoundary,
@@ -46,6 +47,10 @@ import {
 } from '../internal/multipart';
 import { writeRequestBodyChunked } from '../internal/request-body-writer';
 import { markBuiltInNetworkAdapter } from '../internal/built-in-adapter';
+import {
+  notifyUploadSourceWait,
+  readUploadSourceWaitListener,
+} from '../internal/upload-source-wait';
 import { copyArrayValue } from '../internal/array-copy';
 import {
   ACCEPTED_CONTENT_ENCODINGS,
@@ -454,6 +459,12 @@ export class NodeAdapter implements HTTPAdapter {
     // The fields every adapter reads, by the rules they share (see
     // `readAdapterRequestFields`), and this adapter's own on a carrier as those are.
     const fields = readAdapterRequestFields(adapterRequest);
+    // `HTTPClient`'s, when it built this request: told when the multipart writer parks on
+    // its source, so the client's wait on this upload's outcome does not count a slow
+    // `Blob.stream()` read as an upload that has stopped. Read once, here, as the request's
+    // other members are. See `listenForUploadSourceWait`.
+    const uploadSourceWaitListener =
+      readUploadSourceWaitListener(adapterRequest);
     let request: AdapterRequest;
     try {
       request = snapshotAdapterRequest(adapterRequest, fields);
@@ -1004,6 +1015,16 @@ export class NodeAdapter implements HTTPAdapter {
         let sourceWaitSince: number | undefined;
 
         /**
+         * When the body writer first parked on its source since the socket last accepted
+         * bytes, or `undefined` once it has accepted some. The source grace runs from here
+         * rather than from {@link sourceWaitSince}: a read that comes back with nothing - a
+         * `stream()` yielding empty chunks - has given the socket nothing to accept, and
+         * timed from each read, such a source was never out of its grace. See
+         * {@link watchForStalledUpload}.
+         */
+        let sourceStallSince: number | undefined;
+
+        /**
          * When the body writer last came back from its source, so the socket's own grace
          * starts there rather than at a tick that landed mid-read; see
          * {@link watchForStalledUpload}.
@@ -1075,9 +1096,25 @@ export class NodeAdapter implements HTTPAdapter {
          * than slow, and bounded, because a source that never answers is the parked writer
          * the hang below was fixed for. When the read comes back, the socket's grace starts
          * over from that moment: the writer has only then turned to the socket.
+         *
+         * The source grace runs from the first wait since the socket last accepted bytes,
+         * not from each read, so reads that answer with nothing do not keep a source in it.
+         * While the writer is waiting, the next look comes no later than that grace's end,
+         * so an upload whose source has stopped is settled when the grace runs out, not on
+         * whichever regular look comes after it.
          */
         const watchForStalledUpload = (): void => {
           let bytesAtLastTick = uploadedBytesSeen;
+
+          /** What is left of the source grace while the writer waits, else `Infinity`. */
+          const sourceGraceLeftMS = (): number =>
+            sourceWaitSince === undefined || sourceStallSince === undefined
+              ? Infinity
+              : Math.max(
+                  0,
+                  UPLOAD_SOURCE_STALL_GRACE_MS -
+                    (performance.now() - sourceStallSince),
+                );
 
           const tick = (): void => {
             stallWatchdogTimer = undefined;
@@ -1098,7 +1135,7 @@ export class NodeAdapter implements HTTPAdapter {
             if (
               uploadedBytesSeen === bytesAtLastTick &&
               sourceWaitSince !== undefined &&
-              performance.now() - sourceWaitSince < UPLOAD_SOURCE_STALL_GRACE_MS
+              sourceGraceLeftMS() > 0
             ) {
               // Not the socket's fault. Watched on, so a source that never answers is still
               // caught below once its own grace runs out.
@@ -1198,7 +1235,10 @@ export class NodeAdapter implements HTTPAdapter {
           };
 
           const arm = (delayMS = UPLOAD_STALL_GRACE_MS): void => {
-            const timer = setTimeout(tick, delayMS);
+            const timer = setTimeout(
+              tick,
+              Math.min(delayMS, sourceGraceLeftMS()),
+            );
 
             // Never a reason for the process to stay up: the response has already been
             // delivered by the time this is armed.
@@ -1578,7 +1618,12 @@ export class NodeAdapter implements HTTPAdapter {
 
         const reportUploadProgress = (event: AdapterProgressEvent): void => {
           // Tracked before the dedupe gate, so the stall watchdog sees every report the
-          // writers make rather than only the ones the caller is told about.
+          // writers make rather than only the ones the caller is told about. Bytes the
+          // socket accepted end a run of source waits; see `sourceStallSince`.
+          if (event.loaded > uploadedBytesSeen) {
+            sourceStallSince = undefined;
+          }
+
           uploadedBytesSeen = event.loaded;
 
           if (didFireUpload100) {
@@ -2527,10 +2572,13 @@ export class NodeAdapter implements HTTPAdapter {
               (isWaiting) => {
                 if (isWaiting) {
                   sourceWaitSince = performance.now();
+                  sourceStallSince ??= sourceWaitSince;
                 } else {
                   sourceWaitSince = undefined;
                   sourceWaitEndedAt = performance.now();
                 }
+
+                notifyUploadSourceWait(uploadSourceWaitListener, isWaiting);
               },
             ),
           );
@@ -2609,19 +2657,6 @@ export class NodeAdapter implements HTTPAdapter {
  * seconds instead of one held to that server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
-
-/**
- * How long the body writer may wait on its *source* after the response arrived before
- * that is called a stall. See `watchForStalledUpload`.
- *
- * Separate from {@link UPLOAD_STALL_GRACE_MS} because the two waits mean different things:
- * a socket that accepted nothing for five seconds has a receiver that stopped, while a
- * `Blob.stream()` read that has not answered in five seconds has a slow disk under it.
- * A minute is past any read a live disk answers, and it is a bound rather than a promise
- * for the same reason the socket grace is: a source that never answers would otherwise
- * park the writer, the socket and `requestBodySettled` for the life of the process.
- */
-const UPLOAD_SOURCE_STALL_GRACE_MS = 60_000;
 
 // ---------------------------------------------------------------------------
 // Streaming pipe helper
