@@ -961,3 +961,18 @@ test('PR review round 72b: a form body is copied from the entries it holds, not 
     makeBuilder().builder.formData(new Proxy(new FormData(), {})),
   ).toThrow();
 });
+
+test('PR review round 73: a params array keeps a named key set on it, as qs serializes the array', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/search', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  const tags = Object.assign(['x'], { extra: 'y' });
+  const builder = client.get('/search').params({ a: tags });
+  tags.push('z');
+  const response = await builder.send();
+
+  expect(decodeURIComponent(response.requestURL)).toBe(
+    'http://api.test/search?a[0]=x&a[extra]=y',
+  );
+});

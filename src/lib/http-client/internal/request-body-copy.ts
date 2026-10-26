@@ -2,12 +2,13 @@ import { isPlainJSONBodyObject, isRequestBodyBytes } from '../utils';
 
 /**
  * The text each JSON body copy was read back from - exactly the text it serializes to, its
- * own `toJSON` wrapper's included - by the copy. Only a copy no caller holds is here: one
- * is forgotten as it is handed to an interceptor (see `releaseRequestBody`), and nothing
- * else hands a request's body to caller code - an attempt's observers are handed their
- * own, parsed back from the text sent.
+ * own `toJSON` wrapper's included, or `undefined` for one that serializes to nothing - by
+ * the copy. Only a copy no caller holds is here: one is forgotten as it is handed to an
+ * interceptor (see `releaseRequestBody`), and nothing else hands a request's body to
+ * caller code - an attempt's observers are handed their own, parsed back from the text
+ * sent.
  */
-const jsonTextByCopy = new WeakMap<object, string>();
+const jsonTextByCopy = new WeakMap<object, string | undefined>();
 
 /**
  * A request body as a value the client owns, which no caller holds: taken when a body is
@@ -49,11 +50,13 @@ export function copyRequestBody(body: unknown): unknown {
 
   if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
     // A copy of a copy is read back from the text it was read from.
-    const text: unknown = jsonTextByCopy.get(body) ?? JSON.stringify(body);
+    const text = jsonTextOf(body);
 
     // A top-level `toJSON` that answers `undefined` serializes to nothing.
-    if (typeof text !== 'string') {
-      return { toJSON: () => undefined };
+    if (text === undefined) {
+      const copy = { toJSON: () => undefined };
+      jsonTextByCopy.set(copy, undefined);
+      return copy;
     }
 
     const parsed: unknown = JSON.parse(text);
@@ -81,6 +84,36 @@ export function copiedJSONText(body: unknown): string | undefined {
   return typeof body === 'object' && body !== null
     ? jsonTextByCopy.get(body)
     : undefined;
+}
+
+/**
+ * Whether `body` is a JSON body copy, not yet handed to an interceptor, that serializes to
+ * nothing (a top-level `toJSON` that answers `undefined`). Read from the copy's own record
+ * (see `jsonTextByCopy`) rather than by serializing, so a value an interceptor returned -
+ * whose `toJSON` may answer differently the next time - is never asked.
+ */
+export function isCopySerializingToNothing(body: unknown): boolean {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    jsonTextByCopy.has(body) &&
+    jsonTextByCopy.get(body) === undefined
+  );
+}
+
+/**
+ * The text a JSON body - a plain object or an array - serializes to, or `undefined` when
+ * it serializes to nothing (a top-level `toJSON` that answers `undefined`): a copy's own
+ * (see `jsonTextByCopy`), or serialized now for any other value. Throws as
+ * `JSON.stringify` throws on it.
+ */
+export function jsonTextOf(body: object): string | undefined {
+  if (jsonTextByCopy.has(body)) {
+    return jsonTextByCopy.get(body);
+  }
+
+  const text: unknown = JSON.stringify(body);
+  return typeof text === 'string' ? text : undefined;
 }
 
 /**

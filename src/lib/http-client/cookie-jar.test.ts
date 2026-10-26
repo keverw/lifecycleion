@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, spyOn } from 'bun:test';
 import { CookieJar } from './cookie-jar';
+import type { Cookie } from './cookie-jar';
 
 test.each([
   'my_app.example.com',
@@ -3910,4 +3911,61 @@ test('PR review round 72: a stored cookie whose createdAt was moved far forward 
   const restored = new CookieJar();
   restored.fromJSON(jar.toJSON());
   expect(restored.getCookieHeaderString('https://example.com/')).toBe('s=1');
+});
+
+test('PR review round 73: a stored cookie edited through getAllCookies() is purged exactly when it stops being sent', () => {
+  const capMS = 400 * 24 * 3600 * 1000;
+  const hourMS = 3600 * 1000;
+  const start = 1_000_000;
+  let clock = start;
+  const nowSpy = spyOn(Date, 'now').mockImplementation(() => clock);
+
+  try {
+    const url = 'https://example.com/';
+    const edits: Record<string, (stored: Cookie) => void> = {
+      // A `maxAge` so large `createdAt + maxAge * 1000` overflows: capped, not unreadable.
+      hugeMaxAge: (stored) => {
+        stored.maxAge = 1e306;
+      },
+      // A `createdAt` moved far later: measured from the one the jar stored it with.
+      laterCreatedAt: (stored) => {
+        stored.createdAt = start + 1e13;
+      },
+    };
+    const expectedSent: Record<string, (at: number) => boolean> = {
+      hugeMaxAge: (at) => at < start + capMS,
+      laterCreatedAt: (at) => at < start + hourMS,
+    };
+
+    for (const [name, edit] of Object.entries(edits)) {
+      for (const at of [
+        start + hourMS - 1,
+        start + hourMS,
+        start + capMS - 1,
+        start + capMS,
+      ]) {
+        clock = start;
+        const jar = new CookieJar();
+        jar.setCookie({
+          name,
+          value: '1',
+          domain: 'example.com',
+          path: '/',
+          hostOnly: true,
+          maxAge: 3600,
+        });
+        const [stored] = jar.getAllCookies();
+        if (stored) {
+          edit(stored);
+        }
+
+        clock = at;
+        const isSent = jar.getCookieHeaderString(url) === `${name}=1`;
+        expect(isSent).toBe(expectedSent[name]?.(at));
+        expect(jar.clearExpiredCookies()).toBe(isSent ? 0 : 1);
+      }
+    }
+  } finally {
+    nowSpy.mockRestore();
+  }
 });

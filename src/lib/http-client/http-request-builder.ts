@@ -6,6 +6,7 @@ import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { defineEntry } from '../internal/define-entry';
 import { lowerCaseHeaderName } from './utils';
 import { copyRequestBody } from './internal/request-body-copy';
+import { copyArrayValue, copyParamArrayValue } from './internal/array-copy';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -152,12 +153,12 @@ export class HTTPRequestBuilder<T = unknown> {
     }
     // Copied now, as `headers()` copies, so a change to the caller's object after this
     // call does not reach the request: each own entry read once, an array value copied
-    // one level (see `copyArrayValue`) and any other value kept as it is - a nested
-    // object is still the caller's. Own keys, so a `__proto__` name stays a query name
-    // rather than a prototype.
+    // one level as `qs` reads it (see `copyParamArrayValue`) and any other value kept as
+    // it is - a nested object is still the caller's. Own keys, so a `__proto__` name stays
+    // a query name rather than a prototype.
     const copied: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(params)) {
-      defineEntry(copied, key, copyArrayValue(value));
+      defineEntry(copied, key, copyParamArrayValue(value));
     }
     this._params = copied;
     return this;
@@ -665,27 +666,4 @@ function assertCallback(fn: unknown, name: string): void {
       `HTTPRequestBuilder ${name} must be a function (got ${fn === null ? 'null' : typeof fn})`,
     );
   }
-}
-
-/**
- * A `.headers()` or `.params()` value as the builder keeps it: an array copied one level
- * deep - its items, a nested object among them, kept as they are - and anything else as it
- * is. A hole stays a hole, so `qs` serializes the copy as it would the original; copied
- * by index rather than `slice`, which would build the copy through the caller's array's
- * own `constructor`.
- */
-function copyArrayValue<V>(value: V): V {
-  if (!Array.isArray(value)) {
-    return value;
-  }
-
-  const length = value.length;
-  const copy: unknown[] = new Array(length);
-  for (let index = 0; index < length; index++) {
-    if (index in value) {
-      copy[index] = value[index];
-    }
-  }
-
-  return copy as V;
 }

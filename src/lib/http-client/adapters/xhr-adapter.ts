@@ -36,6 +36,7 @@ import {
   resolveBrowserDispatchURL,
   stripURLCredentials,
 } from '../utils';
+import { markBuiltInNetworkAdapter } from '../internal/built-in-adapter';
 
 /**
  * XHR-based adapter for environments that expose `XMLHttpRequest`. Primary
@@ -52,6 +53,12 @@ import {
  *   User-Agent) are browser-managed; `cookieJar` must not be passed there.
  */
 export class XHRAdapter implements HTTPAdapter {
+  constructor() {
+    // Its class's `send`, so the client hands it the request body uncopied while that is
+    // the `send` called (see `isBuiltInNetworkSend`).
+    markBuiltInNetworkAdapter(this, Reflect.get(XHRAdapter.prototype, 'send'));
+  }
+
   public getType(): AdapterType {
     return 'xhr';
   }

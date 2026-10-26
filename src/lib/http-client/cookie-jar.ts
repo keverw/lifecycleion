@@ -18,40 +18,85 @@ import { isHeaderSafeCookieText } from './internal/cookie-text';
 // One trailing dot is allowed, as `normalizeStoredDomain` keeps it (`localhost.`).
 const HOSTNAME_PATTERN = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*\.?$/;
 
+/** {@link MAX_COOKIE_LIFETIME_SECONDS} in milliseconds. */
+const MAX_COOKIE_LIFETIME_MS = MAX_COOKIE_LIFETIME_SECONDS * 1000;
+
+/** A cookie's expiry fields as the jar holds it to the lifetime cap. See {@link cookieLifetime}. */
+interface CookieLifetime {
+  createdAt: number;
+  maxAge?: number;
+  /** `expires` by its time. */
+  expires?: number;
+  /** When the cookie expires: `maxAge` first, then `expires`, else never (a session cookie). */
+  expiresAt: number;
+}
+
 /**
- * `maxAge` and `expires` held to {@link MAX_COOKIE_LIFETIME_SECONDS} from `createdAt`,
- * or to `deadline` when that is earlier: only the fields over it, so one within it, or
- * absent, is left as given.
+ * A cookie's lifetime as the jar holds it, from its expiry fields as read once: measured
+ * from `createdAt`, or from `deadline` less the cap when that is earlier, so a
+ * `createdAt` moved later through `getAllCookies()` counts from the one the jar stored,
+ * and with `maxAge` and `expires` held to {@link MAX_COOKIE_LIFETIME_SECONDS} from there.
+ * One within the cap, or absent, is left as given.
+ *
+ * `setCookie` stores these fields, the send path reports them, and `isExpired` judges
+ * `expiresAt`, so a cookie is sent exactly while it is not purged. Capped before any sum
+ * is taken: a `maxAge` large enough to overflow `createdAt + maxAge * 1000` expires at
+ * the cap rather than reading as unreadable. `null` when a field cannot take part - a
+ * `createdAt` or `maxAge` that is not a finite number, an `expires` time that is `NaN` -
+ * which fails the cookie closed.
  */
-function capLifetime(
-  cookie: Pick<Cookie, 'maxAge' | 'expires'>,
-  createdAt: number,
-  deadline = Infinity,
-): Partial<Pick<Cookie, 'maxAge' | 'expires'>> {
-  const capped: Partial<Pick<Cookie, 'maxAge' | 'expires'>> = {};
-  const fromCreation = createdAt + MAX_COOKIE_LIFETIME_SECONDS * 1000;
-  const latest = Math.min(fromCreation, deadline);
-  // The cap itself unless the deadline is earlier, so a cookie measured from the
-  // `createdAt` it was stored with is capped exactly as `setCookie` capped it.
-  const longest =
-    latest === fromCreation
-      ? MAX_COOKIE_LIFETIME_SECONDS
-      : (latest - createdAt) / 1000;
-
-  if (typeof cookie.maxAge === 'number' && cookie.maxAge > longest) {
-    capped.maxAge = longest;
+function cookieLifetime(
+  createdAt: unknown,
+  maxAge: unknown,
+  expires: number | undefined,
+  deadline: number,
+): CookieLifetime | null {
+  if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) {
+    return null;
   }
 
-  // Read by its time, not a `getTime` the `Date` itself carries, as the expiry check is.
-  const expires = cookie.expires;
   if (
-    expires instanceof Date &&
-    Date.prototype.getTime.call(expires) > latest
+    maxAge !== undefined &&
+    (typeof maxAge !== 'number' || !Number.isFinite(maxAge))
   ) {
-    capped.expires = new Date(latest);
+    return null;
   }
 
-  return capped;
+  if (expires !== undefined && Number.isNaN(expires)) {
+    return null;
+  }
+
+  const from = Math.min(createdAt, deadline - MAX_COOKIE_LIFETIME_MS);
+  const latest = from + MAX_COOKIE_LIFETIME_MS;
+  const lifetime: CookieLifetime = { createdAt: from, expiresAt: Infinity };
+
+  if (expires !== undefined) {
+    lifetime.expires = Math.min(expires, latest);
+    lifetime.expiresAt = lifetime.expires;
+  }
+
+  if (maxAge !== undefined) {
+    lifetime.maxAge = Math.min(maxAge, MAX_COOKIE_LIFETIME_SECONDS);
+    lifetime.expiresAt = from + lifetime.maxAge * 1000;
+  }
+
+  return lifetime;
+}
+
+/**
+ * `cookie`'s expiry fields set to `lifetime`'s: those it carries, each the jar's own
+ * value, so a stored or reported cookie reads as `isExpired` judges it.
+ */
+function applyLifetime(cookie: Cookie, lifetime: CookieLifetime): void {
+  cookie.createdAt = lifetime.createdAt;
+
+  if (lifetime.maxAge !== undefined) {
+    cookie.maxAge = lifetime.maxAge;
+  }
+
+  if (lifetime.expires !== undefined) {
+    cookie.expires = new Date(lifetime.expires);
+  }
 }
 
 /**
@@ -408,11 +453,23 @@ export class CookieJar {
       createdAt,
       domain: normalizedDomain,
       path,
-      // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
-      // creation: a jar restored through `fromJSON` from before the cap kept a 10-year
-      // lifetime.
-      ...capLifetime(input, createdAt),
     };
+
+    // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
+    // creation: a jar restored through `fromJSON` from before the cap kept a 10-year
+    // lifetime. Readable, as `hasReadableExpiry` passed it, and its `expires` the jar's own.
+    const lifetime = cookieLifetime(
+      createdAt,
+      stored.maxAge,
+      stored.expires?.getTime(),
+      Infinity,
+    );
+
+    if (lifetime === null) {
+      return false;
+    }
+
+    applyLifetime(stored, lifetime);
 
     const key = this.cookieKey(
       stored.name,
@@ -444,7 +501,7 @@ export class CookieJar {
       domain: normalizedDomain,
       preparedDomain: this.prepareHost(normalizedDomain),
       path,
-      deadline: createdAt + MAX_COOKIE_LIFETIME_SECONDS * 1000,
+      deadline: createdAt + MAX_COOKIE_LIFETIME_MS,
     };
 
     this.copyIfPresent(stored, scope, 'hostOnly');
@@ -1192,7 +1249,7 @@ export class CookieJar {
           case 'expires': {
             const date = parseCookieDate(attrValue);
             if (date) {
-              // Capped where it is stored (see `capLifetime`), as every cookie is.
+              // Capped where it is stored (see `cookieLifetime`), as every cookie is.
               cookie.expires = date;
             }
             break;
@@ -1202,7 +1259,7 @@ export class CookieJar {
             // the attribute is ignored. `parseInt` read a prefix, so `Max-Age=60abc` was
             // a minute and `Max-Age=1e9` was one second. Bounded here only so it is a
             // finite number: a run of digits too long for one reads as `Infinity`, which
-            // `setCookie` refuses. The lifetime cap itself is `capLifetime`'s.
+            // `setCookie` refuses. The lifetime cap itself is `cookieLifetime`'s.
             if (MAX_AGE_PATTERN.test(attrValue)) {
               cookie.maxAge = Math.min(
                 parseInt(attrValue, 10),
@@ -1842,32 +1899,44 @@ export class CookieJar {
       return null;
     }
 
-    // `createdAt` is the sort key as well as half the Max-Age arithmetic.
-    if (!Number.isFinite(cookie.createdAt) || !this.hasReadableExpiry(cookie)) {
+    // Reported as `setCookie` would store it, and as `isExpired` judges it: a live cookie
+    // edited past the lifetime cap expires at the cap, measured from when the jar stored
+    // it, so it says so. A `createdAt` moved later than the one the jar stored it with is
+    // reported as that one, so a `toJSON` round trip restores the same expiry. The date
+    // is the jar's own copy, so the returned cookie carries nothing the jar still holds a
+    // reference to.
+    const lifetime = this.lifetimeOf(cookie, scope.deadline);
+
+    if (lifetime === null) {
       return null;
     }
 
-    // Own copy of the date too, so the returned cookie carries nothing the jar still
-    // holds a reference to.
-    if (cookie.expires !== undefined) {
-      cookie.expires = new Date(cookie.expires);
-    }
-
-    // Reported as `setCookie` would store it: a live cookie edited past the lifetime cap
-    // expires at the cap, measured from when the jar stored it, so it says so. A
-    // `createdAt` moved later than the one the jar stored it with is reported as that
-    // one, so `createdAt + maxAge` is not computed from a far-off time whose sum loses
-    // the deadline, and a `toJSON` round trip restores the same expiry.
-    cookie.createdAt = Math.min(
-      cookie.createdAt,
-      scope.deadline - MAX_COOKIE_LIFETIME_SECONDS * 1000,
-    );
-    Object.assign(
-      cookie,
-      capLifetime(cookie, cookie.createdAt, scope.deadline),
-    );
+    applyLifetime(cookie, lifetime);
 
     return cookie;
+  }
+
+  /**
+   * `cookie`'s {@link cookieLifetime}, each expiry field read once - `expires` by its time,
+   * not a `getTime` the `Date` itself carries - or `null` when one cannot be read.
+   */
+  private lifetimeOf(cookie: Cookie, deadline: number): CookieLifetime | null {
+    try {
+      const createdAt: unknown = cookie.createdAt;
+      const maxAge: unknown = cookie.maxAge;
+      const expires: unknown = cookie.expires;
+
+      return cookieLifetime(
+        createdAt,
+        maxAge,
+        expires === undefined
+          ? undefined
+          : Date.prototype.getTime.call(expires),
+        deadline,
+      );
+    } catch {
+      return null;
+    }
   }
 
   /** Copies `key` from `from` to `to` only when it is present, reading it once. */
@@ -1888,47 +1957,13 @@ export class CookieJar {
    * the cookie checked is often a {@link snapshotForSend} copy the jar holds no scope for.
    */
   private isExpired(cookie: Cookie, now: number, deadline = Infinity): boolean {
-    // Unknown expiry fails closed, including accessors installed on a live cookie.
-    // Read each field once so a changing getter cannot disagree with its own check.
-    // Read as `hasReadableExpiry` reads them: a `createdAt` that is not finite, a `maxAge`
-    // that is not a number, or an `expires` that is not a `Date` - `null` included - is
-    // not coerced into one.
-    try {
-      const createdAt: unknown = cookie.createdAt;
-      if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) {
-        return true;
-      }
-
-      // The lifetime cap is part of the check, not only of what `setCookie` stores: a
-      // live cookie from `getAllCookies()` edited to a later `expires`, a longer `maxAge`
-      // or a later `createdAt` still expires where the stored one would have.
-      const latest = Math.min(
-        createdAt + MAX_COOKIE_LIFETIME_SECONDS * 1000,
-        deadline,
-      );
-
-      const maxAge: unknown = cookie.maxAge;
-      if (maxAge !== undefined) {
-        if (typeof maxAge !== 'number') {
-          return true;
-        }
-
-        const expiresAt = createdAt + maxAge * 1000;
-        return (
-          !Number.isFinite(expiresAt) || now >= Math.min(expiresAt, latest)
-        );
-      }
-
-      const expires: unknown = cookie.expires;
-      if (expires !== undefined) {
-        const expiresAt = Date.prototype.getTime.call(expires);
-        return Number.isNaN(expiresAt) || now >= Math.min(expiresAt, latest);
-      }
-
-      return false;
-    } catch {
-      return true;
-    }
+    // Unknown expiry fails closed, including accessors installed on a live cookie, and
+    // is judged by the lifetime the send path reports: a live cookie from
+    // `getAllCookies()` edited to a later `expires`, a longer `maxAge` or a later
+    // `createdAt` still expires where the stored one would have, and is purged exactly
+    // when it stops being sent.
+    const lifetime = this.lifetimeOf(cookie, deadline);
+    return lifetime === null || now >= lifetime.expiresAt;
   }
 
   /**

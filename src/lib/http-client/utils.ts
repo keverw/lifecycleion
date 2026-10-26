@@ -82,6 +82,41 @@ function isGivenParam(value: unknown): boolean {
   return true;
 }
 
+/**
+ * A param value with every array and plain record in it copied, each member read once:
+ * the override check and the query both read the copy, so a nested getter cannot answer
+ * one of them differently from the other. Any other value is kept as it is - only `qs`
+ * reads into it. A cycle is refused as `qs` refuses one.
+ *
+ * An array is copied by the keys `qs` serializes it by, as a record is - its own
+ * enumerable keys, so a hole is skipped and a key that is not an index (`list.extra`) kept
+ * - into an array, which `qs` still writes as one.
+ */
+function snapshotParamValue(
+  value: unknown,
+  ancestors: Set<object> = new Set(),
+): unknown {
+  const isArray = Array.isArray(value);
+
+  if (!isArray && !isPlainRecord(value)) {
+    return value;
+  }
+
+  if (ancestors.has(value)) {
+    throw new RangeError('Cyclic object value');
+  }
+
+  ancestors.add(value);
+  const source = value as Record<string, unknown>;
+  const copy = (isArray ? [] : {}) as Record<string, unknown>;
+  for (const key of Object.keys(source)) {
+    defineEntry(copy, key, snapshotParamValue(source[key], ancestors));
+  }
+
+  ancestors.delete(value);
+  return copy;
+}
+
 /** The key a query pair from the wire sets at the top level, as `qs` reads it. */
 function topLevelQueryKey(pair: string): string {
   const rawKey = pair.split('=', 1)[0].replace(/\+/g, ' ');
@@ -128,7 +163,8 @@ function topLevelKeyOf(key: string): string {
  *
  * `params` is read more than once - the override check and the query - so it is given as
  * `HTTPRequestBuilder.params()` copied it: each top-level value a data property, read once
- * from the caller's object.
+ * from the caller's object. A nested array or plain record is still the caller's: it is
+ * read once, into one snapshot both read.
  */
 export function buildURL(
   baseURL: string | undefined,
@@ -177,9 +213,14 @@ export function buildURL(
       // A key whose value is `undefined` - or an object of nothing but `undefined` - is
       // not given, so it leaves the path's pairs alone: `.params({ page: options.page })`
       // with no page keeps `?page=2`. An empty array or object is given, and clears them.
+      // Both read one snapshot of the nested values (see `snapshotParamValue`).
+      const snapshot: Record<string, unknown> = {};
+      for (const key of Object.keys(params)) {
+        defineEntry(snapshot, key, snapshotParamValue(params[key]));
+      }
       const overridden = new Set(
-        Object.keys(params)
-          .filter((key) => isGivenParam(params[key]))
+        Object.keys(snapshot)
+          .filter((key) => isGivenParam(snapshot[key]))
           .map(topLevelKeyOf),
       );
       const kept = existingQuery
@@ -187,7 +228,7 @@ export function buildURL(
         .filter(
           (pair) => pair !== '' && !overridden.has(topLevelQueryKey(pair)),
         );
-      const added = qs.stringify(params);
+      const added = qs.stringify(snapshot);
       const query = [...kept, ...(added ? [added] : [])].join('&');
       url = `${basePath}${query ? `?${query}` : ''}${hash ? `#${hash}` : ''}`;
     }

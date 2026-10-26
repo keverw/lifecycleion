@@ -43,6 +43,8 @@ import {
   serializeMultipartFormData,
 } from '../internal/multipart';
 import { writeRequestBodyChunked } from '../internal/request-body-writer';
+import { markBuiltInNetworkAdapter } from '../internal/built-in-adapter';
+import { copyArrayValue } from '../internal/array-copy';
 import {
   ACCEPTED_CONTENT_ENCODINGS,
   createResponseBodySource,
@@ -433,6 +435,10 @@ export class NodeAdapter implements HTTPAdapter {
     }
 
     this._config = config;
+
+    // Its class's `send`, so the client hands it the request body uncopied while that is
+    // the `send` called (see `isBuiltInNetworkSend`).
+    markBuiltInNetworkAdapter(this, Reflect.get(NodeAdapter.prototype, 'send'));
   }
 
   public getType(): AdapterType {
@@ -4238,12 +4244,13 @@ function describeFactoryReturn(value: unknown): string {
 }
 
 /**
- * A `ca` or `mtls.ca` value read once: a list is copied, so its entries are each read
- * once, and the entries {@link assertTrustAnchors} checks are the entries sent. A hole is
- * read as the `undefined` it is, and refused.
+ * A `ca` or `mtls.ca` value read once: a list is copied (see `copyArrayValue`), so its
+ * entries are each read once, and the entries {@link assertTrustAnchors} checks are the
+ * entries sent. A hole stays a hole, which that check reads as the `undefined` it is, and
+ * refuses.
  */
 function readTrustAnchors<V>(value: V | V[] | undefined): V | V[] | undefined {
-  return Array.isArray(value) ? [...value] : value;
+  return copyArrayValue(value);
 }
 
 /**
@@ -4263,10 +4270,17 @@ function assertTrustAnchors(value: unknown, name: string): void {
     entry === undefined ||
     (typeof entry === 'string' && entry.trim() === '') ||
     (ArrayBuffer.isView(entry) && entry.byteLength === 0);
-  if (
-    isEmpty(value) ||
-    (Array.isArray(value) && (value.length === 0 || value.some(isEmpty)))
-  ) {
+  // Every entry, not `some`, which skips a hole: the list is this adapter's own copy, and
+  // its iterator reads a hole as the `undefined` it is.
+  const hasEmptyEntry = (list: unknown[]): boolean => {
+    for (const entry of list) {
+      if (isEmpty(entry)) {
+        return true;
+      }
+    }
+    return list.length === 0;
+  };
+  if (isEmpty(value) || (Array.isArray(value) && hasEmptyEntry(value))) {
     const error = new TypeError(
       `NodeAdapter ${name} holds no certificate. Leave it unset to use the runtime's default trust store.`,
     );

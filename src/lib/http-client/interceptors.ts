@@ -80,10 +80,10 @@ export interface InterceptorChainOptions {
   /**
    * Called once, as the first interceptor's function this phase calls is about to be
    * called - after its filter, which reads the request as it was handed over - and its
-   * answer read in place of the request: the client hands retry-phase interceptors a copy
-   * of the hop's body this way, so one that edits the body in place edits neither the
-   * body the hop's later attempts start from nor what a hop to an origin the caller never
-   * chose sends.
+   * answer read in place of the request: the client hands retry- and redirect-phase
+   * interceptors a copy of the hop's body this way, so one that edits the body in place
+   * edits neither the body the hop's later attempts start from, what a hop to an origin
+   * the caller never chose sends, nor an upload still under way.
    * The filters up to and including that interceptor's read the request as handed over,
    * as on any other hop; the filters after it read the prepared request, or whatever an
    * interceptor returned in its place. A request no interceptor's function is called

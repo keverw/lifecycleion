@@ -21,7 +21,6 @@ import { FetchAdapter } from './adapters/fetch-adapter';
 import {
   assertNoBrowserRestrictedHeaders,
   copyHeaderRecord,
-  copyHeaderValue,
   lowerCaseHeaderName,
   presentHeaderValue,
 } from './internal/header-utils';
@@ -110,7 +109,9 @@ import type {
   ErrorObserver,
   ErrorObserverFilter,
   AdapterType,
+  AdapterRequest,
   AdapterResponse,
+  HTTPAdapter,
   HTTPRequestOptions,
   RedirectHopInfo,
   InterceptorCancel,
@@ -144,7 +145,11 @@ import {
   cloneBodyValue,
   copiedJSONText,
   copyRequestBody,
+  isCopySerializingToNothing,
+  jsonTextOf,
 } from './internal/request-body-copy';
+import { isBuiltInNetworkSend } from './internal/built-in-adapter';
+import { copyArrayValue } from './internal/array-copy';
 import {
   adoptPromise,
   adoptResult,
@@ -996,7 +1001,7 @@ export class BaseHTTPClient {
         // Read now: the interceptors are handed this very object, and one may rewrite it
         // in place before the comparison below.
         const callerMethod = interceptedRequest.method;
-        const hasCallerBody = !isNullish(interceptedRequest.body);
+        const hasCallerBody = hasRequestBody(interceptedRequest.body);
         try {
           this._assertRequestIsSupported(interceptedRequest);
         } catch (error) {
@@ -1090,8 +1095,9 @@ export class BaseHTTPClient {
             methodRefusals.has(error as Error) &&
             readStringMember(initialRequestCandidate, 'method', '') ===
               callerMethod &&
-            !isNullish(readObjectMember(initialRequestCandidate, 'body')) ===
-              hasCallerBody;
+            hasRequestBody(
+              readObjectMember(initialRequestCandidate, 'body'),
+            ) === hasCallerBody;
           // So is a body the interceptors returned that cannot be copied (see
           // `copyChainResultBody`): the body's failure, not an interceptor's.
           const isSetupError = isCallersOwnRefusal || initialBodyCopy.didFail;
@@ -1657,7 +1663,14 @@ export class BaseHTTPClient {
             let redirectIntercept: ResolvedRequest | InterceptorCancel;
             let failedRedirectRequest: InterceptedRequest = redirectRequest;
             let redirectInterceptURL = redirectURL;
-            const redirectBodyCopy: BodyCopyOutcome = { didFail: false };
+            // The interceptors are handed a copy of the hop's body, as the retry phase's
+            // are (see `bodyCopyPreparer`): the hop's own is the body the hop that
+            // answered was sent from, kept as it was for the reports a cancel or a failure
+            // here makes, and a runtime's `fetch` may still hold its bytes.
+            const redirectBodyCopy: HandedBodyCopy = {
+              isTaken: false,
+              didFail: false,
+            };
 
             try {
               const {
@@ -1676,6 +1689,7 @@ export class BaseHTTPClient {
                 (failed) => {
                   failedRedirectRequest = failed;
                 },
+                bodyCopyPreparer(redirectBodyCopy),
               );
               if (isInterceptorCancel(redirectRunResult)) {
                 redirectIntercept = redirectRunResult;
@@ -2253,7 +2267,7 @@ export class BaseHTTPClient {
 
     if (
       (request.method === 'GET' || request.method === 'HEAD') &&
-      (request.body === undefined || request.body === null)
+      !hasRequestBody(request.body)
     ) {
       // Drop body-related headers when the hop dropped the body: a method rewritten to
       // GET, or a 303, which leaves a HEAD a HEAD. A 307/308 GET that replays its body
@@ -2656,24 +2670,11 @@ export class BaseHTTPClient {
         // including that interceptor's - the parent client's chain's included - read the
         // hop's own body; filters after it read the copy, or whatever that interceptor
         // returned. A retry no interceptor's function runs for takes none.
-        const retryBodyCopy: RetryBodyCopy = { isTaken: false, didFail: false };
-        const prepareRetryRequest = (
-          request: InterceptedRequest,
-        ): InterceptedRequest => {
-          // Once per phase: a parent client's chain may have taken it already.
-          if (retryBodyCopy.isTaken) {
-            return request;
-          }
-          retryBodyCopy.isTaken = true;
-          let body: unknown;
-          try {
-            body = copyRequestBody(request.body);
-          } catch (error) {
-            retryBodyCopy.didFail = true;
-            throw error;
-          }
-          return { ...request, body };
+        const retryBodyCopy: HandedBodyCopy = {
+          isTaken: false,
+          didFail: false,
         };
+        const prepareRetryRequest = bodyCopyPreparer(retryBodyCopy);
         // Whether this hop is on an origin the caller never chose, where a retry-phase
         // request is held to the hop's own URL, body and headers (see below).
         const isHopOnUnchosenOrigin =
@@ -2977,124 +2978,143 @@ export class BaseHTTPClient {
         // a no-op `then` would hang the request, its rejection unhandled. See
         // `adoptPromise()`.
         const streamResponse = options.streamResponse;
+        const adapter = this._adapter;
+        // Read once, before the request is built as a call reads it, and called as read:
+        // whether the body is copied for it is decided by the function handed it.
+        const send: unknown = Reflect.get(adapter, 'send');
         const adapterPromise = adoptPromise(
-          this._adapter.send({
-            requestURL: sentRequest.requestURL,
-            method: sentRequest.method,
-            // Its own copy, arrays too: an adapter that changes one in place reaches
-            // neither the request observers are handed nor the next attempt.
-            headers: copyHeaderRecord(sentRequest.headers),
-            body: sentBody ?? null,
-            signal: attemptSignal,
-            // Forward the builder's streaming factory to each adapter attempt.
-            // NodeAdapter invokes it only for a 200 response with a body, letting the caller
-            // create attempt-local writable state when a retry happens.
-            // Called on the receiver the adapter calls it on, so a factory reading `this`
-            // reads what it always did.
-            streamResponse:
-              typeof streamResponse === 'function'
-                ? function (
-                    this: unknown,
-                    ...args: Parameters<typeof streamResponse>
-                  ) {
-                    // A cancel, as the factory's own `null` is: no sink is opened.
-                    if (isAbandoned) {
-                      return null;
-                    }
-                    didCallStreamFactory = true;
-                    const announcedStatus = readObjectMember(args[0], 'status');
-                    if (
-                      typeof announcedStatus === 'number' &&
-                      Number.isInteger(announcedStatus) &&
-                      announcedStatus >= 100 &&
-                      announcedStatus <= 999
+          Reflect.apply(send as HTTPAdapter['send'], adapter, [
+            {
+              requestURL: sentRequest.requestURL,
+              method: sentRequest.method,
+              // Its own copy, arrays too: an adapter that changes one in place reaches
+              // neither the request observers are handed nor the next attempt.
+              headers: copyHeaderRecord(sentRequest.headers),
+              body: adapterRequestBody(adapter, send, sentBody),
+              signal: attemptSignal,
+              // Forward the builder's streaming factory to each adapter attempt.
+              // NodeAdapter invokes it only for a 200 response with a body, letting the caller
+              // create attempt-local writable state when a retry happens.
+              // Called on the receiver the adapter calls it on, so a factory reading `this`
+              // reads what it always did.
+              streamResponse:
+                typeof streamResponse === 'function'
+                  ? function (
+                      this: unknown,
+                      ...args: Parameters<typeof streamResponse>
                     ) {
-                      streamFactoryStatus = announcedStatus;
-                    }
-                    const returned: unknown = Reflect.apply(
-                      streamResponse,
-                      this,
-                      args,
-                    );
-                    const watched = watchStreamFactoryAnswer(
-                      returned,
-                      (answer) => {
-                        // A promise's answer. Once the attempt is abandoned the state
-                        // has been read, and a sink arriving then is torn down at once.
-                        if (isAbandoned) {
-                          if (answer !== undefined) {
-                            tearDownStreamFactoryAnswer(answer);
+                      // A cancel, as the factory's own `null` is: no sink is opened.
+                      if (isAbandoned) {
+                        return null;
+                      }
+                      didCallStreamFactory = true;
+                      const announcedStatus = readObjectMember(
+                        args[0],
+                        'status',
+                      );
+                      if (
+                        typeof announcedStatus === 'number' &&
+                        Number.isInteger(announcedStatus) &&
+                        announcedStatus >= 100 &&
+                        announcedStatus <= 999
+                      ) {
+                        streamFactoryStatus = announcedStatus;
+                      }
+                      const returned: unknown = Reflect.apply(
+                        streamResponse,
+                        this,
+                        args,
+                      );
+                      const watched = watchStreamFactoryAnswer(
+                        returned,
+                        (answer) => {
+                          // A promise's answer. Once the attempt is abandoned the state
+                          // has been read, and a sink arriving then is torn down at once.
+                          if (isAbandoned) {
+                            if (answer !== undefined) {
+                              tearDownStreamFactoryAnswer(answer);
+                            }
+                          } else if (answer === undefined) {
+                            streamFactoryState = 'none';
+                          } else {
+                            streamFactoryState = 'answered';
+                            streamFactoryAnswer = answer;
                           }
-                        } else if (answer === undefined) {
-                          streamFactoryState = 'none';
-                        } else {
-                          streamFactoryState = 'answered';
-                          streamFactoryAnswer = answer;
-                        }
-                      },
-                    );
-                    streamFactoryState = watched.state;
-                    streamFactoryAnswer = watched.answer;
-                    return returned as ReturnType<typeof streamResponse>;
-                  }
-                : streamResponse,
-            // attemptNumber and requestID are passed so NodeAdapter can populate
-            // StreamResponseInfo without the adapter needing to track attempt state
-            // itself.
-            attemptNumber,
-            requestID: requestID,
-            // Every adapter stops reading a buffered body past it; a streamed one is
-            // not held, so it is not limited. See `AdapterRequest.maxResponseBytes`.
-            maxResponseBytes,
-            // The origin the caller addressed, so an adapter can tell a redirect hop to
-            // another host from the request it was configured for. See
-            // `AdapterRequest.initialURL`.
-            initialURL: credentialScope.url,
-            // Handed over for a bodied request whether or not the caller asked for
-            // progress: the stamp is what lets the wait on `requestBodySettled` tell an
-            // upload that is still moving from one that has stalled. A bodiless request
-            // has no upload to watch, so the adapter is told nothing it was not told before.
-            // Nor is an `xhr` adapter, unless the caller asked: `XHRAdapter` reports no
-            // `requestBodySettled` to wait on, and a hook makes it listen on
-            // `xhr.upload`, which makes a browser preflight a cross-origin upload `fetch`
-            // would send without one. A custom `xhr` adapter that does report one has
-            // its wait bounded flat from dispatch.
-            // The caller's hooks are guarded here, as `onAttemptStart`/`onAttemptEnd`
-            // are, not left to the adapter: a custom adapter that calls them bare had a
-            // throwing hook fail - and retry - a request that succeeded.
-            onUploadProgress:
-              onUploadProgress ||
-              ((sentBody ?? null) !== null && this._adapterType !== 'xhr')
+                        },
+                      );
+                      streamFactoryState = watched.state;
+                      streamFactoryAnswer = watched.answer;
+                      return returned as ReturnType<typeof streamResponse>;
+                    }
+                  : streamResponse,
+              // attemptNumber and requestID are passed so NodeAdapter can populate
+              // StreamResponseInfo without the adapter needing to track attempt state
+              // itself.
+              attemptNumber,
+              requestID: requestID,
+              // Every adapter stops reading a buffered body past it; a streamed one is
+              // not held, so it is not limited. See `AdapterRequest.maxResponseBytes`.
+              maxResponseBytes,
+              // The origin the caller addressed, so an adapter can tell a redirect hop to
+              // another host from the request it was configured for. See
+              // `AdapterRequest.initialURL`.
+              initialURL: credentialScope.url,
+              // Handed over for a bodied request whether or not the caller asked for
+              // progress: the stamp is what lets the wait on `requestBodySettled` tell an
+              // upload that is still moving from one that has stalled. A bodiless request
+              // has no upload to watch, so the adapter is told nothing it was not told before.
+              // Nor is an `xhr` adapter, unless the caller asked: `XHRAdapter` reports no
+              // `requestBodySettled` to wait on, and a hook makes it listen on
+              // `xhr.upload`, which makes a browser preflight a cross-origin upload `fetch`
+              // would send without one. A custom `xhr` adapter that does report one has
+              // its wait bounded flat from dispatch.
+              // The caller's hooks are guarded here, as `onAttemptStart`/`onAttemptEnd`
+              // are, not left to the adapter: a custom adapter that calls them bare had a
+              // throwing hook fail - and retry - a request that succeeded.
+              onUploadProgress:
+                onUploadProgress ||
+                ((sentBody ?? null) !== null && this._adapterType !== 'xhr')
+                  ? (e) => {
+                      if (isAbandoned) {
+                        return;
+                      }
+                      uploadActivity.at = performance.now();
+
+                      if (onUploadProgress) {
+                        safeHandleCallback(
+                          'onUploadProgress',
+                          onUploadProgress,
+                          {
+                            ...e,
+                            attemptNumber,
+                            ...(hopContext
+                              ? { hopNumber: hopContext.hopNumber }
+                              : {}),
+                          },
+                        );
+                      }
+                    }
+                  : undefined,
+              onDownloadProgress: onDownloadProgress
                 ? (e) => {
                     if (isAbandoned) {
                       return;
                     }
-                    uploadActivity.at = performance.now();
-
-                    if (onUploadProgress) {
-                      safeHandleCallback('onUploadProgress', onUploadProgress, {
+                    safeHandleCallback(
+                      'onDownloadProgress',
+                      onDownloadProgress,
+                      {
                         ...e,
                         attemptNumber,
                         ...(hopContext
                           ? { hopNumber: hopContext.hopNumber }
                           : {}),
-                      });
-                    }
+                      },
+                    );
                   }
                 : undefined,
-            onDownloadProgress: onDownloadProgress
-              ? (e) => {
-                  if (isAbandoned) {
-                    return;
-                  }
-                  safeHandleCallback('onDownloadProgress', onDownloadProgress, {
-                    ...e,
-                    attemptNumber,
-                    ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                  });
-                }
-              : undefined,
-          }),
+            },
+          ]),
         );
         // Raced against the attempt's own abort, so a timeout or a cancel ends the attempt
         // even when the adapter ignores its signal and never settles: awaited bare, neither
@@ -3611,7 +3631,7 @@ export class BaseHTTPClient {
         // caller's it stood in the way of the `identity` a later hop's `Range` asks for.
         for (const key of ['host', 'authorization', 'accept-encoding']) {
           if (Object.hasOwn(sentRequest.headers, key)) {
-            redirectRequestHeaders[key] = copyHeaderValue(
+            redirectRequestHeaders[key] = copyArrayValue(
               sentRequest.headers[key],
             );
           } else {
@@ -3627,7 +3647,7 @@ export class BaseHTTPClient {
         const authoredHeaders = attemptRequest.headers;
         for (const key of ['content-length', 'content-type']) {
           if (Object.hasOwn(authoredHeaders, key)) {
-            redirectRequestHeaders[key] = copyHeaderValue(authoredHeaders[key]);
+            redirectRequestHeaders[key] = copyArrayValue(authoredHeaders[key]);
           } else {
             delete redirectRequestHeaders[key];
           }
@@ -5049,7 +5069,7 @@ export class BaseHTTPClient {
       // second time; it is reported as it came, as one that fails to build here is.
       if (knownBodies === undefined) {
         try {
-          observed = buildAttemptBodies(rawBody, true, false).observed;
+          observed = buildAttemptBodies(rawBody, true).observed;
         } catch {
           // Reported as it came, below.
         }
@@ -5211,10 +5231,9 @@ export class BaseHTTPClient {
     if (
       (adapterType === 'fetch' ||
         (adapterType === 'xhr' && this._isBrowserRuntime)) &&
-      request.body !== undefined &&
-      request.body !== null &&
       (asciiUppercase(request.method) === 'GET' ||
-        asciiUppercase(request.method) === 'HEAD')
+        asciiUppercase(request.method) === 'HEAD') &&
+      hasRequestBody(request.body)
     ) {
       throw methodRefusal(
         adapterType === 'fetch'
@@ -5347,11 +5366,13 @@ function snapshotClientConfigFields(config: SubClientConfig) {
  * does to theirs reaches the adapter or a later attempt. On an attempt the request's body
  * is the client's own copy (see `copyRequestBody`), which no caller holds; a best-effort
  * snapshot of a request that failed before one existed may be handed any value.
+ *
+ * Bytes and form data are sent as the request's own body: copied for the adapter, where
+ * it may change them, by `adapterRequestBody`.
  */
 function buildAttemptBodies(
   rawBody: unknown,
   isObserved: boolean,
-  isSent = true,
 ): AttemptBodies {
   // Validate first so unsupported object-like values (URLSearchParams, Blob, etc.) fail
   // explicitly instead of being stringified into `{}`.
@@ -5385,31 +5406,44 @@ function buildAttemptBodies(
     };
   }
 
-  // Bytes and form data are sent as a copy taken for this attempt, so an adapter that
-  // changes or transfers what it was handed leaves the request's own body - the next
-  // attempt's, and a replay's - alone. No observer is handed that copy: their `body` and
-  // `rawBody` are one copy of it, taken now - before the adapter can change or transfer
-  // it. NodeAdapter writes a FormData's parts as it walks them, so a redirect- or
-  // retry-phase observer changing the one being sent, while its upload was still under
-  // way, changed parts not yet written.
-  const sentBody = cloneBodyValue(rawBody);
-  const { body, contentType } = serializeBody(sentBody);
+  // No observer is handed the bytes or form sent: their `body` and `rawBody` are one copy
+  // of it, taken now - before the adapter can change or transfer it. NodeAdapter writes a
+  // FormData's parts as it walks them, so a redirect- or retry-phase observer changing the
+  // one being sent, while its upload was still under way, changed parts not yet written.
+  const { body, contentType } = serializeBody(rawBody);
   let observed: ObservedBodies | undefined;
 
   if (isObserved) {
     if (isRequestBodyBytes(body) || body instanceof FormData) {
-      // For a body that will never be sent (a snapshot of a request that ended first),
-      // the client's own copy is the observers' already: nothing else holds it.
-      const copy = isSent ? (cloneBodyValue(body) as typeof body) : body;
+      const copy = cloneBodyValue(body) as typeof body;
       observed = { body: copy, rawBody: copy };
     } else {
       // A string, or nothing: `rawBody` is the request's body as it is, `undefined`
       // included.
-      observed = { body, rawBody: sentBody };
+      observed = { body, rawBody };
     }
   }
 
   return { sentBody: body, contentType, observed };
+}
+
+/**
+ * The body an adapter is handed: a copy taken for this attempt, so an adapter that changes
+ * or transfers what it was handed leaves the request's own body - the next attempt's, and
+ * a replay's - alone. Bytes are the request's own when `send` is a built-in network
+ * adapter's, which copies them as it is called (see `isBuiltInNetworkSend`); a form is
+ * copied for every adapter, as NodeAdapter reads its entries while the upload runs.
+ */
+function adapterRequestBody(
+  adapter: HTTPAdapter,
+  send: unknown,
+  body: AttemptRequest['body'],
+): AdapterRequest['body'] {
+  if (isRequestBodyBytes(body) && isBuiltInNetworkSend(adapter, send)) {
+    return body;
+  }
+
+  return (cloneBodyValue(body) as AttemptRequest['body']) ?? null;
 }
 
 /**
@@ -6094,9 +6128,36 @@ interface BodyCopyOutcome {
   didFail: boolean;
 }
 
-/** The copy of a hop's body a retry phase's interceptors were handed; see `copyRequestBody`. */
-interface RetryBodyCopy extends BodyCopyOutcome {
+/**
+ * The copy of a hop's body a retry or redirect phase's interceptors were handed; see
+ * `copyRequestBody`.
+ */
+interface HandedBodyCopy extends BodyCopyOutcome {
   isTaken: boolean;
+}
+
+/**
+ * A phase's `prepareRequest` (see `InterceptorChainOptions`): the request with a copy of
+ * its body, taken once per phase - a parent client's chain may have taken it already - and
+ * recorded in `copy`, a copy that fails with it.
+ */
+function bodyCopyPreparer(
+  copy: HandedBodyCopy,
+): (request: InterceptedRequest) => InterceptedRequest {
+  return (request) => {
+    if (copy.isTaken) {
+      return request;
+    }
+    copy.isTaken = true;
+    let body: unknown;
+    try {
+      body = copyRequestBody(request.body);
+    } catch (error) {
+      copy.didFail = true;
+      throw error;
+    }
+    return { ...request, body };
+  };
 }
 
 /**
@@ -6128,12 +6189,14 @@ function copyChainResultBody(
 
 /**
  * What a cross-origin hop sends for a retry-phase interceptor's body that sends nothing -
- * none, an empty string, no bytes, or a form with no entries - as `{ body }`, or
- * `undefined` for any other body. Bytes and a form are answered as an empty one of the
- * client's own, so what goes out is what was measured: the bytes are measured through the
- * intrinsic getters (see `readBinaryByteLength`), which a subclass that reports a
- * `byteLength` of `0` while holding a token cannot answer for, and the form's entries
- * through `FormData`'s own iterator rather than one the value declares. Throws on a body
+ * none, an empty string, no bytes, a form with no entries, or a JSON body that serializes
+ * to nothing - as `{ body }`, or `undefined` for any other body. Bytes and a form are
+ * answered as an empty one of the client's own, so what goes out is what was measured:
+ * the bytes are measured through the intrinsic getters (see `readBinaryByteLength`),
+ * which a subclass that reports a `byteLength` of `0` while holding a token cannot answer
+ * for, and the form's entries through `FormData`'s own iterator rather than one the value
+ * declares. A JSON body is read as the attempt serializes it (see `jsonTextOf`), and one
+ * whose top-level `toJSON` answers `undefined` is answered as no body. Throws on a body
  * those reads refuse, such as a `Proxy` over a form, as building it would.
  */
 function emptyRequestBody(body: unknown): { body: unknown } | undefined {
@@ -6158,16 +6221,41 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
     return { body: new FormData() };
   }
 
+  if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
+    // One that cannot be serialized - a `BigInt`, a `toJSON` that throws - is no body that
+    // sends nothing: on a hop held to its own body, the hop's is sent in its place.
+    try {
+      return jsonTextOf(body) === undefined ? { body: undefined } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   return undefined;
 }
 
 /**
+ * Whether a request carries a body at all, as the GET and HEAD rules read one. None does
+ * not, and nor does a JSON body copy the client made that serializes to nothing (see
+ * `isCopySerializingToNothing`), which goes out with no body. Any other value is a body -
+ * an empty string, bytes or form, which `fetch` refuses on a GET, and a body an
+ * interceptor returned, which is not serialized here: its `toJSON` could answer nothing
+ * now and a body when the copy that is sent is taken.
+ */
+function hasRequestBody(body: unknown): boolean {
+  return (
+    body !== undefined && body !== null && !isCopySerializingToNothing(body)
+  );
+}
+
+/**
  * Whether a body sends anything: by the rule `emptyRequestBody` reads a body by - none, an
- * empty string, no bytes, or a form with no entries sends nothing. Every body it is asked
- * about is one of the client's own copies - an attempt's body as the client serialized it
- * (see `buildAttemptBodies`), or a cross-origin hop's (see
- * `withoutAddedCrossOriginCredentials`) - so the reads are not expected to throw; a
- * caller that is handed a throw fails the request as `request_setup_error`.
+ * empty string, no bytes, a form with no entries, or a JSON body that serializes to
+ * nothing sends nothing. It is asked about an attempt's body as the client serialized it
+ * (see `buildAttemptBodies`), and on a cross-origin hop (see
+ * `withoutAddedCrossOriginCredentials`) about the hop's own body and the body the retry
+ * interceptors returned, which on a hop held to its own is read uncopied, once; a caller
+ * that is handed a throw fails the request as `request_setup_error`.
  */
 function sendsRequestBody(body: unknown): boolean {
   return emptyRequestBody(body) === undefined;

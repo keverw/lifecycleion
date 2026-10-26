@@ -9462,3 +9462,64 @@ describe('NodeAdapter - PR review round 72a', () => {
     expect(captured?.ca).toEqual(['first-ca', 'second-ca']);
   });
 });
+
+describe('NodeAdapter - PR review round 73', () => {
+  test("PR review round 73: a ca list is read by index, not through the caller's own Symbol.iterator", async () => {
+    const withIterator = (entries: unknown[], yields: unknown[]): string[] => {
+      Object.defineProperty(entries, Symbol.iterator, {
+        value: function* () {
+          yield* yields;
+        },
+      });
+      return entries as string[];
+    };
+
+    // An empty entry is refused, whatever the iterator reports instead.
+    expect(
+      () => new NodeAdapter({ ca: withIterator(['', 'pem'], ['pem']) }),
+    ).toThrow(/ca holds no certificate/);
+    // A hole too: copied as a hole, it is read as the `undefined` it is.
+    const holey: string[] = ['pem'];
+    holey.length = 2;
+    expect(
+      () => new NodeAdapter({ ca: withIterator(holey, ['pem', 'pem']) }),
+    ).toThrow(/ca holds no certificate/);
+
+    const adapter = new NodeAdapter({
+      ca: withIterator(['first-ca', 'second-ca'], ['evil-ca']),
+    });
+    let captured: https.RequestOptions | undefined;
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured = options;
+      const req = new EventEmitter();
+      const stub = req as unknown as Record<string, unknown>;
+      stub.setHeader = () => {};
+      stub.getHeaders = () => ({});
+      stub.destroy = () => {};
+      stub.end = () => {
+        queueMicrotask(() =>
+          req.emit(
+            'error',
+            Object.assign(new Error('captured'), { code: 'ECONNRESET' }),
+          ),
+        );
+      };
+
+      return req as unknown as http.ClientRequest;
+    }) as unknown as typeof https.request);
+
+    try {
+      await adapter.send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(captured?.ca).toEqual(['first-ca', 'second-ca']);
+  });
+});

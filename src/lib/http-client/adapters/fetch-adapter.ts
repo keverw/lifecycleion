@@ -35,6 +35,7 @@ import type {
   AdapterResponse,
   AdapterType,
 } from '../types';
+import { markBuiltInNetworkAdapter } from '../internal/built-in-adapter';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
 // original value retained on cause for consumers of the normalized error.
@@ -48,6 +49,15 @@ import {
 } from '../../internal/binary-view';
 
 export class FetchAdapter implements HTTPAdapter {
+  constructor() {
+    // Its class's `send`, so the client hands it the request body uncopied while that is
+    // the `send` called (see `isBuiltInNetworkSend`).
+    markBuiltInNetworkAdapter(
+      this,
+      Reflect.get(FetchAdapter.prototype, 'send'),
+    );
+  }
+
   public getType(): AdapterType {
     return 'fetch';
   }

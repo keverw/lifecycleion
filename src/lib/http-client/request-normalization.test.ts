@@ -3,6 +3,7 @@ import vm from 'node:vm';
 import * as http from 'node:http';
 import * as zlib from 'node:zlib';
 import { PassThrough, Writable } from 'node:stream';
+import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
 import type { HTTPSubClient } from './http-client';
@@ -14933,4 +14934,469 @@ test("PR review round 72b: a parent client's interceptor body changed later does
     .send();
 
   expect(sent).toEqual(['{"token":"parent"}', '{"token":"parent"}']);
+});
+
+test("PR review round 73: a built-in adapter is handed the request's bytes uncopied, and a retry and a 307 replay still send the same bytes and form", async () => {
+  const received: Array<{ url: string | undefined; body: Buffer }> = [];
+  let startCalls = 0;
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      received.push({ url: req.url, body: Buffer.concat(chunks) });
+      if (req.url === '/start') {
+        startCalls++;
+        res.writeHead(startCalls % 2 === 1 ? 503 : 307, {
+          location: '/next',
+        });
+        res.end();
+        return;
+      }
+      res.end('ok');
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      followRedirects: true,
+      retryPolicy: roundSeventyTwoBRetryPolicy,
+    });
+    const form = new FormData();
+    form.set('a', 'form-value');
+
+    const bytesResponse = await client
+      .put('/start')
+      .body(new Uint8Array([1, 2, 3, 4]))
+      .send();
+    const formResponse = await client.put('/start').formData(form).send();
+
+    expect(bytesResponse.status).toBe(200);
+    expect(formResponse.status).toBe(200);
+    expect(received.map((entry) => entry.url)).toEqual([
+      '/start',
+      '/start',
+      '/next',
+      '/start',
+      '/start',
+      '/next',
+    ]);
+    for (const { body } of received.slice(0, 3)) {
+      expect([...body]).toEqual([1, 2, 3, 4]);
+    }
+    for (const { body } of received.slice(3)) {
+      expect(body.toString('utf8')).toContain('\r\n\r\nform-value\r\n');
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test('PR review round 73: an adapter that is not a built-in one, or a built-in one whose send a subclass overrides or the instance replaces, cannot change what a retry or a replay sends', async () => {
+  const makeSend = (seen: unknown[]): HTTPAdapter['send'] => {
+    const answers = [503, 307, 200];
+    return (request) => {
+      const { body } = request;
+      if (body instanceof Uint8Array) {
+        seen.push(Array.from(body));
+        body.fill(9);
+      } else if (body instanceof FormData) {
+        seen.push([...body.entries()]);
+        body.set('a', 'changed');
+        body.append('token', 'SECRET');
+      }
+      const status = answers[(seen.length - 1) % answers.length] ?? 200;
+      const headers: Record<string, string> =
+        status === 307 ? { location: '/next' } : {};
+      return Promise.resolve({ status, headers, body: null });
+    };
+  };
+
+  class MutatingNodeAdapter extends NodeAdapter {
+    public readonly seen: unknown[] = [];
+    private readonly mutatingSend = makeSend(this.seen);
+
+    public override send(request: AdapterRequest): Promise<AdapterResponse> {
+      return this.mutatingSend(request);
+    }
+  }
+
+  const plainSeen: unknown[] = [];
+  const replacedSeen: unknown[] = [];
+  const replaced = new NodeAdapter();
+  replaced.send = makeSend(replacedSeen);
+  const subclass = new MutatingNodeAdapter();
+  const cases: Array<{ adapter: HTTPAdapter; seen: unknown[] }> = [
+    {
+      adapter: { getType: () => 'node', send: makeSend(plainSeen) },
+      seen: plainSeen,
+    },
+    { adapter: subclass, seen: subclass.seen },
+    { adapter: replaced, seen: replacedSeen },
+  ];
+
+  for (const { adapter, seen } of cases) {
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      followRedirects: true,
+      retryPolicy: roundSeventyTwoBRetryPolicy,
+    });
+    const form = new FormData();
+    form.set('a', '1');
+
+    await client
+      .put('/start')
+      .body(new Uint8Array([1, 2, 3]))
+      .send();
+    await client.put('/start').formData(form).send();
+
+    expect(seen).toEqual([
+      [1, 2, 3],
+      [1, 2, 3],
+      [1, 2, 3],
+      [['a', '1']],
+      [['a', '1']],
+      [['a', '1']],
+    ]);
+  }
+});
+
+test('PR review round 73: a nested param read once decides both whether it overrides the path query and what is sent', async () => {
+  const { adapter, urls } = roundSeventyTwoBAdapter([]);
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const answering = (first: unknown, then: unknown) => {
+    let calls = 0;
+    return {
+      get number() {
+        return calls++ === 0 ? first : then;
+      },
+    };
+  };
+
+  // Absent when first read: the path's `page` is kept, and nothing is added.
+  await client
+    .get('/x?page=1')
+    .params({ page: answering(undefined, 2) })
+    .send();
+  // Present when first read: it replaces the path's `page`.
+  await client
+    .get('/x?page=1')
+    .params({ page: answering(2, undefined) })
+    .send();
+
+  expect(urls).toEqual([
+    'http://api.test/x?page=1',
+    'http://api.test/x?page%5Bnumber%5D=2',
+  ]);
+});
+
+test('PR review round 73: on a cross-origin hop, a JSON body that serializes to nothing is read as no body, as the attempt sends it', async () => {
+  const sendHop = async (
+    hopBody: object | undefined,
+    retryBody: unknown,
+  ): Promise<AdapterRequest[]> => {
+    const { adapter, sentToTarget } = crossOriginReplayAdapter(
+      'https://evil.example/next',
+    );
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: crossOriginRetryPolicy,
+    });
+    client.addRequestInterceptor(
+      (request) => ({ ...request, body: retryBody }),
+      { phases: ['retry'] },
+    );
+    const builder = client.put('https://api.example/start');
+    await (hopBody === undefined ? builder : builder.json(hopBody)).send();
+    return sentToTarget;
+  };
+  const describeSent = (
+    sent: AdapterRequest[],
+  ): Array<{ body: unknown; contentType: unknown }> =>
+    sent.map((request) => ({
+      body: request.body ?? null,
+      contentType: request.headers['content-type'],
+    }));
+
+  // A hop that sends nothing has nothing to drop: the interceptors' empty string is not
+  // sent as an empty `text/plain` body, as it is not on a hop with no body at all.
+  const bodiless = describeSent(await sendHop(undefined, ''));
+  expect(bodiless).toEqual([
+    { body: null, contentType: undefined },
+    { body: null, contentType: undefined },
+  ]);
+  expect(describeSent(await sendHop({ toJSON: () => undefined }, ''))).toEqual(
+    bodiless,
+  );
+
+  // And the interceptors' body that serializes to nothing drops the hop's, as an empty
+  // one does: nothing is sent, and nothing describes a body.
+  expect(
+    describeSent(await sendHop({ a: 1 }, { toJSON: () => undefined })),
+  ).toEqual([
+    { body: '{"a":1}', contentType: 'application/json; charset=utf-8' },
+    { body: null, contentType: undefined },
+  ]);
+});
+
+test('PR review round 73: a redirect-phase interceptor that edits the body in place changes the next hop, not an upload of the hop that answered still under way', async () => {
+  // Answers `/start` with a 307 as soon as its head arrives, then reads nothing for a
+  // while, so NodeAdapter is still writing that hop's body when the redirect phase runs.
+  const received = new Map<string, Buffer>();
+  const server = net.createServer((socket) => {
+    let buffered = Buffer.alloc(0);
+    let head: { path: string; length: number; start: number } | undefined;
+    socket.on('error', () => {});
+    socket.on('data', (chunk: Buffer) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      if (!head) {
+        const end = buffered.indexOf('\r\n\r\n');
+        if (end < 0) {
+          return;
+        }
+        const text = buffered.subarray(0, end).toString('latin1');
+        head = {
+          path: text.split(' ')[1] ?? '',
+          length: Number(/content-length: (\d+)/i.exec(text)?.[1] ?? 0),
+          start: end + 4,
+        };
+        if (head.path === '/start') {
+          socket.write(
+            'HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n',
+          );
+          socket.pause();
+          setTimeout(() => socket.resume(), 300);
+        }
+      }
+      if (buffered.length - head.start >= head.length) {
+        received.set(head.path, buffered.subarray(head.start));
+        if (head.path !== '/start') {
+          socket.write(
+            'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok',
+          );
+        }
+        socket.end();
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const bigPart = 4 << 20;
+
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      followRedirects: true,
+    });
+    client.addRequestInterceptor(
+      (request) => {
+        const { body } = request;
+        if (body instanceof FormData) {
+          body.set('tail', 'BBBB');
+        } else if (body instanceof Uint8Array) {
+          body.fill(0x42, bigPart);
+        }
+        return request;
+      },
+      { phases: ['redirect'] },
+    );
+
+    const form = new FormData();
+    form.append('big', new Blob([new Uint8Array(bigPart)]), 'big.bin');
+    form.append('tail', 'AAAA');
+    const formResponse = await client.post('/start').formData(form).send();
+
+    expect(formResponse.status).toBe(200);
+    expect(received.get('/start')?.toString('latin1')).toContain('AAAA');
+    expect(received.get('/start')?.toString('latin1')).not.toContain('BBBB');
+    expect(received.get('/next')?.toString('latin1')).toContain('BBBB');
+    // The caller's form is its own throughout.
+    expect(form.get('tail')).toBe('AAAA');
+
+    received.clear();
+    const bytes = new Uint8Array(bigPart + 4).fill(0x41, bigPart);
+    const bytesResponse = await client.post('/start').body(bytes).send();
+
+    expect(bytesResponse.status).toBe(200);
+    expect(received.get('/start')?.subarray(bigPart).toString('latin1')).toBe(
+      'AAAA',
+    );
+    expect(received.get('/next')?.subarray(bigPart).toString('latin1')).toBe(
+      'BBBB',
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test("PR review round 73: a redirect-phase interceptor is handed a copy of the hop's body, never the bytes a built-in adapter was handed", async () => {
+  const handed: Uint8Array[] = [];
+  // In place of the built-in `send` before the adapter is built, so the adapter records it
+  // as its own and the client hands it the request's bytes uncopied.
+  const sendSpy = spyOn(NodeAdapter.prototype, 'send').mockImplementation(
+    (request: AdapterRequest) => {
+      if (request.body instanceof Uint8Array) {
+        handed.push(request.body);
+      }
+      return Promise.resolve<AdapterResponse>(
+        handed.length === 1
+          ? { status: 307, headers: { location: '/next' }, body: null }
+          : { status: 200, headers: {}, body: null },
+      );
+    },
+  );
+
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL: 'http://api.test',
+      followRedirects: true,
+    });
+    client.addRequestInterceptor(
+      (request) => {
+        (request.body as Uint8Array).fill(9);
+        return request;
+      },
+      { phases: ['redirect'] },
+    );
+
+    await client
+      .post('/start')
+      .body(new Uint8Array([1, 2, 3, 4]))
+      .send();
+  } finally {
+    sendSpy.mockRestore();
+  }
+
+  expect(handed.map((body) => Array.from(body))).toEqual([
+    [1, 2, 3, 4],
+    [9, 9, 9, 9],
+  ]);
+});
+
+test('PR review round 73: a nested array param is serialized by the keys qs reads, with or without a query in the path', () => {
+  const sparse: string[] = [];
+  sparse[2] = 'z';
+  const params = (): Record<string, unknown> => ({
+    a: { b: Object.assign(['x'], { extra: 'y' }), c: sparse },
+  });
+  const expected = 'a%5Bb%5D%5B0%5D=x&a%5Bb%5D%5Bextra%5D=y&a%5Bc%5D%5B2%5D=z';
+
+  expect(buildURL('http://x', '/s', params())).toBe(`http://x/s?${expected}`);
+  expect(buildURL('http://x', '/s?q=1', params())).toBe(
+    `http://x/s?q=1&${expected}`,
+  );
+});
+
+test('PR review round 73: FetchAdapter sends a GET whose JSON body serializes to nothing bodiless, and still refuses a GET with an empty body', async () => {
+  const sentBodies: unknown[] = [];
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((
+    _url: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    sentBodies.push(init?.body ?? null);
+    return Promise.resolve(new Response('ok'));
+  }) as unknown as typeof fetch);
+
+  try {
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://api.test',
+    });
+
+    const response = await client
+      .get('/x')
+      .json({ toJSON: () => undefined })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(sentBodies).toEqual([null]);
+
+    // Each of these is a body `fetch` refuses on a GET: refused before any attempt.
+    for (const body of ['', new Uint8Array(0), new FormData()]) {
+      const builder = client.request('GET', '/x', { body });
+      await builder.send();
+
+      expect(builder.error?.code).toBe('request_setup_error');
+    }
+    expect(sentBodies).toEqual([null]);
+  } finally {
+    fetchSpy.mockRestore();
+  }
+});
+
+test('PR review round 73: a GET body an interceptor returns is refused on FetchAdapter, however its toJSON answers', async () => {
+  const sentBodies: unknown[] = [];
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((
+    _url: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    sentBodies.push(init?.body ?? null);
+    return Promise.resolve(new Response('ok'));
+  }) as unknown as typeof fetch);
+
+  try {
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://api.test',
+    });
+    // Nothing the first time it is asked, a body every time after.
+    let calls = 0;
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      body: { toJSON: () => (calls++ === 0 ? undefined : { a: 1 }) },
+    }));
+
+    const builder = client.get('/x');
+    await builder.send();
+
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(sentBodies).toEqual([]);
+  } finally {
+    fetchSpy.mockRestore();
+  }
+});
+
+test('PR review round 73: a 307 replay of a GET whose JSON body serializes to nothing drops the headers that describe a body', async () => {
+  const sentHeaders: Array<Record<string, unknown>> = [];
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: (request) => {
+        sentHeaders.push(request.headers);
+        return Promise.resolve<AdapterResponse>(
+          sentHeaders.length % 2 === 1
+            ? { status: 307, headers: { location: '/next' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    },
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  const send = (body: object) =>
+    client
+      .get('/start')
+      .headers({
+        'content-type': 'application/json',
+        'content-language': 'en',
+      })
+      .json(body)
+      .send();
+
+  await send({ toJSON: () => undefined });
+  await send({ a: 1 });
+
+  const replayed = sentHeaders.map((headers) => ({
+    type: headers['content-type'],
+    language: headers['content-language'],
+  }));
+  expect(replayed[1]).toEqual({ type: undefined, language: undefined });
+  // A body that is sent is replayed with the headers that describe it.
+  expect(replayed[3]).toEqual({ type: 'application/json', language: 'en' });
 });

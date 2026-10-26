@@ -7,6 +7,7 @@ import {
 import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
 import { isHTTPToken } from './http-token';
+import { copyArrayValue } from './array-copy';
 import type { RequestHeadersInput } from '../types';
 
 /**
@@ -60,16 +61,9 @@ export function copyHeaderRecord(
 ): Record<string, string | string[]> {
   const copy: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(headers)) {
-    defineEntry(copy, name, copyHeaderValue(value));
+    defineEntry(copy, name, copyArrayValue(value));
   }
   return copy;
-}
-
-/** One header value as {@link copyHeaderRecord} copies it. */
-export function copyHeaderValue<V extends string | string[] | undefined>(
-  value: V,
-): V {
-  return (Array.isArray(value) ? value.slice() : value) as V;
 }
 
 /**
