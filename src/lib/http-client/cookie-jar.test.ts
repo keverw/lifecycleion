@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeEach, spyOn } from 'bun:test';
 import { CookieJar } from './cookie-jar';
 
 test.each([
@@ -3456,4 +3456,52 @@ describe('PR review round 51: a trailing dot is part of the host', () => {
       'sid=other',
     );
   });
+});
+
+test('PR review round 67: setCookie decides whether the cookie it replaces has expired at the time it stores', () => {
+  const jar = new CookieJar();
+  let clock = 1_000_000;
+  const nowSpy = spyOn(Date, 'now').mockImplementation(() => clock);
+
+  try {
+    const url = 'https://example.com/';
+    // `a` expires half a second after the replacement below is stored.
+    jar.setCookie({
+      name: 'a',
+      value: '1',
+      domain: 'example.com',
+      path: '/',
+      hostOnly: true,
+      expires: new Date(1_000_700),
+    });
+    clock = 1_000_100;
+    jar.setCookie({
+      name: 'b',
+      value: '1',
+      domain: 'example.com',
+      path: '/',
+      hostOnly: true,
+    });
+
+    // A clock that moves a second on every read: a second read inside one `setCookie`
+    // found the cookie it replaced already expired, and dropped its creation time.
+    clock = 1_000_200;
+    nowSpy.mockImplementation(() => {
+      const now = clock;
+      clock += 1000;
+      return now;
+    });
+    jar.setCookie({
+      name: 'a',
+      value: '2',
+      domain: 'example.com',
+      path: '/',
+      hostOnly: true,
+    });
+
+    // The replacement keeps `a`'s place, ahead of the later `b`.
+    expect(jar.getCookieHeaderString(url)).toBe('a=2; b=1');
+  } finally {
+    nowSpy.mockRestore();
+  }
 });

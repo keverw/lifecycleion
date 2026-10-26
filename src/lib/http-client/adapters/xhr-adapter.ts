@@ -269,28 +269,27 @@ export class XHRAdapter implements HTTPAdapter {
       // it as a fallback for environments that skip upload.load entirely.
       let didUploadComplete = false;
 
-      // The body's own size: `0` for none or an empty one, `undefined` where it cannot be
-      // known up front (a `FormData`). Measured on first use and kept, so a value of the
-      // caller's (a `Blob`'s `size`) is read at most once.
-      let measuredBodyByteLength: { value: number | undefined } | undefined;
-      const bodyByteLength = (): number | undefined =>
-        (measuredBodyByteLength ??= {
-          value: knownBodyByteLength(requestBody),
-        }).value;
+      // The size of a body that is not text, read once, so a value of the caller's (a
+      // `Blob`'s `size`) is read at most once: `0` for none or an empty one, `undefined`
+      // where it cannot be known up front (a `FormData`). Text with any characters is at
+      // least a byte, so it is measured only by the final upload event, and only when the
+      // browser reported nothing.
+      const binaryBodyByteLength =
+        typeof requestBody === 'string'
+          ? undefined
+          : knownBodyByteLength(requestBody);
 
-      // Whether the body has, or may have, bytes to send. Text with any characters is at
-      // least a byte, so it is not measured for this - only by the final upload event, and
-      // only when the browser reported nothing.
+      // Whether the body has, or may have, bytes to send.
       const hasBytesToSend =
         typeof requestBody === 'string'
           ? requestBody !== ''
-          : bodyByteLength() !== 0;
+          : binaryBodyByteLength !== 0;
 
       // The one final upload event, however the upload ends: the bytes the browser
       // reported, or the body's own size where it reported none - `0` for an empty
       // string, as FetchAdapter reports it - not a stand-in `1`.
       const emitFinalUpload = (): void => {
-        if (didFireUpload100) {
+        if (didFireUpload100 || !guardedUploadProgress) {
           return;
         }
 
@@ -301,8 +300,12 @@ export class XHRAdapter implements HTTPAdapter {
         // of the two - `total: 0`, or `loaded: 0`. An upload a server answered partway
         // through cannot be told from a finished one here, as FetchAdapter cannot.
         const bytes =
-          Math.max(uploadedBytes, uploadTotalBytes) || (bodyByteLength() ?? 0);
-        guardedUploadProgress?.({ loaded: bytes, total: bytes, progress: 1 });
+          Math.max(uploadedBytes, uploadTotalBytes) ||
+          ((typeof requestBody === 'string'
+            ? knownBodyByteLength(requestBody)
+            : binaryBodyByteLength) ??
+            0);
+        guardedUploadProgress({ loaded: bytes, total: bytes, progress: 1 });
       };
 
       // `upload` is optional where XHR runs outside a browser - Node's `xmlhttprequest` has
@@ -311,14 +314,15 @@ export class XHRAdapter implements HTTPAdapter {
       // throws fails the same way on every attempt, so it is refused as non-retryable, as a
       // send the XHR refuses is - and, never sent, takes the abort listener off itself.
       //
-      // Listened on only for a body with bytes to send. A listener on `upload` makes a
-      // browser preflight a cross-origin request - the XHR standard exempts a request with
-      // no body, but not every engine need honour that - and a body of no bytes has no
-      // upload to report on: its final event, `0` bytes, fires when the request ends.
+      // Listened on only when upload progress was asked for, and only for a body with bytes
+      // to send. A listener on `upload` makes a browser preflight a cross-origin request -
+      // the XHR standard exempts a request with no body, but not every engine need honour
+      // that - so a request with no progress hook goes out as `fetch` would send it, and a
+      // body of no bytes has no upload to report on: its final event, `0` bytes, fires when
+      // the request ends.
       try {
-        const upload: XMLHttpRequestUpload | null | undefined = hasBytesToSend
-          ? xhr.upload
-          : undefined;
+        const upload: XMLHttpRequestUpload | null | undefined =
+          guardedUploadProgress && hasBytesToSend ? xhr.upload : undefined;
 
         if (upload) {
           upload.addEventListener('progress', (event) => {

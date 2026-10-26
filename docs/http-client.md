@@ -364,7 +364,10 @@ Redirect-phase observers see that hop's outcome.
 
 Before following a redirect or retrying, the client waits for a reported upload outcome.
 Cancellation ends the wait. The request's `timeout` bounds inactivity during this wait,
-including silence since dispatch. Upload-progress reports restart that inactivity clock.
+including silence since dispatch. Upload-progress reports restart that inactivity clock:
+the client hands an adapter an `onUploadProgress` for every request with a body to watch
+for them, except an `xhr` adapter, which is handed one only for a request that asked for
+upload progress (see [XHRAdapter](#xhradapter)).
 On expiry, the client returns a timeout, aborts the attempt, and reports the stalled
 settlement through the global `'error'` channel. `timeout: 0`, negative values, and
 `Infinity` disable this client wait bound. A custom adapter that supplies the promise
@@ -1494,7 +1497,7 @@ It is Node diverging from the library it links, not an OpenSSL limitation: `open
 
 Uses `XMLHttpRequest` for real per-chunk progress tracking in browsers where `fetch` progress is unavailable.
 
-The adapter listens for upload progress on every request with a body of at least one byte, or of a size it cannot know up front (a `FormData`), which the client uses to track the upload. In a browser that makes a cross-origin upload a non-simple request, so the server must answer a CORS preflight (`OPTIONS`) even for a `text/plain`, urlencoded or `FormData` body; `FetchAdapter` sends such a body without one. A request with no body, or an empty one, is not listened on, so it needs no preflight on that account; its `onUploadProgress` still fires `0` at dispatch and `1` (`0` bytes) once an answer arrives.
+The adapter listens for upload progress on `xhr.upload` only for a request that asked for it with `onUploadProgress`, and then only when its body has at least one byte, or a size it cannot know up front (a `FormData`). In a browser that listener makes a cross-origin upload a non-simple request, so asking for `onUploadProgress` on one means the server must answer a CORS preflight (`OPTIONS`) even for a `text/plain`, urlencoded or `FormData` body, which `FetchAdapter` sends without one. A request that does not ask is not listened on, and goes out as `fetch` would send it. Nor is a request with no body, or an empty one; its `onUploadProgress` still fires `0` at dispatch and `1` (`0` bytes) once an answer arrives.
 
 ```typescript
 import { XHRAdapter } from 'lifecycleion/http-client-xhr';
@@ -1515,7 +1518,7 @@ No configuration options. Adapter-level behavior is controlled through `HTTPClie
 - `followRedirects` must not be `true`
 - `HTTPClient` throws if `XMLHttpRequest` is not available (e.g. Node.js without a shim)
 
-A synchronous throw from `xhr.send()` fails the request once, as a non-retryable `adapter_error`. An asynchronous `send()` throws only an `InvalidStateError` or for a body it cannot convert, and both fail the same way on every attempt; network failures arrive as `error` events and follow the retry rules. An `XMLHttpRequest` shim that throws a network failure from `send()` instead is not retried. An `XMLHttpRequest` with no `upload` (as some shims have) sends without per-chunk upload progress: `onUploadProgress` fires `0` at dispatch and `1` only once an answer arrives (a response, including one refused as too large or a redirect the browser followed, even one an abort lands on), not on a network error, a timeout or an abort. One whose `upload` throws when read or listened on fails a request with a body to send once, as a non-retryable `adapter_error`.
+A synchronous throw from `xhr.send()` fails the request once, as a non-retryable `adapter_error`. An asynchronous `send()` throws only an `InvalidStateError` or for a body it cannot convert, and both fail the same way on every attempt; network failures arrive as `error` events and follow the retry rules. An `XMLHttpRequest` shim that throws a network failure from `send()` instead is not retried. An `XMLHttpRequest` with no `upload` (as some shims have) sends without per-chunk upload progress: `onUploadProgress` fires `0` at dispatch and `1` only once an answer arrives (a response, including one refused as too large or a redirect the browser followed, even one an abort lands on), not on a network error, a timeout or an abort. One whose `upload` throws when read or listened on fails a request with a body to send and an `onUploadProgress` once, as a non-retryable `adapter_error`.
 
 A caller's `Content-Length` is not sent: the XHR frames the body itself, as `fetch` does for `FetchAdapter`. The adapter rejects a cancel or timeout with a plain `Error` named `AbortError`, so it needs no `DOMException` where XHR runs outside a browser (React Native, a test shim).
 

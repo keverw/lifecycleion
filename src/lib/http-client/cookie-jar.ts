@@ -402,15 +402,12 @@ export class CookieJar {
     // own, the base of its `Max-Age`.
     // Not an expired one still waiting to be purged: it was already gone (§5.3 step 11
     // reads the store, from which an expired cookie has been evicted), so the new cookie
-    // takes its own place.
+    // takes its own place. Judged at `now`, the time the new cookie is stored at, and by
+    // its expiry alone, read once and failing closed as `isExpired` does.
     const replaced = bucket.get(key);
-    const replacedSnapshot =
-      replaced === undefined ? null : this.snapshotForSend(replaced);
     this.creationTimes.set(
       stored,
-      replaced === undefined ||
-        replacedSnapshot === null ||
-        this.isExpired(replacedSnapshot, Date.now())
+      replaced === undefined || this.isExpired(replaced, now)
         ? createdAt
         : (this.creationTimes.get(replaced) ?? replaced.createdAt),
     );

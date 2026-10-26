@@ -2289,6 +2289,8 @@ describe('XHRAdapter', () => {
         headers: {},
         body: 'hello',
         signal: signal as unknown as AbortSignal,
+        // Read and listened on only when upload progress is asked for.
+        onUploadProgress: () => {},
       })
       .then(
         () => undefined,
@@ -2336,6 +2338,8 @@ describe('XHRAdapter', () => {
         headers: {},
         body: 'hello',
         signal: signal as unknown as AbortSignal,
+        // Read and listened on only when upload progress is asked for.
+        onUploadProgress: () => {},
       })
       .then(
         () => undefined,
@@ -3343,6 +3347,7 @@ describe('XHRAdapter - PR review round 64', () => {
       method: 'POST',
       headers: {},
       body: 'hello',
+      onUploadProgress: () => {},
     });
 
     expect(uploadListenerCount(lastXHR)).toBe(2);
@@ -3410,5 +3415,102 @@ describe('XHRAdapter - PR review round 64', () => {
       expect(reads).toBe(1);
       expect(uploads.at(-1)).toEqual({ loaded: size, progress: 1 });
     }
+  });
+});
+
+describe('XHRAdapter - PR review round 67', () => {
+  /** The listeners registered on the fake XHR's `upload`, by event type. */
+  function uploadListenerCount(xhr: FakeXHR): number {
+    const handlers = (
+      xhr.upload as unknown as { handlers: Record<string, unknown[]> }
+    ).handlers;
+
+    return Object.values(handlers).reduce(
+      (count, list) => count + list.length,
+      0,
+    );
+  }
+
+  test('PR review round 67: an adapter driven without onUploadProgress listens on no upload', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+    });
+
+    expect(uploadListenerCount(lastXHR)).toBe(0);
+
+    lastXHR.status = 204;
+    lastXHR.simulateLoad();
+    await promise;
+  });
+
+  test('PR review round 67: a request without onUploadProgress never reads an upload that throws', async () => {
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
+      FakeXHR
+    ) {
+      constructor() {
+        super();
+        Object.defineProperty(this, 'upload', {
+          get() {
+            throw new Error('upload getter failed');
+          },
+        });
+      }
+    };
+
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+    });
+
+    const xhr = FakeXHR.instances[0];
+    expect(xhr?.sentBody).toBe('hello');
+    if (xhr) {
+      xhr.status = 204;
+      xhr.simulateLoad();
+    }
+    expect((await promise).status).toBe(204);
+  });
+
+  test('PR review round 67: through the client, a bodied request listens on its upload only when it asks for upload progress', async () => {
+    const client = new HTTPClient({
+      adapter: new XHRAdapter(),
+      baseURL: 'https://api.test',
+    });
+
+    // No hook: no listener on `upload`, which would make a browser preflight it.
+    const plain = client.post('/data').body('hello').send();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(uploadListenerCount(lastXHR)).toBe(0);
+    lastXHR.status = 204;
+    lastXHR.simulateLoad();
+    expect((await plain).status).toBe(204);
+
+    // A hook: listened on, and its events delivered.
+    const uploads: Array<{ loaded: number; progress: number }> = [];
+    const tracked = client
+      .post('/data')
+      .body('hello')
+      .onUploadProgress((event) => {
+        uploads.push({ loaded: event.loaded, progress: event.progress });
+      })
+      .send();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(uploadListenerCount(lastXHR)).toBe(2);
+    lastXHR.simulateUploadProgress(3, 5);
+    lastXHR.simulateUploadProgress(5, 5);
+    lastXHR.status = 204;
+    lastXHR.simulateLoad();
+    expect((await tracked).status).toBe(204);
+
+    expect(uploads).toEqual([
+      { loaded: 0, progress: 0 },
+      { loaded: 3, progress: 0.6 },
+      { loaded: 5, progress: 1 },
+    ]);
   });
 });

@@ -2996,15 +2996,20 @@ export class BaseHTTPClient {
             // another host from the request it was configured for. See
             // `AdapterRequest.initialURL`.
             initialURL: credentialScope.url,
-            // Always handed over for a bodied request, whether or not the caller asked for
+            // Handed over for a bodied request whether or not the caller asked for
             // progress: the stamp is what lets the wait on `requestBodySettled` tell an
             // upload that is still moving from one that has stalled. A bodiless request
             // has no upload to watch, so the adapter is told nothing it was not told before.
+            // Nor is an `xhr` adapter, unless the caller asked: it reports no
+            // `requestBodySettled` to wait on, and a hook makes `XHRAdapter` listen on
+            // `xhr.upload`, which makes a browser preflight a cross-origin upload `fetch`
+            // would send without one.
             // The caller's hooks are guarded here, as `onAttemptStart`/`onAttemptEnd`
             // are, not left to the adapter: a custom adapter that calls them bare had a
             // throwing hook fail - and retry - a request that succeeded.
             onUploadProgress:
-              onUploadProgress || (sentBody ?? null) !== null
+              onUploadProgress ||
+              ((sentBody ?? null) !== null && this._adapterType !== 'xhr')
                 ? (e) => {
                     if (isAbandoned) {
                       return;

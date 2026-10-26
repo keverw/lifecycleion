@@ -274,8 +274,10 @@ export interface AdapterResponse {
    * broken contract is reported on the global `'error'` channel. An upload that
    * keeps reporting progress is never cut, however long it takes. `NodeAdapter`
    * reports progress as it writes and settles through its own stall watchdog; a
-   * custom adapter that reports no progress gets the bound flat, and one that never
-   * settles the field turns every followed redirect and every retry into a timeout.
+   * custom adapter that reports no progress gets the bound flat - as does an `xhr` one,
+   * which is handed an `onUploadProgress` only for a request that asked for upload
+   * progress - and one that never settles the field turns every followed redirect and
+   * every retry into a timeout.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }
