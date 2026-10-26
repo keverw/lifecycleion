@@ -788,7 +788,8 @@ function readResponseBody(
  * Parses the raw header string from `xhr.getAllResponseHeaders()` into a
  * lowercase-keyed record.
  *
- * `getAllResponseHeaders()` returns CRLF-delimited `name: value` lines. When
+ * `getAllResponseHeaders()` returns CRLF-delimited `name: value` lines; an XHR
+ * outside a browser may end them with a bare LF, and both are read. When
  * a server sends multiple headers with the same name the browser combines them
  * into a single comma-joined line for most headers, but emits each `Set-Cookie`
  * value as its own line (per spec) to avoid ambiguity with the comma in cookie
@@ -812,7 +813,8 @@ function parseXHRResponseHeaders(
     return result;
   }
 
-  for (const line of raw.split('\r\n')) {
+  // Split on LF alone: a CRLF line's CR is HTTP whitespace, trimmed with its value.
+  for (const line of raw.split('\n')) {
     // Lines are `Name: value` pairs separated by the first colon.
     // indexOf is used (not split) so colons in the value are preserved.
     const colonIndex = line.indexOf(':');

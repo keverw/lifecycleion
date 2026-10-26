@@ -7351,6 +7351,89 @@ describe('NodeAdapter — crl option (normalization)', () => {
     }
   });
 
+  test('PR review round 82: a CRL buffer it copies owns its memory from the start, never a slice of a shared pool', async () => {
+    const captured: unknown[] = [];
+    const requestSpy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured.push(options.crl);
+      const req = new EventEmitter();
+      const stub = req as unknown as Record<string, unknown>;
+      stub.setHeader = () => {};
+      stub.getHeaders = () => ({});
+      stub.destroy = () => {};
+      stub.end = () => {
+        queueMicrotask(() =>
+          req.emit(
+            'error',
+            Object.assign(new Error('captured'), { code: 'ECONNRESET' }),
+          ),
+        );
+      };
+      return req as unknown as http.ClientRequest;
+    }) as unknown as typeof https.request);
+    // Node cuts a small `Buffer.from(view)` from a shared pool, at an offset into memory
+    // that is not its own, which Bun's `tls` would read from the start. Bun's own copy
+    // is not pooled, so it is cut here as Node cuts it.
+    const originalFrom = Buffer.from.bind(Buffer) as (
+      ...args: unknown[]
+    ) => Buffer;
+    const fromSpy = spyOn(Buffer, 'from').mockImplementation(((
+      value: unknown,
+      ...rest: unknown[]
+    ) => {
+      const made = originalFrom(value, ...rest);
+      if (rest.length > 0 || !ArrayBuffer.isView(value)) {
+        return made;
+      }
+      const pool = Buffer.alloc(made.byteLength + 8);
+      made.copy(pool, 8);
+      return pool.subarray(8);
+    }) as unknown as typeof Buffer.from);
+    const ownsItsMemory = (value: unknown): boolean =>
+      Buffer.isBuffer(value) &&
+      value.byteOffset === 0 &&
+      value.buffer.byteLength === value.byteLength &&
+      value.toString('latin1') === fixtures.crlEmpty;
+
+    try {
+      const config: NodeAdapterConfig = { crl: fixtures.crlRevoked };
+      const adapter = new NodeAdapter(config);
+      const request = {
+        requestURL: 'https://crl.test/api',
+        method: 'GET' as const,
+        headers: {},
+      };
+
+      // Read past a byte-order mark, which leaves a view at an offset: copied, and the
+      // copy kept is answered again for the same bytes.
+      const withBOM = Buffer.alloc(fixtures.crlEmpty.length + 3);
+      withBOM.set([0xef, 0xbb, 0xbf]);
+      withBOM.write(fixtures.crlEmpty, 3, 'latin1');
+      config.crl = withBOM;
+      await adapter.send(request);
+      await adapter.send(request);
+
+      // Passed through at the start of its memory, then the same bytes at an offset:
+      // answered with the copy kept of the first.
+      const atStart = Buffer.alloc(fixtures.crlEmpty.length);
+      atStart.write(fixtures.crlEmpty, 'latin1');
+      config.crl = atStart;
+      await adapter.send(request);
+      const atOffset = Buffer.alloc(fixtures.crlEmpty.length + 4);
+      atOffset.write(fixtures.crlEmpty, 4, 'latin1');
+      config.crl = atOffset.subarray(4);
+      await adapter.send(request);
+
+      expect(captured).toHaveLength(4);
+      expect(captured.map(ownsItsMemory)).toEqual([true, true, true, true]);
+      expect(captured[2]).toBe(atStart);
+    } finally {
+      fromSpy.mockRestore();
+      requestSpy.mockRestore();
+    }
+  });
+
   const countCRLs = (value: unknown): number => {
     const blocks = (text: unknown) =>
       typeof text === 'string'

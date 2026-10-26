@@ -12,6 +12,7 @@ import { REDIRECT_STATUS_CODES } from './consts';
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
+import { describeValue } from '../internal/describe-value';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { copyArrayValue } from './internal/array-copy';
 import { readUnknownMember } from '../internal/read-member';
@@ -623,7 +624,7 @@ export function describeInvalidHTTPMethod(
   candidate: unknown,
 ): string | undefined {
   if (typeof candidate !== 'string') {
-    return `is not a string (got ${candidate === null ? 'null' : typeof candidate})`;
+    return `is not a string (got ${describeValue(candidate)})`;
   }
   const tokenProblem = describeNonTokenMethod(candidate);
   if (tokenProblem !== undefined) {
@@ -833,7 +834,7 @@ export function assertSupportedAdapterRuntimeAndConfig(
   if (baseURL !== undefined) {
     if (typeof baseURL !== 'string') {
       throw new TypeError(
-        `HTTPClient baseURL must be a string (got ${baseURL === null ? 'null' : typeof baseURL})`,
+        `HTTPClient baseURL must be a string (got ${describeValue(baseURL)})`,
       );
     }
     if (baseURL.includes('?') || baseURL.includes('#')) {
@@ -1342,7 +1343,7 @@ export function serializeBody(
     return { body, contentType: 'text/plain; charset=utf-8' };
   } else if (isRequestBodyBytes(body)) {
     return { body, contentType: 'application/octet-stream' };
-  } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
+  } else if (Array.isArray(body) || isPlainRecord(body)) {
     // `JSON.stringify` answers `undefined` for a top-level `toJSON` that does: nothing is
     // sent, so nothing is typed as JSON either.
     const serialized: unknown = jsonText ?? JSON.stringify(body);
@@ -1351,11 +1352,14 @@ export function serializeBody(
       ? { body: serialized, contentType: 'application/json; charset=utf-8' }
       : { body: null, contentType: null };
   } else {
-    throw new TypeError(
-      'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.',
-    );
+    // Reached by a `Proxy` whose prototype answers differently than it did to the check.
+    throw new TypeError(UNSUPPORTED_REQUEST_BODY_MESSAGE);
   }
 }
+
+/** The refusal of a request body of a type no adapter sends, wherever it is refused. */
+export const UNSUPPORTED_REQUEST_BODY_MESSAGE =
+  'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.';
 
 export function assertSupportedRequestBody(body: unknown): void {
   if (
@@ -1365,14 +1369,12 @@ export function assertSupportedRequestBody(body: unknown): void {
     isRequestBodyBytes(body) ||
     body instanceof FormData ||
     Array.isArray(body) ||
-    isPlainJSONBodyObject(body)
+    isPlainRecord(body)
   ) {
     return;
   }
 
-  throw new TypeError(
-    'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.',
-  );
+  throw new TypeError(UNSUPPORTED_REQUEST_BODY_MESSAGE);
 }
 
 /**
@@ -1387,15 +1389,6 @@ export function isRequestBodyBytes(body: unknown): body is Uint8Array {
     body !== null &&
     typedArrayNameOf(body) === 'Uint8Array'
   );
-}
-
-export function isPlainJSONBodyObject(
-  value: unknown,
-): value is Record<string, unknown> {
-  // The header record's rule, so a plain object is one in either place - another
-  // realm's (a `vm` context's) included. It is sent as `JSON.stringify` serializes it;
-  // see `buildAttemptBodies`.
-  return isPlainRecord(value);
 }
 
 /**

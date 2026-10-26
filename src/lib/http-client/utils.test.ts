@@ -1624,3 +1624,20 @@ test.each([NaN, Infinity, -Infinity])(
     ).toThrow();
   },
 );
+
+test('PR review round 82: serializeBody refuses a body whose prototype answers differently once it has passed the check', () => {
+  let looks = 0;
+  // A plain object to `assertSupportedRequestBody`'s two looks, then not one.
+  const body = new Proxy(
+    {},
+    {
+      getPrototypeOf: () =>
+        ++looks <= 2 ? Object.prototype : Object.create(Object.prototype),
+    },
+  );
+
+  expect(() => serializeBody(body)).toThrow(
+    'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.',
+  );
+  expect(looks).toBe(4);
+});

@@ -1,5 +1,6 @@
 import { asciiUppercase, isBlankText } from '../../internal/ascii-text';
 import { readBinaryByteLength } from '../../internal/binary-view';
+import { describeValue } from '../../internal/describe-value';
 import {
   defineHiddenTags,
   makeAbortError,
@@ -422,8 +423,8 @@ export class NodeAdapter implements HTTPAdapter {
     if (config.crl !== undefined) {
       normalizeCRL(config.crl, this);
     }
-    assertTrustAnchors(readTrustAnchors(config.ca), 'ca');
-    assertTrustAnchors(readTrustAnchors(config.mtls?.ca), 'mtls.ca');
+    assertTrustAnchors(copyArrayValue(config.ca), 'ca');
+    assertTrustAnchors(copyArrayValue(config.mtls?.ca), 'mtls.ca');
 
     const candidateDecompress: unknown = config.decompress;
     if (
@@ -431,7 +432,7 @@ export class NodeAdapter implements HTTPAdapter {
       typeof candidateDecompress !== 'boolean'
     ) {
       throw new TypeError(
-        `NodeAdapter decompress must be a boolean (got ${candidateDecompress === null ? 'null' : typeof candidateDecompress})`,
+        `NodeAdapter decompress must be a boolean (got ${describeValue(candidateDecompress)})`,
       );
     }
 
@@ -663,11 +664,12 @@ export class NodeAdapter implements HTTPAdapter {
       // custom CA trust store. An empty one is refused rather than skipped: skipped, it
       // fell back to the public roots - a client meant to trust one private CA, whose
       // loader came back empty, then trusted every public one.
-      // Each read once, so the value checked is the value sent - a list's entries too
-      // (see `readTrustAnchors`).
-      const trustedCA = readTrustAnchors(this._config.ca);
+      // Each read once, so the value checked is the value sent - a list's entries too,
+      // copied by index (see `copyArrayValue`). A hole stays a hole, which
+      // `assertTrustAnchors` reads as the `undefined` it is, and refuses.
+      const trustedCA = copyArrayValue(this._config.ca);
       const mtls = this._config.mtls;
-      const mtlsCA = readTrustAnchors(mtls?.ca);
+      const mtlsCA = copyArrayValue(mtls?.ca);
       const servername = this._config.servername;
       assertTrustAnchors(trustedCA, 'ca');
       assertTrustAnchors(mtlsCA, 'mtls.ca');
@@ -3556,7 +3558,18 @@ function snapshotCRLInput(
 
 /** A normalized CRL entry this adapter owns: a string as is, a buffer copied. */
 function ownCRLEntry(entry: string | Buffer): string | Buffer {
-  return typeof entry === 'string' ? entry : Buffer.from(entry);
+  return typeof entry === 'string' ? entry : copyToOwnMemory(entry);
+}
+
+/**
+ * `bytes` copied into a Buffer over memory of its own, starting at its start. Not
+ * `Buffer.from(bytes)`: Node cuts a small copy from its shared pool, at an offset into
+ * memory it does not own, and Bun's `tls` reads a view from the start of its memory.
+ */
+function copyToOwnMemory(bytes: Uint8Array): Buffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return Buffer.from(copy.buffer, 0, copy.byteLength);
 }
 
 /** A `crl` value as given, copied: a string as is, a buffer's bytes into one of its own. */
@@ -3568,7 +3581,7 @@ function copyCRLInput(
   const copyEntry = (entry: string | ArrayBufferView): string | Buffer =>
     typeof entry === 'string'
       ? entry
-      : Buffer.from(
+      : copyToOwnMemory(
           new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength),
         );
 
@@ -3699,7 +3712,7 @@ function normalizeCRLEntry(
   if (!Buffer.isBuffer(candidate) && !ArrayBuffer.isView(candidate)) {
     throw crlValidationError(
       new TypeError(
-        `NodeAdapter crl must be a string, binary data such as a Buffer, or an array of them (got ${candidate === null ? 'null' : typeof candidate})`,
+        `NodeAdapter crl must be a string, binary data such as a Buffer, or an array of them (got ${describeValue(candidate)})`,
       ),
     );
   }
@@ -3736,7 +3749,7 @@ function normalizeCRLEntry(
 
   // Copied when it starts partway into its memory (a `subarray`, a view at an offset):
   // Bun's `tls` reads such a view from the start of the memory, and failed to parse it.
-  return withoutBOM.byteOffset === 0 ? withoutBOM : Buffer.from(withoutBOM);
+  return withoutBOM.byteOffset === 0 ? withoutBOM : copyToOwnMemory(withoutBOM);
 }
 
 /**
@@ -4244,16 +4257,6 @@ function describeFactoryReturn(value: unknown): string {
   }
 
   return typeof value;
-}
-
-/**
- * A `ca` or `mtls.ca` value read once: a list is copied (see `copyArrayValue`), so its
- * entries are each read once, and the entries {@link assertTrustAnchors} checks are the
- * entries sent. A hole stays a hole, which that check reads as the `undefined` it is, and
- * refuses.
- */
-function readTrustAnchors<V>(value: V | V[] | undefined): V | V[] | undefined {
-  return copyArrayValue(value);
 }
 
 /**

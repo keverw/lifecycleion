@@ -1,4 +1,5 @@
-import { isPlainJSONBodyObject, isRequestBodyBytes } from '../utils';
+import { isRequestBodyBytes, UNSUPPORTED_REQUEST_BODY_MESSAGE } from '../utils';
+import { isPlainRecord } from './plain-record';
 import { formEntries } from './form-entries';
 
 /**
@@ -49,7 +50,7 @@ export function copyRequestBody(body: unknown): unknown {
     return copyFormData(body);
   }
 
-  if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
+  if (Array.isArray(body) || isPlainRecord(body)) {
     // A copy of a copy is read back from the text it was read from.
     const text = jsonTextOf(body);
 
@@ -62,7 +63,7 @@ export function copyRequestBody(body: unknown): unknown {
 
     const parsed: unknown = JSON.parse(text);
     const copy: object =
-      Array.isArray(parsed) || isPlainJSONBodyObject(parsed)
+      Array.isArray(parsed) || isPlainRecord(parsed)
         ? parsed
         : { toJSON: () => parsed };
 
@@ -71,9 +72,7 @@ export function copyRequestBody(body: unknown): unknown {
   }
 
   // Refused as `params()` refuses a query it cannot copy: by type, when it is handed over.
-  throw new TypeError(
-    'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.',
-  );
+  throw new TypeError(UNSUPPORTED_REQUEST_BODY_MESSAGE);
 }
 
 /**

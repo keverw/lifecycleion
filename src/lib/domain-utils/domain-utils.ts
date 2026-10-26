@@ -376,23 +376,96 @@ export function matchesWildcardOrigin(
   origin: string,
   pattern: string,
 ): boolean {
-  return matchesWildcardOriginIn(origin, pattern, true);
+  return wildcardOriginMatcher(origin, true)(pattern);
 }
 
-/** {@link matchesWildcardOrigin}, its pattern cached as `isCached` says (see above). */
-function matchesWildcardOriginIn(
+/**
+ * {@link matchesWildcardOrigin} for a whole list of patterns, each cached as `isCached`
+ * says (see above): the origin is read once - when a pattern first needs it - rather than
+ * for every wildcard entry.
+ */
+function wildcardOriginMatcher(
   origin: string,
-  pattern: string,
   isCached: PatternCache,
-): boolean {
+): (pattern: string) => boolean {
+  let parsed: WildcardOrigin | undefined;
+  let isRead = false;
+
+  return (pattern) => {
+    if (!isRead) {
+      const originURL = readWildcardOrigin(origin);
+      parsed = originURL === undefined ? undefined : { url: originURL };
+      isRead = true;
+    }
+
+    return (
+      parsed !== undefined &&
+      matchesWildcardPatternIn(parsed, pattern, isCached)
+    );
+  };
+}
+
+/** An origin as a wildcard pattern reads it (see `readWildcardOrigin`). */
+interface WildcardOrigin {
+  url: URL;
+  /** Its hostname normalized, when a pattern has first needed it. */
+  normalizedHostname?: string;
+}
+
+/**
+ * `origin` parsed as a wildcard pattern reads it: an HTTP(S) origin with nothing past its
+ * host and port, or `undefined` for one no wildcard pattern matches.
+ */
+function readWildcardOrigin(origin: string): URL | undefined {
   // Read as the parser reads its text, as `normalizeOrigin` reads it; see `toOriginText`.
   const originText = toOriginText(origin);
   if (originText === undefined) {
-    return false;
+    return undefined;
   }
 
   // Normalize Unicode dots before URL parsing for consistency
   const normalizedOrigin = foldOriginDots(originText);
+
+  if (
+    hasDanglingPortInAuthority(normalizedOrigin) ||
+    hasPercentEncodedHost(normalizedOrigin) ||
+    hasOriginExtras(normalizedOrigin)
+  ) {
+    return undefined;
+  }
+
+  // Every pattern - `*` and the protocol wildcards included - needs a parsed URL.
+  const originURL = safeParseURL(normalizedOrigin);
+  if (!originURL) {
+    return undefined;
+  }
+
+  // For CORS, only http/https are relevant.
+  const scheme = asciiLowercase(originURL.protocol);
+  if (scheme !== 'http:' && scheme !== 'https:') {
+    return undefined;
+  }
+
+  if (
+    originURL.username ||
+    originURL.password ||
+    (originURL.pathname && originURL.pathname !== '/') ||
+    originURL.search ||
+    originURL.hash
+  ) {
+    return undefined;
+  }
+
+  return originURL;
+}
+
+/** Whether an origin read by `readWildcardOrigin` matches `pattern`. */
+function matchesWildcardPatternIn(
+  origin: WildcardOrigin,
+  pattern: string,
+  isCached: PatternCache,
+): boolean {
+  const originURL = origin.url;
   // Trimmed, as `validateConfigEntry` and `matchesOriginList` read it: ` https://*`
   // matched nothing here alone. Of HTTP whitespace only - see `readTrimmedEntry`.
   const trimmedPattern = readTrimmedEntry(pattern);
@@ -401,48 +474,15 @@ function matchesWildcardOriginIn(
   }
   const normalizedPattern = toAsciiDots(trimmedPattern);
 
-  if (
-    hasDanglingPortInAuthority(normalizedOrigin) ||
-    hasPercentEncodedHost(normalizedOrigin) ||
-    hasOriginExtras(normalizedOrigin)
-  ) {
-    return false;
-  }
-
-  // Parse once and reuse
-  const originURL = safeParseURL(normalizedOrigin);
-
-  // For CORS, only http/https are relevant; reject other schemes early when parsed.
-  if (originURL) {
-    const scheme = asciiLowercase(originURL.protocol);
-    if (scheme !== 'http:' && scheme !== 'https:') {
-      return false;
-    }
-
-    if (
-      originURL.username ||
-      originURL.password ||
-      (originURL.pathname && originURL.pathname !== '/') ||
-      originURL.search ||
-      originURL.hash
-    ) {
-      return false;
-    }
-  }
-
   // Global wildcard: single "*" matches any valid HTTP(S) origin
   if (normalizedPattern === '*') {
-    return originURL !== null && hasValidWildcardOriginHost(originURL);
+    return hasValidWildcardOriginHost(originURL);
   }
 
-  // Protocol-only wildcards: require valid URL parsing for security
+  // Protocol-only wildcards
   const patternLower = asciiLowercase(normalizedPattern);
 
   if (patternLower === 'https://*' || patternLower === 'http://*') {
-    if (!originURL) {
-      return false; // must be a valid URL
-    }
-
     const want = patternLower === 'https://*' ? 'https:' : 'http:';
     return (
       asciiLowercase(originURL.protocol) === want &&
@@ -450,12 +490,8 @@ function matchesWildcardOriginIn(
     );
   }
 
-  // Remaining logic requires a parsed URL
-  if (!originURL) {
-    return false;
-  }
-
-  const normalizedHostname = normalizeDomain(originURL.hostname);
+  origin.normalizedHostname ??= normalizeDomain(originURL.hostname);
+  const normalizedHostname = origin.normalizedHostname;
 
   if (normalizedHostname === '') {
     return false;
@@ -1292,9 +1328,13 @@ export function validateConfigEntry(
   }
 
   // Exact origin: allow any scheme; validate host as domain or IP. Every acceptance
-  // below is held to what the matcher can match - see `exactOriginVerdict`.
+  // below is held to what the matcher can match - see `exactOriginVerdict`. The entry is
+  // normalized once, for that and for the opaque-host check below.
+  let normalizedEntry: string | undefined;
+  const readNormalizedEntry = (): string =>
+    (normalizedEntry ??= normalizeOrigin(raw));
   const exactOriginVerdict = (result: ValidationResult): ValidationResult =>
-    result.valid && normalizeOrigin(raw) === ''
+    result.valid && readNormalizedEntry() === ''
       ? {
           valid: false,
           info: 'origin is not one the URL parser reads as written (it can never match)',
@@ -1329,7 +1369,15 @@ export function validateConfigEntry(
   // dots included, which are not folded for it - and a matched origin is read through
   // `normalizeOrigin`, which refuses that: say so here, ahead of every branch below,
   // rather than accept `foo://bücher.example` or `foo://1。2。3。4` and never match it.
-  if (isOpaqueHost && normalizeOrigin(`${scheme}://${host}`) === '') {
+  // Read without the entry's port or trailing slash - the entry itself when it has
+  // neither, normalized once for this and `exactOriginVerdict`.
+  const hostOrigin = `${scheme}://${host}`;
+  if (
+    isOpaqueHost &&
+    (hostOrigin === raw
+      ? readNormalizedEntry()
+      : normalizeOrigin(hostOrigin)) === ''
+  ) {
     return {
       valid: false,
       info: 'origin host is not one a non-special scheme can match (use ASCII)',
@@ -1583,19 +1631,16 @@ export function matchesOriginList(
 
   // The list's own compiled patterns: two lists that each fit the shared cache, used
   // in turn, evicted each other there on every call (see `originListPatterns`).
-  const isCached = originListPatterns(allowedOrigins);
+  const matchesWildcard = wildcardOriginMatcher(
+    origin,
+    originListPatterns(allowedOrigins),
+  );
 
   return cleaned.some((allowed) => {
-    // Global wildcard: single "*" matches any origin - delegate to matchesWildcardOrigin for proper validation
-    if (allowed === '*') {
-      return matchesWildcardOriginIn(origin, '*', isCached);
-    }
-
+    // A wildcard - the global `*` included - is matched against the origin as the
+    // wildcard matcher reads it, parsed once for the whole list.
     if (allowed.includes('*')) {
-      // Avoid double-normalizing/parsing; wildcard matcher handles parsing + normalization itself
-      // We pass the raw origin/pattern here (vs normalized in the non-wildcard path) because
-      // the wildcard matcher needs to parse the origin as a URL for protocol/host extraction
-      return matchesWildcardOriginIn(origin, allowed, isCached);
+      return matchesWildcard(allowed);
     }
 
     if (allowed === 'null') {
@@ -1660,14 +1705,17 @@ export function matchesCORSCredentialsList(
 
   const allowWildcard = !!options.allowWildcardSubdomains;
   // The list's own compiled patterns (see `originListPatterns`).
-  const isCached = originListPatterns(allowedOrigins);
+  const matchesWildcard = wildcardOriginMatcher(
+    origin,
+    originListPatterns(allowedOrigins),
+  );
 
   for (const allowed of cleaned) {
     // Optional wildcard support for credentials lists (subdomain patterns only)
     if (allowWildcard && allowed.includes('*')) {
       if (
         isCredentialsSafeWildcardOriginPattern(allowed) &&
-        matchesWildcardOriginIn(origin, allowed, isCached)
+        matchesWildcard(allowed)
       ) {
         return true;
       }

@@ -56,7 +56,6 @@ import {
   mergeHeaders,
   normalizeMergedHeaderValue,
   describeInvalidHTTPMethod,
-  isPlainJSONBodyObject,
   isRequestBodyBytes,
   normalizeAdapterResponseHeaders,
   isAdapterHeaderValue,
@@ -402,7 +401,7 @@ export class BaseHTTPClient {
     // the caller's.
     if (!ADAPTER_TYPES.has(adapterType as AdapterType)) {
       throw new TypeError(
-        `HTTPClient adapter getType() must return 'fetch', 'xhr', 'node' or 'mock' (got ${adapterType === null ? 'null' : typeof adapterType})`,
+        `HTTPClient adapter getType() must return 'fetch', 'xhr', 'node' or 'mock' (got ${describeValue(adapterType)})`,
       );
     }
     this._adapterType = adapterType as AdapterType;
@@ -5461,7 +5460,7 @@ function buildAttemptBodies(
   // observers' copy is parsed back from the bytes sent, so `rawBody` is exactly what went
   // out. Parsed for each attempt, so an observer that changes it changes no other
   // attempt's - every observer of one attempt shares the one copy.
-  if (Array.isArray(rawBody) || isPlainJSONBodyObject(rawBody)) {
+  if (Array.isArray(rawBody) || isPlainRecord(rawBody)) {
     const { body, contentType } = serializeBody(
       rawBody,
       copiedJSONText(rawBody),
@@ -6303,7 +6302,7 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
     return { body: new FormData() };
   }
 
-  if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
+  if (Array.isArray(body) || isPlainRecord(body)) {
     // One whose `toJSON` throws is no body that sends nothing: on a hop held to its own
     // body, the hop's is sent in its place.
     try {

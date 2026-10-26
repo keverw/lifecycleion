@@ -15150,6 +15150,9 @@ test('PR review round 73: on a cross-origin hop, a JSON body that serializes to 
 test('PR review round 73: a redirect-phase interceptor that edits the body in place changes the next hop, not an upload of the hop that answered still under way', async () => {
   // Answers `/start` with a 307 as soon as its head arrives, then reads nothing for a
   // while, so NodeAdapter is still writing that hop's body when the redirect phase runs.
+  // The 307 keeps the connection open (a `Connection: close` there would end that upload),
+  // so the client may send its next request on it: each connection is read as a run of
+  // requests.
   const received = new Map<string, Buffer>();
   const server = net.createServer((socket) => {
     let buffered = Buffer.alloc(0);
@@ -15157,33 +15160,39 @@ test('PR review round 73: a redirect-phase interceptor that edits the body in pl
     socket.on('error', () => {});
     socket.on('data', (chunk: Buffer) => {
       buffered = Buffer.concat([buffered, chunk]);
-      if (!head) {
-        const end = buffered.indexOf('\r\n\r\n');
-        if (end < 0) {
+      for (;;) {
+        if (!head) {
+          const end = buffered.indexOf('\r\n\r\n');
+          if (end < 0) {
+            return;
+          }
+          const text = buffered.subarray(0, end).toString('latin1');
+          head = {
+            path: text.split(' ')[1] ?? '',
+            length: Number(/content-length: (\d+)/i.exec(text)?.[1] ?? 0),
+            start: end + 4,
+          };
+          if (head.path === '/start') {
+            socket.write(
+              'HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n',
+            );
+            socket.pause();
+            setTimeout(() => socket.resume(), 300);
+          }
+        }
+        const bodyEnd = head.start + head.length;
+        if (buffered.length < bodyEnd) {
           return;
         }
-        const text = buffered.subarray(0, end).toString('latin1');
-        head = {
-          path: text.split(' ')[1] ?? '',
-          length: Number(/content-length: (\d+)/i.exec(text)?.[1] ?? 0),
-          start: end + 4,
-        };
-        if (head.path === '/start') {
-          socket.write(
-            'HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n',
-          );
-          socket.pause();
-          setTimeout(() => socket.resume(), 300);
-        }
-      }
-      if (buffered.length - head.start >= head.length) {
-        received.set(head.path, buffered.subarray(head.start));
+        received.set(head.path, buffered.subarray(head.start, bodyEnd));
         if (head.path !== '/start') {
-          socket.write(
+          socket.end(
             'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok',
           );
+          return;
         }
-        socket.end();
+        buffered = buffered.subarray(bodyEnd);
+        head = undefined;
       }
     });
   });

@@ -73,7 +73,7 @@ function normalizeSuffix(
 
   if (typeof entry !== 'string') {
     throw new TypeError(
-      `${entryName} must be a string (got ${entry === null ? 'null' : typeof entry})`,
+      `${entryName} must be a string (got ${describeValue(entry)})`,
     );
   }
 

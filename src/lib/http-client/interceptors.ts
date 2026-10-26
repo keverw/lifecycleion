@@ -6,6 +6,7 @@ import {
 } from './utils';
 import { normalizeStandardMethod } from './internal/http-method';
 import { isPlainRecord } from './internal/plain-record';
+import { describeValue } from '../internal/describe-value';
 import { adoptPromise } from '../internal/adopt-promise';
 import { releaseRequestBody } from './internal/request-body-copy';
 import {
@@ -256,7 +257,7 @@ export function snapshotInterceptedRequest(
 
   if (typeof requestURL !== 'string') {
     throw new TypeError(
-      `[HTTPClient] Interceptor returned a request whose requestURL is not a string (got ${requestURL === null ? 'null' : typeof requestURL}).`,
+      `[HTTPClient] Interceptor returned a request whose requestURL is not a string (got ${describeValue(requestURL)}).`,
     );
   }
 

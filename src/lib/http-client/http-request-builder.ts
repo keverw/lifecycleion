@@ -1,5 +1,6 @@
 import { isSignalAbortedQuietly } from './internal/request-fields';
 import { isNullish } from '../internal/is-nullish';
+import { describeValue } from '../internal/describe-value';
 import { generateID } from '../id-helpers';
 import { validateMaxResponseBytes, validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
@@ -238,7 +239,7 @@ export class HTTPRequestBuilder<T = unknown> {
       Object.prototype.toString.call(candidate) !== '[object AbortSignal]'
     ) {
       throw new TypeError(
-        `HTTPRequestBuilder signal must be an AbortSignal (got ${candidate === null ? 'null' : typeof candidate})`,
+        `HTTPRequestBuilder signal must be an AbortSignal (got ${describeValue(candidate)})`,
       );
     }
     this._signal = abortSignal;
@@ -251,7 +252,7 @@ export class HTTPRequestBuilder<T = unknown> {
     const candidate: unknown = label;
     if (typeof candidate !== 'string') {
       throw new TypeError(
-        `HTTPRequestBuilder label must be a string (got ${candidate === null ? 'null' : typeof candidate})`,
+        `HTTPRequestBuilder label must be a string (got ${describeValue(candidate)})`,
       );
     }
 
@@ -284,7 +285,7 @@ export class HTTPRequestBuilder<T = unknown> {
     const candidate: unknown = allow;
     if (typeof candidate !== 'boolean') {
       throw new TypeError(
-        `HTTPRequestBuilder retryNonIdempotentMethods must be a boolean (got ${candidate === null ? 'null' : typeof candidate})`,
+        `HTTPRequestBuilder retryNonIdempotentMethods must be a boolean (got ${describeValue(candidate)})`,
       );
     }
     this._retryNonIdempotentMethods = allow;
@@ -664,7 +665,7 @@ export class HTTPRequestBuilder<T = unknown> {
 function assertCallback(fn: unknown, name: string): void {
   if (typeof fn !== 'function') {
     throw new TypeError(
-      `HTTPRequestBuilder ${name} must be a function (got ${fn === null ? 'null' : typeof fn})`,
+      `HTTPRequestBuilder ${name} must be a function (got ${describeValue(fn)})`,
     );
   }
 }

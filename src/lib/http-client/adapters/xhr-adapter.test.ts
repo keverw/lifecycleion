@@ -3577,3 +3577,28 @@ describe('XHRAdapter - PR review round 74', () => {
     expect((await promise).status).toBe(204);
   });
 });
+
+describe('XHRAdapter - PR review round 82', () => {
+  test('PR review round 82: response header lines ended with a bare LF are read as CRLF ones are', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+    });
+    lastXHR.status = 302;
+    lastXHR.responseURL = 'https://api.test/start';
+    lastXHR.response = textBody('');
+    lastXHR.getAllResponseHeadersResult =
+      'content-type: text/plain\nset-cookie: a=1\nset-cookie: b=2\nlocation: /next\n';
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.headers).toEqual({
+      'content-type': 'text/plain',
+      'set-cookie': ['a=1', 'b=2'],
+      location: '/next',
+    });
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://api.test/next');
+  });
+});

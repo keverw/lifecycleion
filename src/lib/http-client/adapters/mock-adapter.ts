@@ -47,7 +47,6 @@ import {
 } from '../consts';
 import {
   derivedRedirectFields,
-  isPlainJSONBodyObject,
   isRequestBodyBytes,
   normalizeAdapterResponseHeaders,
   parseContentType,
@@ -506,7 +505,7 @@ export class MockAdapter implements HTTPAdapter {
     // route, and its side effects, again.
     if (typeof mockResponse !== 'object' || mockResponse === null) {
       const error = new TypeError(
-        `MockAdapter ${responseSource} for ${routeMethod} ${routePattern} returned no MockResponse (got ${mockResponse === null ? 'null' : typeof mockResponse})`,
+        `MockAdapter ${responseSource} for ${routeMethod} ${routePattern} returned no MockResponse (got ${describeValue(mockResponse)})`,
       );
       markNonRetryableAdapterError(error);
       throw error;
@@ -1232,7 +1231,7 @@ function serializeResponseBody(response: MockResponse): Uint8Array | null {
     return new Uint8Array(new Uint8Array(body));
   } else if (typeof body === 'string') {
     return new TextEncoder().encode(body);
-  } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
+  } else if (Array.isArray(body) || isPlainRecord(body)) {
     // `JSON.stringify` answers `undefined` for a top-level `toJSON` that does: nothing is
     // sent, so nothing is typed as JSON either, as the client sends such a request body.
     const serialized = JSON.stringify(body) as string | undefined;
@@ -1278,7 +1277,7 @@ function isRouteBinaryBody(body: unknown): body is Uint8Array | ArrayBuffer {
 function inferContentType(body: unknown): ContentType {
   if (typeof body === 'string') {
     return 'text';
-  } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
+  } else if (Array.isArray(body) || isPlainRecord(body)) {
     return 'json';
   } else {
     return 'binary';

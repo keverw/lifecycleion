@@ -1,4 +1,5 @@
 import { isNullish } from '../../internal/is-nullish';
+import { describeValue } from '../../internal/describe-value';
 import { isRealmRootPrototype } from './plain-record';
 import { copyArrayValue } from './array-copy';
 import {
@@ -258,7 +259,7 @@ function copyFilterLists(
       const entryName = `${label} filter ${field}[${String(index)}]`;
       if (typeof entry !== rule.entryType) {
         throw new TypeError(
-          `${entryName} must be a ${rule.entryType} (got ${entry === null ? 'null' : typeof entry})`,
+          `${entryName} must be a ${rule.entryType} (got ${describeValue(entry)})`,
         );
       }
       const problem =
@@ -310,13 +311,13 @@ export class CallbackRegistry<
     const callback: unknown = fn;
     if (typeof callback !== 'function') {
       throw new TypeError(
-        `${this.label} must be a function (got ${callback === null ? 'null' : typeof callback})`,
+        `${this.label} must be a function (got ${describeValue(callback)})`,
       );
     }
     const candidate: unknown = filter;
     if (!isNullish(candidate) && typeof candidate !== 'object') {
       throw new TypeError(
-        `${this.label} filter must be an object (got ${typeof candidate})`,
+        `${this.label} filter must be an object (got ${describeValue(candidate)})`,
       );
     }
     const source = (candidate ?? {}) as Record<string, unknown>;
