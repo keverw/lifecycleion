@@ -2535,6 +2535,8 @@ export class NodeAdapter implements HTTPAdapter {
           // String or Uint8Array body — write in chunks so upload progress fires
           // at meaningful granularity rather than one giant 100% event at the end.
           const body = classifiedBody.body;
+          // Copied here, before `send()` first awaits: the client hands this adapter the
+          // request's bytes uncopied, relying on it (see `isBuiltInNetworkSend`).
           const bytes =
             typeof body === 'string'
               ? Buffer.from(body, 'utf8')

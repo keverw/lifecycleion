@@ -15330,7 +15330,7 @@ test('PR review round 73: FetchAdapter sends a GET whose JSON body serializes to
   }
 });
 
-test('PR review round 73: a GET body an interceptor returns is refused on FetchAdapter, however its toJSON answers', async () => {
+test('PR review round 73: a GET body an interceptor returns is refused on FetchAdapter, though its toJSON answers nothing when asked again', async () => {
   const sentBodies: unknown[] = [];
   const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((
     _url: string | URL | Request,
@@ -15345,17 +15345,19 @@ test('PR review round 73: a GET body an interceptor returns is refused on FetchA
       adapter: new FetchAdapter(),
       baseURL: 'http://api.test',
     });
-    // Nothing the first time it is asked, a body every time after.
+    // A body the first time it is asked, nothing every time after.
     let calls = 0;
     client.addRequestInterceptor((request) => ({
       ...request,
-      body: { toJSON: () => (calls++ === 0 ? undefined : { a: 1 }) },
+      body: { toJSON: () => (calls++ === 0 ? { a: 1 } : undefined) },
     }));
 
     const builder = client.get('/x');
     await builder.send();
 
     expect(builder.error?.code).toBe('interceptor_error');
+    // Asked once, by the copy the rule reads.
+    expect(calls).toBe(1);
     expect(sentBodies).toEqual([]);
   } finally {
     fetchSpy.mockRestore();
@@ -15399,4 +15401,500 @@ test('PR review round 73: a 307 replay of a GET whose JSON body serializes to no
   expect(replayed[1]).toEqual({ type: undefined, language: undefined });
   // A body that is sent is replayed with the headers that describe it.
   expect(replayed[3]).toEqual({ type: 'application/json', language: 'en' });
+});
+
+/** A `fetch` that answers by path, recording each request's body and headers as sent. */
+function spyOnScriptedFetch(answer: (url: URL, call: number) => Response): {
+  sent: Array<{ url: string; body: unknown; headers: Headers }>;
+  restore: () => void;
+} {
+  const sent: Array<{ url: string; body: unknown; headers: Headers }> = [];
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((
+    url: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const href =
+      typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+    sent.push({
+      url: href,
+      body: init?.body ?? null,
+      headers: new Headers(init?.headers),
+    });
+    return Promise.resolve(answer(new URL(href), sent.length));
+  }) as unknown as typeof fetch);
+  return { sent, restore: () => fetchSpy.mockRestore() };
+}
+
+test('PR review round 74: a GET whose JSON body serializes to nothing is sent bodiless on FetchAdapter after an interceptor passes it on, in every phase', async () => {
+  const sendGET = async (
+    path: string,
+    phase: 'initial' | 'retry' | 'redirect',
+  ): Promise<{ status: number; code: unknown; bodies: unknown[] }> => {
+    let retryCalls = 0;
+    const { sent, restore } = spyOnScriptedFetch((url) => {
+      if (url.pathname === '/retry' && retryCalls++ === 0) {
+        return new Response(null, { status: 503 });
+      }
+      if (url.pathname === '/redirect') {
+        return new Response(null, {
+          status: 307,
+          headers: { location: '/target' },
+        });
+      }
+      return new Response('ok');
+    });
+    try {
+      const client = new HTTPClient({
+        adapter: new FetchAdapter(),
+        baseURL: 'http://api.test',
+        followRedirects: true,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+      });
+      client.addRequestInterceptor((request) => request, { phases: [phase] });
+
+      const builder = client.get(path).json({ toJSON: () => undefined });
+      const response = await builder.send();
+      return {
+        status: response.status,
+        code: builder.error?.code,
+        bodies: sent.map((request) => request.body),
+      };
+    } finally {
+      restore();
+    }
+  };
+
+  expect(await sendGET('/x', 'initial')).toEqual({
+    status: 200,
+    code: undefined,
+    bodies: [null],
+  });
+  expect(await sendGET('/retry', 'retry')).toEqual({
+    status: 200,
+    code: undefined,
+    bodies: [null, null],
+  });
+  expect(await sendGET('/redirect', 'redirect')).toEqual({
+    status: 200,
+    code: undefined,
+    bodies: [null, null],
+  });
+});
+
+test("PR review round 74: an interceptor's GET body on FetchAdapter is judged by the copy that is sent, its type and its serialization failing as before", async () => {
+  const { sent, restore } = spyOnScriptedFetch(() => new Response('ok'));
+  try {
+    const sendGET = async (body: unknown) => {
+      const client = new HTTPClient({
+        adapter: new FetchAdapter(),
+        baseURL: 'http://api.test',
+      });
+      client.addRequestInterceptor((request) => ({ ...request, body }));
+      const builder = client.get('/x');
+      const response = await builder.send();
+      return { status: response.status, code: builder.error?.code };
+    };
+
+    // Nothing the first time it is asked, a body every time after: asked once, by the
+    // copy, which serializes to nothing and is what is sent.
+    let calls = 0;
+    expect(
+      await sendGET({ toJSON: () => (calls++ === 0 ? undefined : { a: 1 }) }),
+    ).toEqual({ status: 200, code: undefined });
+    expect(calls).toBe(1);
+    expect(sent.map((request) => request.body)).toEqual([null]);
+
+    // A body the client cannot send is the interceptor's failure, and so, on a GET, is
+    // one that cannot be serialized: it cannot serialize to nothing, so the GET is
+    // refused whatever it holds.
+    expect(await sendGET(new URLSearchParams('a=1'))).toEqual({
+      status: 0,
+      code: 'interceptor_error',
+    });
+    expect(
+      await sendGET({
+        toJSON: () => {
+          throw new Error('unserializable');
+        },
+      }),
+    ).toEqual({ status: 0, code: 'interceptor_error' });
+    expect(await sendGET({ n: BigInt(1) })).toEqual({
+      status: 0,
+      code: 'interceptor_error',
+    });
+    // And a body that is sent is still refused on a GET.
+    expect(await sendGET({ a: 1 })).toEqual({
+      status: 0,
+      code: 'interceptor_error',
+    });
+    expect(sent).toHaveLength(1);
+  } finally {
+    restore();
+  }
+});
+
+test('PR review round 74: a 307 replay of a GET on FetchAdapter drops the headers that describe a body for an interceptor-passed JSON body that serializes to nothing', async () => {
+  const { sent, restore } = spyOnScriptedFetch((url) =>
+    url.pathname === '/start'
+      ? new Response(null, { status: 307, headers: { location: '/next' } })
+      : new Response('ok'),
+  );
+  try {
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://api.test',
+      followRedirects: true,
+    });
+    client.addRequestInterceptor((request) => request);
+
+    const response = await client
+      .get('/start')
+      .headers({ 'content-type': 'application/json', 'content-language': 'en' })
+      .json({ toJSON: () => undefined })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(sent.map((request) => request.body)).toEqual([null, null]);
+    expect({
+      type: sent[1].headers.get('content-type'),
+      language: sent[1].headers.get('content-language'),
+    }).toEqual({ type: null, language: null });
+  } finally {
+    restore();
+  }
+});
+
+test("PR review round 74: a retry held to a cross-origin hop's own body is checked on FetchAdapter as it is sent", async () => {
+  const sendHop = async (
+    method: 'GET' | 'PUT',
+    hopBody: object,
+    retry: (request: InterceptedRequest) => InterceptedRequest,
+  ) => {
+    let targetCalls = 0;
+    const { sent, restore } = spyOnScriptedFetch((url) => {
+      if (url.host === 'api.example') {
+        return new Response(null, {
+          status: 307,
+          headers: { location: 'https://evil.example/next' },
+        });
+      }
+      return new Response(null, { status: targetCalls++ === 0 ? 503 : 200 });
+    });
+    try {
+      const client = new HTTPClient({
+        adapter: new FetchAdapter(),
+        followRedirects: true,
+        retryPolicy: crossOriginRetryPolicy,
+        retryNonIdempotentMethods: true,
+      });
+      client.addRequestInterceptor(retry, { phases: ['retry'] });
+      const builder = client
+        .request(method, 'https://api.example/start')
+        .json(hopBody);
+      const response = await builder.send();
+      return {
+        status: response.status,
+        code: builder.error?.code,
+        bodies: sent.map((request) => request.body),
+      };
+    } finally {
+      restore();
+    }
+  };
+
+  // The hop sends nothing, so the retry does, whatever body the interceptors returned:
+  // the one they passed on, or one of their own that is not sent.
+  for (const retry of [
+    (request: InterceptedRequest) => request,
+    (request: InterceptedRequest) => ({ ...request, body: { a: 1 } }),
+    (request: InterceptedRequest) => ({ ...request, body: '' }),
+  ]) {
+    expect(await sendHop('GET', { toJSON: () => undefined }, retry)).toEqual({
+      status: 200,
+      code: undefined,
+      bodies: [null, null, null],
+    });
+  }
+
+  // A method they rewrote to GET over the hop's own body is refused, as theirs.
+  expect(
+    await sendHop('PUT', { a: 1 }, (request) => ({
+      ...request,
+      method: 'GET',
+    })),
+  ).toEqual({
+    status: 0,
+    code: 'interceptor_error',
+    bodies: ['{"a":1}', '{"a":1}'],
+  });
+});
+
+test("PR review round 74: an interceptor's method on FetchAdapter is refused before its body is copied, in every phase", async () => {
+  const sendTRACE = async (
+    path: string,
+    phase: 'initial' | 'retry' | 'redirect',
+    body: unknown,
+  ) => {
+    let retryCalls = 0;
+    const { sent, restore } = spyOnScriptedFetch((url) => {
+      if (url.pathname === '/retry' && retryCalls++ === 0) {
+        return new Response(null, { status: 503 });
+      }
+      if (url.pathname === '/redirect') {
+        return new Response(null, {
+          status: 307,
+          headers: { location: '/target' },
+        });
+      }
+      return new Response('ok');
+    });
+    try {
+      const client = new HTTPClient({
+        adapter: new FetchAdapter(),
+        baseURL: 'http://api.test',
+        followRedirects: true,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+        retryNonIdempotentMethods: true,
+      });
+      client.addRequestInterceptor(
+        (request) => ({ ...request, method: 'TRACE', body }),
+        { phases: [phase] },
+      );
+
+      const builder = client.post(path).json({ a: 1 });
+      await builder.send();
+      return {
+        code: builder.error?.code,
+        attemptCount: builder.attemptCount,
+        sent: sent.length,
+      };
+    } finally {
+      restore();
+    }
+  };
+
+  // A body that cannot be copied does not turn the interceptor's refused method into the
+  // body's failure.
+  expect(await sendTRACE('/x', 'initial', { n: BigInt(1) })).toEqual({
+    code: 'interceptor_error',
+    attemptCount: null,
+    sent: 0,
+  });
+  expect(await sendTRACE('/retry', 'retry', { n: BigInt(1) })).toEqual({
+    code: 'interceptor_error',
+    attemptCount: 2,
+    sent: 1,
+  });
+  expect(await sendTRACE('/redirect', 'redirect', { n: BigInt(1) })).toEqual({
+    code: 'interceptor_error',
+    attemptCount: 1,
+    sent: 1,
+  });
+
+  // Nor is a body serialized for a request that is refused.
+  let calls = 0;
+  const counted = {
+    toJSON: () => {
+      calls++;
+      return { a: 1 };
+    },
+  };
+  for (const [path, phase] of [
+    ['/x', 'initial'],
+    ['/retry', 'retry'],
+    ['/redirect', 'redirect'],
+  ] as const) {
+    expect((await sendTRACE(path, phase, counted)).code).toBe(
+      'interceptor_error',
+    );
+  }
+  expect(calls).toBe(0);
+});
+
+test('PR review round 74: in a browser, a header an interceptor adds that FetchAdapter refuses is its failure, though its body cannot be copied', async () => {
+  const saved = {
+    window: Object.getOwnPropertyDescriptor(globalThis, 'window'),
+    document: Object.getOwnPropertyDescriptor(globalThis, 'document'),
+  };
+  for (const name of ['window', 'document']) {
+    Object.defineProperty(globalThis, name, {
+      value: {},
+      configurable: true,
+      writable: true,
+    });
+  }
+  const { sent, restore } = spyOnScriptedFetch(() => new Response('ok'));
+
+  try {
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://api.test',
+    });
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      headers: { ...request.headers, 'sec-test': '1' },
+      body: { n: BigInt(1) },
+    }));
+
+    const builder = client.post('/x').json({ a: 1 });
+    await builder.send();
+
+    expect({
+      code: builder.error?.code,
+      attemptCount: builder.attemptCount,
+    }).toEqual({ code: 'interceptor_error', attemptCount: null });
+    expect(sent).toEqual([]);
+  } finally {
+    restore();
+    for (const [name, descriptor] of Object.entries(saved)) {
+      if (descriptor === undefined) {
+        delete (globalThis as Record<string, unknown>)[name];
+      } else {
+        Object.defineProperty(globalThis, name, descriptor);
+      }
+    }
+  }
+});
+
+test("PR review round 74: an interceptor's URL that cannot be sent is its failure on FetchAdapter, though the caller's GET carries a body", async () => {
+  const { sent, restore } = spyOnScriptedFetch(() => new Response('ok'));
+  try {
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://api.test',
+    });
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      requestURL: 'ftp://x/',
+    }));
+
+    const builder = client.get('/x').json({ a: 1 });
+    await builder.send();
+
+    expect({
+      code: builder.error?.code,
+      attemptCount: builder.attemptCount,
+    }).toEqual({ code: 'interceptor_error', attemptCount: null });
+    expect(sent).toEqual([]);
+  } finally {
+    restore();
+  }
+});
+
+test("PR review round 74: an interceptor's GET or HEAD on FetchAdapter is refused, not the body's failure, though its body cannot be copied, in every phase", async () => {
+  const send = async (
+    path: string,
+    phase: 'initial' | 'retry' | 'redirect',
+    method: string,
+    body: unknown,
+  ) => {
+    let retryCalls = 0;
+    const { sent, restore } = spyOnScriptedFetch((url) => {
+      if (url.pathname === '/retry' && retryCalls++ === 0) {
+        return new Response(null, { status: 503 });
+      }
+      if (url.pathname === '/redirect') {
+        return new Response(null, {
+          status: 307,
+          headers: { location: '/target' },
+        });
+      }
+      return new Response('ok');
+    });
+    try {
+      const client = new HTTPClient({
+        adapter: new FetchAdapter(),
+        baseURL: 'http://api.test',
+        followRedirects: true,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+        retryNonIdempotentMethods: true,
+      });
+      client.addRequestInterceptor(
+        (request) => ({ ...request, method, body }),
+        { phases: [phase] },
+      );
+
+      const builder = client.post(path).json({ a: 1 });
+      await builder.send();
+      return {
+        code: builder.error?.code,
+        attemptCount: builder.attemptCount,
+        sent: sent.length,
+        message: String(builder.error?.cause?.message),
+      };
+    } finally {
+      restore();
+    }
+  };
+
+  const unserializable = {
+    toJSON: () => {
+      throw new Error('unserializable');
+    },
+  };
+  for (const method of ['GET', 'HEAD']) {
+    for (const body of [{ n: BigInt(1) }, unserializable]) {
+      const refusal = `[FetchAdapter] Cannot send a ${method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`;
+      expect(await send('/x', 'initial', method, body)).toEqual({
+        code: 'interceptor_error',
+        attemptCount: null,
+        sent: 0,
+        message: refusal,
+      });
+      expect(await send('/retry', 'retry', method, body)).toEqual({
+        code: 'interceptor_error',
+        attemptCount: 2,
+        sent: 1,
+        message: refusal,
+      });
+      expect(await send('/redirect', 'redirect', method, body)).toEqual({
+        code: 'interceptor_error',
+        attemptCount: 1,
+        sent: 1,
+        message: refusal,
+      });
+    }
+  }
+
+  // On any other method it is still the body's failure.
+  expect(await send('/x', 'initial', 'POST', { n: BigInt(1) })).toMatchObject({
+    code: 'request_setup_error',
+    attemptCount: 0,
+    sent: 0,
+  });
+  expect(await send('/retry', 'retry', 'PUT', { n: BigInt(1) })).toMatchObject({
+    code: 'request_setup_error',
+    attemptCount: 2,
+    sent: 1,
+  });
+  expect(
+    await send('/redirect', 'redirect', 'POST', { n: BigInt(1) }),
+  ).toMatchObject({ code: 'request_setup_error', attemptCount: 1, sent: 1 });
+});
+
+test("PR review round 74: a caller's own TRACE on FetchAdapter whose body serializes to nothing is its setup error through a pass-through interceptor, as without one", async () => {
+  const { sent, restore } = spyOnScriptedFetch(() => new Response('ok'));
+  try {
+    const sendTRACE = async (hasInterceptor: boolean) => {
+      const client = new HTTPClient({
+        adapter: new FetchAdapter(),
+        baseURL: 'http://api.test',
+      });
+      if (hasInterceptor) {
+        client.addRequestInterceptor((request) => request);
+      }
+      const builder = client
+        .request('TRACE', '/x')
+        .json({ toJSON: () => undefined });
+      await builder.send();
+      return { code: builder.error?.code, attemptCount: builder.attemptCount };
+    };
+
+    const expected = { code: 'request_setup_error', attemptCount: 0 } as const;
+    expect(await sendTRACE(false)).toEqual(expected);
+    expect(await sendTRACE(true)).toEqual(expected);
+    expect(sent).toEqual([]);
+  } finally {
+    restore();
+  }
 });

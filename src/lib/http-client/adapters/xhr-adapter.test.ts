@@ -3536,3 +3536,23 @@ describe('XHRAdapter - PR review round 67', () => {
     ]);
   });
 });
+
+describe('XHRAdapter - PR review round 74', () => {
+  test('PR review round 74: the bytes it is handed are given to xhr.send() before send() returns, which copies them there', async () => {
+    const body = new Uint8Array([1, 2, 3, 4]);
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/upload',
+      method: 'POST',
+      headers: {},
+      body,
+    });
+
+    // Read before anything is awaited: the client hands a built-in adapter the request's
+    // bytes uncopied, relying on `XMLHttpRequest.send()` copying them as it is called.
+    expect(lastXHR.sentBody).toBe(body);
+
+    lastXHR.status = 204;
+    lastXHR.simulateLoad();
+    expect((await promise).status).toBe(204);
+  });
+});

@@ -2230,3 +2230,34 @@ describe('FetchAdapter - PR review round 66', () => {
     expect(decoder.decode(response.body as Uint8Array)).toBe('héllo');
   });
 });
+
+describe('FetchAdapter - PR review round 74', () => {
+  test("PR review round 74: the bytes it is handed are copied by the runtime's fetch before send() returns, so a change made after it reaches nothing sent", async () => {
+    const received: number[][] = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch: async (request) => {
+        received.push([...new Uint8Array(await request.arrayBuffer())]);
+        return new Response('ok');
+      },
+    });
+
+    try {
+      const body = new Uint8Array([1, 2, 3, 4]);
+      const sending = new FetchAdapter().send({
+        requestURL: `http://127.0.0.1:${server.port}/upload`,
+        method: 'POST',
+        headers: {},
+        body,
+      });
+      // The client hands a built-in adapter the request's bytes uncopied, relying on this.
+      body.fill(9);
+
+      expect((await sending).status).toBe(200);
+      expect(received).toEqual([[1, 2, 3, 4]]);
+    } finally {
+      await server.stop(true);
+    }
+  });
+});

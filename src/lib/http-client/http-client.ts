@@ -185,9 +185,15 @@ type ResponseFields<T> = Pick<
 /** The refusals of a method the adapter cannot send (see `_assertRequestIsSupported`). */
 const methodRefusals = new WeakSet<Error>();
 
-function methodRefusal(message: string): Error {
+/** Those of `methodRefusals` the GET and HEAD rule makes, which depend on the body too. */
+const bodyMethodRefusals = new WeakSet<Error>();
+
+function methodRefusal(message: string, isOfBody = false): Error {
   const error = new Error(message);
   methodRefusals.add(error);
+  if (isOfBody) {
+    bodyMethodRefusals.add(error);
+  }
   return error;
 }
 
@@ -1054,15 +1060,20 @@ export class BaseHTTPClient {
 
           if (!isInterceptorCancel(interceptResult)) {
             initialRequestCandidate = interceptResult;
-            this._assertRequestIsSupported(interceptResult);
+            // The checks that do not read the body first, so a body the client cannot
+            // send, a header or a method is the interceptor's failure before the body
+            // is copied; the GET and HEAD rule once it is (see `copyChainResultBody`).
+            this._assertRequestShapeIsSupported(interceptResult);
             initialRequestURL = interceptResult.requestURL;
             this._assertInterceptorResolvedURL(initialRequestURL);
             if (initialRun.isBodyHandedOut) {
-              interceptResult = copyChainResultBody(
+              interceptResult = this._copyChainResultBody(
                 interceptResult,
                 initialBodyCopy,
               );
+              initialRequestCandidate = interceptResult;
             }
+            this._assertRequestBodyFitsMethod(interceptResult);
           }
         } catch (error) {
           // A cancel made before the failure - by the interceptor that then threw, say -
@@ -1088,19 +1099,25 @@ export class BaseHTTPClient {
           });
 
           // A method refusal the caller's own request already had, which no interceptor
-          // changed - same method, a body or none as before - is the caller's mistake,
-          // reported as the `request_setup_error` it is with no interceptor registered.
+          // changed - same method, and for the GET and HEAD rule a body or none as
+          // before; a CONNECT, TRACE or TRACK is refused whatever its body - is the
+          // caller's mistake, reported as the `request_setup_error` it is with no
+          // interceptor registered.
           const isCallersOwnRefusal =
             callerMethodRefusal !== undefined &&
             methodRefusals.has(error as Error) &&
             readStringMember(initialRequestCandidate, 'method', '') ===
               callerMethod &&
-            hasRequestBody(
-              readObjectMember(initialRequestCandidate, 'body'),
-            ) === hasCallerBody;
+            (!bodyMethodRefusals.has(error as Error) ||
+              hasRequestBody(
+                readObjectMember(initialRequestCandidate, 'body'),
+              ) === hasCallerBody);
           // So is a body the interceptors returned that cannot be copied (see
-          // `copyChainResultBody`): the body's failure, not an interceptor's.
-          const isSetupError = isCallersOwnRefusal || initialBodyCopy.didFail;
+          // `copyChainResultBody`): the body's failure, not an interceptor's - unless the
+          // GET and HEAD rule refused it (see `_copyChainResultBody`).
+          const isSetupError =
+            isCallersOwnRefusal ||
+            (initialBodyCopy.didFail && !methodRefusals.has(error as Error));
           const normalizedError = isCancelled
             ? this._makeError(
                 response,
@@ -1705,7 +1722,8 @@ export class BaseHTTPClient {
                 failedRedirectRequest = redirectIntercept;
               }
               if (!isInterceptorCancel(redirectIntercept)) {
-                this._assertRequestIsSupported(redirectIntercept);
+                // The GET and HEAD rule once the copy is taken; see the initial phase's.
+                this._assertRequestShapeIsSupported(redirectIntercept);
                 redirectInterceptURL = redirectIntercept.requestURL;
 
                 // Skipped when the `Location` arrived unusable and is still unusable: the
@@ -1722,11 +1740,13 @@ export class BaseHTTPClient {
 
                 // The hop's body for every attempt and replay; see `copyChainResultBody`.
                 if (isRedirectBodyHandedOut) {
-                  redirectIntercept = copyChainResultBody(
+                  redirectIntercept = this._copyChainResultBody(
                     redirectIntercept,
                     redirectBodyCopy,
                   );
+                  failedRedirectRequest = redirectIntercept;
                 }
+                this._assertRequestBodyFitsMethod(redirectIntercept);
               }
             } catch (error) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
@@ -1759,10 +1779,11 @@ export class BaseHTTPClient {
               });
 
               // A body that could not be copied is the body's failure; see
-              // `copyChainResultBody`.
-              errorCode = redirectBodyCopy.didFail
-                ? 'request_setup_error'
-                : 'interceptor_error';
+              // `copyChainResultBody` and, for a GET or HEAD, `_copyChainResultBody`.
+              errorCode =
+                redirectBodyCopy.didFail && !methodRefusals.has(error as Error)
+                  ? 'request_setup_error'
+                  : 'interceptor_error';
               adapterCause = normalizeError(error);
 
               break;
@@ -2728,26 +2749,34 @@ export class BaseHTTPClient {
 
           if (!isInterceptorCancel(retryIntercept)) {
             failedRetryRequest = retryIntercept;
-            this._assertRequestIsSupported(retryIntercept);
+            // The GET and HEAD rule once the copy is taken; see the initial phase's in
+            // `_execute`.
+            this._assertRequestShapeIsSupported(retryIntercept);
             this._assertInterceptorResolvedURL(retryIntercept.requestURL);
             isRetryHeld =
               retryRun.isIntercepted && isHeldToHop(retryIntercept.requestURL);
             // The attempt's body, and a `307`/`308` replay's; see `copyChainResultBody`.
             // A request held to the hop's own sends the hop's body, never this one, which
             // is only asked whether it sends anything (see
-            // `withoutAddedCrossOriginCredentials`), so it is not copied.
-            if (retryRun.isBodyHandedOut && !isRetryHeld) {
-              retryIntercept = copyChainResultBody(
-                retryIntercept,
-                retryBodyCopy,
-              );
+            // `withoutAddedCrossOriginCredentials`), so it is not copied, and the GET and
+            // HEAD rule reads the request as it is sent, below.
+            if (!isRetryHeld) {
+              if (retryRun.isBodyHandedOut) {
+                retryIntercept = this._copyChainResultBody(
+                  retryIntercept,
+                  retryBodyCopy,
+                );
+                failedRetryRequest = retryIntercept;
+              }
+              this._assertRequestBodyFitsMethod(retryIntercept);
             }
           }
         } catch (error) {
           // Terminal failure — no further attempts. _execute notifies error observers
           // with phase `final` (same as all settled errors), not `retry`. A body that
           // could not be copied is the body's failure, as one that cannot be serialized
-          // is, not an interceptor's. On a hop held to its own request, reported as that
+          // is, not an interceptor's, but on a GET or HEAD the rule refuses (see
+          // `_copyChainResultBody`). On a hop held to its own request, reported as that
           // request, as a stripped attempt would have gone out: the interceptors' carries
           // what they added - a token in the URL or a header - and the response, the error
           // and host-filtered observers would name a credentialed request to the host the
@@ -2763,9 +2792,10 @@ export class BaseHTTPClient {
           return endBeforeDispatch(
             isHeld ? baseRequest : failedRetryRequest,
             {
-              errorCode: retryBodyCopy.didFail
-                ? 'request_setup_error'
-                : 'interceptor_error',
+              errorCode:
+                retryBodyCopy.didFail && !methodRefusals.has(error as Error)
+                  ? 'request_setup_error'
+                  : 'interceptor_error',
               adapterCause: normalizeError(error),
             },
             // A body that failed to copy is reported as it came, not read again; the
@@ -2824,6 +2854,19 @@ export class BaseHTTPClient {
             // credentialed request to the host the server chose.
             return endBeforeDispatch(baseRequest, {
               errorCode: 'request_setup_error',
+              adapterCause: normalizeError(error),
+            });
+          }
+
+          // Checked as it is sent: the hop's body, or none, with the interceptors' method
+          // - a GET or HEAD refused for a body the hop sends, never for one of theirs that
+          // is not. The hop's own request passed these checks, so a refusal is of what
+          // they changed: their failure, reported as the hop's own request.
+          try {
+            this._assertRequestIsSupported(attemptRequest);
+          } catch (error) {
+            return endBeforeDispatch(baseRequest, {
+              errorCode: 'interceptor_error',
               adapterCause: normalizeError(error),
             });
           }
@@ -5211,6 +5254,16 @@ export class BaseHTTPClient {
   }
 
   private _assertRequestIsSupported(request: InterceptedRequest): void {
+    this._assertRequestShapeIsSupported(request);
+    this._assertRequestBodyFitsMethod(request);
+  }
+
+  /**
+   * The checks of `_assertRequestIsSupported` that do not read the body: its type, the
+   * headers and the method. An interceptor phase runs them on what its interceptors
+   * returned, before the body is copied, and the GET and HEAD rule on the copy.
+   */
+  private _assertRequestShapeIsSupported(request: InterceptedRequest): void {
     assertSupportedRequestBody(request.body);
 
     const adapterType = this._adapterType;
@@ -5221,25 +5274,6 @@ export class BaseHTTPClient {
       (adapterType === 'fetch' || adapterType === 'xhr')
     ) {
       assertNoBrowserRestrictedHeaders(request.headers, adapterName);
-    }
-    // `fetch` refuses a GET or HEAD with a body on every attempt, on every runtime, and
-    // XHR drops it - the XHR standard sends a GET or HEAD bodiless - so the request went
-    // out without it and answered as though it had been sent. Refused here for the same
-    // reason as the methods below.
-    // XHR in a browser only, as the TRACE refusal below: a non-browser XHR (React Native,
-    // a shim) may send the body.
-    if (
-      (adapterType === 'fetch' ||
-        (adapterType === 'xhr' && this._isBrowserRuntime)) &&
-      (asciiUppercase(request.method) === 'GET' ||
-        asciiUppercase(request.method) === 'HEAD') &&
-      hasRequestBody(request.body)
-    ) {
-      throw methodRefusal(
-        adapterType === 'fetch'
-          ? `[FetchAdapter] Cannot send a ${request.method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`
-          : `[XHRAdapter] Cannot send a ${request.method} request with a body: XMLHttpRequest drops it. Send the body with POST.`,
-      );
     }
     // Refused here, as the method-override headers that tunnel them are: `fetch` refuses
     // these methods on every runtime (the Fetch Standard forbids them), and XHR in a
@@ -5253,6 +5287,52 @@ export class BaseHTTPClient {
       throw methodRefusal(
         `[${adapterName}] Cannot send a ${request.method} request: fetch and browsers refuse the CONNECT, TRACE and TRACK methods.`,
       );
+    }
+  }
+
+  /** The GET and HEAD rule of `_assertRequestIsSupported`, which reads the body. */
+  private _assertRequestBodyFitsMethod(request: InterceptedRequest): void {
+    const adapterType = this._adapterType;
+    // `fetch` refuses a GET or HEAD with a body on every attempt, on every runtime, and
+    // XHR drops it - the XHR standard sends a GET or HEAD bodiless - so the request went
+    // out without it and answered as though it had been sent. Refused here for the same
+    // reason as the CONNECT, TRACE and TRACK methods (see `_assertRequestShapeIsSupported`).
+    // XHR in a browser only, as the TRACE refusal there: a non-browser XHR (React Native,
+    // a shim) may send the body.
+    if (
+      (adapterType === 'fetch' ||
+        (adapterType === 'xhr' && this._isBrowserRuntime)) &&
+      (asciiUppercase(request.method) === 'GET' ||
+        asciiUppercase(request.method) === 'HEAD') &&
+      hasRequestBody(request.body)
+    ) {
+      throw methodRefusal(
+        adapterType === 'fetch'
+          ? `[FetchAdapter] Cannot send a ${request.method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`
+          : `[XHRAdapter] Cannot send a ${request.method} request with a body: XMLHttpRequest drops it. Send the body with POST.`,
+        true,
+      );
+    }
+  }
+
+  /**
+   * `copyChainResultBody`, with a copy that fails on a GET or HEAD the adapter refuses a
+   * body on reported as that refusal: a body that cannot be copied cannot serialize to
+   * nothing, so the method is refused whatever it holds, and the interceptor's refused
+   * method is not turned into the body's failure, as a CONNECT, TRACE or TRACK is not.
+   * `outcome.didFail` is still set, so the body is not read a second time to report it.
+   */
+  private _copyChainResultBody(
+    request: ResolvedRequest,
+    outcome: BodyCopyOutcome,
+  ): ResolvedRequest {
+    try {
+      return copyChainResultBody(request, outcome);
+    } catch (error) {
+      // The uncopied body is a body to `hasRequestBody`, so this throws wherever the
+      // rule applies.
+      this._assertRequestBodyFitsMethod(request);
+      throw error;
     }
   }
 
@@ -6165,12 +6245,17 @@ function bodyCopyPreparer(
  * phase whose interceptors were handed the request's body: one may keep the object it
  * returned - or the one it was handed - and change it later, from an observer or an
  * `onAttemptEnd`, which would otherwise reach a later attempt or a `307`/`308` replay.
- * Taken once the result has passed the phase's checks, so a body of an unsupported type
- * is still refused as the interceptor's, and only for a result whose body is sent: a
- * retry held to a hop's own request sends the hop's body. A body that cannot be copied - a `toJSON` that
- * throws, a `Proxy` over a form - is the body's failure, as one that cannot be
- * serialized is, not an interceptor's: `outcome.didFail` is set before it throws, and the
- * phase reports it as `request_setup_error`.
+ * Taken once the result has passed the phase's checks that do not read the body - its
+ * type, the headers, the method, the URL (skipped in the redirect phase for a `Location`
+ * that arrived unusable and is still unusable, which is answered after the phase) - so each
+ * is still refused as the interceptor's before the body is serialized, and only for a
+ * result whose body is sent: a retry held to a hop's own request sends the hop's body. The
+ * GET and HEAD rule reads the copy (see `hasRequestBody`), so a body is judged by what it
+ * serialized to when it was copied, which is what is sent. A body that cannot be copied -
+ * a `toJSON` that throws, a `Proxy` over a form - is the body's failure, as one that
+ * cannot be serialized is, not an interceptor's: `outcome.didFail` is set before it
+ * throws, and the phase reports it as `request_setup_error` - but on a GET or HEAD the
+ * rule refuses, which `_copyChainResultBody` reports as that refusal.
  */
 function copyChainResultBody(
   request: ResolvedRequest,
@@ -6240,7 +6325,8 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
  * `isCopySerializingToNothing`), which goes out with no body. Any other value is a body -
  * an empty string, bytes or form, which `fetch` refuses on a GET, and a body an
  * interceptor returned, which is not serialized here: its `toJSON` could answer nothing
- * now and a body when the copy that is sent is taken.
+ * now and a body when the copy that is sent is taken. So the GET and HEAD rule reads a
+ * phase's request once its interceptors' body is copied (see `copyChainResultBody`).
  */
 function hasRequestBody(body: unknown): boolean {
   return (

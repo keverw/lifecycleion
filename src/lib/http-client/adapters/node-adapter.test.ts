@@ -9523,3 +9523,38 @@ describe('NodeAdapter - PR review round 73', () => {
     expect(captured?.ca).toEqual(['first-ca', 'second-ca']);
   });
 });
+
+describe('NodeAdapter - PR review round 74', () => {
+  test('PR review round 74: the bytes it is handed are copied before send() returns, so a change made after it reaches nothing sent', async () => {
+    const received: number[][] = [];
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        received.push([...Buffer.concat(chunks)]);
+        res.end('ok');
+      });
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', resolve);
+    });
+
+    try {
+      const { port } = server.address() as { port: number };
+      const body = new Uint8Array([1, 2, 3, 4]);
+      const sending = new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        body,
+      });
+      // The client hands a built-in adapter the request's bytes uncopied, relying on this.
+      body.fill(9);
+
+      expect((await sending).status).toBe(200);
+      expect(received).toEqual([[1, 2, 3, 4]]);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
