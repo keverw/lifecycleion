@@ -2762,13 +2762,14 @@ export class BaseHTTPClient {
               baseRequest,
             );
           } catch (error) {
-            // Telling whether the interceptors' body sends nothing reads it, and a body
-            // that cannot be read fails here as it fails being built on any other hop:
-            // as the request's setup, with the attempt it already started ended. Reported
-            // as the hop's own request, as a stripped attempt would have gone out: the
-            // interceptors' carries what they added - a token in the URL or a header -
-            // and the response, the error and host-filtered observers would name a
-            // credentialed request to the host the server chose.
+            // Telling whether the hop's body or the interceptors' sends nothing reads it -
+            // the hop's is the caller's value - and a body that cannot be read fails here
+            // as it fails being built on any other hop: as the request's setup, with the
+            // attempt it already started ended. Reported as the hop's own request, as a
+            // stripped attempt would have gone out: the interceptors' carries what they
+            // added - a token in the URL or a header - and the response, the error and
+            // host-filtered observers would name a credentialed request to the host the
+            // server chose.
             return endBeforeDispatch(baseRequest, {
               errorCode: 'request_setup_error',
               adapterCause: normalizeError(error),
@@ -3000,10 +3001,11 @@ export class BaseHTTPClient {
             // progress: the stamp is what lets the wait on `requestBodySettled` tell an
             // upload that is still moving from one that has stalled. A bodiless request
             // has no upload to watch, so the adapter is told nothing it was not told before.
-            // Nor is an `xhr` adapter, unless the caller asked: it reports no
-            // `requestBodySettled` to wait on, and a hook makes `XHRAdapter` listen on
+            // Nor is an `xhr` adapter, unless the caller asked: `XHRAdapter` reports no
+            // `requestBodySettled` to wait on, and a hook makes it listen on
             // `xhr.upload`, which makes a browser preflight a cross-origin upload `fetch`
-            // would send without one.
+            // would send without one. A custom `xhr` adapter that does report one has
+            // its wait bounded flat from dispatch.
             // The caller's hooks are guarded here, as `onAttemptStart`/`onAttemptEnd`
             // are, not left to the adapter: a custom adapter that calls them bare had a
             // throwing hook fail - and retry - a request that succeeded.
@@ -6089,10 +6091,12 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
 }
 
 /**
- * Whether an attempt's body, as the client serialized it, sends anything: by the rule
- * `emptyRequestBody` reads a body by - none, an empty string, no bytes, or a form with no
- * entries sends nothing. The client's own copy (see `buildAttemptBodies`), so the reads
- * cannot throw.
+ * Whether a body sends anything: by the rule `emptyRequestBody` reads a body by - none, an
+ * empty string, no bytes, or a form with no entries sends nothing. On an attempt's body as
+ * the client serialized it (see `buildAttemptBodies`), its own copy, the reads cannot
+ * throw. On a cross-origin hop's own body, the caller's value (see
+ * `withoutAddedCrossOriginCredentials`), they can, and its caller fails the request as
+ * `request_setup_error`.
  */
 function sendsRequestBody(body: unknown): boolean {
   return emptyRequestBody(body) === undefined;

@@ -3604,3 +3604,108 @@ test('PR review round 68: the 400-day cap reads a Date by its time, not a getTim
     : Number.NaN;
   expect(storedTime).toBeLessThanOrEqual(Date.now() + 400 * 24 * 3600 * 1000);
 });
+
+test("PR review round 69: a stored cookie's expiry is the jar's own Date, not the caller's", () => {
+  const capMS = 400 * 24 * 3600 * 1000;
+
+  // Through `setCookie`, and through `fromJSON`, which stores through it.
+  for (const store of [
+    (jar: CookieJar, expires: Date) =>
+      jar.setCookie({
+        name: 'a',
+        value: '1',
+        domain: 'example.com',
+        path: '/',
+        hostOnly: true,
+        expires,
+      }),
+    (jar: CookieJar, expires: Date) =>
+      jar.fromJSON({
+        cookies: [
+          {
+            name: 'a',
+            value: '1',
+            domain: 'example.com',
+            path: '/',
+            hostOnly: true,
+            createdAt: Date.now(),
+            expires,
+          },
+        ],
+      }),
+  ]) {
+    const jar = new CookieJar();
+    const expires = new Date(Date.now() + 3600 * 1000);
+    const expected = expires.getTime();
+    store(jar, expires);
+
+    // Within the cap, so stored as given - and then moved ten years on by the caller.
+    expires.setFullYear(expires.getFullYear() + 10);
+
+    const [stored] = jar.getAllCookies();
+    expect(stored?.expires).not.toBe(expires);
+    expect(stored?.expires?.getTime()).toBe(expected);
+    expect(jar.toJSON().cookies[0]?.expires?.getTime()).toBeLessThanOrEqual(
+      Date.now() + capMS,
+    );
+  }
+});
+
+test('PR review round 69: setCookie stores a replacement whose replaced cookie empties the jar while it is read', () => {
+  const jar = new CookieJar();
+  const url = 'https://example.com/';
+  const cookie = {
+    name: 'a',
+    value: '1',
+    domain: 'example.com',
+    path: '/',
+    hostOnly: true,
+  };
+  jar.setCookie(cookie);
+
+  // `getAllCookies()` hands out the stored cookie itself.
+  const [stored] = jar.getAllCookies();
+  expect(stored).toBeDefined();
+  if (stored) {
+    Object.defineProperty(stored, 'maxAge', {
+      get() {
+        jar.clear();
+        return undefined;
+      },
+    });
+  }
+
+  expect(jar.setCookie({ ...cookie, value: '2' })).toBe(true);
+  expect(jar.getCookieHeaderString(url)).toBe('a=2');
+  expect(jar.getAllCookies().map((c) => c.value)).toEqual(['2']);
+});
+
+test('PR review round 69: clearExpiredCookies leaves a cookie stored while it read the one it judged expired', () => {
+  const jar = new CookieJar();
+  const url = 'https://example.com/';
+  const cookie = {
+    name: 'a',
+    value: '1',
+    domain: 'example.com',
+    path: '/',
+    hostOnly: true,
+  };
+  jar.setCookie(cookie);
+
+  // Expired, by a getter that restores the jar - a fresh `a` - as it is read.
+  const [stored] = jar.getAllCookies();
+  expect(stored).toBeDefined();
+  if (stored) {
+    Object.defineProperty(stored, 'maxAge', {
+      get() {
+        jar.fromJSON({
+          cookies: [{ ...cookie, value: '2', createdAt: Date.now() }],
+        });
+        return -1;
+      },
+    });
+  }
+
+  expect(jar.clearExpiredCookies()).toBe(0);
+  expect(jar.getCookieHeaderString(url)).toBe('a=2');
+});

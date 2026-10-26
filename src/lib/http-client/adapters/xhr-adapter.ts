@@ -273,17 +273,20 @@ export class XHRAdapter implements HTTPAdapter {
       // `Blob`'s `size`) is read at most once: `0` for none or an empty one, `undefined`
       // where it cannot be known up front (a `FormData`). Text with any characters is at
       // least a byte, so it is measured only by the final upload event, and only when the
-      // browser reported nothing.
+      // browser reported nothing. Only when upload progress was asked for: nothing else
+      // reads it.
       const binaryBodyByteLength =
-        typeof requestBody === 'string'
+        !guardedUploadProgress || typeof requestBody === 'string'
           ? undefined
           : knownBodyByteLength(requestBody);
 
-      // Whether the body has, or may have, bytes to send.
+      // Whether the body has, or may have, bytes to send - read only for a request that
+      // asked for upload progress, as above.
       const hasBytesToSend =
-        typeof requestBody === 'string'
+        guardedUploadProgress !== undefined &&
+        (typeof requestBody === 'string'
           ? requestBody !== ''
-          : binaryBodyByteLength !== 0;
+          : binaryBodyByteLength !== 0);
 
       // The one final upload event, however the upload ends: the bytes the browser
       // reported, or the body's own size where it reported none - `0` for an empty

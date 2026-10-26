@@ -3446,6 +3446,28 @@ describe('XHRAdapter - PR review round 67', () => {
     await promise;
   });
 
+  test("PR review round 69: a request without onUploadProgress never reads its Blob body's size", async () => {
+    let reads = 0;
+    const body = new (class extends Blob {
+      public override get size(): number {
+        reads++;
+        return 7;
+      }
+    })();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      // A Blob reaches an adapter driven directly, as XHR sends one natively.
+      body: body as unknown as AdapterRequest['body'],
+    });
+
+    lastXHR.status = 204;
+    lastXHR.simulateLoad();
+    expect((await promise).status).toBe(204);
+    expect(reads).toBe(0);
+  });
+
   test('PR review round 67: a request without onUploadProgress never reads an upload that throws', async () => {
     (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
       FakeXHR

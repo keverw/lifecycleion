@@ -331,14 +331,19 @@ export class CookieJar {
       return false;
     }
 
-    if (!this.hasReadableExpiry(input)) {
-      return false;
+    // The jar's own `Date`, read once by its time: the caller's stays theirs, so setting
+    // it later cannot move the stored expiry past the lifetime cap, and one made in
+    // another realm (a `vm` context, an iframe) is stored as a same-realm one.
+    if (input.expires !== undefined) {
+      try {
+        input.expires = new Date(Date.prototype.getTime.call(input.expires));
+      } catch {
+        return false;
+      }
     }
 
-    // A same-realm copy of a `Date` made in another realm (a `vm` context, an iframe),
-    // which `hasReadableExpiry` accepts by its time rather than by `instanceof`.
-    if (input.expires !== undefined && !(input.expires instanceof Date)) {
-      input.expires = new Date(Date.prototype.getTime.call(input.expires));
+    if (!this.hasReadableExpiry(input)) {
+      return false;
     }
 
     // Booleans or absent: the send path withholds a cookie whose `secure`, `hostOnly` or
@@ -383,7 +388,7 @@ export class CookieJar {
     // jar claiming a creation five years on held a cookie past the cap.
     const now = Date.now();
     const createdAt = Math.min(input.createdAt ?? now, now);
-    const bucket = this.getOrCreateBucket(this.apexFor(normalizedDomain));
+    const apex = this.apexFor(normalizedDomain);
 
     const stored: Cookie = {
       ...input,
@@ -409,14 +414,16 @@ export class CookieJar {
     // reads the store, from which an expired cookie has been evicted), so the new cookie
     // takes its own place. Judged at `now`, the time the new cookie is stored at, and by
     // its expiry alone, read once and failing closed as `isExpired` does.
-    const replaced = bucket.get(key);
-    this.creationTimes.set(
-      stored,
+    // Read before the bucket is taken: the replaced cookie is a live object
+    // `getAllCookies()` handed out, and a getter on it that empties or restores the jar
+    // left the new cookie written into a bucket the jar no longer held.
+    const replaced = this.buckets.get(apex)?.get(key);
+    const creationTime =
       replaced === undefined || this.isExpired(replaced, now)
         ? createdAt
-        : (this.creationTimes.get(replaced) ?? replaced.createdAt),
-    );
-    bucket.set(key, stored);
+        : (this.creationTimes.get(replaced) ?? replaced.createdAt);
+    this.creationTimes.set(stored, creationTime);
+    this.getOrCreateBucket(apex).set(key, stored);
 
     const scope: StoredCookieScope = {
       name: stored.name,
@@ -695,7 +702,14 @@ export class CookieJar {
 
     for (const [apex, bucket] of this.buckets.entries()) {
       for (const [key, cookie] of bucket.entries()) {
-        if (this.isExpired(cookie, now)) {
+        // Removed only while the jar still files it there: the check reads a live
+        // cookie `getAllCookies()` handed out, and a getter on it may have replaced that
+        // cookie or emptied and refilled the jar, whose new cookies are not this one.
+        if (
+          this.isExpired(cookie, now) &&
+          this.buckets.get(apex) === bucket &&
+          bucket.get(key) === cookie
+        ) {
           bucket.delete(key);
           count++;
 
