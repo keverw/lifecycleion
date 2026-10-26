@@ -1,4 +1,5 @@
 import {
+  asciiLowercase,
   asciiUppercase,
   describeNonTokenMethod,
   normalizeStandardMethod,
@@ -15,6 +16,7 @@ import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
 import {
   lowerCaseHeaderName,
   presentHeaderValue,
+  trimHTTPWhitespace,
 } from './internal/header-utils';
 import { normalizeDomain } from '../domain-utils/domain-utils';
 import {
@@ -1554,9 +1556,12 @@ function hasNestedKey(obj: Record<string, unknown>, path: string): boolean {
 }
 
 // The first media type of a header fetch or XHR joined from repeats
-// (`application/json, application/json`), without its parameters.
+// (`application/json, application/json`), without its parameters, trimmed of HTTP
+// whitespace and lowercased in ASCII only, as the Fetch standard parses a MIME type.
 function normalizeMimeType(value: string): string {
-  return value.split(',', 1)[0].split(';', 1)[0].trim().toLowerCase();
+  return asciiLowercase(
+    trimHTTPWhitespace(value.split(',', 1)[0].split(';', 1)[0]),
+  );
 }
 
 function matchesContentTypePattern(

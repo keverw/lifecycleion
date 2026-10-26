@@ -17,6 +17,8 @@ import type * as http from 'node:http';
 import { Transform, type TransformCallback } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
+import { trimHTTPWhitespace } from './header-utils';
+import { asciiLowercase } from './http-method';
 import { reportCallbackError } from '../../safe-handle-callback';
 
 /** The encodings NodeAdapter asks for and decodes, as `fetch` asks for them. */
@@ -97,7 +99,7 @@ export function createResponseBodySource(
     Array.isArray(contentEncoding) ? contentEncoding.join(',') : contentEncoding
   )
     .split(',')
-    .map((token) => token.trim().toLowerCase())
+    .map((token) => asciiLowercase(trimHTTPWhitespace(token)))
     .filter((token) => token !== '' && token !== 'identity')
     .map((token) => (token === 'x-gzip' ? 'gzip' : token));
 

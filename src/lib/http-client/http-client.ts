@@ -150,6 +150,7 @@ import {
   serializesToNothing,
 } from './internal/request-body-copy';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
+import { formEntries } from './internal/form-entries';
 import { copyArrayValue } from './internal/array-copy';
 import {
   adoptPromise,
@@ -6309,10 +6310,7 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
       : undefined;
   }
 
-  if (
-    body instanceof FormData &&
-    FormData.prototype.entries.call(body).next().done === true
-  ) {
+  if (body instanceof FormData && formEntries(body).next().done === true) {
     return { body: new FormData() };
   }
 

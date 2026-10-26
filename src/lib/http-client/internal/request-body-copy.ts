@@ -1,4 +1,5 @@
 import { isPlainJSONBodyObject, isRequestBodyBytes } from '../utils';
+import { formEntries } from './form-entries';
 
 /**
  * The text each JSON body copy was read back from - exactly the text it serializes to, its
@@ -172,10 +173,7 @@ export function cloneBodyValue(body: unknown): unknown {
 function copyFormData(form: FormData): FormData {
   const cloned = new FormData();
 
-  // Read through the intrinsic `entries`, as the client reads a form everywhere else: a
-  // subclass's or a `Proxy`'s own `entries` would report entries the form does not hold,
-  // and a `Proxy` over a form, which has no internal slots, throws here.
-  for (const [key, value] of FormData.prototype.entries.call(form)) {
+  for (const [key, value] of formEntries(form)) {
     cloned.append(key, value);
   }
 

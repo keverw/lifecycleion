@@ -41,6 +41,7 @@
 
 import { types } from 'node:util';
 import { markNonRetryableAdapterError } from './adapter-error';
+import { formEntries } from './form-entries';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 import {
@@ -156,10 +157,7 @@ function measureMultipartFormData(
   let size = 0;
   const partSizes: number[] = [];
 
-  // Read through the intrinsic `entries`, as the client reads a form everywhere else: a
-  // subclass's or a `Proxy`'s own `entries` would report entries the form does not hold,
-  // and a `Proxy` over a form, which has no internal slots, throws here.
-  for (const [name, value] of FormData.prototype.entries.call(formData)) {
+  for (const [name, value] of formEntries(formData)) {
     const fieldName = formatFieldName(name);
 
     // Every part starts with its own opening boundary line.
@@ -296,9 +294,9 @@ export async function serializeMultipartFormData(
         )
       : writeToRequest(data);
 
-  // Read through the intrinsic `entries` again (see `measureMultipartFormData`), and live:
-  // a form changed after the sizing pass is caught against the measured sizes below.
-  for (const [name, value] of FormData.prototype.entries.call(formData)) {
+  // Read again, and live: a form changed after the sizing pass is caught against the
+  // measured sizes below.
+  for (const [name, value] of formEntries(formData)) {
     if (req.destroyed) {
       break;
     }

@@ -99,6 +99,26 @@ describe('isBrowserRestrictedHeader', () => {
       isBrowserRestrictedHeader('X-HTTP-Method-Override', 'GET,\t TRACK \t'),
     ).toBe(true);
   });
+
+  test('PR review round 79: a method-override value is split as a browser splits it, not inside a quoted string', () => {
+    // One quoted value, not three methods.
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', '"x,TRACE,y"'),
+    ).toBe(false);
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', '"x\\",TRACE"'),
+    ).toBe(false);
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', 'GET, TRACE'),
+    ).toBe(true);
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', '"x,y", TRACE'),
+    ).toBe(true);
+    // The quotes stay part of the value, so a quoted method is not that method.
+    expect(isBrowserRestrictedHeader('X-HTTP-Method-Override', '"TRACE"')).toBe(
+      false,
+    );
+  });
 });
 
 describe('assertNoBrowserRestrictedHeaders', () => {

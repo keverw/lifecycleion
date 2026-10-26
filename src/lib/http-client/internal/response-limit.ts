@@ -3,7 +3,8 @@
  * {@link AdapterRequest.maxResponseBytes}.
  */
 
-import { asciiUppercase } from './http-method';
+import { asciiLowercase, asciiUppercase } from './http-method';
+import { trimHTTPWhitespace } from './header-utils';
 import {
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
@@ -105,13 +106,16 @@ export function tooLargeAnswer(
 
 /**
  * Whether a `Content-Encoding` value applies no coding: each of its comma-separated
- * tokens is empty or `identity`, in any case. A body sent so is its own decoded bytes,
- * so its `Content-Length`, or the bytes counted as it arrives, are the decoded size.
+ * tokens, trimmed of HTTP whitespace, is empty or `identity` in any ASCII case. A body
+ * sent so is its own decoded bytes, so its `Content-Length`, or the bytes counted as it
+ * arrives, are the decoded size.
  */
 export function isIdentityContentEncoding(contentEncoding: string): boolean {
   return contentEncoding
     .split(',')
-    .every((token) => ['', 'identity'].includes(token.trim().toLowerCase()));
+    .every((token) =>
+      ['', 'identity'].includes(asciiLowercase(trimHTTPWhitespace(token))),
+    );
 }
 
 /**

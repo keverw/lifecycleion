@@ -41,6 +41,7 @@ import { knownBodyByteLength } from './internal/progress';
 import { readBinaryByteLength } from '../internal/binary-view';
 import { utf8ByteLength } from './internal/utf8-length';
 import { createResponseBodySource } from './internal/response-decoding';
+import { isIdentityContentEncoding } from './internal/response-limit';
 import { sleep } from '../sleep';
 import {
   matchesCORSCredentialsList,
@@ -16183,4 +16184,32 @@ test('PR review round 76: a Buffer body reaches every request interceptor and ob
     expect(Object.getPrototypeOf(handed[0])).toBe(Uint8Array.prototype);
     expect(Array.from(handed[0] as Uint8Array)).toEqual([1, 2]);
   }
+});
+
+test('PR review round 79: a content coding is read in ASCII case and trimmed of HTTP whitespace only', () => {
+  expect(isIdentityContentEncoding('IDENTITY,\t ')).toBe(true);
+  // NO-BREAK SPACE is not HTTP whitespace: `\u00A0identity` is not a coding `fetch` knows.
+  expect(isIdentityContentEncoding('\u00A0identity')).toBe(false);
+
+  const decoded = createResponseBodySource(stubResponse(), ' GZIP\t');
+  decoded.release();
+  expect(decoded.isDecoded).toBe(true);
+
+  const unknown = createResponseBodySource(stubResponse(), '\u00A0gzip');
+  unknown.release();
+  expect(unknown.isDecoded).toBe(false);
+});
+
+test('PR review round 79: a contentTypeHeaders entry trimmed of a no-break space is refused, since no header could match it', () => {
+  const client = new HTTPClient();
+  expect(() =>
+    client.addResponseObserver(() => {}, {
+      contentTypeHeaders: ['\u00A0application/json'],
+    }),
+  ).toThrow(TypeError);
+  expect(() =>
+    client.addResponseObserver(() => {}, {
+      contentTypeHeaders: [' application/json\t'],
+    }),
+  ).not.toThrow();
 });

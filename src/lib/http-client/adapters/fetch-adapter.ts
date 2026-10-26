@@ -414,9 +414,7 @@ async function readResponseBody(
     readerChunks(reader),
     maxResponseBytes,
     () => {
-      reader.cancel().catch(() => {
-        // The body is being discarded; a stream that fails to cancel has nothing to add.
-      });
+      cancelBodyQuietly(reader);
     },
     false,
   );
@@ -493,9 +491,9 @@ async function readBodyWithin(
 }
 
 /**
- * Let go of a body that will not be read, ignoring one that refuses: a web stream is
- * cancelled, and a polyfilled `fetch`'s Node `Readable` - which has no `cancel` - is
- * destroyed, so its socket is not held with the body unread.
+ * Let go of a body that will not be read, ignoring one that refuses: a web stream, or the
+ * reader it is locked to, is cancelled, and a polyfilled `fetch`'s Node `Readable` - which
+ * has no `cancel` - is destroyed, so its socket is not held with the body unread.
  */
 function cancelBodyQuietly(body: unknown): void {
   if (!body) {
@@ -520,7 +518,8 @@ function cancelBodyQuietly(body: unknown): void {
       destroy.call(body);
     }
   } catch {
-    // A locked or already-cancelled stream: nothing left to release.
+    // A locked or already-cancelled stream, or a cancel that throws: nothing left to
+    // release.
   }
 }
 

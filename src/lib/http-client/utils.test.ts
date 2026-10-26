@@ -530,6 +530,29 @@ describe('parseContentType', () => {
   });
 });
 
+describe('content-type matching - PR review round 79', () => {
+  test('PR review round 79: a media type is trimmed of HTTP whitespace and lowercased in ASCII only', () => {
+    expect(parseContentType(' Application/JSON\t; charset=utf-8')).toBe('json');
+    // NO-BREAK SPACE is not HTTP whitespace, so the media type is not `application/json`.
+    expect(parseContentType('\u00A0application/json')).toBe('binary');
+    // KELVIN SIGN: `toLowerCase` folds it into `k`, the Fetch standard does not.
+    expect(
+      matchesFilter(
+        { contentTypeHeaders: ['text/markdown'] },
+        { contentTypeHeader: 'text/mar\u212Adown' },
+        'response',
+      ),
+    ).toBe(false);
+    expect(
+      matchesFilter(
+        { contentTypeHeaders: ['text/markdown'] },
+        { contentTypeHeader: 'TEXT/MARKDOWN' },
+        'response',
+      ),
+    ).toBe(true);
+  });
+});
+
 describe('assertSupportedAdapterRuntimeAndConfig', () => {
   // This block is the supported adapter/runtime matrix enforced at client
   // construction time.

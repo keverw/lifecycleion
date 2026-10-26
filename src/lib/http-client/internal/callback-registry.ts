@@ -1,6 +1,7 @@
 import { isNullish } from '../../internal/is-nullish';
 import { isRealmRootPrototype } from './plain-record';
 import { copyArrayValue } from './array-copy';
+import { trimHTTPWhitespace } from './header-utils';
 import {
   isGlobalHostPattern,
   normalizeFilterMethods,
@@ -132,7 +133,9 @@ function urlHostnameOf(host: string): string | undefined {
 function describeUnmatchableMediaTypePattern(
   entry: string,
 ): string | undefined {
-  const mediaType = entry.split(';', 1)[0].trim();
+  // Trimmed as a header's media type is matched, so a no-break space is refused here
+  // rather than accepted into a pattern that matches nothing.
+  const mediaType = trimHTTPWhitespace(entry.split(';', 1)[0]);
   const slash = mediaType.indexOf('/');
   const type = mediaType.slice(0, slash);
   const subtype = mediaType.slice(slash + 1);

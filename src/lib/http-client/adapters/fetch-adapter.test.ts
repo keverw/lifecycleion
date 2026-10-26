@@ -2311,3 +2311,75 @@ describe('FetchAdapter - PR review round 78', () => {
     expect(unhandled).toEqual([]);
   });
 });
+
+describe('FetchAdapter - PR review round 79', () => {
+  /** A `fetch` answering with a body whose reader yields `chunks` and cancels with `cancel`. */
+  async function sendWithReader(chunks: unknown[], cancel: () => unknown) {
+    let cancels = 0;
+    (globalThis as any).fetch = () => {
+      const response = new Response(null, { status: 200 });
+      const pending = [...chunks];
+      Object.defineProperty(response, 'body', {
+        value: {
+          getReader() {
+            return {
+              read() {
+                return Promise.resolve(
+                  pending.length > 0
+                    ? { done: false, value: pending.shift() }
+                    : { done: true, value: undefined },
+                );
+              },
+              cancel() {
+                cancels++;
+                return cancel();
+              },
+            };
+          },
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+
+    return { response, cancels };
+  }
+
+  test("PR review round 79: a body over the limit is refused as too large when its reader's cancel() answers with nothing or throws", async () => {
+    for (const cancel of [
+      () => undefined,
+      () => {
+        throw new Error('cancel failed');
+      },
+    ]) {
+      const { response, cancels } = await sendWithReader(
+        [new Uint8Array(8), new Uint8Array(8)],
+        cancel,
+      );
+
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('response_too_large');
+      expect(cancels).toBe(1);
+    }
+  });
+
+  test("PR review round 79: a chunk that is not a Uint8Array keeps its TypeError when the reader's cancel() throws", async () => {
+    const { response, cancels } = await sendWithReader(['abc'], () => {
+      throw new Error('cancel failed');
+    });
+
+    expect(response.isStreamError).toBe(true);
+    expect(response.streamErrorCode).toBe('stream_response_error');
+    expect(response.errorCause).toBeInstanceOf(TypeError);
+    expect((response.errorCause as Error).message).toContain(
+      'not a Uint8Array',
+    );
+    expect(cancels).toBe(1);
+  });
+});

@@ -17,7 +17,7 @@ import type { RequestHeadersInput } from '../types';
  * into the valid `x-key`, and grouping it with a real `x-key`.
  */
 export function lowerCaseHeaderName(name: string): string {
-  return name.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+  return asciiLowercase(name);
 }
 
 /**
@@ -88,6 +88,84 @@ const HTTP_WHITESPACE_ONLY = /^[\t\n\r ]*$/;
 /** That same whitespace at either end of a value; `trim()` also takes U+00A0 and more. */
 const HTTP_WHITESPACE_EDGES = /^[\t\n\r ]+|[\t\n\r ]+$/g;
 
+/**
+ * `text` without the HTTP whitespace (tab, LF, CR, space) at either end, as a header
+ * value's parts are trimmed: `trim()` would also take a no-break space and others.
+ */
+export function trimHTTPWhitespace(text: string): string {
+  return text.replace(HTTP_WHITESPACE_EDGES, '');
+}
+
+/**
+ * A header value's comma-separated values, split as the Fetch standard's "get, decode,
+ * and split" splits them: a comma inside a quoted string (`"a,b"`, with `\` escaping the
+ * next character) does not split, and the quotes stay part of the value. Each value is
+ * trimmed of HTTP whitespace - the standard trims tab and space only, from a value whose
+ * ends `Headers` has already trimmed of all four, and a line break anywhere else makes
+ * the value one a browser refuses outright.
+ */
+function splitHeaderValues(input: string): string[] {
+  const values: string[] = [];
+  let position = 0;
+  let temporaryValue = '';
+
+  while (true) {
+    const start = position;
+    while (
+      position < input.length &&
+      input[position] !== '"' &&
+      input[position] !== ','
+    ) {
+      position++;
+    }
+    temporaryValue += input.slice(start, position);
+
+    if (position < input.length && input[position] === '"') {
+      const quoteStart = position;
+      position = skipQuotedString(input, position);
+      temporaryValue += input.slice(quoteStart, position);
+
+      if (position < input.length) {
+        continue;
+      }
+    }
+
+    values.push(trimHTTPWhitespace(temporaryValue));
+    temporaryValue = '';
+
+    if (position >= input.length) {
+      return values;
+    }
+
+    // At a comma: step past it to the next value.
+    position++;
+  }
+}
+
+/**
+ * The position just past the quoted string opening at `position`, as the Fetch
+ * standard's "collect an HTTP quoted string" finds it: the closing `"`, a `\` taking the
+ * character after it, or the end of the input when the string is never closed.
+ */
+function skipQuotedString(input: string, position: number): number {
+  position++;
+
+  while (position < input.length) {
+    const char = input[position];
+    position++;
+
+    if (char === '"') {
+      break;
+    }
+
+    if (char === '\\' && position < input.length) {
+      position++;
+    }
+  }
+
+  return position;
+}
+
 export function isBrowserRestrictedHeader(
   key: string,
   value: string | undefined,
@@ -109,17 +187,14 @@ export function isBrowserRestrictedHeader(
   }
 
   // Method-override headers are only restricted when they try to tunnel a
-  // forbidden method such as TRACE/CONNECT/TRACK through an allowed verb. Each
-  // method is trimmed of HTTP whitespace and lowercased in ASCII only, as a
-  // browser compares it: `TRAC\u212A` (KELVIN SIGN) is not `track`.
+  // forbidden method such as TRACE/CONNECT/TRACK through an allowed verb. The
+  // value is split as a browser splits it - not inside a quoted string - and each
+  // method lowercased in ASCII only, as a browser compares it: `TRAC\u212A`
+  // (KELVIN SIGN) is not `track`, and neither is `"TRACK"`.
   if (BROWSER_METHOD_OVERRIDE_HEADER_NAMES.has(lowerKey) && value) {
-    return value
-      .split(',')
-      .some((method) =>
-        BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(
-          asciiLowercase(method.replace(HTTP_WHITESPACE_EDGES, '')),
-        ),
-      );
+    return splitHeaderValues(value).some((method) =>
+      BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(asciiLowercase(method)),
+    );
   }
 
   return false;

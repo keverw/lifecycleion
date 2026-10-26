@@ -7,6 +7,7 @@ import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
 import { assertHeaderRecord } from './internal/plain-record';
 import { lowerCaseHeaderName } from './internal/header-utils';
+import { asciiLowercase } from './internal/http-method';
 import { isNullish } from '../internal/is-nullish';
 import { isHeaderSafeCookieText } from './internal/cookie-text';
 
@@ -231,7 +232,9 @@ function parseCookieDate(value: string): Date | undefined {
       continue;
     }
     if (month === undefined) {
-      const index = COOKIE_DATE_MONTHS.indexOf(token.slice(0, 3).toLowerCase());
+      const index = COOKIE_DATE_MONTHS.indexOf(
+        asciiLowercase(token.slice(0, 3)),
+      );
       if (index !== -1) {
         month = index;
         continue;
@@ -1199,9 +1202,10 @@ export class CookieJar {
     for (let i = 1; i < parts.length; i++) {
       const part = parts[i];
       const eqIdx = part.indexOf('=');
-      const attrName = trimSpacesAndTabs(
-        eqIdx === -1 ? part : part.slice(0, eqIdx),
-      ).toLowerCase();
+      // Matched in ASCII case only, as RFC 6265bis compares attribute names.
+      const attrName = asciiLowercase(
+        trimSpacesAndTabs(eqIdx === -1 ? part : part.slice(0, eqIdx)),
+      );
 
       // Flag attributes are matched by name; RFC 6265bis ignores any value.
       if (attrName === 'secure') {
@@ -1269,7 +1273,7 @@ export class CookieJar {
             break;
           }
           case 'samesite': {
-            const lower = attrValue.toLowerCase();
+            const lower = asciiLowercase(attrValue);
             if (lower === 'strict') {
               cookie.sameSite = 'Strict';
             } else if (lower === 'lax') {
@@ -1577,7 +1581,7 @@ export class CookieJar {
    * attribute half is checked on `setCookie` as well, since it needs no URL.
    */
   private hasValidNamePrefix(parsed: ParsedCookie): boolean {
-    const lowerName = parsed.name.toLowerCase();
+    const lowerName = asciiLowercase(parsed.name);
 
     if (lowerName.startsWith('__host-')) {
       return parsed.secure === true && !parsed.domain && parsed.path === '/';

@@ -410,7 +410,7 @@ client waits to dispatch another hop is a separate request failure.
 
 ### Content-Type Detection and Body Parsing
 
-The response `Content-Type` header determines how the body is parsed. Only its media type is read - the first one, when fetch or XHR joined a repeated header, and without its parameters, case-insensitively:
+The response `Content-Type` header determines how the body is parsed. Only its media type is read - the first one, when fetch or XHR joined a repeated header, and without its parameters, trimmed of HTTP whitespace and in any ASCII case:
 
 | Media type                                    | `contentType` | Body type                 |
 | --------------------------------------------- | ------------- | ------------------------- |
@@ -2074,7 +2074,7 @@ Exact names: `accept-charset`, `accept-encoding`, `access-control-request-header
 
 Prefix-based: all `proxy-*` and `sec-*` headers
 
-Method-override headers `x-http-method`, `x-http-method-override`, `x-method-override` cannot tunnel `connect`, `trace`, or `track`.
+Method-override headers `x-http-method`, `x-http-method-override`, `x-method-override` cannot tunnel `connect`, `trace`, or `track`. Their value is split on commas as a browser splits it - not inside a quoted string, whose quotes stay part of the method - and each method compared in ASCII case.
 
 ## Exported Types
 

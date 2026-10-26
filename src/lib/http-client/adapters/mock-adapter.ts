@@ -1,6 +1,7 @@
 import { asciiUppercase } from '../internal/http-method';
 import { isHTTPToken } from '../internal/http-token';
 import { isHeaderSafeCookieText } from '../internal/cookie-text';
+import { formEntries } from '../internal/form-entries';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -1108,9 +1109,7 @@ function extractFormData(fd: FormData): MockFormData {
   const allFields: Record<string, string[]> = {};
   const allFiles: Record<string, File[]> = {};
 
-  // Read through the intrinsic `entries`, as the client reads a form everywhere else: a
-  // subclass's or the form's own `entries` would report entries the form does not hold.
-  for (const [key, value] of FormData.prototype.entries.call(fd)) {
+  for (const [key, value] of formEntries(fd)) {
     // Defined, not assigned: a `__proto__` field would otherwise vanish, and a
     // `__proto__` file would become the record's prototype.
     if (typeof value === 'string') {
