@@ -2553,3 +2553,39 @@ describe('MockAdapter - PR review round 64', () => {
     expect(delayRejection?.message).toBe(earlyRejection?.message);
   });
 });
+
+describe('MockAdapter - PR review round 71', () => {
+  test('PR review round 71: a request body of bytes from another realm reaches the route as bytes, decoded by its content type', async () => {
+    const adapter = new MockAdapter();
+    const received: unknown[] = [];
+    adapter.routes.post('/upload', (request) => {
+      received.push(request.body);
+      return { status: 204 };
+    });
+
+    const foreign = () =>
+      vm.runInNewContext('new Uint8Array([123, 34, 97, 34, 58, 49, 125])');
+
+    await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/upload',
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: foreign() as Uint8Array,
+      }),
+    );
+    await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/upload',
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: foreign() as Uint8Array,
+      }),
+    );
+
+    expect(Array.from(received[0] as Uint8Array)).toEqual([
+      123, 34, 97, 34, 58, 49, 125,
+    ]);
+    expect(received[1]).toEqual({ a: 1 });
+  });
+});

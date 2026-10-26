@@ -9,6 +9,7 @@ import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { readUnknownMember } from '../internal/read-member';
+import { typedArrayNameOf } from '../internal/binary-view';
 import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
 import {
   lowerCaseHeaderName,
@@ -1293,7 +1294,7 @@ export function serializeBody(body: unknown): {
     return { body: null, contentType: null };
   } else if (typeof body === 'string') {
     return { body, contentType: 'text/plain; charset=utf-8' };
-  } else if (body instanceof Uint8Array) {
+  } else if (isRequestBodyBytes(body)) {
     return { body, contentType: 'application/octet-stream' };
   } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
     // `JSON.stringify` answers `undefined` for a top-level `toJSON` that does: nothing is
@@ -1315,7 +1316,7 @@ export function assertSupportedRequestBody(body: unknown): void {
     body === undefined ||
     body === null ||
     typeof body === 'string' ||
-    body instanceof Uint8Array ||
+    isRequestBodyBytes(body) ||
     body instanceof FormData ||
     Array.isArray(body) ||
     isPlainJSONBodyObject(body)
@@ -1325,6 +1326,20 @@ export function assertSupportedRequestBody(body: unknown): void {
 
   throw new Error(
     'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.',
+  );
+}
+
+/**
+ * Whether a request body is bytes: a `Uint8Array` - a `Buffer` included - told by its
+ * internal slot (see `typedArrayNameOf`), so from any realm: a `vm` context's, or a
+ * `Buffer` under jsdom, which `instanceof Uint8Array` misses. A `Proxy` over one has no
+ * slot, and nothing could copy its bytes, so it is not.
+ */
+export function isRequestBodyBytes(body: unknown): body is Uint8Array {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    typedArrayNameOf(body) === 'Uint8Array'
   );
 }
 

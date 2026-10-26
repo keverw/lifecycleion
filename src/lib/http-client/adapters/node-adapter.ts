@@ -64,6 +64,7 @@ import {
 import {
   derivedRedirectFields,
   isCrossOrigin,
+  isRequestBodyBytes,
   mergeObservedHeaders,
 } from '../utils';
 import { defineEntry } from '../../internal/define-entry';
@@ -3329,7 +3330,8 @@ function dropBodilessContentLength(request: AdapterRequest): void {
 
 /**
  * The kind of request body this adapter writes: multipart for a `FormData`, bytes for a
- * string or `Uint8Array`, and `undefined` for none. Read once, by both the branch that
+ * string or `Uint8Array` (another realm's included; see `isRequestBodyBytes`), and
+ * `undefined` for none. Read once, by both the branch that
  * opens the upload's outcome and the one that writes it, so a body is never written
  * without one.
  */
@@ -3343,7 +3345,7 @@ function classifyRequestBody(
     return { kind: 'form', body };
   }
 
-  return typeof body === 'string' || body instanceof Uint8Array
+  return typeof body === 'string' || isRequestBodyBytes(body)
     ? { kind: 'bytes', body }
     : undefined;
 }

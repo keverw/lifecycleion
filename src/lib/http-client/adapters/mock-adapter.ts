@@ -47,6 +47,7 @@ import {
 import {
   derivedRedirectFields,
   isPlainJSONBodyObject,
+  isRequestBodyBytes,
   normalizeAdapterResponseHeaders,
   parseContentType,
 } from '../utils';
@@ -1133,7 +1134,7 @@ function parseRequestBody(
 
   const parsedContentType = parseContentType(contentType);
 
-  if (body instanceof Uint8Array) {
+  if (isRequestBodyBytes(body)) {
     // Keep opaque bytes intact so mock handlers can inspect binary payloads
     // like uploads or octet-stream requests without lossy text decoding.
     if (parsedContentType === 'binary') {

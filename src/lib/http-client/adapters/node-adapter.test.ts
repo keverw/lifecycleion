@@ -11,6 +11,7 @@ import * as https from 'node:https';
 import * as tls from 'node:tls';
 import type { Socket } from 'node:net';
 import { Writable } from 'node:stream';
+import vm from 'node:vm';
 import * as zlib from 'node:zlib';
 import { NodeAdapter } from './node-adapter';
 import type { NodeAdapterConfig } from './node-adapter';
@@ -9322,5 +9323,48 @@ describe('NodeAdapter - PR review round 64', () => {
     expect(captured?.servername).toBe('first.test');
     expect(captured?.cert).toBe('first-cert');
     expect(captured?.key).toBe('first-key');
+  });
+});
+
+describe('NodeAdapter - PR review round 71', () => {
+  test('PR review round 71: a Uint8Array body from another realm is sent as its bytes, through the client and directly', async () => {
+    const received: number[][] = [];
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        received.push(Array.from(Buffer.concat(chunks)));
+        res.writeHead(204);
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as { port: number };
+    const url = `http://127.0.0.1:${port}/upload`;
+    const foreign = () =>
+      vm.runInNewContext('new Uint8Array([1, 2, 3])') as Uint8Array;
+
+    try {
+      const client = new HTTPClient({ adapter: new NodeAdapter() });
+      const viaClient = await client.post(url).body(foreign()).send();
+      expect(viaClient.status).toBe(204);
+
+      const direct = await new NodeAdapter().send({
+        requestURL: url,
+        method: 'POST',
+        headers: {},
+        body: foreign(),
+      });
+      expect(direct.status).toBe(204);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+
+    expect(received).toEqual([
+      [1, 2, 3],
+      [1, 2, 3],
+    ]);
   });
 });

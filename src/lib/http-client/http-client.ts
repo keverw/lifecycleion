@@ -54,6 +54,7 @@ import {
   normalizeMergedHeaderValue,
   describeInvalidHTTPMethod,
   isPlainJSONBodyObject,
+  isRequestBodyBytes,
   normalizeAdapterResponseHeaders,
   isAdapterHeaderValue,
   parseContentType,
@@ -5313,7 +5314,7 @@ function buildAttemptBodies(
   let observed: ObservedBodies | undefined;
 
   if (isObserved) {
-    if (body instanceof Uint8Array || body instanceof FormData) {
+    if (isRequestBodyBytes(body) || body instanceof FormData) {
       // For a body that will never be sent (a snapshot of a request that ended first),
       // the client's own copy is the observers' already: nothing else holds it.
       const copy = isSent ? (cloneBodyValue(body) as typeof body) : body;
@@ -5336,7 +5337,8 @@ function cloneBodyValue(body: unknown): unknown {
     }
 
     return cloned;
-  } else if (body instanceof Uint8Array) {
+  } else if (isRequestBodyBytes(body)) {
+    // Read through its internal slots, so another realm's is copied into this one's.
     return new Uint8Array(body);
   }
 

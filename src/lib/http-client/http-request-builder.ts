@@ -143,7 +143,14 @@ export class HTTPRequestBuilder<T = unknown> {
         'HTTPRequestBuilder params must be a plain object of query names to values (not a URLSearchParams, Map or string)',
       );
     }
-    this._params = params;
+    // Copied now, as `headers()` copies, so a change to the caller's object after this
+    // call does not reach the request: each own entry read once, its value kept as it is.
+    // Own keys, so a `__proto__` name stays a query name rather than a prototype.
+    const copied: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(params)) {
+      defineEntry(copied, key, value);
+    }
+    this._params = copied;
     return this;
   }
 

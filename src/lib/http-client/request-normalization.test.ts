@@ -1689,9 +1689,12 @@ test('a retry-phase interceptor does not spend the attempt timeout', async () =>
 
 test('a builder whose send() rejects is left failed, not sending', async () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  // Nested: `.params()` reads only the top-level entries, so this getter runs at send.
   const params = {
-    get page(): string {
-      throw new Error('params unreadable');
+    filter: {
+      get page(): string {
+        throw new Error('params unreadable');
+      },
     },
   };
   const builder = client.get('http://example.test/x').params(params);
@@ -14217,4 +14220,43 @@ test('PR review round 65: a retry interceptor on a cross-origin hop keeps a __pr
       ).toEqual(value);
     }
   }
+});
+
+test('PR review round 71: a Uint8Array body from another realm is sent as its bytes; a Proxy over one is refused', async () => {
+  const adapter = new MockAdapter();
+  const received: unknown[] = [];
+  adapter.routes.post('/upload', (request) => {
+    received.push(request.body);
+    return {
+      status: 200,
+      body: { contentType: request.headers['content-type'] },
+    };
+  });
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const observed: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    observed.push(request.rawBody);
+  });
+
+  const foreign = vm.runInNewContext('new Uint8Array([1, 2, 3])') as Uint8Array;
+  expect(foreign instanceof Uint8Array).toBe(false);
+
+  const response = await client.post('/upload').body(foreign).send();
+
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ contentType: 'application/octet-stream' });
+  expect(received).toHaveLength(1);
+  expect(received[0]).toBeInstanceOf(Uint8Array);
+  expect(Array.from(received[0] as Uint8Array)).toEqual([1, 2, 3]);
+  expect(observed).toHaveLength(1);
+  expect(Array.from(observed[0] as Uint8Array)).toEqual([1, 2, 3]);
+
+  // No internal slot, so no bytes to copy: refused before anything is sent.
+  const proxied = client
+    .post('/upload')
+    .body(new Proxy(new Uint8Array([1, 2, 3]), {}));
+  await proxied.send();
+
+  expect(proxied.error?.code).toBe('request_setup_error');
+  expect(received).toHaveLength(1);
 });

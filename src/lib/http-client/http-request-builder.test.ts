@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { HTTPRequestBuilder } from './http-request-builder';
 import type { BuilderSendContext } from './http-request-builder';
 import type { HTTPRequestOptions, HTTPResponse } from './types';
+import { HTTPClient } from './http-client';
+import { MockAdapter } from './adapters/mock-adapter';
 
 // Captures the context passed to sendFn so tests can inspect it.
 function makeSendFn(
@@ -761,4 +763,27 @@ test('headers() refuses a Headers, Map or array instead of dropping its entries'
   expect(builder.headers(null)).toBe(builder);
   const record = Object.assign(Object.create(null) as object, { 'x-a': '1' });
   expect(builder.headers(record as Record<string, string>)).toBe(builder);
+});
+
+test('PR review round 71: params are copied when given, so a later change to the object is not sent', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/search', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  const given: Record<string, unknown> = { q: 'a', page: '1' };
+  const builder = client.get('/search').params(given);
+  given.token = 'secret';
+  given.q = 'b';
+  delete given.page;
+  const response = await builder.send();
+
+  expect(response.requestURL).toBe('http://api.test/search?q=a&page=1');
+
+  // The same through the request options.
+  const optionParams: Record<string, unknown> = { q: 'a' };
+  const optionBuilder = client.get('/search', { params: optionParams });
+  optionParams.token = 'secret';
+  const optionResponse = await optionBuilder.send();
+
+  expect(optionResponse.requestURL).toBe('http://api.test/search?q=a');
 });
