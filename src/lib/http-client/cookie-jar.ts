@@ -35,8 +35,13 @@ function capLifetime(
     capped.maxAge = MAX_COOKIE_LIFETIME_SECONDS;
   }
 
+  // Read by its time, not a `getTime` the `Date` itself carries, as the expiry check is.
   const latest = createdAt + MAX_COOKIE_LIFETIME_SECONDS * 1000;
-  if (cookie.expires instanceof Date && cookie.expires.getTime() > latest) {
+  const expires = cookie.expires;
+  if (
+    expires instanceof Date &&
+    Date.prototype.getTime.call(expires) > latest
+  ) {
     capped.expires = new Date(latest);
   }
 
@@ -1794,16 +1799,28 @@ export class CookieJar {
   private isExpired(cookie: Cookie, now: number): boolean {
     // Unknown expiry fails closed, including accessors installed on a live cookie.
     // Read each field once so a changing getter cannot disagree with its own check.
+    // Read as `hasReadableExpiry` reads them: a `createdAt` that is not finite, a `maxAge`
+    // that is not a number, or an `expires` that is not a `Date` - `null` included - is
+    // not coerced into one.
     try {
-      const maxAge = cookie.maxAge;
+      const createdAt: unknown = cookie.createdAt;
+      if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) {
+        return true;
+      }
+
+      const maxAge: unknown = cookie.maxAge;
       if (maxAge !== undefined) {
-        const expiresAt = cookie.createdAt + maxAge * 1000;
+        if (typeof maxAge !== 'number') {
+          return true;
+        }
+
+        const expiresAt = createdAt + maxAge * 1000;
         return !Number.isFinite(expiresAt) || now >= expiresAt;
       }
 
-      const expires = cookie.expires;
-      if (expires) {
-        const expiresAt = expires.getTime();
+      const expires: unknown = cookie.expires;
+      if (expires !== undefined) {
+        const expiresAt = Date.prototype.getTime.call(expires);
         return Number.isNaN(expiresAt) || now >= expiresAt;
       }
 

@@ -3505,3 +3505,102 @@ test('PR review round 67: setCookie decides whether the cookie it replaces has e
     nowSpy.mockRestore();
   }
 });
+
+test('PR review round 68: a stored cookie whose maxAge was changed to a non-number counts as expired', () => {
+  const jar = new CookieJar();
+  let clock = 1_000_000;
+  const nowSpy = spyOn(Date, 'now').mockImplementation(() => clock);
+
+  try {
+    const url = 'https://example.com/';
+    jar.setCookie({
+      name: 'a',
+      value: '1',
+      domain: 'example.com',
+      path: '/',
+      hostOnly: true,
+      maxAge: 3600,
+    });
+    clock = 1_000_100;
+    jar.setCookie({
+      name: 'b',
+      value: '1',
+      domain: 'example.com',
+      path: '/',
+      hostOnly: true,
+    });
+
+    // `getAllCookies()` hands out the stored cookies themselves.
+    const stored = jar.getAllCookies().find((cookie) => cookie.name === 'a');
+    expect(stored).toBeDefined();
+    if (stored) {
+      (stored as { maxAge: unknown }).maxAge = '3600';
+    }
+
+    // Unsendable, as an unreadable expiry is, and gone: the replacement takes its own
+    // creation time rather than the place of a cookie that was never being sent.
+    expect(jar.getCookieHeaderString(url)).toBe('b=1');
+    clock = 1_000_200;
+    jar.setCookie({
+      name: 'a',
+      value: '2',
+      domain: 'example.com',
+      path: '/',
+      hostOnly: true,
+    });
+
+    expect(jar.getCookieHeaderString(url)).toBe('b=1; a=2');
+  } finally {
+    nowSpy.mockRestore();
+  }
+});
+
+test('PR review round 68: a stored cookie whose createdAt or expires was changed to something unreadable is cleared', () => {
+  for (const tamper of [
+    (cookie: Record<string, unknown>) => {
+      cookie.createdAt = Number.NaN;
+    },
+    (cookie: Record<string, unknown>) => {
+      cookie.expires = null;
+    },
+  ]) {
+    const jar = new CookieJar();
+    jar.setCookie({
+      name: 'a',
+      value: '1',
+      domain: 'example.com',
+      path: '/',
+      hostOnly: true,
+    });
+    const [stored] = jar.getAllCookies();
+    expect(stored).toBeDefined();
+    if (stored) {
+      tamper(stored as unknown as Record<string, unknown>);
+    }
+
+    // Withheld from the header, and removed as expired rather than kept unsendable.
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('');
+    expect(jar.clearExpiredCookies()).toBe(1);
+    expect(jar.getAllCookies()).toHaveLength(0);
+  }
+});
+
+test('PR review round 68: the 400-day cap reads a Date by its time, not a getTime it carries', () => {
+  const jar = new CookieJar();
+  const farFuture = new Date(Date.now() + 10 * 365 * 24 * 3600 * 1000);
+  Object.defineProperty(farFuture, 'getTime', { value: () => 0 });
+  jar.setCookie({
+    name: 'a',
+    value: '1',
+    domain: 'example.com',
+    path: '/',
+    hostOnly: true,
+    expires: farFuture,
+  });
+
+  const [stored] = jar.getAllCookies();
+  const storedTime = stored?.expires
+    ? Date.prototype.getTime.call(stored.expires)
+    : Number.NaN;
+  expect(storedTime).toBeLessThanOrEqual(Date.now() + 400 * 24 * 3600 * 1000);
+});
