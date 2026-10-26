@@ -280,8 +280,9 @@ export class CookieJar {
   /**
    * Stores or updates a cookie. Returns false if the domain is missing or
    * not a valid hostname/IP (e.g. empty string, spaces, garbage input), or if the
-   * cookie's expiry cannot be read: an `expires` that is an `Invalid Date`, or a
-   * `maxAge` or `createdAt` that is not a finite number. Such a cookie would compare
+   * cookie's expiry cannot be read: an `expires` that is not a `Date` (`null`
+   * included) or is an `Invalid Date`, or a `maxAge` or `createdAt` that is not a
+   * finite number. Such a cookie would compare
    * `now` against `NaN` in the expiry check, never be found expired, and be sent for
    * the life of the jar - see {@link fromJSON}.
    *
@@ -878,8 +879,10 @@ export class CookieJar {
    * make an immortal cookie. Refused rather than restored as a session cookie,
    * because a cookie that was persisted with an expiry was not a session cookie, and
    * the header parser drops an unreadable `Expires` attribute for the same reason.
-   * `null` - what `JSON.stringify` writes for an `Invalid Date` - and `undefined` mean
-   * no expiry, as they do on a live cookie.
+   * Here `null` - what `JSON.stringify` writes for an `Invalid Date` - and `undefined`
+   * mean no expiry: `fromJSON` restores a `null` as absent. That is this method's own
+   * reading of persisted data; `setCookie` refuses a `null` expiry field, and a stored
+   * cookie mutated to one counts as expired.
    *
    * The same refusal covers the other half of the expiry model: a `maxAge` or a
    * `createdAt` that is not a finite number - a string, `NaN`, an object - would make

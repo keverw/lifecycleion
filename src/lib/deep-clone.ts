@@ -10,7 +10,11 @@
  */
 
 import { defineEntry } from './internal/define-entry';
-import { arrayBufferKindOf, hasBufferTagInChain } from './internal/binary-view';
+import {
+  arrayBufferKindOf,
+  hasBufferTagInChain,
+  typedArrayNameOf,
+} from './internal/binary-view';
 
 /**
  * Deep clone an object or value
@@ -236,7 +240,7 @@ function copyBytes(
  * comes back a `DataView`.
  */
 function cloneView(view: ArrayBufferView): object {
-  const name = typedArrayName(view);
+  const name = typedArrayNameOf(view);
   const read = (key: string): unknown =>
     Reflect.get(
       name === undefined ? DataView.prototype : TYPED_ARRAY_PROTOTYPE,
@@ -284,20 +288,6 @@ function bufferConstructor(kind: BufferKind): BufferConstructorLike {
   return (kind === 'SharedArrayBuffer'
     ? (SHARED_ARRAY_BUFFER ?? ArrayBuffer)
     : ArrayBuffer) as unknown as BufferConstructorLike;
-}
-
-/**
- * The typed array's kind (`Uint8Array` for a `Buffer`), read by the intrinsic getter,
- * which reads it from any realm's typed array; `undefined` for a `DataView`.
- */
-function typedArrayName(view: ArrayBufferView): string | undefined {
-  const name: unknown = Reflect.get(
-    TYPED_ARRAY_PROTOTYPE,
-    Symbol.toStringTag,
-    view,
-  );
-
-  return typeof name === 'string' ? name : undefined;
 }
 
 /**
