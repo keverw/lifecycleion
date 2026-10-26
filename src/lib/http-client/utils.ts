@@ -8,6 +8,7 @@ import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
+import { copyArrayValue } from './internal/array-copy';
 import { readUnknownMember } from '../internal/read-member';
 import { typedArrayNameOf } from '../internal/binary-view';
 import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
@@ -647,14 +648,15 @@ export function normalizeFilterMethods(
       `${label} filter methods must be an array of method names (got ${typeof methods})`,
     );
   }
-  if (methods.length === 0) {
+  // Copied first, by index, as the other lists are (see `copyArrayValue`): the caller's
+  // own `map` and iterator are not called, and a hole is read as the `undefined` it is,
+  // and refused.
+  const entries = copyArrayValue(methods as unknown[]);
+  if (entries.length === 0) {
     throw new TypeError(
       `${label} filter methods is empty, which would match no request; omit it to match every method`,
     );
   }
-  // Copied first, as the other lists are: the caller's own `map` is not called, and a
-  // hole is read as the `undefined` it is, and refused.
-  const entries = [...(methods as unknown[])];
   const normalized: HTTPMethod[] = [];
   for (const [index, entry] of entries.entries()) {
     // Held to the rule a request's method is, so an entry no request can have - `''`,
@@ -858,13 +860,13 @@ export function assertSupportedAdapterRuntimeAndConfig(
 
   if (adapterType === 'xhr' && config.followRedirects === true) {
     throw new Error(
-      'HTTPClient redirect handling is not supported with XHR adapter. Set followRedirects: false or use a different adapter/runtime.',
+      'HTTPClient redirect handling is not supported with XHRAdapter. Set followRedirects: false or use a different adapter/runtime.',
     );
   }
 
   if (adapterType === 'xhr' && !hasXMLHttpRequestGlobal()) {
     throw new Error(
-      'HTTPClient XHR adapter is not supported when XMLHttpRequest is unavailable. Use a browser runtime, install a test shim, or switch to the FetchAdapter/NodeAdapter.',
+      'HTTPClient XHRAdapter is not supported when XMLHttpRequest is unavailable. Use a browser runtime, install a test shim, or switch to the FetchAdapter/NodeAdapter.',
     );
   }
 
@@ -883,13 +885,13 @@ export function assertSupportedAdapterRuntimeAndConfig(
   // simulation features rather than forbidden browser networking controls.
   if ((adapterType === 'fetch' || adapterType === 'xhr') && config.cookieJar) {
     throw new Error(
-      `HTTPClient cookieJar is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter'} in browser environments. Browsers manage cookies automatically.`,
+      `HTTPClient cookieJar is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHRAdapter'} in browser environments. Browsers manage cookies automatically.`,
     );
   }
 
   if ((adapterType === 'fetch' || adapterType === 'xhr') && config.userAgent) {
     throw new Error(
-      `HTTPClient userAgent is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter'} in browser environments. Browsers do not allow overriding the User-Agent header.`,
+      `HTTPClient userAgent is not supported with ${adapterType === 'fetch' ? 'FetchAdapter' : 'XHRAdapter'} in browser environments. Browsers do not allow overriding the User-Agent header.`,
     );
   }
 

@@ -588,7 +588,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
           'xhr',
           true,
         ),
-      ).toThrow(/cookieJar is not supported with XHR adapter/i);
+      ).toThrow(/cookieJar is not supported with XHRAdapter/i);
     });
 
     test('rejects userAgent usage', () => {
@@ -600,7 +600,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
           'xhr',
           true,
         ),
-      ).toThrow(/userAgent is not supported with XHR adapter/i);
+      ).toThrow(/userAgent is not supported with XHRAdapter/i);
     });
 
     test('rejects redirect handling', () => {
@@ -610,7 +610,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
           'xhr',
           true,
         ),
-      ).toThrow(/redirect handling is not supported with XHR adapter/i);
+      ).toThrow(/redirect handling is not supported with XHRAdapter/i);
     });
   });
 
@@ -683,7 +683,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig({}, 'xhr', false),
       ).toThrow(
-        /XHR adapter is not supported when XMLHttpRequest is unavailable/i,
+        /XHRAdapter is not supported when XMLHttpRequest is unavailable/i,
       );
     });
 
@@ -704,7 +704,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
           'xhr',
           false,
         ),
-      ).toThrow(/redirect handling is not supported with XHR adapter/i);
+      ).toThrow(/redirect handling is not supported with XHRAdapter/i);
     });
   });
 });

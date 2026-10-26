@@ -1,4 +1,5 @@
 import {
+  asciiLowercase,
   asciiUppercase,
   normalizeStandardMethod,
 } from './internal/http-method';
@@ -146,7 +147,7 @@ import {
   copiedJSONText,
   copyRequestBody,
   isCopySerializingToNothing,
-  jsonTextOf,
+  serializesToNothing,
 } from './internal/request-body-copy';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
 import { copyArrayValue } from './internal/array-copy';
@@ -195,6 +196,16 @@ function methodRefusal(message: string, isOfBody = false): Error {
     bodyMethodRefusals.add(error);
   }
   return error;
+}
+
+/**
+ * Whether a phase's failure is its body's, reported as `request_setup_error`, rather than
+ * an interceptor's: a body the interceptors returned that could not be copied (see
+ * `copyChainResultBody`) - unless the GET and HEAD rule refused it (see
+ * `_copyChainResultBody`).
+ */
+function isBodyCopyFailure(copy: BodyCopyOutcome, error: unknown): boolean {
+  return copy.didFail && !methodRefusals.has(error as Error);
 }
 
 /** The headers carried across a cross-origin redirect (see `_sanitizeRedirectRequest`). */
@@ -1113,11 +1124,9 @@ export class BaseHTTPClient {
                 readObjectMember(initialRequestCandidate, 'body'),
               ) === hasCallerBody);
           // So is a body the interceptors returned that cannot be copied (see
-          // `copyChainResultBody`): the body's failure, not an interceptor's - unless the
-          // GET and HEAD rule refused it (see `_copyChainResultBody`).
+          // `isBodyCopyFailure`).
           const isSetupError =
-            isCallersOwnRefusal ||
-            (initialBodyCopy.didFail && !methodRefusals.has(error as Error));
+            isCallersOwnRefusal || isBodyCopyFailure(initialBodyCopy, error);
           const normalizedError = isCancelled
             ? this._makeError(
                 response,
@@ -1779,11 +1788,10 @@ export class BaseHTTPClient {
               });
 
               // A body that could not be copied is the body's failure; see
-              // `copyChainResultBody` and, for a GET or HEAD, `_copyChainResultBody`.
-              errorCode =
-                redirectBodyCopy.didFail && !methodRefusals.has(error as Error)
-                  ? 'request_setup_error'
-                  : 'interceptor_error';
+              // `isBodyCopyFailure`.
+              errorCode = isBodyCopyFailure(redirectBodyCopy, error)
+                ? 'request_setup_error'
+                : 'interceptor_error';
               adapterCause = normalizeError(error);
 
               break;
@@ -2792,10 +2800,9 @@ export class BaseHTTPClient {
           return endBeforeDispatch(
             isHeld ? baseRequest : failedRetryRequest,
             {
-              errorCode:
-                retryBodyCopy.didFail && !methodRefusals.has(error as Error)
-                  ? 'request_setup_error'
-                  : 'interceptor_error',
+              errorCode: isBodyCopyFailure(retryBodyCopy, error)
+                ? 'request_setup_error'
+                : 'interceptor_error',
               adapterCause: normalizeError(error),
             },
             // A body that failed to copy is reported as it came, not read again; the
@@ -5267,8 +5274,7 @@ export class BaseHTTPClient {
     assertSupportedRequestBody(request.body);
 
     const adapterType = this._adapterType;
-    const adapterName =
-      adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter';
+    const adapterName = adapterType === 'fetch' ? 'FetchAdapter' : 'XHRAdapter';
     if (
       this._isBrowserRuntime &&
       (adapterType === 'fetch' || adapterType === 'xhr')
@@ -5282,7 +5288,9 @@ export class BaseHTTPClient {
     if (
       (adapterType === 'fetch' ||
         (adapterType === 'xhr' && this._isBrowserRuntime)) &&
-      BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(request.method.toLowerCase())
+      BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(
+        asciiLowercase(request.method),
+      )
     ) {
       throw methodRefusal(
         `[${adapterName}] Cannot send a ${request.method} request: fetch and browsers refuse the CONNECT, TRACE and TRACK methods.`,
@@ -6280,9 +6288,11 @@ function copyChainResultBody(
  * the bytes are measured through the intrinsic getters (see `readBinaryByteLength`),
  * which a subclass that reports a `byteLength` of `0` while holding a token cannot answer
  * for, and the form's entries through `FormData`'s own iterator rather than one the value
- * declares. A JSON body is read as the attempt serializes it (see `jsonTextOf`), and one
- * whose top-level `toJSON` answers `undefined` is answered as no body. Throws on a body
- * those reads refuse, such as a `Proxy` over a form, as building it would.
+ * declares. A JSON body that serializes to nothing is answered as no body, told from its
+ * top-level `toJSON` alone rather than by serializing it (see `serializesToNothing`): a
+ * body only read here, as an interceptor's on a hop held to its own, is never serialized.
+ * Throws on a body those reads refuse, such as a `Proxy` over a form, as building it
+ * would.
  */
 function emptyRequestBody(body: unknown): { body: unknown } | undefined {
   if (body === undefined || body === null || body === '') {
@@ -6307,10 +6317,10 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
   }
 
   if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
-    // One that cannot be serialized - a `BigInt`, a `toJSON` that throws - is no body that
-    // sends nothing: on a hop held to its own body, the hop's is sent in its place.
+    // One whose `toJSON` throws is no body that sends nothing: on a hop held to its own
+    // body, the hop's is sent in its place.
     try {
-      return jsonTextOf(body) === undefined ? { body: undefined } : undefined;
+      return serializesToNothing(body) ? { body: undefined } : undefined;
     } catch {
       return undefined;
     }

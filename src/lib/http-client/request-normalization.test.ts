@@ -15898,3 +15898,205 @@ test("PR review round 74: a caller's own TRACE on FetchAdapter whose body serial
     restore();
   }
 });
+
+test('PR review round 75: a filter list is read by index, not through its own iterator', async () => {
+  // An array whose own iterator yields entries other than those it holds.
+  const withIterator = <T>(entries: T[], yields: unknown[]): T[] => {
+    Object.defineProperty(entries, Symbol.iterator, {
+      value: () => yields[Symbol.iterator](),
+    });
+    return entries;
+  };
+  const thrown = (run: () => unknown): string => {
+    try {
+      run();
+    } catch (error) {
+      return (error as Error).message;
+    }
+    return 'nothing thrown';
+  };
+
+  // The entries checked are the ones held, whatever the iterator yields.
+  expect(
+    thrown(() =>
+      new HTTPClient().addRequestInterceptor((request) => request, {
+        hosts: withIterator([7 as never], ['a.test']),
+      }),
+    ),
+  ).toBe(
+    'HTTPClient request interceptor filter hosts[0] must be a string (got number)',
+  );
+  expect(
+    thrown(() =>
+      new HTTPClient().addRequestInterceptor((request) => request, {
+        methods: withIterator(['GET, POST'], ['GET']),
+      }),
+    ),
+  ).toBe(
+    'HTTPClient request interceptor filter methods[0] is not a valid HTTP method name (got a string with characters an HTTP token does not allow)',
+  );
+  // A hole is still read as the `undefined` it is, and refused.
+  expect(
+    thrown(() =>
+      new HTTPClient().addRequestInterceptor((request) => request, {
+        // eslint-disable-next-line no-sparse-arrays
+        hosts: ['a.test', , 'b.test'] as string[],
+      }),
+    ),
+  ).toBe(
+    'HTTPClient request interceptor filter hosts[1] must be a string (got undefined)',
+  );
+
+  // And the entries held are the ones matched.
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  adapter.routes.post('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://mock.test' });
+  const seen: string[] = [];
+  client.addRequestInterceptor(
+    (request) => {
+      seen.push(`${request.method} ${request.requestURL}`);
+      return request;
+    },
+    {
+      methods: withIterator(['GET'], ['POST']),
+      hosts: withIterator(['mock.test'], ['other.test']),
+    },
+  );
+  await client.get('/x').send();
+  await client.post('/x').send();
+
+  expect(seen).toEqual(['GET http://mock.test/x']);
+});
+
+test('PR review round 75: every refusal XHRAdapter makes in a browser names it as XHRAdapter', async () => {
+  const names = ['window', 'document', 'XMLHttpRequest'] as const;
+  const saved = names.map(
+    (name) =>
+      [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const,
+  );
+  let xhrCount = 0;
+  const globals: Record<string, unknown> = {
+    window: {},
+    document: {},
+    XMLHttpRequest: class {
+      constructor() {
+        xhrCount++;
+      }
+    },
+  };
+  for (const name of names) {
+    Object.defineProperty(globalThis, name, {
+      value: globals[name],
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  try {
+    const client = new HTTPClient({
+      adapter: new XHRAdapter(),
+      baseURL: 'http://api.test',
+      followRedirects: false,
+    });
+    const refusalOf = async (
+      builder: ReturnType<typeof client.get>,
+    ): Promise<string | undefined> => {
+      await builder.send();
+      return builder.error?.cause?.message;
+    };
+
+    expect(
+      await refusalOf(client.get('/x', { headers: { 'sec-test': '1' } })),
+    ).toStartWith("[XHRAdapter] Cannot set header 'sec-test'");
+    expect(await refusalOf(client.request('TRACE', '/x'))).toStartWith(
+      '[XHRAdapter] Cannot send a TRACE request',
+    );
+    expect(await refusalOf(client.get('/x').json({ a: 1 }))).toStartWith(
+      '[XHRAdapter] Cannot send a GET request with a body',
+    );
+    expect(xhrCount).toBe(0);
+  } finally {
+    for (const [name, descriptor] of saved) {
+      if (descriptor === undefined) {
+        delete (globalThis as Record<string, unknown>)[name];
+      } else {
+        Object.defineProperty(globalThis, name, descriptor);
+      }
+    }
+  }
+});
+
+test("PR review round 75: a retry interceptor's body on a cross-origin hop held to its own is not serialized to learn whether it sends nothing", async () => {
+  const sendHop = async (retryBody: unknown) => {
+    const { adapter, sentToTarget } = crossOriginReplayAdapter(
+      'https://evil.example/next',
+    );
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: crossOriginRetryPolicy,
+    });
+    client.addRequestInterceptor(
+      (request) => ({ ...request, body: retryBody }),
+      { phases: ['retry'] },
+    );
+    const builder = client.put('https://api.example/start').json({ a: 1 });
+    await builder.send();
+    return {
+      code: builder.error?.code,
+      bodies: sentToTarget.map((request) => request.body ?? null),
+    };
+  };
+  const held = { code: undefined, bodies: ['{"a":1}', '{"a":1}'] };
+  const dropped = { code: undefined, bodies: ['{"a":1}', null] };
+
+  // A large body that sends something: the hop's own is sent, and the interceptors' is
+  // never handed to `JSON.stringify`.
+  const large = {
+    items: Array.from({ length: 10_000 }, (_, index) => ({ index })),
+  };
+  const stringify = spyOn(JSON, 'stringify');
+  try {
+    expect(await sendHop(large)).toEqual(held);
+    expect(stringify.mock.calls.some(([value]) => value === large)).toBe(false);
+  } finally {
+    stringify.mockRestore();
+  }
+
+  // What it serializes to is still read by its top-level `toJSON`, as `JSON.stringify`
+  // reads it: an answer it writes nothing for drops the hop's body, any other is held,
+  // and a `toJSON` that throws holds it as before.
+  let toJSONCalls: unknown[][] = [];
+  const answering = (answer: () => unknown): object => ({
+    toJSON(...args: unknown[]) {
+      toJSONCalls.push(args);
+      return answer();
+    },
+  });
+  for (const answer of [() => undefined, () => Symbol('s'), () => () => 1]) {
+    toJSONCalls = [];
+    expect(await sendHop(answering(answer))).toEqual(dropped);
+    expect(toJSONCalls).toEqual([['']]);
+  }
+  for (const answer of [
+    () => null,
+    () => '',
+    () => ({ n: BigInt(1) }),
+    () => {
+      throw new Error('toJSON failed');
+    },
+  ]) {
+    expect(await sendHop(answering(answer))).toEqual(held);
+  }
+  const array = Object.assign([1, 2], { toJSON: () => undefined });
+  expect(await sendHop(array)).toEqual(dropped);
+  expect(await sendHop([1, 2])).toEqual(held);
+  // An inherited one is read as an own one is.
+  class Silent extends Array<number> {
+    public toJSON(): undefined {
+      return undefined;
+    }
+  }
+  expect(await sendHop(Silent.from([1, 2]))).toEqual(dropped);
+});

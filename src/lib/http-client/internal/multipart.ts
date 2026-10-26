@@ -156,7 +156,10 @@ function measureMultipartFormData(
   let size = 0;
   const partSizes: number[] = [];
 
-  for (const [name, value] of formData.entries()) {
+  // Read through the intrinsic `entries`, as the client reads a form everywhere else: a
+  // subclass's or a `Proxy`'s own `entries` would report entries the form does not hold,
+  // and a `Proxy` over a form, which has no internal slots, throws here.
+  for (const [name, value] of FormData.prototype.entries.call(formData)) {
     const fieldName = formatFieldName(name);
 
     // Every part starts with its own opening boundary line.
@@ -228,10 +231,11 @@ export async function serializeMultipartFormData(
   onSourceWait?: (isWaiting: boolean) => void,
 ): Promise<void> {
   // Guarded as the reads of a part's stream are, and for the same reason: the sizing pass
-  // runs the caller's code - a `File` subclass's `name`, `type` or `size` getter, an
-  // overridden `entries()` - and a throw there, or a value of the wrong type, fails the
-  // same way on every attempt. Untagged, it reached the adapter as a transport error and
-  // was retried for an idempotent method, failing identically each time.
+  // runs the caller's code - a `File` subclass's `name`, `type` or `size` getter - and
+  // reads a form that may be none, a `Proxy` over one; a throw there, or a value of the
+  // wrong type, fails the same way on every attempt. Untagged, it reached the adapter as
+  // a transport error and was retried for an idempotent method, failing identically each
+  // time.
   let measured: { totalSize: number; partSizes: number[] };
 
   try {
@@ -292,251 +296,188 @@ export async function serializeMultipartFormData(
         )
       : writeToRequest(data);
 
-  // Walked by hand rather than with `for...of`, so every step of the caller's iterator is
-  // guarded as the sizing pass is: an `entries()` that throws on this second call, or a
-  // generator that throws part-way, fails the same way on every attempt. Closed as
-  // `for...of` closes one, on every exit but its own end or its own throw - see the
-  // `finally` below.
-  let entries: Iterator<[string, FormDataEntryValue]>;
-  let next: unknown;
+  // Read through the intrinsic `entries` again (see `measureMultipartFormData`), and live:
+  // a form changed after the sizing pass is caught against the measured sizes below.
+  for (const [name, value] of FormData.prototype.entries.call(formData)) {
+    if (req.destroyed) {
+      break;
+    }
 
-  try {
-    entries = formData.entries();
-    next = (entries as unknown as Record<string, unknown>).next;
-  } catch (error) {
-    throw sourceReadFailure(error);
-  }
+    // A string field's whole part, or a file part's headers. Read again here, so guarded
+    // again: a getter that answered the sizing pass can still throw on this one.
+    let partHead: string;
 
-  /** The iterator ended, or threw, itself: nothing left to close. */
-  let isIteratorFinished = false;
+    try {
+      const fieldName = formatFieldName(name);
 
-  try {
-    for (;;) {
-      let entry: unknown;
+      partHead =
+        typeof value === 'string'
+          ? `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`
+          : formatFilePartHeaders(fieldName, value);
+    } catch (error) {
+      throw sourceReadFailure(error);
+    }
 
-      try {
-        const step = Reflect.apply(
-          next as () => unknown,
-          entries,
-          [],
-        ) as IteratorResult<unknown>;
+    // Start this part with its boundary delimiter.
+    await write(`--${boundary}\r\n`);
 
-        // As `for...of` has it: a step that is no object is a TypeError, and the iterator
-        // that answered it is not closed.
-        if (typeof step !== 'object' || step === null) {
-          throw new TypeError(
-            'FormData entries() iterator answered a step that is not an object',
-          );
-        }
+    // Simple field: one header, blank line, then the field value. File/blob field:
+    // multipart headers first, then the binary payload below.
+    await write(partHead);
 
-        if (step.done) {
-          isIteratorFinished = true;
-          break;
-        }
-
-        entry = step.value;
-      } catch (error) {
-        isIteratorFinished = true;
-        throw sourceReadFailure(error);
+    if (typeof value !== 'string') {
+      // Compare against the sizing pass, even if the source's size later changes.
+      const partSize = partSizes[partIndex++];
+      if (partSize === undefined) {
+        throw sourceMismatch(
+          'Multipart body changed after Content-Length was calculated',
+        );
       }
+      let partBytes = 0;
 
-      let name: string;
-      let value: FormDataEntryValue;
-
+      // Blob.stream() lets us forward large files piece-by-piece instead of
+      // concatenating the whole payload into a single upload buffer.
+      // Opening it can fail as a read can (Bun opens a missing file here): see
+      // `sourceReadFailure` below.
+      let reader: ReadableStreamDefaultReader<Uint8Array>;
       try {
-        [name, value] = entry as [string, FormDataEntryValue];
+        reader = (value as Blob).stream().getReader();
       } catch (error) {
         throw sourceReadFailure(error);
       }
 
-      if (req.destroyed) {
-        break;
-      }
-
-      // A string field's whole part, or a file part's headers. Read again here, so guarded
-      // again: a getter that answered the sizing pass can still throw on this one.
-      let partHead: string;
-
       try {
-        const fieldName = formatFieldName(name);
+        while (true) {
+          if (req.destroyed) {
+            await cancelReaderQuietly(reader);
+            break;
+          }
 
-        partHead =
-          typeof value === 'string'
-            ? `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`
-            : formatFilePartHeaders(fieldName, value);
-      } catch (error) {
-        throw sourceReadFailure(error);
-      }
+          onSourceWait?.(true);
 
-      // Start this part with its boundary delimiter.
-      await write(`--${boundary}\r\n`);
+          let isDone: boolean;
+          let chunk: Uint8Array | undefined;
 
-      // Simple field: one header, blank line, then the field value. File/blob field:
-      // multipart headers first, then the binary payload below.
-      await write(partHead);
+          // A stream torn down while this read is outstanding - by the caller's side after
+          // the response, or by the peer closing - has no pending `write` to reject, so
+          // nothing would wake this writer: it stayed parked on a source that may never
+          // answer, holding the file open and leaving the upload unsettled. Cancelling the
+          // reader ends the read as done, and the `req.destroyed` checks below take it from
+          // there.
+          const cancelOnClose = (): void => {
+            void cancelReaderQuietly(reader);
+          };
 
-      if (typeof value !== 'string') {
-        // Compare against the sizing pass, even if the source's size later changes.
-        const partSize = partSizes[partIndex++];
-        if (partSize === undefined) {
-          throw sourceMismatch(
-            'Multipart body changed after Content-Length was calculated',
-          );
-        }
-        let partBytes = 0;
+          req.once('close', cancelOnClose);
 
-        // Blob.stream() lets us forward large files piece-by-piece instead of
-        // concatenating the whole payload into a single upload buffer.
-        // Opening it can fail as a read can (Bun opens a missing file here): see
-        // `sourceReadFailure` below.
-        let reader: ReadableStreamDefaultReader<Uint8Array>;
-        try {
-          reader = (value as Blob).stream().getReader();
-        } catch (error) {
-          throw sourceReadFailure(error);
-        }
+          try {
+            ({ done: isDone, value: chunk } = await reader.read());
+          } catch (error) {
+            // The caller's source failed - a `File` whose backing file is gone or
+            // unreadable - and it fails the same way on every attempt, as a source that
+            // changed size does: not a network error to retry, re-sending the headers
+            // and first boundary each time.
+            throw sourceReadFailure(error);
+          } finally {
+            req.off('close', cancelOnClose);
+            onSourceWait?.(false);
+          }
 
-        try {
-          while (true) {
-            if (req.destroyed) {
-              await cancelReaderQuietly(reader);
-              break;
-            }
+          if (isDone) {
+            break;
+          }
 
-            onSourceWait?.(true);
+          if (req.destroyed) {
+            await cancelReaderQuietly(reader);
+            break;
+          }
 
-            let isDone: boolean;
-            let chunk: Uint8Array | undefined;
+          // Refused as the caller's source failing, not handed to `req.write`: a custom
+          // `stream()` can yield anything, and the write's own refusal of a value that is
+          // not bytes was untagged - retried as a transport error - and quotes the value.
+          // Read by its internal slot rather than `instanceof`, so bytes made in another
+          // realm - a `vm` context, Jest's node environment, whose `Blob.stream()` chunks
+          // come from the host - are not mistaken for something else.
+          if (chunk !== undefined && !types.isUint8Array(chunk)) {
+            throw sourceMismatch(
+              'Request body source produced a chunk that is not a Uint8Array',
+            );
+          }
 
-            // A stream torn down while this read is outstanding - by the caller's side after
-            // the response, or by the peer closing - has no pending `write` to reject, so
-            // nothing would wake this writer: it stayed parked on a source that may never
-            // answer, holding the file open and leaving the upload unsettled. Cancelling the
-            // reader ends the read as done, and the `req.destroyed` checks below take it from
-            // there.
-            const cancelOnClose = (): void => {
-              void cancelReaderQuietly(reader);
-            };
-
-            req.once('close', cancelOnClose);
+          if (chunk !== undefined) {
+            // Every count, check and slice below is made on a plain view of the chunk's
+            // bytes, never on the chunk: a `Uint8Array` subclass from a custom `stream()`
+            // can answer `byteLength` with anything - Node's `Buffer.byteLength` reads it
+            // too, so a chunk that said 1 passed its part's size check and put its real
+            // bytes on the wire past the `Content-Length` - and can override `subarray`.
+            let bytes: Uint8Array;
 
             try {
-              ({ done: isDone, value: chunk } = await reader.read());
+              bytes = toPlainBytes(chunk);
             } catch (error) {
-              // The caller's source failed - a `File` whose backing file is gone or
-              // unreadable - and it fails the same way on every attempt, as a source that
-              // changed size does: not a network error to retry, re-sending the headers
-              // and first boundary each time.
               throw sourceReadFailure(error);
-            } finally {
-              req.off('close', cancelOnClose);
-              onSourceWait?.(false);
             }
 
-            if (isDone) {
-              break;
-            }
-
-            if (req.destroyed) {
+            // Refused *before* the write, not counted after it: a `File` that grew after
+            // the sizing pass would otherwise have its surplus on the wire past a
+            // `Content-Length` the server reads as the start of the next request, and no
+            // later check could take those bytes back. Held to this part's own measured
+            // size, so the message names the part that outgrew it; `write` holds the
+            // chunk to `partsBudget` as well. The shortfall check below the loop has no
+            // equivalent problem - bytes that were never written need no undoing.
+            if (partBytes + bytes.byteLength > partSize) {
               await cancelReaderQuietly(reader);
-              break;
-            }
 
-            // Refused as the caller's source failing, not handed to `req.write`: a custom
-            // `stream()` can yield anything, and the write's own refusal of a value that is
-            // not bytes was untagged - retried as a transport error - and quotes the value.
-            // Read by its internal slot rather than `instanceof`, so bytes made in another
-            // realm - a `vm` context, Jest's node environment, whose `Blob.stream()` chunks
-            // come from the host - are not mistaken for something else.
-            if (chunk !== undefined && !types.isUint8Array(chunk)) {
+              // What actually went on the wire, and the chunk that was refused, kept
+              // apart: counting the refused chunk into the written total would name up to
+              // a whole chunk that never left this process.
               throw sourceMismatch(
-                'Request body source produced a chunk that is not a Uint8Array',
+                `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, produced more - ${String(partBytes)} written and a further ${String(bytes.byteLength)} refused`,
               );
             }
 
-            if (chunk !== undefined) {
-              // Every count, check and slice below is made on a plain view of the chunk's
-              // bytes, never on the chunk: a `Uint8Array` subclass from a custom `stream()`
-              // can answer `byteLength` with anything - Node's `Buffer.byteLength` reads it
-              // too, so a chunk that said 1 passed its part's size check and put its real
-              // bytes on the wire past the `Content-Length` - and can override `subarray`.
-              let bytes: Uint8Array;
+            // Written in slices of the size the bytes writer uses, each awaited. Node's
+            // `Blob.stream()` yields an in-memory `Blob` as one chunk - a whole 64 MiB
+            // `File` in a single write - and progress is counted on a write's callback,
+            // so that upload reported nothing between 0 and 100%, and the stall watchdog,
+            // which reads that progress, destroyed an upload the server had acked early
+            // and was still reading. The slices are views, not copies.
+            for (
+              let offset = 0;
+              offset < bytes.byteLength && !req.destroyed;
+              offset += REQUEST_BODY_CHUNK_SIZE
+            ) {
+              const slice = bytes.subarray(
+                offset,
+                offset + REQUEST_BODY_CHUNK_SIZE,
+              );
 
-              try {
-                bytes = toPlainBytes(chunk);
-              } catch (error) {
-                throw sourceReadFailure(error);
-              }
-
-              // Refused *before* the write, not counted after it: a `File` that grew after
-              // the sizing pass would otherwise have its surplus on the wire past a
-              // `Content-Length` the server reads as the start of the next request, and no
-              // later check could take those bytes back. Held to this part's own measured
-              // size, so the message names the part that outgrew it; `write` holds the
-              // chunk to `partsBudget` as well. The shortfall check below the loop has no
-              // equivalent problem - bytes that were never written need no undoing.
-              if (partBytes + bytes.byteLength > partSize) {
-                await cancelReaderQuietly(reader);
-
-                // What actually went on the wire, and the chunk that was refused, kept
-                // apart: counting the refused chunk into the written total would name up to
-                // a whole chunk that never left this process.
-                throw sourceMismatch(
-                  `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, produced more - ${String(partBytes)} written and a further ${String(bytes.byteLength)} refused`,
-                );
-              }
-
-              // Written in slices of the size the bytes writer uses, each awaited. Node's
-              // `Blob.stream()` yields an in-memory `Blob` as one chunk - a whole 64 MiB
-              // `File` in a single write - and progress is counted on a write's callback,
-              // so that upload reported nothing between 0 and 100%, and the stall watchdog,
-              // which reads that progress, destroyed an upload the server had acked early
-              // and was still reading. The slices are views, not copies.
-              for (
-                let offset = 0;
-                offset < bytes.byteLength && !req.destroyed;
-                offset += REQUEST_BODY_CHUNK_SIZE
-              ) {
-                const slice = bytes.subarray(
-                  offset,
-                  offset + REQUEST_BODY_CHUNK_SIZE,
-                );
-
-                await write(slice);
-                partBytes += slice.byteLength;
-              }
+              await write(slice);
+              partBytes += slice.byteLength;
             }
           }
-        } finally {
-          // Unconditionally, not only when the stream was destroyed. `await write(chunk)`
-          // above can reject without anything being destroyed - the write callback delivers
-          // an error, or an `'error'` event fires - and that rejection leaves this block
-          // with the reader still locked and the blob's underlying stream never cancelled,
-          // which for a disk-backed `File` is a handle held for the life of the process.
-          // Cancelling a reader whose stream has already closed is a no-op, so the ordinary
-          // `isDone` exit costs nothing by coming through here too.
-          await cancelReaderQuietly(reader);
         }
-
-        if (!req.destroyed && partBytes !== partSize) {
-          throw sourceMismatch(
-            `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, received ${String(partBytes)}`,
-          );
-        }
-
-        if (!req.destroyed) {
-          // Multipart parts are separated by CRLF after the value bytes too.
-          await write('\r\n');
-        }
+      } finally {
+        // Unconditionally, not only when the stream was destroyed. `await write(chunk)`
+        // above can reject without anything being destroyed - the write callback delivers
+        // an error, or an `'error'` event fires - and that rejection leaves this block
+        // with the reader still locked and the blob's underlying stream never cancelled,
+        // which for a disk-backed `File` is a handle held for the life of the process.
+        // Cancelling a reader whose stream has already closed is a no-op, so the ordinary
+        // `isDone` exit costs nothing by coming through here too.
+        await cancelReaderQuietly(reader);
       }
-    }
-  } finally {
-    // An early exit - a part that outgrew its size, a destroyed stream, a write that
-    // failed - leaves a generator suspended at its `yield`, with its own `finally` never
-    // run: whatever it holds open stays open. Closed quietly, so its own failure cannot
-    // replace the one already on its way out.
-    if (!isIteratorFinished) {
-      closeIteratorQuietly(entries);
+
+      if (!req.destroyed && partBytes !== partSize) {
+        throw sourceMismatch(
+          `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, received ${String(partBytes)}`,
+        );
+      }
+
+      if (!req.destroyed) {
+        // Multipart parts are separated by CRLF after the value bytes too.
+        await write('\r\n');
+      }
     }
   }
 
@@ -602,35 +543,6 @@ function toPlainBytes(chunk: Uint8Array): Uint8Array {
     readIntrinsic('byteOffset') as number,
     readIntrinsic('byteLength') as number,
   );
-}
-
-/** Close a caller's iterator left part-way, as `for...of` does, ignoring its failure. */
-function closeIteratorQuietly(iterator: Iterator<unknown>): void {
-  try {
-    const close: unknown = (iterator as unknown as Record<string, unknown>)
-      .return;
-
-    if (typeof close === 'function') {
-      const result: unknown = Reflect.apply(close, iterator, []);
-
-      // A `return()` that answers a promise and rejects it would otherwise surface as an
-      // unhandled rejection - a crash under Node's default - for a request already ending.
-      if (
-        (typeof result === 'object' || typeof result === 'function') &&
-        result !== null &&
-        typeof (result as { then?: unknown }).then === 'function'
-      ) {
-        Reflect.apply(
-          (result as { then: unknown }).then as () => unknown,
-          result,
-          [undefined, () => undefined],
-        );
-      }
-    }
-  } catch {
-    // Best-effort, as `for...of` treats a `return()` that throws on an exit already
-    // failing. The request's own outcome stands.
-  }
 }
 
 async function cancelReaderQuietly(

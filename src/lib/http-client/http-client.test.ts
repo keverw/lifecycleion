@@ -1617,7 +1617,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     };
 
     expect(() => new HTTPClient({ adapter, followRedirects: true })).toThrow(
-      /redirect handling is not supported with XHR adapter/i,
+      /redirect handling is not supported with XHRAdapter/i,
     );
   });
 
@@ -1734,7 +1734,7 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(
       () => new HTTPClient({ adapter, cookieJar: new CookieJar() }),
-    ).toThrow(/cookieJar is not supported with XHR adapter/i);
+    ).toThrow(/cookieJar is not supported with XHRAdapter/i);
   });
 
   test('rejects userAgent with browser XHR adapter at construction time', () => {
@@ -1754,7 +1754,7 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(
       () => new HTTPClient({ adapter, userAgent: 'test-agent/1.0' }),
-    ).toThrow(/userAgent is not supported with XHR adapter/i);
+    ).toThrow(/userAgent is not supported with XHRAdapter/i);
   });
 
   test('rejects Node adapter in browser environments at construction time', () => {

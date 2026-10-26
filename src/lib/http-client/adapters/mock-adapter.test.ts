@@ -390,6 +390,32 @@ describe('MockAdapter via HTTPClient', () => {
     ).toBe('c');
   });
 
+  test('PR review round 75: a FormData body is read through the intrinsic entries, not one the form declares', async () => {
+    let captured: MockFormData | undefined;
+
+    adapter.routes.post('/upload', (req) => {
+      captured = req.body as MockFormData | undefined;
+      return { status: 200 };
+    });
+
+    const fd = new FormData();
+    fd.append('held', 'value');
+    Object.defineProperty(fd, 'entries', {
+      value: (): Iterator<[string, string]> =>
+        [['reported', 'not held'] as [string, string]][Symbol.iterator](),
+    });
+
+    // Driven directly: the client hands an adapter its own copy of the form.
+    await adapter.send({
+      requestURL: 'http://mock.test/upload',
+      method: 'POST',
+      headers: {},
+      body: fd,
+    });
+
+    expect(captured?.fields).toEqual({ held: 'value' });
+  });
+
   // --- cookies ---
 
   test('CookieJar cookies are visible in req.headers.cookie and req.cookies', async () => {

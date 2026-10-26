@@ -12,6 +12,14 @@ export function asciiUppercase(text: string): string {
 }
 
 /**
+ * `text` with its ASCII letters lowercased, and nothing else: `toLowerCase` would also
+ * turn `TRAC\u212A` (KELVIN SIGN) into `track`.
+ */
+export function asciiLowercase(text: string): string {
+  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}
+
+/**
  * What is wrong with `method` as a method name - completing "the method …" - or
  * `undefined` when nothing is: a method is a non-empty RFC 9110 token. Never the method
  * itself, which may be text pasted in whole. The rule `request()` and every adapter hold

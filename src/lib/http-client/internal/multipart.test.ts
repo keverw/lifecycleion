@@ -11,6 +11,12 @@ import {
 import type { RequestBodyWritable } from './request-body-writable';
 import { REQUEST_BODY_CHUNK_SIZE } from './request-body-writer';
 import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
+import {
+  scriptFormEntries,
+  useScriptedFormEntries,
+} from '../test-helpers/scripted-form-entries';
+
+useScriptedFormEntries();
 
 interface CapturedWrite {
   data: Buffer;
@@ -423,9 +429,9 @@ describe('serializeMultipartFormData', () => {
     // loop exits through `isDone`, every delimiter is written, and the body used to go out
     // short of the length already on the wire. Node does not check a `ClientRequest` for a
     // shortfall, so the caller hangs on a server waiting for bytes that never come.
-    // A stub rather than a real `FormData`: `append(name, blob, filename)` builds a fresh
-    // `File` from the blob per spec, so a subclass overriding `size` and `stream` does not
-    // survive being put in one. Both passes only ever call `entries()`, then read `name`,
+    // Scripted rather than appended (see `scriptFormEntries`): `append(name, blob,
+    // filename)` builds a fresh `File` from the blob per spec, so a subclass overriding
+    // `size` and `stream` does not survive being put in one. Both passes read only `name`,
     // `type`, `size` and `stream()` off the value.
     const shortFile = {
       name: 'short.bin',
@@ -441,9 +447,9 @@ describe('serializeMultipartFormData', () => {
         }),
     };
 
-    const fd = {
-      entries: () => [['file', shortFile]][Symbol.iterator](),
-    } as unknown as FormData;
+    const fd = scriptFormEntries(new FormData(), () =>
+      [['file', shortFile]][Symbol.iterator](),
+    );
 
     const { req, headers } = makeCapture();
     const boundary = generateMultipartBoundary();
@@ -479,9 +485,9 @@ describe('serializeMultipartFormData', () => {
         }),
     };
 
-    const fd = {
-      entries: () => [['file', longFile]][Symbol.iterator](),
-    } as unknown as FormData;
+    const fd = scriptFormEntries(new FormData(), () =>
+      [['file', longFile]][Symbol.iterator](),
+    );
 
     const { req } = makeCapture();
     const boundary = generateMultipartBoundary();
@@ -551,35 +557,33 @@ describe('serializeMultipartFormData', () => {
     let isDestroyed = false;
     let didSeeFirstBinaryChunk = false;
     let binaryChunkWriteCount = 0;
-    const fd = {
-      *entries() {
-        yield [
-          'upload',
-          {
-            name: 'video.bin',
-            type: 'application/octet-stream',
-            size: chunks.reduce((total, chunk) => total + chunk.length, 0),
-            stream() {
-              return new ReadableStream<Uint8Array>({
-                pull(controller) {
-                  const chunk = chunks[readCount++];
+    const fd = scriptFormEntries(new FormData(), function* () {
+      yield [
+        'upload',
+        {
+          name: 'video.bin',
+          type: 'application/octet-stream',
+          size: chunks.reduce((total, chunk) => total + chunk.length, 0),
+          stream() {
+            return new ReadableStream<Uint8Array>({
+              pull(controller) {
+                const chunk = chunks[readCount++];
 
-                  if (chunk) {
-                    controller.enqueue(chunk);
-                    return;
-                  }
+                if (chunk) {
+                  controller.enqueue(chunk);
+                  return;
+                }
 
-                  controller.close();
-                },
-                cancel() {
-                  cancelCount++;
-                },
-              });
-            },
+                controller.close();
+              },
+              cancel() {
+                cancelCount++;
+              },
+            });
           },
-        ];
-      },
-    } as unknown as FormData;
+        },
+      ];
+    });
 
     const req: RequestBodyWritable = {
       get destroyed() {
@@ -1058,32 +1062,30 @@ describe('serializeMultipartFormData', () => {
     let cancelCount = 0;
     let isDestroyed = false;
 
-    const fd = {
-      *entries() {
-        yield [
-          'upload',
-          {
-            name: 'data.bin',
-            type: 'application/octet-stream',
-            size: 3,
-            stream() {
-              return new ReadableStream<Uint8Array>({
-                pull(controller) {
-                  readCount++;
-                  // Set destroyed before the chunk value reaches the caller so
-                  // the post-read req.destroyed check (lines 380-382) fires.
-                  isDestroyed = true;
-                  controller.enqueue(new Uint8Array([1, 2, 3]));
-                },
-                cancel() {
-                  cancelCount++;
-                },
-              });
-            },
+    const fd = scriptFormEntries(new FormData(), function* () {
+      yield [
+        'upload',
+        {
+          name: 'data.bin',
+          type: 'application/octet-stream',
+          size: 3,
+          stream() {
+            return new ReadableStream<Uint8Array>({
+              pull(controller) {
+                readCount++;
+                // Set destroyed before the chunk value reaches the caller so
+                // the post-read req.destroyed check (lines 380-382) fires.
+                isDestroyed = true;
+                controller.enqueue(new Uint8Array([1, 2, 3]));
+              },
+              cancel() {
+                cancelCount++;
+              },
+            });
           },
-        ];
-      },
-    } as unknown as FormData;
+        },
+      ];
+    });
 
     const req: RequestBodyWritable = {
       get destroyed() {
@@ -1211,13 +1213,12 @@ test.each([
           },
         }),
     });
-    const form = {
-      entries: () =>
-        [
-          ['first', part(firstSize)],
-          ['second', part(secondSize)],
-        ][Symbol.iterator](),
-    } as unknown as FormData;
+    const form = scriptFormEntries(new FormData(), () =>
+      [
+        ['first', part(firstSize)],
+        ['second', part(secondSize)],
+      ][Symbol.iterator](),
+    );
     const capture = makeCapture();
     let failure: unknown;
     try {
@@ -1250,9 +1251,9 @@ test('uses the original part size even when size changes after the sizing pass',
         },
       }),
   };
-  const form = {
-    entries: () => [['file', file]][Symbol.iterator](),
-  } as unknown as FormData;
+  const form = scriptFormEntries(new FormData(), () =>
+    [['file', file]][Symbol.iterator](),
+  );
   const capture = makeCapture();
   let failure: unknown;
   try {
@@ -1269,13 +1270,12 @@ test('round 129: a File named "" is sent as filename="", one with no name as blo
   // where Node's keeps `''`.
   const emptyNamed = Object.assign(new Blob(['x']), { name: '' });
   const unnamed = new Blob(['y']);
-  const fd = {
-    entries: () =>
-      [
-        ['empty', emptyNamed],
-        ['unnamed', unnamed],
-      ][Symbol.iterator](),
-  } as unknown as FormData;
+  const fd = scriptFormEntries(new FormData(), () =>
+    [
+      ['empty', emptyNamed],
+      ['unnamed', unnamed],
+    ][Symbol.iterator](),
+  );
   const { req, getBody } = makeCapture();
   const boundary = generateMultipartBoundary();
 
@@ -1330,9 +1330,9 @@ test('PR review round 37: a File that outgrows its measured size is refused nami
         },
       }),
   };
-  const fd = {
-    entries: () => [['file', longFile]][Symbol.iterator](),
-  } as unknown as FormData;
+  const fd = scriptFormEntries(new FormData(), () =>
+    [['file', longFile]][Symbol.iterator](),
+  );
   const { req, getBody } = makeCapture();
   const boundary = generateMultipartBoundary();
 
@@ -1382,10 +1382,8 @@ test('PR review round 37: a chunk within its part but past the body total is ref
   // Read live, as a FormData is: the second part is swapped for one whose filename is
   // three bytes longer once the first part's bytes go out. Its headers still fit in the
   // bytes its payload was measured at; its payload, the right size for its part, does not.
-  const fd = {
-    // An array's iterator reads each index as it reaches it.
-    entries: () => parts[Symbol.iterator](),
-  } as unknown as FormData;
+  // An array's iterator reads each index as it reaches it.
+  const fd = scriptFormEntries(new FormData(), () => parts[Symbol.iterator]());
   const { req, getBody } = makeCapture();
   const boundary = generateMultipartBoundary();
   const write = req.write.bind(req);
@@ -1417,10 +1415,8 @@ describe('PR review round 54: caller values the writer cannot use are refused as
   const formWith = (part: unknown): FormData => {
     const fd = new FormData();
 
-    Object.defineProperty(fd, 'entries', {
-      value: function* (): Generator<[string, unknown]> {
-        yield ['file', part];
-      },
+    scriptFormEntries(fd, function* (): Generator<[string, unknown]> {
+      yield ['file', part];
     });
 
     return fd;
@@ -1498,20 +1494,11 @@ describe('PR review round 54: caller values the writer cannot use are refused as
     expect(error.message).toBe('Request body source could not be read');
   });
 
-  test('an entries() that throws', async () => {
-    const failure = new Error('entries failed');
-    const fd = new FormData();
-
-    Object.defineProperty(fd, 'entries', {
-      value: () => {
-        throw failure;
-      },
-    });
-
-    const { error, written } = await failureOf(fd);
+  test('a form its entries cannot be read from: a Proxy over one', async () => {
+    const { error, written } = await failureOf(new Proxy(new FormData(), {}));
 
     expect(written).toBe(0);
-    expect(error.cause).toBe(failure);
+    expect(error.cause).toBeInstanceOf(TypeError);
   });
 
   test('a stream() that yields a chunk that is not a Uint8Array', async () => {
@@ -1536,7 +1523,7 @@ describe('PR review round 54: caller values the writer cannot use are refused as
   });
 });
 
-describe('PR review round 54: source chunks and entries the writing pass reads', () => {
+describe('PR review round 54: source chunks the writing pass reads', () => {
   test('a stream() that yields the whole part as one chunk is written in REQUEST_BODY_CHUNK_SIZE slices', async () => {
     // Node's `Blob.stream()` yields an in-memory `Blob` as a single chunk. Written as one
     // `req.write`, a 64 MiB `File` reported no progress between 0 and 100%, and the
@@ -1558,10 +1545,8 @@ describe('PR review round 54: source chunks and entries the writing pass reads',
 
     const fd = new FormData();
 
-    Object.defineProperty(fd, 'entries', {
-      value: function* (): Generator<[string, unknown]> {
-        yield ['file', new OneChunkFile([source], 'one.bin')];
-      },
+    scriptFormEntries(fd, function* (): Generator<[string, unknown]> {
+      yield ['file', new OneChunkFile([source], 'one.bin')];
     });
 
     const { req, writes, getBody } = makeCapture();
@@ -1606,10 +1591,8 @@ describe('PR review round 54: source chunks and entries the writing pass reads',
 
     const fd = new FormData();
 
-    Object.defineProperty(fd, 'entries', {
-      value: function* (): Generator<[string, unknown]> {
-        yield ['file', new ForeignChunkFile([new Uint8Array(3)], 'f.bin')];
-      },
+    scriptFormEntries(fd, function* (): Generator<[string, unknown]> {
+      yield ['file', new ForeignChunkFile([new Uint8Array(3)], 'f.bin')];
     });
 
     const { req, getBody } = makeCapture();
@@ -1617,45 +1600,6 @@ describe('PR review round 54: source chunks and entries the writing pass reads',
     await serializeMultipartFormData(fd, req, generateMultipartBoundary());
 
     expect(getBody().includes(Buffer.from([1, 2, 3]))).toBe(true);
-  });
-
-  test('an entries() generator that throws part-way through the writing pass is refused as non-retryable', async () => {
-    // The sizing pass's `entries()` was guarded; the writing pass walked its own call with
-    // `for...of`, so a generator that answered the first pass and threw on the second went
-    // out untagged, as a transport error.
-    const failure = new Error('entries failed');
-    let calls = 0;
-    const fd = new FormData();
-
-    Object.defineProperty(fd, 'entries', {
-      value: function* (): Generator<[string, unknown]> {
-        calls++;
-        yield ['a', 'one'];
-
-        if (calls > 1) {
-          throw failure;
-        }
-
-        yield ['b', 'two'];
-      },
-    });
-
-    const { req } = makeCapture();
-    let caught: unknown;
-
-    try {
-      await serializeMultipartFormData(fd, req, generateMultipartBoundary());
-    } catch (error) {
-      caught = error;
-    }
-
-    expect(caught).toBeInstanceOf(Error);
-    expect(
-      (caught as Record<string, unknown>)[
-        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
-      ],
-    ).toBe(true);
-    expect((caught as Error).cause).toBe(failure);
   });
 });
 
@@ -1686,10 +1630,8 @@ describe('PR review round 54: source chunks are counted and sliced as the bytes 
 
     const fd = new FormData();
 
-    Object.defineProperty(fd, 'entries', {
-      value: function* (): Generator<[string, unknown]> {
-        yield ['file', new ChunkedFile([], 'chunked.bin')];
-      },
+    scriptFormEntries(fd, function* (): Generator<[string, unknown]> {
+      yield ['file', new ChunkedFile([], 'chunked.bin')];
     });
 
     return fd;
@@ -1856,146 +1798,30 @@ describe('PR review round 54: source chunks are counted and sliced as the bytes 
     ).toBe(true);
     expect(capture.getBody().includes(0x7a)).toBe(false);
   });
+});
 
-  test.each([
-    ['a part that outgrows its size', 'overrun'],
-    ['a stream destroyed mid-body', 'destroy'],
-  ])(
-    'the entries iterator is closed on an early exit: %s',
-    async (_label, exit) => {
-      const closed: boolean[] = [];
-      let calls = 0;
+test('PR review round 75: a form is read through the intrinsic entries, not one it declares', async () => {
+  const reported = (): Iterator<[string, string]> =>
+    [['reported', 'not held'] as [string, string]][Symbol.iterator]();
+  // A subclass's `entries`, and a form's own.
+  class Reporting extends FormData {}
+  Object.defineProperty(Reporting.prototype, 'entries', { value: reported });
+  const subclass = new Reporting();
+  subclass.append('held', 'value');
+  const ownEntries = new FormData();
+  ownEntries.append('held', 'value');
+  Object.defineProperty(ownEntries, 'entries', { value: reported });
 
-      class FiveBytes extends File {
-        public override get size(): number {
-          return exit === 'overrun' ? 1 : 5;
-        }
+  for (const fd of [subclass, ownEntries]) {
+    const { req, headers, getBody } = makeCapture();
+    const boundary = generateMultipartBoundary();
 
-        public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-          return new ReadableStream({
-            start(controller) {
-              controller.enqueue(new Uint8Array(5));
-              controller.close();
-            },
-          });
-        }
-      }
+    await serializeMultipartFormData(fd, req, boundary);
+    const body = getBody().toString();
 
-      const fd = new FormData();
-
-      Object.defineProperty(fd, 'entries', {
-        value: function* (): Generator<[string, unknown]> {
-          const call = calls++;
-
-          closed[call] = false;
-
-          try {
-            yield ['file', new FiveBytes([], 'a.bin')];
-            yield ['b', 'c'];
-          } finally {
-            closed[call] = true;
-          }
-        },
-      });
-
-      const capture = makeCapture();
-
-      if (exit === 'destroy') {
-        const { req } = capture;
-        const write = req.write.bind(req);
-
-        req.write = (data, callback) => {
-          const canContinue = write(data, callback);
-
-          if (typeof data !== 'string') {
-            (req as { destroyed: boolean }).destroyed = true;
-          }
-
-          return canContinue;
-        };
-      }
-
-      const { error } = await send(fd, capture);
-
-      expect(error).toBeInstanceOf(Error);
-      // The sizing pass's `for...of` and the writing pass's own walk both.
-      expect(closed).toEqual([true, true]);
-    },
-  );
-
-  // Sizing pass first (a real `for...of`), then the writing pass's own walk.
-  const formWithWritingPass = (
-    writingPass: () => Iterator<[string, unknown]>,
-  ): FormData => {
-    const fd = new FormData();
-    let calls = 0;
-
-    Object.defineProperty(fd, 'entries', {
-      value: (): Iterator<[string, unknown]> =>
-        calls++ === 0
-          ? ([['a', 'b']] as Array<[string, unknown]>)[Symbol.iterator]()
-          : writingPass(),
-    });
-
-    return fd;
-  };
-
-  test('PR review round 54: a return() that rejects on an early exit is not left unhandled', async () => {
-    const unhandled: unknown[] = [];
-    const onUnhandled = (reason: unknown): void => {
-      unhandled.push(reason);
-    };
-
-    process.on('unhandledRejection', onUnhandled);
-
-    try {
-      const capture = makeCapture();
-      const { req } = capture;
-      const write = req.write.bind(req);
-
-      req.write = (data, callback) => {
-        (req as { destroyed: boolean }).destroyed = true;
-
-        return write(data, callback);
-      };
-
-      const { error } = await send(
-        formWithWritingPass(
-          () =>
-            ({
-              next: () => ({ done: false, value: ['a', 'b'] }),
-              return: () => Promise.reject(new Error('return rejected')),
-            }) as unknown as Iterator<[string, unknown]>,
-        ),
-        capture,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      expect(error).toBeInstanceOf(Error);
-      expect(unhandled).toEqual([]);
-    } finally {
-      process.off('unhandledRejection', onUnhandled);
-    }
-  });
-
-  test('PR review round 54: a step that is not an object is refused without closing its iterator', async () => {
-    let returnCalls = 0;
-    const { error } = await send(
-      formWithWritingPass(
-        () =>
-          ({
-            next: () => 5,
-            return: () => {
-              returnCalls++;
-              return { done: true, value: undefined };
-            },
-          }) as unknown as Iterator<[string, unknown]>,
-      ),
-    );
-
-    expect(
-      (error as Record<string, unknown>)[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG],
-    ).toBe(true);
-    expect(returnCalls).toBe(0);
-  });
+    expect(body).toContain('name="held"\r\n\r\nvalue\r\n');
+    expect(body).not.toContain('reported');
+    expect(headers['content-length']).toBe(String(getBody().length));
+    expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+  }
 });

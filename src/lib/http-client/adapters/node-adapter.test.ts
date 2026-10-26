@@ -35,6 +35,10 @@ import type {
   WritableLike,
 } from '../types';
 import { startTestServer } from '../test-helpers/test-server';
+import {
+  scriptFormEntries,
+  useScriptedFormEntries,
+} from '../test-helpers/scripted-form-entries';
 import { errorText } from '../test-helpers/error-text';
 import type { TestServer } from '../test-helpers/test-server';
 import {
@@ -46,6 +50,8 @@ import {
   getTestCACert,
 } from '../test-helpers/https-test-server';
 import type { TlsTestServer } from '../test-helpers/https-test-server';
+
+useScriptedFormEntries();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -8750,11 +8756,11 @@ test('PR review round 54: a FormData part whose getter throws in the sizing pass
     const fd = new FormData();
     const part = new ThrowingTypeFile([new Uint8Array(4)], 'part.bin');
 
-    // Yielded as it is, for the same reason.
-    Object.defineProperty(fd, 'entries', {
-      value: function* (): Generator<[string, FormDataEntryValue]> {
-        yield ['file', part];
-      },
+    // Yielded as it is, for the same reason (see `scriptFormEntries`).
+    scriptFormEntries(fd, function* (): Generator<
+      [string, FormDataEntryValue]
+    > {
+      yield ['file', part];
     });
 
     let outcome: unknown;

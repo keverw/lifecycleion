@@ -1,5 +1,6 @@
 import { isNullish } from '../../internal/is-nullish';
 import { isRealmRootPrototype } from './plain-record';
+import { copyArrayValue } from './array-copy';
 import {
   isGlobalHostPattern,
   normalizeFilterMethods,
@@ -230,7 +231,10 @@ function copyFilterLists(
       );
     }
     const allowed = field === 'phases' ? kind.phases : rule.allowed;
-    const list = [...(value as unknown[])];
+    // Read by index (see `copyArrayValue`), not through the caller's iterator, which
+    // could yield entries other than those checked; a hole is read as the `undefined` it
+    // is, and refused.
+    const list = copyArrayValue(value as unknown[]);
     // Refused rather than given a meaning: an empty list read as "match nothing" leaves a
     // callback that never runs, and read as "match everything" turns `hosts: []` from a
     // config with no hosts into a callback that runs for every host. `phases: []` keeps

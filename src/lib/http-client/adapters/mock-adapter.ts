@@ -1108,7 +1108,9 @@ function extractFormData(fd: FormData): MockFormData {
   const allFields: Record<string, string[]> = {};
   const allFiles: Record<string, File[]> = {};
 
-  for (const [key, value] of fd.entries()) {
+  // Read through the intrinsic `entries`, as the client reads a form everywhere else: a
+  // subclass's or the form's own `entries` would report entries the form does not hold.
+  for (const [key, value] of FormData.prototype.entries.call(fd)) {
     // Defined, not assigned: a `__proto__` field would otherwise vanish, and a
     // `__proto__` file would become the record's prototype.
     if (typeof value === 'string') {

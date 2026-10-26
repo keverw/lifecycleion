@@ -107,13 +107,41 @@ export function isCopySerializingToNothing(body: unknown): boolean {
  * (see `jsonTextByCopy`), or serialized now for any other value. Throws as
  * `JSON.stringify` throws on it.
  */
-export function jsonTextOf(body: object): string | undefined {
+function jsonTextOf(body: object): string | undefined {
   if (jsonTextByCopy.has(body)) {
     return jsonTextByCopy.get(body);
   }
 
   const text: unknown = JSON.stringify(body);
   return typeof text === 'string' ? text : undefined;
+}
+
+/**
+ * Whether a JSON body - a plain object or an array - serializes to nothing, as
+ * `JSON.stringify(body) === undefined` would answer, without serializing it: a copy's own
+ * record (see `jsonTextByCopy`), or for any other value its top-level `toJSON`, own or
+ * inherited, read once and called once with the key `''`, as `JSON.stringify` calls it.
+ * Only an answer `JSON.stringify` writes nothing for - `undefined`, a symbol or a function
+ * - serializes to nothing; a body with no `toJSON`, or one answering anything else, is
+ * serialized to text or throws, and is not read further. Throws as reading or calling its
+ * `toJSON` throws.
+ */
+export function serializesToNothing(body: object): boolean {
+  if (jsonTextByCopy.has(body)) {
+    return jsonTextByCopy.get(body) === undefined;
+  }
+
+  const toJSON: unknown = (body as { toJSON?: unknown }).toJSON;
+  if (typeof toJSON !== 'function') {
+    return false;
+  }
+
+  const value: unknown = Reflect.apply(toJSON, body, ['']);
+  return (
+    typeof value === 'undefined' ||
+    typeof value === 'symbol' ||
+    typeof value === 'function'
+  );
 }
 
 /**
