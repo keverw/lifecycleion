@@ -2106,3 +2106,127 @@ describe('FetchAdapter - PR review round 65', () => {
     expect([...body]).toEqual([1, 2, 3, 4, 5]);
   });
 });
+
+describe('FetchAdapter - PR review round 66', () => {
+  /** A `fetch` answering with a web stream of `chunks`, read under `maxResponseBytes`. */
+  async function sendStreamed(chunks: unknown[], maxResponseBytes: number) {
+    let isCancelled = false;
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              for (const chunk of chunks) {
+                controller.enqueue(chunk);
+              }
+              controller.close();
+            },
+            cancel() {
+              isCancelled = true;
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes,
+    });
+
+    return { response, isCancelled };
+  }
+
+  test('PR review round 66: a chunk that is not a Uint8Array fails the body read as arrayBuffer() does, not as zeros', async () => {
+    // How the unlimited path fails for the same stream where `arrayBuffer()` follows the
+    // Fetch standard (Node's undici, browsers): it rejects with a `TypeError`.
+    (globalThis as any).fetch = () => {
+      const response = new Response('', { status: 200 });
+      Object.defineProperty(response, 'arrayBuffer', {
+        value: () =>
+          Promise.reject(new TypeError('Received non-Uint8Array chunk')),
+      });
+      return Promise.resolve(response);
+    };
+    const unlimited = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(unlimited.isStreamError).toBe(true);
+    expect(unlimited.streamErrorCode).toBe('stream_response_error');
+    expect(unlimited.errorCause).toBeInstanceOf(TypeError);
+
+    for (const chunk of [
+      new Uint8Array([1, 2, 3]).buffer,
+      new DataView(new Uint8Array([1, 2, 3]).buffer),
+      new Uint16Array([1, 2]),
+      'abc',
+      { byteLength: 3 },
+    ]) {
+      // A chunk after it, so the stream is still open to be let go of.
+      const { response, isCancelled } = await sendStreamed(
+        [new Uint8Array([9]), chunk, new Uint8Array([9])],
+        100,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBeNull();
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe(unlimited.streamErrorCode);
+      expect(response.errorCause).toBeInstanceOf(TypeError);
+      expect(isCancelled).toBe(true);
+    }
+  });
+
+  test('PR review round 66: a chunk is counted by the bytes it holds, not the byteLength it reports', async () => {
+    class Understated extends Uint8Array {
+      public override get byteLength(): number {
+        return 0;
+      }
+    }
+
+    const { response } = await sendStreamed([new Understated(200)], 100);
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+
+    const joined = await sendStreamed(
+      [new Understated([1, 2]), new Uint8Array([3])],
+      100,
+    );
+
+    expect([...(joined.response.body as Uint8Array)]).toEqual([1, 2, 3]);
+  });
+
+  test('PR review round 66: a Uint8Array chunk from another realm is read as one', async () => {
+    const { runInNewContext } = await import('node:vm');
+    const foreign = runInNewContext('new Uint8Array([4, 5, 6])') as Uint8Array;
+    const { response } = await sendStreamed([foreign], 100);
+
+    expect([...(response.body as Uint8Array)]).toEqual([4, 5, 6]);
+  });
+
+  test("PR review round 66: a polyfilled fetch's Readable that yields text is still read as its UTF-8 bytes", async () => {
+    const { Readable } = await import('node:stream');
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body: Readable.from(['hé', 'llo']),
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+    });
+
+    expect(decoder.decode(response.body as Uint8Array)).toBe('héllo');
+  });
+});

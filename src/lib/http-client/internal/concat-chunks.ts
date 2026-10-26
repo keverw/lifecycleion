@@ -1,11 +1,19 @@
+import {
+  arrayBufferKindOf,
+  readBinaryByteLength,
+} from '../../internal/binary-view';
+
 /**
- * `chunks` joined into one fresh array of `byteLength` bytes, copied once. Fresh, not a
- * view: a `Buffer` from Node's pool shares its `ArrayBuffer` with other data.
+ * `chunks` joined into one plain `Uint8Array` of `byteLength` bytes that spans a
+ * fixed-length `ArrayBuffer` of its own, copied once. Not a view: a `Buffer` from Node's
+ * pool shares its `ArrayBuffer` with other data. Each chunk is placed by the length its
+ * internal slot holds, not the `byteLength` it reports.
  *
- * A lone chunk that is a plain `Uint8Array` spanning the whole of its own buffer - a web
- * stream's, as the runtime's `fetch` hands one over - shares it with nothing there, so it
- * is the result as it is, not copied. A `Buffer`, pooled or not, is always copied: the result is a plain
- * `Uint8Array` either way.
+ * A lone chunk that already is that - a plain `Uint8Array` spanning the whole of a plain,
+ * fixed-length, unshared `ArrayBuffer`, as a web stream's chunk from the runtime's `fetch`
+ * is - shares it with nothing there, so it is the result as it is, not copied. A `Buffer`,
+ * pooled or not, is always copied, as is a chunk over a resizable or shared buffer: the
+ * result is a plain `Uint8Array` over a plain `ArrayBuffer` either way.
  */
 export function concatChunks(
   chunks: readonly Uint8Array[],
@@ -14,12 +22,7 @@ export function concatChunks(
   if (chunks.length === 1) {
     const [only] = chunks;
 
-    if (
-      Object.getPrototypeOf(only) === Uint8Array.prototype &&
-      only.byteOffset === 0 &&
-      only.byteLength === byteLength &&
-      byteLength === only.buffer.byteLength
-    ) {
+    if (isWholeOfPlainBuffer(only, byteLength)) {
       return only;
     }
   }
@@ -29,8 +32,33 @@ export function concatChunks(
 
   for (const chunk of chunks) {
     bytes.set(chunk, offset);
-    offset += chunk.byteLength;
+    offset += readBinaryByteLength(chunk) ?? 0;
   }
 
   return bytes;
+}
+
+/**
+ * Whether `chunk` is a plain `Uint8Array` of `byteLength` bytes spanning the whole of a
+ * plain `ArrayBuffer` that is neither resizable nor shared. Read through the intrinsic
+ * getters, so a value's own claims about its buffer or extent count for nothing.
+ */
+function isWholeOfPlainBuffer(chunk: Uint8Array, byteLength: number): boolean {
+  if (
+    Object.getPrototypeOf(chunk) !== Uint8Array.prototype ||
+    Reflect.get(Uint8Array.prototype, 'byteOffset', chunk) !== 0 ||
+    readBinaryByteLength(chunk) !== byteLength
+  ) {
+    return false;
+  }
+
+  const buffer = Reflect.get(Uint8Array.prototype, 'buffer', chunk) as object;
+
+  return (
+    Object.getPrototypeOf(buffer) === ArrayBuffer.prototype &&
+    arrayBufferKindOf(buffer) === 'ArrayBuffer' &&
+    // `undefined` where the runtime has no resizable buffers, which leaves it fixed.
+    Reflect.get(ArrayBuffer.prototype, 'resizable', buffer) !== true &&
+    readBinaryByteLength(buffer) === byteLength
+  );
 }

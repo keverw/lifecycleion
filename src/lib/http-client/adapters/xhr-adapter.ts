@@ -16,7 +16,11 @@ import {
   isSignalAborted,
   readAdapterRequestFields,
 } from '../internal/request-fields';
-import { tooLargeAnswer, hasResponseBody } from '../internal/response-limit';
+import {
+  tooLargeAnswer,
+  hasResponseBody,
+  isIdentityContentEncoding,
+} from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
 import { readUnknownMember } from '../../internal/read-member';
 import type {
@@ -265,14 +269,22 @@ export class XHRAdapter implements HTTPAdapter {
       // it as a fallback for environments that skip upload.load entirely.
       let didUploadComplete = false;
 
-      // The body's own size, read once where that costs nothing: `0` for none or an empty
-      // one, `undefined` where it cannot be known up front (a `FormData`). Text with any
-      // characters is at least a byte, so it is counted only by the final upload event,
-      // and only when the browser reported nothing.
-      const isTextBody = typeof requestBody === 'string' && requestBody !== '';
-      const bodyByteLength = isTextBody
-        ? undefined
-        : knownBodyByteLength(requestBody);
+      // The body's own size: `0` for none or an empty one, `undefined` where it cannot be
+      // known up front (a `FormData`). Measured on first use and kept, so a value of the
+      // caller's (a `Blob`'s `size`) is read at most once.
+      let measuredBodyByteLength: { value: number | undefined } | undefined;
+      const bodyByteLength = (): number | undefined =>
+        (measuredBodyByteLength ??= {
+          value: knownBodyByteLength(requestBody),
+        }).value;
+
+      // Whether the body has, or may have, bytes to send. Text with any characters is at
+      // least a byte, so it is not measured for this - only by the final upload event, and
+      // only when the browser reported nothing.
+      const hasBytesToSend =
+        typeof requestBody === 'string'
+          ? requestBody !== ''
+          : bodyByteLength() !== 0;
 
       // The one final upload event, however the upload ends: the bytes the browser
       // reported, or the body's own size where it reported none - `0` for an empty
@@ -289,9 +301,7 @@ export class XHRAdapter implements HTTPAdapter {
         // of the two - `total: 0`, or `loaded: 0`. An upload a server answered partway
         // through cannot be told from a finished one here, as FetchAdapter cannot.
         const bytes =
-          Math.max(uploadedBytes, uploadTotalBytes) ||
-          ((isTextBody ? knownBodyByteLength(requestBody) : bodyByteLength) ??
-            0);
+          Math.max(uploadedBytes, uploadTotalBytes) || (bodyByteLength() ?? 0);
         guardedUploadProgress?.({ loaded: bytes, total: bytes, progress: 1 });
       };
 
@@ -306,8 +316,9 @@ export class XHRAdapter implements HTTPAdapter {
       // no body, but not every engine need honour that - and a body of no bytes has no
       // upload to report on: its final event, `0` bytes, fires when the request ends.
       try {
-        const upload: XMLHttpRequestUpload | null | undefined =
-          bodyByteLength === 0 ? undefined : xhr.upload;
+        const upload: XMLHttpRequestUpload | null | undefined = hasBytesToSend
+          ? xhr.upload
+          : undefined;
 
         if (upload) {
           upload.addEventListener('progress', (event) => {
@@ -370,17 +381,18 @@ export class XHRAdapter implements HTTPAdapter {
 
       /**
        * Fail a body past `maxResponseBytes` as a stream error with the real status and
-       * headers, and stop the download. Both are read before `xhr.abort()`, which resets
-       * them. A browser-followed redirect is reported as the redirect, as on `load`: the
-       * client refuses those whatever the body.
+       * `headers` (parsed by the caller), and stop the download. Both are read before
+       * `xhr.abort()`, which resets them. A browser-followed redirect is reported as the
+       * redirect, as on `load`: the client refuses those whatever the body.
        */
-      const refuseTooLargeBody = (): void => {
+      const refuseTooLargeBody = (
+        headers: Record<string, string | string[]>,
+      ): void => {
         didExceedMaxResponseBytes = true;
         // Read before the upload callback below: one that cancels makes `xhr.abort()`
         // reset this XHR, wiping its URL, status and headers.
         const responseURL = xhr.responseURL;
         const status = xhr.status;
-        const headers = parseXHRResponseHeaders(xhr.getAllResponseHeaders());
         finishUploadProgress();
 
         if (responseURL && didBrowserFollowRedirect(responseURL, answeredURL)) {
@@ -406,11 +418,17 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        if (event.loaded > maxResponseBytes) {
-          isBodyKnownUncoded ??= isKnownUncodedBody(xhr, answeredURL);
+        // Decided once: a body known uncoded is refused at once, and one that is not is
+        // left to `load`. The headers are parsed once, for the decision and the refusal.
+        if (
+          event.loaded > maxResponseBytes &&
+          isBodyKnownUncoded === undefined
+        ) {
+          const headers = parseXHRResponseHeaders(xhr.getAllResponseHeaders());
+          isBodyKnownUncoded = isKnownUncodedBody(xhr, headers, answeredURL);
 
           if (isBodyKnownUncoded) {
-            refuseTooLargeBody();
+            refuseTooLargeBody(headers);
             return;
           }
         }
@@ -619,24 +637,25 @@ export class XHRAdapter implements HTTPAdapter {
 
 /**
  * Whether the response body is known to carry no content coding, so the bytes XHR
- * progress counts are the decoded body's own. Known only from a `Content-Encoding` of
- * `identity` (or empty) the adapter can read, or from none at all on a browser response
- * that would show one: the request and the response URL both same-origin with the page.
+ * progress counts are the decoded body's own, read off its parsed `headers`. Known only
+ * from a `Content-Encoding` of `identity` (or empty) the adapter can read, or from none at
+ * all on a browser response that would show one: the request and the response URL both
+ * same-origin with the page.
  * A browser hides `Content-Encoding` on a cross-origin response unless the server lists
  * it in `Access-Control-Expose-Headers` - a cross-origin request redirected back to the
  * page's origin included - and outside a browser (no page origin) a runtime may decode
  * the body itself and drop the header (React Native's Android networking does), so
  * there its absence proves nothing and the body is taken as possibly coded.
  */
-function isKnownUncodedBody(xhr: XMLHttpRequest, answeredURL: string): boolean {
-  const contentEncoding = parseXHRResponseHeaders(xhr.getAllResponseHeaders())[
-    'content-encoding'
-  ];
+function isKnownUncodedBody(
+  xhr: XMLHttpRequest,
+  headers: Record<string, string | string[]>,
+  answeredURL: string,
+): boolean {
+  const contentEncoding = headers['content-encoding'];
 
   if (contentEncoding !== undefined) {
-    return (contentEncoding as string)
-      .split(',')
-      .every((token) => ['', 'identity'].includes(token.trim().toLowerCase()));
+    return isIdentityContentEncoding(contentEncoding as string);
   }
 
   const pageOrigin = readPageOrigin();

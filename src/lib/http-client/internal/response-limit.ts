@@ -104,6 +104,17 @@ export function tooLargeAnswer(
 }
 
 /**
+ * Whether a `Content-Encoding` value applies no coding: each of its comma-separated
+ * tokens is empty or `identity`, in any case. A body sent so is its own decoded bytes,
+ * so its `Content-Length`, or the bytes counted as it arrives, are the decoded size.
+ */
+export function isIdentityContentEncoding(contentEncoding: string): boolean {
+  return contentEncoding
+    .split(',')
+    .every((token) => ['', 'identity'].includes(token.trim().toLowerCase()));
+}
+
+/**
  * The byte count a `Content-Length` value states, or `undefined` when it states none this
  * can trust: absent, empty, or not a plain decimal number. Repeated values (`10, 10`, or
  * an array from a header seen twice) count when they agree, as RFC 9110 lets a recipient

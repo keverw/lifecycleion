@@ -25,6 +25,7 @@ import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   hasResponseBody,
+  isIdentityContentEncoding,
   tooLargeAnswer,
   parseContentLength,
 } from '../internal/response-limit';
@@ -41,6 +42,10 @@ import { toError as normalizeError } from '../../to-error';
 // Members of a body or a thrown error read guarded, for the same reason adapter marker
 // reads are.
 import { readUnknownMember } from '../../internal/read-member';
+import {
+  readBinaryByteLength,
+  typedArrayNameOf,
+} from '../../internal/binary-view';
 
 export class FetchAdapter implements HTTPAdapter {
   public getType(): AdapterType {
@@ -345,11 +350,7 @@ async function readResponseBody(
   const isIdentityEncoded =
     contentEncoding === null
       ? response.type !== 'cors'
-      : contentEncoding
-          .split(',')
-          .every((token) =>
-            ['', 'identity'].includes(token.trim().toLowerCase()),
-          );
+      : isIdentityContentEncoding(contentEncoding);
   const declaredLength = isIdentityEncoded
     ? parseContentLength(response.headers.get('content-length'))
     : undefined;
@@ -374,10 +375,17 @@ async function readResponseBody(
         Symbol.asyncIterator
       ] === 'function'
     ) {
-      const iterable = body as AsyncIterable<Uint8Array | string>;
-      return await readBodyWithin(iterable, maxResponseBytes, () => {
-        cancelBodyQuietly(iterable);
-      });
+      const iterable = body as AsyncIterable<unknown>;
+      // Text taken as well: a `Readable` given an encoding yields strings, which the
+      // polyfill's own `arrayBuffer()` joins as it joins `Buffer`s.
+      return await readBodyWithin(
+        iterable,
+        maxResponseBytes,
+        () => {
+          cancelBodyQuietly(iterable);
+        },
+        true,
+      );
     }
 
     const buffer = await response.arrayBuffer();
@@ -385,21 +393,26 @@ async function readResponseBody(
     return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
   }
 
-  const reader = (body as ReadableStream<Uint8Array>).getReader();
+  const reader = (body as ReadableStream<unknown>).getReader();
 
   // Cancelled, not awaited: the cancel settles once the stream has let go, and the
   // answer here does not depend on when that is.
-  return await readBodyWithin(readerChunks(reader), maxResponseBytes, () => {
-    reader.cancel().catch(() => {
-      // The body is being discarded; a stream that fails to cancel has nothing to add.
-    });
-  });
+  return await readBodyWithin(
+    readerChunks(reader),
+    maxResponseBytes,
+    () => {
+      reader.cancel().catch(() => {
+        // The body is being discarded; a stream that fails to cancel has nothing to add.
+      });
+    },
+    false,
+  );
 }
 
 /** A web stream reader's chunks, as an async iterable. */
 async function* readerChunks(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-): AsyncGenerator<Uint8Array> {
+  reader: ReadableStreamDefaultReader<unknown>,
+): AsyncGenerator<unknown> {
   while (true) {
     const { done: isDone, value } = await reader.read();
 
@@ -416,11 +429,19 @@ async function* readerChunks(
  * `fetch`'s async-iterable Node `Readable` - counted as it comes, and let go through
  * `cancel` the moment it passes the limit: counted before the chunk is kept, so a body
  * over the limit is never held whole.
+ *
+ * Each chunk must be a `Uint8Array`, from any realm, told and measured by its internal
+ * slot rather than by the `byteLength` it reports - or, where `isTextChunkAccepted`, a
+ * string, taken as its UTF-8 bytes. Anything else is refused with the `TypeError` the
+ * Fetch standard's `arrayBuffer()` rejects with for the same stream, and the body let go:
+ * an `ArrayBuffer` or `DataView` chunk would be counted but joined as zeros, and one with
+ * no `byteLength` would turn the count to `NaN`, which no limit is under.
  */
 async function readBodyWithin(
-  source: AsyncIterable<Uint8Array | string>,
+  source: AsyncIterable<unknown>,
   maxResponseBytes: number,
   cancel: () => void,
+  isTextChunkAccepted: boolean,
 ): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
   const chunks: Uint8Array[] = [];
   let loadedBytes = 0;
@@ -428,17 +449,31 @@ async function readBodyWithin(
 
   for await (const value of source) {
     const chunk =
-      typeof value === 'string'
+      isTextChunkAccepted && typeof value === 'string'
         ? (encoder ??= new TextEncoder()).encode(value)
         : value;
-    loadedBytes += chunk.byteLength;
+    const byteLength =
+      typeof chunk === 'object' &&
+      chunk !== null &&
+      typedArrayNameOf(chunk) === 'Uint8Array'
+        ? readBinaryByteLength(chunk)
+        : null;
+
+    if (byteLength === null) {
+      cancel();
+      throw new TypeError(
+        'FetchAdapter response body yielded a chunk that is not a Uint8Array',
+      );
+    }
+
+    loadedBytes += byteLength;
 
     if (loadedBytes > maxResponseBytes) {
       cancel();
       return RESPONSE_TOO_LARGE;
     }
 
-    chunks.push(chunk);
+    chunks.push(chunk as Uint8Array);
   }
 
   return concatChunks(chunks, loadedBytes);
