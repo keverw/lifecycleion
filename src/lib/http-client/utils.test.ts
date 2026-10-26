@@ -18,8 +18,10 @@ import {
   resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
   scalarHeader,
+  reportedRedirectTarget,
   serializeBody,
   stripCrossOriginURLCredentials,
+  stripURLCredentials,
 } from './utils';
 import { materializeRequestHeaders } from './internal/header-utils';
 import { matchesHostPattern } from './test-helpers/host-pattern';
@@ -290,6 +292,52 @@ describe('stripCrossOriginURLCredentials', () => {
     expect(
       stripCrossOriginURLCredentials('//cdn.test/a/../asset', 'not a URL'),
     ).toBe('//cdn.test/a/../asset');
+  });
+});
+
+describe('URL userinfo removal - PR review round 78', () => {
+  test('PR review round 78: every userinfo remover keeps an absolute URL absolute and a network-path reference in its network-path form', () => {
+    const cases: Array<[string, string]> = [
+      [stripURLCredentials('https://u:p@a.test/x?q#h'), 'https://a.test/x?q#h'],
+      [stripURLCredentials('https://u@a.test/x'), 'https://a.test/x'],
+      // Unparseable initial URL: a network-path target loses its userinfo, an absolute one too.
+      [
+        stripCrossOriginURLCredentials('//u:p@b.test/x', 'not a URL'),
+        '//b.test/x',
+      ],
+      [
+        stripCrossOriginURLCredentials('https://u:p@b.test/x', 'not a URL'),
+        'https://b.test/x',
+      ],
+      // A cross-origin target against a parseable initial URL.
+      [
+        stripCrossOriginURLCredentials('//u:p@b.test/x', 'https://a.test/'),
+        '//b.test/x',
+      ],
+      [
+        stripCrossOriginURLCredentials(
+          'https://u:p@b.test/x',
+          'https://a.test/',
+        ),
+        'https://b.test/x',
+      ],
+      // A same-origin target carrying the request's own userinfo.
+      [
+        reportedRedirectTarget('//u:p@a.test/next', 'https://u:p@a.test/start'),
+        '//a.test/next',
+      ],
+      [
+        reportedRedirectTarget(
+          'https://u:p@a.test/next',
+          'https://u:p@a.test/start',
+        ),
+        'https://a.test/next',
+      ],
+    ];
+
+    for (const [actual, expected] of cases) {
+      expect(actual).toBe(expected);
+    }
   });
 });
 

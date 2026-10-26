@@ -2261,3 +2261,53 @@ describe('FetchAdapter - PR review round 74', () => {
     }
   });
 });
+
+describe('FetchAdapter - PR review round 78', () => {
+  test("PR review round 78: a body whose cancel() answers with another realm's rejecting promise leaves no unhandled rejection", async () => {
+    const { runInNewContext } = await import('node:vm');
+    let cancels = 0;
+    (globalThis as any).fetch = () => {
+      const response = new Response('x'.repeat(1000), {
+        status: 200,
+        headers: { 'content-length': '1000' },
+      });
+      // Refused by its declared length, so the body is let go of unread.
+      Object.defineProperty(response, 'body', {
+        value: {
+          getReader() {
+            throw new Error('not read');
+          },
+          cancel() {
+            cancels++;
+            return runInNewContext(
+              'Promise.reject(new Error("cancel failed"))',
+            ) as unknown;
+          },
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 10,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(response.streamErrorCode).toBe('response_too_large');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    expect(cancels).toBe(1);
+    expect(unhandled).toEqual([]);
+  });
+});

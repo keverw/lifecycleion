@@ -321,13 +321,23 @@ export function stripURLCredentials(url: string): string {
       return url;
     }
 
-    parsed.username = '';
-    parsed.password = '';
-
-    return parsed.href;
+    return withoutUserinfo(parsed, false);
   } catch {
     return url;
   }
+}
+
+/**
+ * `target`'s href with its userinfo cleared - without its scheme when `isNetworkPath`, so
+ * a caller's network-path reference (`//host/path`) stays one. Clears it on `target`.
+ */
+function withoutUserinfo(target: URL, isNetworkPath: boolean): string {
+  target.username = '';
+  target.password = '';
+
+  return isNetworkPath
+    ? target.href.slice(target.protocol.length)
+    : target.href;
 }
 
 /**
@@ -375,10 +385,7 @@ export function stripCrossOriginURLCredentials(
         return requestURL;
       }
 
-      target.username = '';
-      target.password = '';
-
-      return target.href.slice(target.protocol.length);
+      return withoutUserinfo(target, true);
     } catch {
       return requestURL;
     }
@@ -404,13 +411,8 @@ export function stripCrossOriginURLCredentials(
       return requestURL;
     }
 
-    target.username = '';
-    target.password = '';
-
     // Keep the caller's network-path form; both browser adapters support relative URLs.
-    return requestURL.startsWith('//')
-      ? target.href.slice(target.protocol.length)
-      : target.href;
+    return withoutUserinfo(target, requestURL.startsWith('//'));
   } catch {
     // The origins cannot be shown to match, so fail closed below.
   }
@@ -1218,13 +1220,8 @@ export function reportedRedirectTarget(
       target.password === password &&
       !isCrossOrigin(request, target)
     ) {
-      target.username = '';
-      target.password = '';
-
       // Kept in its network-path form, as `stripCrossOriginURLCredentials` keeps one.
-      return reported.startsWith('//')
-        ? target.href.slice(target.protocol.length)
-        : target.href;
+      return withoutUserinfo(target, reported.startsWith('//'));
     }
   } catch {
     // A request URL that does not parse has no userinfo to match, and the cross-origin

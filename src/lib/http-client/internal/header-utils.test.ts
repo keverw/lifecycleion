@@ -84,6 +84,21 @@ describe('isBrowserRestrictedHeader', () => {
       false,
     );
   });
+
+  test('PR review round 78: a method-override value is lowercased and trimmed in ASCII only', () => {
+    // KELVIN SIGN: `toLowerCase` folds it into `k`, a browser does not.
+    expect(isBrowserRestrictedHeader('X-HTTP-Method-Override', 'TRACK')).toBe(
+      false,
+    );
+    // NO-BREAK SPACE is not HTTP whitespace, so it is not trimmed.
+    expect(isBrowserRestrictedHeader('X-HTTP-Method-Override', ' TRACE')).toBe(
+      false,
+    );
+    // HTTP whitespace is.
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', 'GET,\t TRACK \t'),
+    ).toBe(true);
+  });
 });
 
 describe('assertNoBrowserRestrictedHeaders', () => {

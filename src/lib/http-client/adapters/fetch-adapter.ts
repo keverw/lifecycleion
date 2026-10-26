@@ -43,6 +43,9 @@ import { toError as normalizeError } from '../../to-error';
 // Members of a body or a thrown error read guarded, for the same reason adapter marker
 // reads are.
 import { readUnknownMember } from '../../internal/read-member';
+import { adoptPromise } from '../../internal/adopt-promise';
+import { noop, observeRejection } from '../../internal/promise-reactions';
+import { isObjectLike } from '../../internal/is-object-like';
 import {
   readBinaryByteLength,
   typedArrayNameOf,
@@ -503,10 +506,11 @@ function cancelBodyQuietly(body: unknown): void {
     const cancel = readUnknownMember(body, 'cancel');
     if (typeof cancel === 'function') {
       const cancelled: unknown = cancel.call(body);
-      if (cancelled instanceof Promise) {
-        cancelled.catch(() => {
-          // The body is being discarded; a stream that fails to cancel has nothing to add.
-        });
+      // The body is being discarded; a stream that fails to cancel has nothing to add.
+      // Any thenable is followed - another realm's promise, a polyfill's - so a
+      // rejection is never left unhandled.
+      if (isObjectLike(cancelled)) {
+        observeRejection(adoptPromise(cancelled), noop);
       }
       return;
     }

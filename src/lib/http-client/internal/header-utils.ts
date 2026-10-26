@@ -8,6 +8,7 @@ import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
 import { isHTTPToken } from './http-token';
 import { copyArrayValue } from './array-copy';
+import { asciiLowercase } from './http-method';
 import type { RequestHeadersInput } from '../types';
 
 /**
@@ -81,6 +82,12 @@ export function deleteHeader(
   }
 }
 
+/** Empty, or only the whitespace `fetch` trims from a header value (tab, LF, CR, space). */
+const HTTP_WHITESPACE_ONLY = /^[\t\n\r ]*$/;
+
+/** That same whitespace at either end of a value; `trim()` also takes U+00A0 and more. */
+const HTTP_WHITESPACE_EDGES = /^[\t\n\r ]+|[\t\n\r ]+$/g;
+
 export function isBrowserRestrictedHeader(
   key: string,
   value: string | undefined,
@@ -102,13 +109,15 @@ export function isBrowserRestrictedHeader(
   }
 
   // Method-override headers are only restricted when they try to tunnel a
-  // forbidden method such as TRACE/CONNECT/TRACK through an allowed verb.
+  // forbidden method such as TRACE/CONNECT/TRACK through an allowed verb. Each
+  // method is trimmed of HTTP whitespace and lowercased in ASCII only, as a
+  // browser compares it: `TRAC\u212A` (KELVIN SIGN) is not `track`.
   if (BROWSER_METHOD_OVERRIDE_HEADER_NAMES.has(lowerKey) && value) {
     return value
       .split(',')
       .some((method) =>
         BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(
-          method.trim().toLowerCase(),
+          asciiLowercase(method.replace(HTTP_WHITESPACE_EDGES, '')),
         ),
       );
   }
@@ -165,9 +174,6 @@ export function assertNoBrowserRestrictedHeaders(
     }
   }
 }
-
-/** Empty, or only the whitespace `fetch` trims from a header value (tab, LF, CR, space). */
-const HTTP_WHITESPACE_ONLY = /^[\t\n\r ]*$/;
 
 /**
  * Every spelling of `Cookie` among `entries` as the one field NodeAdapter and MockAdapter
