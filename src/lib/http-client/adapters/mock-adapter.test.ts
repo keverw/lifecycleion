@@ -2589,3 +2589,52 @@ describe('MockAdapter - PR review round 71', () => {
     expect(received[1]).toEqual({ a: 1 });
   });
 });
+
+describe('MockAdapter - PR review round 72a', () => {
+  test('PR review round 72a: a route body of bytes is delivered as a copy, so changing it leaves the fixture as it was', async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const buffer = new Uint8Array([4, 5, 6]).buffer;
+    const adapter = new MockAdapter();
+    adapter.routes.get('/bytes', () => ({ status: 200, body: bytes }));
+    adapter.routes.get('/buffer', () => ({ status: 200, body: buffer }));
+
+    for (const [path, fixture] of [
+      ['/bytes', bytes],
+      ['/buffer', new Uint8Array(buffer)],
+    ] as const) {
+      const expected = Array.from(fixture);
+      const first = await adapter.send(
+        makeAdapterRequest({ requestURL: path }),
+      );
+      const delivered = first.body as Uint8Array;
+      expect(delivered).not.toBe(fixture);
+      delivered[0] = 99;
+
+      expect(Array.from(fixture)).toEqual(expected);
+      const second = await adapter.send(
+        makeAdapterRequest({ requestURL: path }),
+      );
+      expect(Array.from(second.body as Uint8Array)).toEqual(expected);
+    }
+  });
+
+  test('PR review round 72a: a route body changed while the response is delayed is delivered as the route answered it', async () => {
+    const shared = { v: 1 };
+    const adapter = new MockAdapter();
+    adapter.routes.get('/delayed', () => {
+      setTimeout(() => {
+        shared.v = 2;
+      }, 5);
+      return { status: 200, body: shared, delay: 30 };
+    });
+
+    const response = await adapter.send(
+      makeAdapterRequest({ requestURL: '/delayed' }),
+    );
+
+    expect(shared.v).toBe(2);
+    expect(new TextDecoder().decode(response.body as Uint8Array)).toBe(
+      '{"v":1}',
+    );
+  });
+});

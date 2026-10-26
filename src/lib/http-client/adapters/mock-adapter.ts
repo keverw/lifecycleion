@@ -517,6 +517,35 @@ export class MockAdapter implements HTTPAdapter {
     // caller code read here always had, as the CRL's does.
     mockResponse = snapshotMockResponse(mockResponse);
 
+    // What the server would have put on the wire, fixed when the route answers: serialized
+    // now, before the delay, so a body the test changes while the response is delayed is
+    // not delivered changed. HEAD / 204 / 205 / 304 never expose a body to consumers, even
+    // if the handler returned one, keeping the mock transport aligned with real HTTP.
+    // Not serialized at all under a simulated transport or stream error, which loses it:
+    // a body the mock could not serialize (a `Map`) failed the route as an
+    // `adapter_error` instead. A body that cannot be serialized is held, and refused
+    // below, after the delay and the checks ahead of it.
+    const simulatedStreamErrorCode = resolveMockStreamErrorCode(
+      mockResponse.streamError,
+    );
+    let serializedBody: { bytes: Uint8Array | null } | { error: unknown } = {
+      bytes: null,
+    };
+    if (
+      !mockResponse.transportError &&
+      simulatedStreamErrorCode === undefined &&
+      // A status that is no integer is refused below, before the body is used; compared
+      // as one here, an object's `valueOf` would run.
+      Number.isInteger(mockResponse.status) &&
+      hasResponseBody(method, mockResponse.status)
+    ) {
+      try {
+        serializedBody = { bytes: serializeResponseBody(mockResponse) };
+      } catch (error) {
+        serializedBody = { error };
+      }
+    }
+
     // --- 5. Delay ---
     // Simulates network latency. Per-response delay takes priority over the
     // adapter default. When a signal is present, the sleep is abort-aware and
@@ -632,29 +661,12 @@ export class MockAdapter implements HTTPAdapter {
       }
     });
 
-    // A simulated post-header body failure loses the body the same way a real
-    // one does, so the handler's body is never serialized.
-    const simulatedStreamErrorCode = resolveMockStreamErrorCode(
-      mockResponse.streamError,
-    );
-
-    // What the server would have put on the wire. HEAD / 204 / 205 / 304 never expose
-    // a body to consumers, even if the handler returned one. This keeps the mock
-    // transport aligned with real HTTP.
-    // Not serialized at all under a simulated stream error, which loses it: a body the
-    // mock could not serialize (a `Map`) failed the route as an `adapter_error` instead.
-    let intendedBody: ReturnType<typeof serializeResponseBody> | null;
-    try {
-      intendedBody =
-        !hasResponseBody(method, mockResponse.status) ||
-        simulatedStreamErrorCode !== undefined
-          ? null
-          : serializeResponseBody(mockResponse);
-    } catch (error) {
-      // A body the mock cannot serialize is the route's mistake, after it has run; not
-      // retried, for the reason a bad delay is not.
-      throw nonRetryableAdapterErrorFrom(error);
+    // A body the mock cannot serialize (see above) is the route's mistake, after it has
+    // run; not retried, for the reason a bad delay is not.
+    if ('error' in serializedBody) {
+      throw nonRetryableAdapterErrorFrom(serializedBody.error);
     }
+    const intendedBody = serializedBody.bytes;
 
     // A body past `maxResponseBytes` fails as the real adapters fail it: a stream error
     // that keeps the status and headers, the body dropped. A simulated stream error
@@ -1200,13 +1212,21 @@ function serializeResponseBody(response: MockResponse): Uint8Array | null {
     return null;
   } else if (isRouteBinaryBody(body)) {
     // Avoid JSON.stringify indexing the buffer into {"0":…,"1":…}. Delivered as this
-    // realm's `Uint8Array`: a view over an `ArrayBuffer`, the route's own `Uint8Array`
-    // when it is this realm's, and a copy of one from another realm's.
+    // realm's `Uint8Array` holding a copy of the route's bytes, so a caller that changes
+    // the body it was handed does not change the route's fixture for the requests after
+    // it. Copied through the internal slots, calling none of the body's own methods. A
+    // `Proxy` over a `Uint8Array` has no slot to copy from, so it is delivered as it is
+    // (see `isRouteBinaryBody`).
+    if (typedArrayNameOf(body) === 'Uint8Array') {
+      return new Uint8Array(body as Uint8Array);
+    }
+
     if (body instanceof Uint8Array) {
       return body;
     }
 
-    return new Uint8Array(body);
+    // A view over the buffer, then a copy of what it views.
+    return new Uint8Array(new Uint8Array(body));
   } else if (typeof body === 'string') {
     return new TextEncoder().encode(body);
   } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {

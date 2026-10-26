@@ -787,3 +787,47 @@ test('PR review round 71: params are copied when given, so a later change to the
 
   expect(optionResponse.requestURL).toBe('http://api.test/search?q=a');
 });
+
+test('PR review round 72a: an array in params or headers is copied when given, so an item added to it afterwards is not sent', async () => {
+  const adapter = new MockAdapter();
+  const seen: unknown[] = [];
+  adapter.routes.get('/search', (request) => {
+    seen.push(request.headers['x-m']);
+    return { status: 200 };
+  });
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  const ids = [1, 2];
+  const values = ['a'];
+  const nested = { tag: 'x' };
+  const builder = client
+    .get('/search')
+    .params({ ids, filter: nested })
+    .headers({ 'x-m': values });
+  ids.push(3);
+  values.push('b');
+  // A nested object is still the caller's, read when the request is sent.
+  nested.tag = 'y';
+  const response = await builder.send();
+
+  expect(decodeURIComponent(response.requestURL)).toBe(
+    'http://api.test/search?ids[0]=1&ids[1]=2&filter[tag]=y',
+  );
+  expect(seen).toEqual(['a']);
+
+  // The same through the request options.
+  const optionIDs = [1];
+  const optionValues = ['a'];
+  const optionBuilder = client.get('/search', {
+    params: { ids: optionIDs },
+    headers: { 'x-m': optionValues },
+  });
+  optionIDs.push(2);
+  optionValues.push('b');
+  const optionResponse = await optionBuilder.send();
+
+  expect(decodeURIComponent(optionResponse.requestURL)).toBe(
+    'http://api.test/search?ids[0]=1',
+  );
+  expect(seen).toEqual(['a', 'a']);
+});

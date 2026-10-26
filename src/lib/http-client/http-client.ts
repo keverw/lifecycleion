@@ -20,6 +20,8 @@ import { RetryPolicy } from '../retry-utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
 import {
   assertNoBrowserRestrictedHeaders,
+  copyHeaderRecord,
+  copyHeaderValue,
   lowerCaseHeaderName,
   presentHeaderValue,
 } from './internal/header-utils';
@@ -2928,7 +2930,9 @@ export class BaseHTTPClient {
           this._adapter.send({
             requestURL: sentRequest.requestURL,
             method: sentRequest.method,
-            headers: { ...sentRequest.headers },
+            // Its own copy, arrays too: an adapter that changes one in place reaches
+            // neither the request observers are handed nor the next attempt.
+            headers: copyHeaderRecord(sentRequest.headers),
             body: sentBody ?? null,
             signal: attemptSignal,
             // Forward the builder's streaming factory to each adapter attempt.
@@ -3546,13 +3550,19 @@ export class BaseHTTPClient {
         // Observers retain the wire snapshot, but Node-generated Host and URL
         // Basic auth must not become caller headers on the next hop. The adapter
         // will regenerate them for that hop; explicit caller headers still carry
-        // through same-origin redirects and caller-directed failover retries.
-        const redirectRequestHeaders = { ...observedSentRequest.headers };
+        // through same-origin redirects and caller-directed failover retries. Arrays
+        // copied: taken before the redirect-phase observers are handed the attempt's
+        // request, so an item one of them changes in place does not reach the next hop.
+        const redirectRequestHeaders = copyHeaderRecord(
+          observedSentRequest.headers,
+        );
         // `accept-encoding` with them: NodeAdapter adds its own, and carried forward as a
         // caller's it stood in the way of the `identity` a later hop's `Range` asks for.
         for (const key of ['host', 'authorization', 'accept-encoding']) {
           if (Object.hasOwn(sentRequest.headers, key)) {
-            redirectRequestHeaders[key] = sentRequest.headers[key];
+            redirectRequestHeaders[key] = copyHeaderValue(
+              sentRequest.headers[key],
+            );
           } else {
             delete redirectRequestHeaders[key];
           }
@@ -3566,7 +3576,7 @@ export class BaseHTTPClient {
         const authoredHeaders = attemptRequest.headers;
         for (const key of ['content-length', 'content-type']) {
           if (Object.hasOwn(authoredHeaders, key)) {
-            redirectRequestHeaders[key] = authoredHeaders[key];
+            redirectRequestHeaders[key] = copyHeaderValue(authoredHeaders[key]);
           } else {
             delete redirectRequestHeaders[key];
           }
@@ -4802,8 +4812,11 @@ export class BaseHTTPClient {
     attemptNumber?: number,
   ): Record<string, string | string[]> {
     // A copy, so the internal headers added below stay off the request the next attempt
-    // starts from. Not normalized again: only a `ResolvedRequest`'s headers reach here.
-    const nextHeaders = { ...headers };
+    // starts from, its arrays too: the record goes on to observers and interceptors, and
+    // an item one of them changes in place - a redaction, a pushed value - reaches neither
+    // the next attempt nor the request an earlier attempt was reported as. Not normalized
+    // again: only a `ResolvedRequest`'s headers reach here.
+    const nextHeaders = copyHeaderRecord(headers);
 
     if (this._config.includeRequestID) {
       nextHeaders[DEFAULT_REQUEST_ID_HEADER] = requestID;

@@ -9368,3 +9368,97 @@ describe('NodeAdapter - PR review round 71', () => {
     ]);
   });
 });
+
+describe('NodeAdapter - PR review round 72a', () => {
+  test('PR review round 72a: a streamResponse factory that writes into info.headers changes neither the response headers nor the cookie jar', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'x-a': 'server' });
+      res.end('hello');
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as { port: number };
+    const url = `http://127.0.0.1:${port}/`;
+
+    try {
+      const jar = new CookieJar();
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        cookieJar: jar,
+      });
+      const response = await client
+        .get(url)
+        .streamResponse((info) => {
+          const headers = info.headers;
+          headers['x-a'] = 'factory';
+          headers['set-cookie'] = ['planted=1; Path=/'];
+          return new Writable({
+            write(_chunk, _encoding, callback) {
+              callback();
+            },
+          });
+        })
+        .send();
+
+      expect(response.status).toBe(200);
+      expect(response.headers['x-a']).toBe('server');
+      expect(response.headers['set-cookie']).toBeUndefined();
+      expect(jar.getCookieHeaderString(url)).toBe('');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  test('PR review round 72a: each ca entry is read once per request, and the entry checked is the one sent', async () => {
+    const reads: number[] = [0, 0];
+    const entries = ['first-ca', 'second-ca'];
+    const ca = new Proxy(entries, {
+      get(target, key, receiver) {
+        if (key === '0' || key === '1') {
+          reads[Number(key)]++;
+        }
+
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+    const adapter = new NodeAdapter({ ca });
+    // Construction checks `ca` too; only the request's reads are counted.
+    reads.fill(0);
+
+    let captured: https.RequestOptions | undefined;
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured = options;
+      const req = new EventEmitter();
+      const stub = req as unknown as Record<string, unknown>;
+      stub.setHeader = () => {};
+      stub.getHeaders = () => ({});
+      stub.destroy = () => {};
+      stub.end = () => {
+        queueMicrotask(() =>
+          req.emit(
+            'error',
+            Object.assign(new Error('captured'), { code: 'ECONNRESET' }),
+          ),
+        );
+      };
+
+      return req as unknown as http.ClientRequest;
+    }) as unknown as typeof https.request);
+
+    try {
+      await adapter.send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(reads).toEqual([1, 1]);
+    expect(captured?.ca).toEqual(['first-ca', 'second-ca']);
+  });
+});

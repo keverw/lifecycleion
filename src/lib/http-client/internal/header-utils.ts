@@ -51,6 +51,28 @@ export function presentHeaderValue(
 }
 
 /**
+ * A copy of a header record the client built, its arrays copied too: a record handed on -
+ * to an observer, an interceptor, an adapter, the next attempt - shares no array with the
+ * one it was copied from, so an item one of them changes in place reaches no other.
+ */
+export function copyHeaderRecord(
+  headers: Record<string, string | string[]>,
+): Record<string, string | string[]> {
+  const copy: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    defineEntry(copy, name, copyHeaderValue(value));
+  }
+  return copy;
+}
+
+/** One header value as {@link copyHeaderRecord} copies it. */
+export function copyHeaderValue<V extends string | string[] | undefined>(
+  value: V,
+): V {
+  return (Array.isArray(value) ? value.slice() : value) as V;
+}
+
+/**
  * Remove every entry named `name` (lowercase), in any case, from `headers` - a record the
  * caller owns, such as an adapter's copy of its request headers.
  */

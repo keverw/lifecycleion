@@ -14262,3 +14262,197 @@ test('PR review round 71: a Uint8Array body from another realm is sent as its by
   expect(proxied.error?.code).toBe('request_setup_error');
   expect(received).toHaveLength(1);
 });
+
+const roundSeventyTwoARetryPolicy = {
+  strategy: 'fixed',
+  maxRetryAttempts: 1,
+  delayMS: 0,
+} as const;
+
+test('PR review round 72a: a retry-phase error observer that redacts an array header in place does not change the retry', async () => {
+  const sent: string[] = [];
+  let attempts = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request) => {
+      sent.push(JSON.stringify(request.headers['x-api-keys']));
+      attempts++;
+      if (attempts === 1) {
+        return Promise.reject(new TypeError('socket hang up'));
+      }
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    retryPolicy: roundSeventyTwoARetryPolicy,
+  });
+  const reported: unknown[] = [];
+  client.addErrorObserver(
+    (_error, request) => {
+      const value = request.headers['x-api-keys'];
+      if (Array.isArray(value)) {
+        value.fill('[REDACTED]');
+      }
+      reported.push(request.headers['x-api-keys']);
+    },
+    { phases: ['retry'] },
+  );
+
+  const response = await client
+    .get('http://api.test/x')
+    .headers({ 'x-api-keys': ['k1', 'k2'] })
+    .send();
+
+  expect(response.status).toBe(200);
+  expect(sent).toEqual(['["k1","k2"]', '["k1","k2"]']);
+  expect(reported).toEqual([['[REDACTED]', '[REDACTED]']]);
+});
+
+test('PR review round 72a: a retry interceptor that pushes onto an array header does not accumulate across retries', async () => {
+  const adapter = new MockAdapter();
+  const seen: unknown[] = [];
+  adapter.routes.get('/x', (request) => {
+    seen.push(request.headers['x-multi']);
+    return { status: seen.length < 3 ? 503 : 200, body: 'ok' };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+  });
+  client.addRequestInterceptor(
+    (request) => {
+      const value = request.headers['x-multi'];
+      if (Array.isArray(value)) {
+        value.push('retry');
+      }
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+
+  await client
+    .get('/x')
+    .headers({ 'x-multi': ['a', 'b'] })
+    .send();
+
+  expect(seen).toEqual(['a, b', 'a, b, retry', 'a, b, retry']);
+});
+
+test('PR review round 72a: the request an earlier attempt was reported as keeps its array headers after a later attempt changes its own', async () => {
+  const adapter = new MockAdapter();
+  let attempts = 0;
+  adapter.routes.get('/x', () => {
+    attempts++;
+    return { status: attempts === 1 ? 503 : 200, body: 'ok' };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: roundSeventyTwoARetryPolicy,
+  });
+  const kept: Array<{ headers: Record<string, string | string[]> }> = [];
+  client.addResponseObserver(
+    (_response, request) => {
+      kept.push(request);
+    },
+    { phases: ['retry', 'final'] },
+  );
+  client.addRequestInterceptor(
+    (request) => {
+      (request.headers['x-multi'] as string[]).push('r');
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+
+  await client
+    .get('/x')
+    .headers({ 'x-multi': ['a', 'b'] })
+    .send();
+
+  expect(kept).toHaveLength(2);
+  expect(kept[0].headers['x-multi']).toEqual(['a', 'b']);
+  expect(kept[1].headers['x-multi']).toEqual(['a', 'b', 'r']);
+});
+
+test('PR review round 72a: a custom adapter that pushes onto an array header reaches neither the observers nor the retry', async () => {
+  const inner = new MockAdapter();
+  const seen: unknown[] = [];
+  inner.routes.get('/x', (request) => {
+    seen.push(request.headers.accept);
+    return { status: seen.length === 1 ? 503 : 200, body: 'ok' };
+  });
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request) => {
+      const accept = request.headers.accept;
+      if (Array.isArray(accept)) {
+        accept.push('application/x-adapter');
+      }
+      return inner.send(request);
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: roundSeventyTwoARetryPolicy,
+  });
+  const observed: unknown[] = [];
+  client.addResponseObserver(
+    (_response, request) => {
+      observed.push(request.headers.accept);
+    },
+    { phases: ['retry', 'final'] },
+  );
+
+  await client
+    .get('/x')
+    .headers({ accept: ['text/plain', 'application/json'] })
+    .send();
+
+  expect(seen).toEqual([
+    'text/plain, application/json, application/x-adapter',
+    'text/plain, application/json, application/x-adapter',
+  ]);
+  expect(observed).toEqual([
+    ['text/plain', 'application/json'],
+    ['text/plain', 'application/json'],
+  ]);
+});
+
+test('PR review round 72a: a redirect-phase response observer that pushes onto an array header does not change the next hop', async () => {
+  const adapter = new MockAdapter();
+  const seen: unknown[] = [];
+  adapter.routes.get('/a', (request) => {
+    seen.push(request.headers['x-multi']);
+    return { status: 302, headers: { location: '/b' } };
+  });
+  adapter.routes.get('/b', (request) => {
+    seen.push(request.headers['x-multi']);
+    return { status: 200, body: 'ok' };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  client.addResponseObserver(
+    (_response, request) => {
+      const value = request.headers['x-multi'];
+      if (Array.isArray(value)) {
+        value.push('from-observer');
+      }
+    },
+    { phases: ['redirect'] },
+  );
+
+  const response = await client
+    .get('/a')
+    .headers({ 'x-multi': ['a', 'b'] })
+    .send();
+
+  expect(response.status).toBe(200);
+  expect(seen).toEqual(['a, b', 'a, b']);
+});

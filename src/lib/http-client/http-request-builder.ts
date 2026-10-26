@@ -122,8 +122,14 @@ export class HTTPRequestBuilder<T = unknown> {
     // Own keys, not `Object.assign`: a `__proto__` header would set the record's
     // prototype (an array value) or vanish (a string). Lowercased, as the request sends
     // them, so a later call replaces an earlier one whatever either's capitalization.
+    // An array value copied (see `copyArrayValue`), so an item added to the caller's
+    // afterwards is not sent.
     for (const [key, value] of Object.entries(headers)) {
-      defineEntry(this._headers, lowerCaseHeaderName(key), value);
+      defineEntry(
+        this._headers,
+        lowerCaseHeaderName(key),
+        copyArrayValue(value),
+      );
     }
     return this;
   }
@@ -144,11 +150,13 @@ export class HTTPRequestBuilder<T = unknown> {
       );
     }
     // Copied now, as `headers()` copies, so a change to the caller's object after this
-    // call does not reach the request: each own entry read once, its value kept as it is.
-    // Own keys, so a `__proto__` name stays a query name rather than a prototype.
+    // call does not reach the request: each own entry read once, an array value copied
+    // one level (see `copyArrayValue`) and any other value kept as it is - a nested
+    // object is still the caller's. Own keys, so a `__proto__` name stays a query name
+    // rather than a prototype.
     const copied: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(params)) {
-      defineEntry(copied, key, value);
+      defineEntry(copied, key, copyArrayValue(value));
     }
     this._params = copied;
     return this;
@@ -649,4 +657,27 @@ function assertCallback(fn: unknown, name: string): void {
       `HTTPRequestBuilder ${name} must be a function (got ${fn === null ? 'null' : typeof fn})`,
     );
   }
+}
+
+/**
+ * A `.headers()` or `.params()` value as the builder keeps it: an array copied one level
+ * deep - its items, a nested object among them, kept as they are - and anything else as it
+ * is. A hole stays a hole, so `qs` serializes the copy as it would the original; copied
+ * by index rather than `slice`, which would build the copy through the caller's array's
+ * own `constructor`.
+ */
+function copyArrayValue<V>(value: V): V {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+
+  const length = value.length;
+  const copy: unknown[] = new Array(length);
+  for (let index = 0; index < length; index++) {
+    if (index in value) {
+      copy[index] = value[index];
+    }
+  }
+
+  return copy as V;
 }

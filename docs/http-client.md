@@ -236,7 +236,7 @@ const builder = client
 const response = await builder.send();
 ```
 
-A header value of `null` or `undefined` - or such an item in an array - means no header: a request's `.headers({ authorization: undefined })` removes that client default for the request, a sub-client merging `defaultHeaders` removes the parent's the same way, and an interceptor removes one with `{ ...request.headers, authorization: undefined }`. Header names are case-insensitive and are sent lowercased. The client's own `user-agent` is applied after a request's headers, so a request's `headers` neither change nor remove it: set `userAgent` on the client, or change or remove it in an interceptor. The request-ID and attempt headers are added to every attempt and follow `includeRequestID` and `includeAttemptHeader` only.
+A header value of `null` or `undefined` - or such an item in an array - means no header: a request's `.headers({ authorization: undefined })` removes that client default for the request, a sub-client merging `defaultHeaders` removes the parent's the same way, and an interceptor removes one with `{ ...request.headers, authorization: undefined }`. Header names are case-insensitive and are sent lowercased. `.headers()`, and `headers` in the request options, copy the record's own entries when called, an array value included, so a header or array item added afterwards is not sent. The client's own `user-agent` is applied after a request's headers, so a request's `headers` neither change nor remove it: set `userAgent` on the client, or change or remove it in an interceptor. The request-ID and attempt headers are added to every attempt and follow `includeRequestID` and `includeAttemptHeader` only.
 
 Options can also be passed directly to the method call:
 
@@ -278,7 +278,7 @@ client
 // → /search?q=hello&filter%5Bactive%5D=true&tags%5B0%5D=a&tags%5B1%5D=b
 ```
 
-An existing query string in the path is kept as written, and `.params()` is added after it. When the same top-level key appears in both, the `.params()` value wins and the path's pairs for that key are left out; a `.params()` value of `undefined` (or an object of nothing but `undefined`) is not given, and leaves the path's pairs alone, while an empty array or object is given and clears them. `.params()` takes a plain object; `null` or `undefined` clears the params set so far, and a `URLSearchParams`, `Map` or string throws a `TypeError`. Its own top-level entries are copied when `.params()` is called, each read once - the same for `params` in the request options - so adding, removing or replacing a key on the object afterwards does not change the request, and a top-level getter that throws throws from `.params()`; a nested object or array is kept as given and serialized when the request is sent.
+An existing query string in the path is kept as written, and `.params()` is added after it. When the same top-level key appears in both, the `.params()` value wins and the path's pairs for that key are left out; a `.params()` value of `undefined` (or an object of nothing but `undefined`) is not given, and leaves the path's pairs alone, while an empty array or object is given and clears them. `.params()` takes a plain object; `null` or `undefined` clears the params set so far, and a `URLSearchParams`, `Map` or string throws a `TypeError`. Its own top-level entries are copied when `.params()` is called, each read once - the same for `params` in the request options - so adding, removing or replacing a key on the object afterwards does not change the request, and a top-level getter that throws throws from `.params()`. An array value is copied too, one level deep and with any holes kept, so an item added to it afterwards is not sent; an object value, and anything inside an array, is kept as given and serialized when the request is sent.
 
 ## HTTPResponse
 
@@ -695,7 +695,7 @@ interface AttemptRequest {
 }
 ```
 
-`request.body` and `request.rawBody` are built once for each attempt, from the caller's body, as the attempt is dispatched - before the adapter is handed its own body - (for a request that ends before any attempt is dispatched, as it ends) and only when a response or error observer is registered on the client or its parent: an attempt dispatched with none registered carries neither, and no body is parsed back or copied for it. They are plain fields of the attempt's own, so changing or replacing them reaches neither the adapter, a `307`/`308` replay, nor a later attempt. Every observer of one attempt - a parent client's and then the sub-client's - is handed the same request, so an observer that redacts its body in place changes what the observers after it see. `request.body` is the body as serialized for the adapter: a JSON body's string, or the string given. `request.rawBody` is the body before serialization. For a JSON body it is the value sent, parsed back from `request.body`: the caller's body is read once per attempt, by `JSON.stringify`, so a `toJSON` is applied, a `Date` is its ISO string, a `Map` is `{}`, and an `undefined` member is dropped (`null` in an array). For a `Uint8Array` or `FormData` body, `request.body` and `request.rawBody` are one copy of the body as sent, not the one the adapter is writing, so redacting it in place leaves the bytes on the wire alone, and an adapter changing or transferring what it was handed leaves it alone too. A string body is the string in both. When the body could not be built - a `BigInt` or a circular reference in a JSON body, an unsupported body type - an error observer's `request.body` is `null` and `request.rawBody` is the caller's own value, not a copy.
+`request.body` and `request.rawBody` are built once for each attempt, from the caller's body, as the attempt is dispatched - before the adapter is handed its own body - (for a request that ends before any attempt is dispatched, as it ends) and only when a response or error observer is registered on the client or its parent: an attempt dispatched with none registered carries neither, and no body is parsed back or copied for it. They are plain fields of the attempt's own, so changing or replacing them reaches neither the adapter, a `307`/`308` replay, nor a later attempt. `request.headers` is the attempt's own as well, its array values included, so redacting or adding to one in place reaches neither the adapter, a retry, the next redirect hop, nor the request another attempt was reported as. Every observer of one attempt - a parent client's and then the sub-client's - is handed the same request, so an observer that redacts its body in place changes what the observers after it see. `request.body` is the body as serialized for the adapter: a JSON body's string, or the string given. `request.rawBody` is the body before serialization. For a JSON body it is the value sent, parsed back from `request.body`: the caller's body is read once per attempt, by `JSON.stringify`, so a `toJSON` is applied, a `Date` is its ISO string, a `Map` is `{}`, and an `undefined` member is dropped (`null` in an array). For a `Uint8Array` or `FormData` body, `request.body` and `request.rawBody` are one copy of the body as sent, not the one the adapter is writing, so redacting it in place leaves the bytes on the wire alone, and an adapter changing or transferring what it was handed leaves it alone too. A string body is the string in both. When the body could not be built - a `BigInt` or a circular reference in a JSON body, an unsupported body type - an error observer's `request.body` is `null` and `request.rawBody` is the caller's own value, not a copy.
 
 Use `request.timeout` to inspect what timeout budget was configured for that attempt. Use `response.isTimeout` / `error.isTimeout` to inspect what actually happened.
 
@@ -1625,6 +1625,8 @@ interface MockResponse {
 }
 ```
 
+A route's `body` is serialized when the route answers, before its `delay`, so changing the object while the response is delayed does not change what is delivered. A `Uint8Array` or `ArrayBuffer` body is delivered as a plain `Uint8Array` copy of its bytes (a `Buffer` included, as the network adapters deliver one), so changing the bytes a request was answered with leaves the route's value as it was for the next request; a `Proxy` over a `Uint8Array` is delivered as it is.
+
 `MockResponse.cookies` shorthand:
 
 - `string` -> session cookie: `name=value; Path=/` (the string is the cookie value, not a raw Set-Cookie header)
@@ -1701,7 +1703,7 @@ The factory receives:
 ```typescript
 interface StreamResponseInfo {
   status: 200; // Always 200 - not called for other statuses
-  headers: Record<string, string | string[]>;
+  headers: Record<string, string | string[]>; // A copy: writing to it changes neither the response's headers nor the cookie jar
   url: string; // Resolved URL for this attempt
   attempt: number; // 1-based; increments on retry
   requestID: string;

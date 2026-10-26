@@ -56,6 +56,7 @@ import {
 } from '../internal/response-limit';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
+  copyHeaderRecord,
   deleteHeader,
   describeRefusedHeader,
   lowerCaseHeaderName,
@@ -418,8 +419,8 @@ export class NodeAdapter implements HTTPAdapter {
     if (config.crl !== undefined) {
       normalizeCRL(config.crl, this);
     }
-    assertTrustAnchors(config.ca, 'ca');
-    assertTrustAnchors(config.mtls?.ca, 'mtls.ca');
+    assertTrustAnchors(readTrustAnchors(config.ca), 'ca');
+    assertTrustAnchors(readTrustAnchors(config.mtls?.ca), 'mtls.ca');
 
     const candidateDecompress: unknown = config.decompress;
     if (
@@ -655,10 +656,11 @@ export class NodeAdapter implements HTTPAdapter {
       // custom CA trust store. An empty one is refused rather than skipped: skipped, it
       // fell back to the public roots - a client meant to trust one private CA, whose
       // loader came back empty, then trusted every public one.
-      // Each read once, so the value checked is the value sent.
-      const trustedCA = this._config.ca;
+      // Each read once, so the value checked is the value sent - a list's entries too
+      // (see `readTrustAnchors`).
+      const trustedCA = readTrustAnchors(this._config.ca);
       const mtls = this._config.mtls;
-      const mtlsCA = mtls?.ca;
+      const mtlsCA = readTrustAnchors(mtls?.ca);
       const servername = this._config.servername;
       assertTrustAnchors(trustedCA, 'ca');
       assertTrustAnchors(mtlsCA, 'mtls.ca');
@@ -1798,7 +1800,10 @@ export class NodeAdapter implements HTTPAdapter {
                 const returned = request.streamResponse(
                   {
                     status: 200,
-                    headers,
+                    // A copy, arrays too: the record is the response's own, delivered
+                    // with it and read by the cookie jar, so a factory that writes into
+                    // it - a `set-cookie` added - changes neither.
+                    headers: copyHeaderRecord(headers),
                     url: request.requestURL,
                     attempt: request.attemptNumber ?? 1,
                     requestID: request.requestID ?? '',
@@ -4230,6 +4235,15 @@ function describeFactoryReturn(value: unknown): string {
   }
 
   return typeof value;
+}
+
+/**
+ * A `ca` or `mtls.ca` value read once: a list is copied, so its entries are each read
+ * once, and the entries {@link assertTrustAnchors} checks are the entries sent. A hole is
+ * read as the `undefined` it is, and refused.
+ */
+function readTrustAnchors<V>(value: V | V[] | undefined): V | V[] | undefined {
+  return Array.isArray(value) ? [...value] : value;
 }
 
 /**
