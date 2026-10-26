@@ -101,6 +101,23 @@ export class FetchAdapter implements HTTPAdapter {
     // Taken off the adapter's own copy, in place.
     deleteHeader(headers, 'content-length');
 
+    // `fetch` refuses a GET or HEAD with any body that is not `null`, an empty string
+    // included, on every attempt - a `TypeError` with no code, retried as a network
+    // failure to no end. The probe below is built without the body, so it is checked
+    // here. `HTTPClient` refuses one before this, and hands a JSON body that serializes
+    // to nothing over as `null`.
+    if (
+      (method === 'GET' || method === 'HEAD') &&
+      body !== null &&
+      body !== undefined
+    ) {
+      const refusal = new Error(
+        `[FetchAdapter] Cannot send a ${method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`,
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
+
     // Checked before it is sent, so a request fetch refuses to build - Node's fetch refuses
     // a URL carrying credentials, on every attempt - fails once as the non-retryable
     // `adapter_error` it is, rather than as a network error retried to no end. Built

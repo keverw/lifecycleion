@@ -3602,3 +3602,65 @@ describe('XHRAdapter - PR review round 82', () => {
     expect(response.detectedRedirectURL).toBe('https://api.test/next');
   });
 });
+
+describe('XHRAdapter - PR review round 83', () => {
+  test('PR review round 83: a download counted past its declared length reports an unknown length, and the final event still fires at load', async () => {
+    const downloadEvents: Array<{
+      loaded: number;
+      total: number;
+      progress: number;
+    }> = [];
+
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      onDownloadProgress: (e) => downloadEvents.push(e),
+    });
+
+    // A gzip body counted decoded against its encoded Content-Length: it reaches the
+    // total partway and counts on past it.
+    lastXHR.simulateDownloadProgress(5120, 10240);
+    lastXHR.simulateDownloadProgress(10240, 10240);
+    lastXHR.simulateDownloadProgress(40960, 10240);
+    lastXHR.status = 200;
+    lastXHR.response = textBody('x'.repeat(40960));
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(downloadEvents.every((e) => e.progress <= 1)).toBe(true);
+    expect(downloadEvents[2]).toEqual({
+      loaded: 40960,
+      total: 40960,
+      progress: -1,
+    });
+    expect(downloadEvents.slice(3)).toEqual([
+      { loaded: 40960, total: 40960, progress: 1 },
+    ]);
+  });
+
+  test('PR review round 83: an upload counted past its reported total reports an unknown length', async () => {
+    const uploadEvents: Array<{
+      loaded: number;
+      total: number;
+      progress: number;
+    }> = [];
+
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'payload',
+      onUploadProgress: (e) => uploadEvents.push(e),
+    });
+
+    lastXHR.simulateUploadProgress(4, 2);
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(uploadEvents).toContainEqual({ loaded: 4, total: 4, progress: -1 });
+    expect(uploadEvents.every((e) => e.progress <= 1)).toBe(true);
+  });
+});

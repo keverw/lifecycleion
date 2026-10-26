@@ -2228,8 +2228,15 @@ export class BaseHTTPClient {
     } finally {
       this._tracker.remove(requestID);
 
+      // Each guarded: a caller's signal whose `removeEventListener` throws would reject a
+      // request that has already ended, and skip the releasers after it. The listener it
+      // keeps is `once`, and inert now the request is over.
       for (const release of signalReleasers) {
-        release();
+        try {
+          release();
+        } catch {
+          // Nothing more to do for that signal.
+        }
       }
     }
   }
@@ -5228,11 +5235,12 @@ export class BaseHTTPClient {
       // Registered before either listener is attached, so a second `addEventListener`
       // that throws - a caller's own `AbortSignal` subclass, a `Proxy` - does not leave
       // the first listener attached with nothing recorded to remove it. Removing a
-      // listener that was never added is a no-op.
-      releasers.push(() => {
-        a.removeEventListener('abort', onAbortA);
-        b.removeEventListener('abort', onAbortB);
-      });
+      // listener that was never added is a no-op. One releaser per signal, each run
+      // guarded, so a `removeEventListener` that throws leaves only its own listener.
+      releasers.push(
+        () => a.removeEventListener('abort', onAbortA),
+        () => b.removeEventListener('abort', onAbortB),
+      );
 
       a.addEventListener('abort', onAbortA, { once: true });
       b.addEventListener('abort', onAbortB, { once: true });

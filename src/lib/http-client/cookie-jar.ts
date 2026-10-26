@@ -424,7 +424,6 @@ export class CookieJar {
       return false;
     }
 
-    const normalizedDomain = domain;
     // Match the Set-Cookie path parser: an absent, empty, or non-absolute path uses the
     // default root path. Besides keeping persisted/programmatic cookies canonical, this
     // avoids retaining a path representation the send-side matcher never produces.
@@ -443,7 +442,7 @@ export class CookieJar {
         value: input.value,
         secure: input.secure,
         // `Domain` absent means host-only; on this path that is the `hostOnly` flag.
-        domain: input.hostOnly === true ? undefined : normalizedDomain,
+        domain: input.hostOnly === true ? undefined : domain,
         path,
       })
     ) {
@@ -453,12 +452,12 @@ export class CookieJar {
     // jar claiming a creation five years on held a cookie past the cap.
     const now = Date.now();
     const createdAt = Math.min(input.createdAt ?? now, now);
-    const apex = this.apexFor(normalizedDomain);
+    const apex = this.apexFor(domain);
 
     const stored: Cookie = {
       ...input,
       createdAt,
-      domain: normalizedDomain,
+      domain,
       path,
     };
 
@@ -480,7 +479,7 @@ export class CookieJar {
 
     const key = this.cookieKey(
       stored.name,
-      normalizedDomain,
+      domain,
       path,
       input.hostOnly === true,
     );
@@ -505,8 +504,8 @@ export class CookieJar {
 
     const scope: StoredCookieScope = {
       name: stored.name,
-      domain: normalizedDomain,
-      preparedDomain: this.prepareHost(normalizedDomain),
+      domain,
+      preparedDomain: this.prepareHost(domain),
       path,
       deadline: createdAt + MAX_COOKIE_LIFETIME_MS,
     };

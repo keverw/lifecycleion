@@ -450,9 +450,10 @@ export class XHRAdapter implements HTTPAdapter {
 
         const { progress, total } = readProgressEvent(event);
 
-        if (progress === 1) {
-          didFireDownload100 = true;
-        }
+        // Whether the last event reported 100%, not whether any did: a compressed body
+        // counted decoded can reach its encoded length partway and count on past it, and
+        // `load` then reports the whole body.
+        didFireDownload100 = progress === 1;
 
         downloadedBytes = Math.max(downloadedBytes, event.loaded);
         downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
@@ -716,15 +717,18 @@ function readPageOrigin(): string | undefined {
 /**
  * An XHR progress event's `progress` and `total`, for upload and download alike. A length
  * is known only where it is one: a shim's `lengthComputable` with a total of `0` made the
- * progress `NaN` or `Infinity`. An unknown length has progress `-1`, and the bytes so far
- * stand for the total, as NodeAdapter reports them.
+ * progress `NaN` or `Infinity`, and a compressed response can count `loaded` in decoded
+ * bytes against an encoded `Content-Length` (Chrome does), so a count past the total says
+ * the total is not the body's length. An unknown length has progress `-1`, and the bytes
+ * so far stand for the total, as NodeAdapter reports a decoded body's.
  */
 function readProgressEvent(event: {
   loaded: number;
   total: number;
   lengthComputable: boolean;
 }): { progress: number; total: number } {
-  const isLengthKnown = event.lengthComputable && event.total > 0;
+  const isLengthKnown =
+    event.lengthComputable && event.total > 0 && event.loaded <= event.total;
 
   return isLengthKnown
     ? { progress: event.loaded / event.total, total: event.total }

@@ -2383,3 +2383,43 @@ describe('FetchAdapter - PR review round 79', () => {
     expect(cancels).toBe(1);
   });
 });
+
+describe('FetchAdapter - PR review round 83', () => {
+  test('PR review round 83: a GET or HEAD with any body, an empty string included, is refused as non-retryable before fetch or upload progress', async () => {
+    let fetches = 0;
+    (globalThis as any).fetch = () => {
+      fetches++;
+      return Promise.reject(
+        new TypeError('Request with GET/HEAD method cannot have body.'),
+      );
+    };
+
+    for (const [method, body] of [
+      ['GET', ''],
+      ['HEAD', 'payload'],
+      ['get', new Uint8Array(1)],
+    ] as const) {
+      const uploadEvents: unknown[] = [];
+      const outcome = await new FetchAdapter()
+        .send({
+          requestURL: 'https://local.test/data',
+          method,
+          headers: {},
+          body,
+          onUploadProgress: (event) => uploadEvents.push(event),
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(String(outcome?.message)).toContain('with a body');
+      expect(String(outcome?.message)).not.toContain('payload');
+      expect(uploadEvents).toEqual([]);
+    }
+
+    expect(fetches).toBe(0);
+  });
+});

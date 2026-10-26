@@ -9978,3 +9978,74 @@ describe('a cancel or timeout wins over a cookie jar that throws', () => {
     }
   });
 });
+
+test('PR review round 83: a caller signal whose removeEventListener throws neither rejects a finished request nor keeps the other listeners', async () => {
+  const anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
+  const originalAdd = Object.getOwnPropertyDescriptor(
+    EventTarget.prototype,
+    'addEventListener',
+  )?.value as EventTarget['addEventListener'];
+  const originalRemove = Object.getOwnPropertyDescriptor(
+    EventTarget.prototype,
+    'removeEventListener',
+  )?.value as EventTarget['removeEventListener'];
+  const counts = new Map<AbortSignal, number>();
+  const add = spyOn(
+    EventTarget.prototype,
+    'addEventListener',
+  ).mockImplementation(function (
+    this: EventTarget,
+    ...args: Parameters<typeof originalAdd>
+  ) {
+    if (this instanceof AbortSignal && args[0] === 'abort') {
+      counts.set(this, (counts.get(this) ?? 0) + 1);
+    }
+    Reflect.apply(originalAdd, this, args);
+  });
+  const remove = spyOn(
+    EventTarget.prototype,
+    'removeEventListener',
+  ).mockImplementation(function (
+    this: EventTarget,
+    ...args: Parameters<typeof originalRemove>
+  ) {
+    if (this instanceof AbortSignal && args[0] === 'abort') {
+      counts.set(this, (counts.get(this) ?? 0) - 1);
+    }
+    Reflect.apply(originalRemove, this, args);
+  });
+  Object.defineProperty(AbortSignal, 'any', {
+    value: undefined,
+    configurable: true,
+  });
+  const callerSignal = new AbortController().signal;
+  Object.defineProperty(callerSignal, 'removeEventListener', {
+    value: () => {
+      throw new Error('remove refused');
+    },
+  });
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+  };
+  try {
+    const response = await new HTTPClient({ adapter })
+      .get('https://example.com/')
+      .signal(callerSignal)
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(counts.get(callerSignal)).toBe(1);
+    counts.delete(callerSignal);
+    expect(counts.size).toBeGreaterThanOrEqual(2);
+    expect([...counts.values()].every((count) => count === 0)).toBe(true);
+  } finally {
+    add.mockRestore();
+    remove.mockRestore();
+    if (anyDescriptor) {
+      Object.defineProperty(AbortSignal, 'any', anyDescriptor);
+    } else {
+      Reflect.deleteProperty(AbortSignal, 'any');
+    }
+  }
+});
