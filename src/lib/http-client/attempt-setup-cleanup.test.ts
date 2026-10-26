@@ -9,8 +9,8 @@ import type {
 } from './types';
 
 test.each(['bigint', 'circular', 'toJSON'] as const)(
-  'failed %s serialization clears the attempt timer and ends the attempt',
-  async (kind) => {
+  'a body whose %s serialization fails is refused as it is handed over',
+  (kind) => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;
     const body =
@@ -31,52 +31,76 @@ test.each(['bigint', 'circular', 'toJSON'] as const)(
         return Promise.resolve({ status: 200, headers: {}, body: null });
       },
     };
-    const timeoutMS = 12_345;
-    const timer = spyOn(globalThis, 'setTimeout');
-    const clear = spyOn(globalThis, 'clearTimeout');
-    const starts: number[] = [];
-    const ends: AttemptEndEvent[] = [];
-    try {
-      const request = new HTTPClient({ adapter })
-        .put('https://example.com/')
-        .json(body)
-        .timeout(timeoutMS)
-        .onAttemptStart((event) => {
-          starts.push(event.attemptNumber);
-        })
-        .onAttemptEnd((event) => {
-          ends.push(event);
-        });
-      const response = await request.send();
-      expect(request.error?.code).toBe('request_setup_error');
-      expect(response.isNetworkError).toBe(false);
-      expect(response.isTimeout).toBe(false);
-      expect(sends).toBe(0);
-      expect(starts).toEqual([1]);
-      expect(request.attemptCount).toBe(1);
-      // Attempt setup fails after the attempt began, so its start time is recorded.
-      expect(request.startedAt).not.toBeNull();
-      const attemptTimerIndex = timer.mock.calls.findIndex(
-        (call) => call[1] === timeoutMS,
-      );
-      expect(attemptTimerIndex).toBeGreaterThanOrEqual(0);
-      expect(clear).toHaveBeenCalledWith(
-        timer.mock.results[attemptTimerIndex].value,
-      );
-      expect(ends).toMatchObject([
-        { attemptNumber: 1, status: 0, willRetry: false },
-      ]);
-    } finally {
-      for (const result of timer.mock.results) {
-        if (result.type === 'return') {
-          clearTimeout(result.value);
-        }
-      }
-      timer.mockRestore();
-      clear.mockRestore();
-    }
+    const request = new HTTPClient({ adapter }).put('https://example.com/');
+
+    // Copied as it is handed over, so the copy's failure is the setter's.
+    expect(() => request.json(body)).toThrow();
+    expect(request.state).toBe('pending');
+    expect(request.startedAt).toBeNull();
+    expect(sends).toBe(0);
   },
 );
+
+test('a failed attempt setup clears the attempt timer and ends the attempt', async () => {
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => {
+      sends++;
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  // Fails as the attempt's request is built, once its timer is armed: the jar building
+  // the `Cookie` header.
+  const jar = new CookieJar();
+  spyOn(jar, 'getCookieHeaderString').mockImplementation(() => {
+    throw new Error('cookie header failed');
+  });
+  const timeoutMS = 12_345;
+  const timer = spyOn(globalThis, 'setTimeout');
+  const clear = spyOn(globalThis, 'clearTimeout');
+  const starts: number[] = [];
+  const ends: AttemptEndEvent[] = [];
+  try {
+    const request = new HTTPClient({ adapter, cookieJar: jar })
+      .put('https://example.com/')
+      .json({ value: 1 })
+      .timeout(timeoutMS)
+      .onAttemptStart((event) => {
+        starts.push(event.attemptNumber);
+      })
+      .onAttemptEnd((event) => {
+        ends.push(event);
+      });
+    const response = await request.send();
+    expect(request.error?.code).toBe('request_setup_error');
+    expect(response.isNetworkError).toBe(false);
+    expect(response.isTimeout).toBe(false);
+    expect(sends).toBe(0);
+    expect(starts).toEqual([1]);
+    expect(request.attemptCount).toBe(1);
+    // Attempt setup fails after the attempt began, so its start time is recorded.
+    expect(request.startedAt).not.toBeNull();
+    const attemptTimerIndex = timer.mock.calls.findIndex(
+      (call) => call[1] === timeoutMS,
+    );
+    expect(attemptTimerIndex).toBeGreaterThanOrEqual(0);
+    expect(clear).toHaveBeenCalledWith(
+      timer.mock.results[attemptTimerIndex].value,
+    );
+    expect(ends).toMatchObject([
+      { attemptNumber: 1, status: 0, willRetry: false },
+    ]);
+  } finally {
+    for (const result of timer.mock.results) {
+      if (result.type === 'return') {
+        clearTimeout(result.value);
+      }
+    }
+    timer.mockRestore();
+    clear.mockRestore();
+  }
+});
 
 test('an attempt signal that cannot be composed leaves no attempt timer behind', async () => {
   const anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
@@ -180,16 +204,21 @@ test('attempt setup failures release caller and composed signal listeners', asyn
   const adapter: HTTPAdapter = {
     getType: () => 'node',
     send: () => {
-      throw new Error('Serialization must fail before dispatch');
+      throw new Error('Attempt setup must fail before dispatch');
     },
   };
+  // Fails as the attempt's request is built, after its signals are composed.
+  const jar = new CookieJar();
+  spyOn(jar, 'getCookieHeaderString').mockImplementation(() => {
+    throw new Error('cookie header failed');
+  });
   try {
-    const client = new HTTPClient({ adapter });
+    const client = new HTTPClient({ adapter, cookieJar: jar });
     for (let i = 0; i < 3; i++) {
       const request = client
         .post('https://example.com/')
         .signal(controller.signal)
-        .json({ value: 1n });
+        .json({ value: 1 });
       await request.send();
       expect(request.error?.code).toBe('request_setup_error');
       expect(counts.get(controller.signal)).toBe(0);
@@ -416,37 +445,47 @@ test.each(['body', 'header'] as const)(
         return { value: 1 };
       },
     };
-    if (failure === 'header') {
-      client.addRequestInterceptor((request) => ({
-        ...request,
-        headers: {
-          ...request.headers,
-          bad: {
-            toString() {
-              throw new Error('header conversion failed');
+    // The caller's body is copied as it is handed over, so the counted body is one an
+    // interceptor returns: one that fails to copy as the chain ends, or one beside
+    // headers that fail to copy first, which the snapshot builds itself.
+    client.addRequestInterceptor((request) =>
+      failure === 'body'
+        ? { ...request, body }
+        : {
+            ...request,
+            body,
+            headers: {
+              ...request.headers,
+              bad: {
+                toString() {
+                  throw new Error('header conversion failed');
+                },
+              } as unknown as string,
             },
-          } as unknown as string,
-        },
-      }));
-    }
+          },
+    );
     const observed: Array<{ body: unknown; rawBody: unknown }> = [];
-    client.addErrorObserver((_error, attemptRequest) => {
+    const codes: string[] = [];
+    client.addErrorObserver((error, attemptRequest) => {
+      codes.push(error.code);
       observed.push({
         body: attemptRequest.body,
         rawBody: attemptRequest.rawBody,
       });
     });
-    await client.put('https://example.com/').json(body).send();
+    await client.put('https://example.com/').json({ value: 1 }).send();
     expect(observed).toHaveLength(1);
-    // One build, for the attempt: no snapshot is taken up front, and the failed
-    // attempt's snapshot adds none.
+    // One build: the copy that failed, which the failure's snapshot does not repeat, or
+    // the snapshot's own.
     expect(serializations).toBe(1);
     if (failure === 'body') {
       // Reported as it came, without a second validate-and-clone.
       expect(observed[0]).toEqual({ body: null, rawBody: body });
+      expect(codes).toEqual(['request_setup_error']);
     } else {
-      // The bodies built before the header failure are the snapshot's.
+      // Built from the body the interceptor returned.
       expect(observed[0].body).toBe('{"value":1}');
+      expect(codes).toEqual(['interceptor_error']);
     }
   },
 );

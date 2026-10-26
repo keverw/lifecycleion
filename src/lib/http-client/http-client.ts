@@ -141,6 +141,11 @@ import {
 import { readBinaryByteLength } from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
+  cloneBodyValue,
+  copiedJSONText,
+  copyRequestBody,
+} from './internal/request-body-copy';
+import {
   adoptPromise,
   adoptResult,
   UnreadableReturn,
@@ -787,7 +792,9 @@ export class BaseHTTPClient {
       baseHeaders['user-agent'] = DEFAULT_USER_AGENT;
     }
 
-    // Build intercepted request context
+    // Build intercepted request context. The body is the builder's own copy, taken when
+    // the caller handed it over (see `copyRequestBody`), so nothing the caller does to
+    // their value from here on reaches an attempt.
     const interceptedRequest: ResolvedRequest = {
       requestURL: url,
       method,
@@ -1006,6 +1013,7 @@ export class BaseHTTPClient {
         const initialPhase: InterceptorPhase = { type: 'initial' };
         let interceptResult: ResolvedRequest | InterceptorCancel;
         let initialRequestCandidate: InterceptedRequest = finalRequest;
+        const initialBodyCopy: BodyCopyOutcome = { didFail: false };
 
         try {
           const initialRun = await this._runInterceptors(
@@ -1044,6 +1052,12 @@ export class BaseHTTPClient {
             this._assertRequestIsSupported(interceptResult);
             initialRequestURL = interceptResult.requestURL;
             this._assertInterceptorResolvedURL(initialRequestURL);
+            if (initialRun.isBodyHandedOut) {
+              interceptResult = copyChainResultBody(
+                interceptResult,
+                initialBodyCopy,
+              );
+            }
           }
         } catch (error) {
           // A cancel made before the failure - by the interceptor that then threw, say -
@@ -1078,6 +1092,9 @@ export class BaseHTTPClient {
               callerMethod &&
             !isNullish(readObjectMember(initialRequestCandidate, 'body')) ===
               hasCallerBody;
+          // So is a body the interceptors returned that cannot be copied (see
+          // `copyChainResultBody`): the body's failure, not an interceptor's.
+          const isSetupError = isCallersOwnRefusal || initialBodyCopy.didFail;
           const normalizedError = isCancelled
             ? this._makeError(
                 response,
@@ -1091,15 +1108,13 @@ export class BaseHTTPClient {
                 response,
                 requestID,
                 false,
-                isCallersOwnRefusal
-                  ? 'request_setup_error'
-                  : 'interceptor_error',
+                isSetupError ? 'request_setup_error' : 'interceptor_error',
                 normalizeError(error),
               );
 
           // And counted as it is there: `0`, a setup error before any attempt, not the
           // `null` of a request the interceptors ended.
-          if (!isCancelled && isCallersOwnRefusal) {
+          if (!isCancelled && isSetupError) {
             callbacks.setAttemptCount(0);
           }
 
@@ -1115,6 +1130,9 @@ export class BaseHTTPClient {
               requestID,
               // The URL the response and error name, so a host filter agrees with them.
               { fallbackURL: url },
+              // A body that failed to copy is not read a second time; it is reported as
+              // it came.
+              initialBodyCopy.didFail ? 'unbuildable' : undefined,
             ),
             {
               type: 'final',
@@ -1212,7 +1230,8 @@ export class BaseHTTPClient {
         const credentialScope = { url: initialRequestURL };
         currentInterceptedRequest = finalRequest;
         let hopCount = 0;
-        // The body each hop's last attempt sent, as the caller gave it; see `sentBody`.
+        // The request body each hop's last attempt sent, before serialization; see
+        // `sentBody`.
         const sentBody: { value: unknown } = { value: undefined };
         // Tracks the last global attempt number across all hops and retries,
         // so the next hop's attempts continue the sequence (e.g. 1,2,3 on
@@ -1638,9 +1657,13 @@ export class BaseHTTPClient {
             let redirectIntercept: ResolvedRequest | InterceptorCancel;
             let failedRedirectRequest: InterceptedRequest = redirectRequest;
             let redirectInterceptURL = redirectURL;
+            const redirectBodyCopy: BodyCopyOutcome = { didFail: false };
 
             try {
-              const { result: redirectRunResult } = await this._runInterceptors(
+              const {
+                result: redirectRunResult,
+                isBodyHandedOut: isRedirectBodyHandedOut,
+              } = await this._runInterceptors(
                 redirectRequest,
                 { type: 'redirect', ...hopInfo },
                 {
@@ -1682,6 +1705,14 @@ export class BaseHTTPClient {
                 ) {
                   this._assertInterceptorResolvedURL(redirectInterceptURL);
                 }
+
+                // The hop's body for every attempt and replay; see `copyChainResultBody`.
+                if (isRedirectBodyHandedOut) {
+                  redirectIntercept = copyChainResultBody(
+                    redirectIntercept,
+                    redirectBodyCopy,
+                  );
+                }
               }
             } catch (error) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
@@ -1689,6 +1720,8 @@ export class BaseHTTPClient {
                 attemptLimits,
                 requestID,
                 { fallbackURL: redirectURL },
+                // See the initial phase's.
+                redirectBodyCopy.didFail ? 'unbuildable' : undefined,
               );
               response = this._buildResponse<T>({
                 adapterResponse: null,
@@ -1711,7 +1744,11 @@ export class BaseHTTPClient {
                 isNetworkErrorOverride: false,
               });
 
-              errorCode = 'interceptor_error';
+              // A body that could not be copied is the body's failure; see
+              // `copyChainResultBody`.
+              errorCode = redirectBodyCopy.didFail
+                ? 'request_setup_error'
+                : 'interceptor_error';
               adapterCause = normalizeError(error);
 
               break;
@@ -2271,9 +2308,10 @@ export class BaseHTTPClient {
      */
     markCancelled: (reason: string | undefined) => void;
     /**
-     * Set to the caller's body of each attempt as it is dispatched, so a 307/308 replays
-     * that value - serialized as the attempt's was - rather than the observers' copy,
-     * which is theirs to change.
+     * Set to the request's body of each attempt as it is dispatched - the client's own
+     * copy, which no caller holds (see `copyRequestBody`) - so a 307/308 replays that
+     * value, serialized as the attempt's was, rather than the observers' copy, which is
+     * theirs to change.
      */
     sentBody: { value: unknown };
     /**
@@ -2318,8 +2356,8 @@ export class BaseHTTPClient {
     sentRequest: AttemptRequest;
     /**
      * Set when the hop's first attempt ended before it was dispatched - cancelled from
-     * `onAttemptStart`, a body that failed to serialize: a redirect hop that never went
-     * out, which is no followed redirect.
+     * `onAttemptStart`, a cookie jar that threw building its `Cookie` header: a redirect
+     * hop that never went out, which is no followed redirect.
      */
     isHopUndispatched?: boolean;
     /** Headers for following a redirect, excluding adapter-generated origin headers. */
@@ -2598,7 +2636,8 @@ export class BaseHTTPClient {
         };
         let retryIntercept: ResolvedRequest | InterceptorCancel;
         let failedRetryRequest: InterceptedRequest = baseRequest;
-        let isRetryIntercepted = false;
+        // Whether the interceptors' request is held to the hop's own; see below.
+        let isRetryHeld = false;
         const retryInputHeaders = this._withInternalRequestHeaders(
           baseRequest.headers,
           requestID,
@@ -2607,45 +2646,45 @@ export class BaseHTTPClient {
         // Taken before the chain runs: an interceptor may write into the headers it was
         // handed, which would otherwise make a header it added look like one it was given.
         const retryInputHeaderNames = new Set(Object.keys(retryInputHeaders));
-        // On a redirect hop to an origin the caller never chose, the interceptors are
-        // handed a copy of the hop's body (see `copyRequestBody`): the hop's own is the
-        // caller's value, and an interceptor that added a field to it in place -
-        // `request.body.token = ...; return request` - changed the caller's body and sent
-        // that field to the host the server chose, past the check below, which compares
-        // identities. Taken only once an interceptor's function is about to be called,
-        // so the filters up to and including that interceptor's - the parent client's
-        // chain's included - read the hop's own body, as on any other hop; filters after
-        // it read the copy, or whatever that interceptor returned. A hop on the caller's
-        // own origin hands over the hop's body as it is, at no cost.
-        const retryBodyCopy: RetryBodyCopy | undefined =
+        // The interceptors are handed a copy of the hop's body (see `copyRequestBody`):
+        // the hop's own is the body every attempt of the hop starts from, and an
+        // interceptor that added a field to it in place - `request.body.token = ...;
+        // return request` - added it again on every later retry, and on a hop to an
+        // origin the caller never chose sent that field to the host the server chose,
+        // past the check below, which compares identities. Taken only once an
+        // interceptor's function is about to be called, so the filters up to and
+        // including that interceptor's - the parent client's chain's included - read the
+        // hop's own body; filters after it read the copy, or whatever that interceptor
+        // returned. A retry no interceptor's function runs for takes none.
+        const retryBodyCopy: RetryBodyCopy = { isTaken: false, didFail: false };
+        const prepareRetryRequest = (
+          request: InterceptedRequest,
+        ): InterceptedRequest => {
+          // Once per phase: a parent client's chain may have taken it already.
+          if (retryBodyCopy.isTaken) {
+            return request;
+          }
+          retryBodyCopy.isTaken = true;
+          let body: unknown;
+          try {
+            body = copyRequestBody(request.body);
+          } catch (error) {
+            retryBodyCopy.didFail = true;
+            throw error;
+          }
+          return { ...request, body };
+        };
+        // Whether this hop is on an origin the caller never chose, where a retry-phase
+        // request is held to the hop's own URL, body and headers (see below).
+        const isHopOnUnchosenOrigin =
           hopContext !== undefined &&
-          isCrossOrigin(credentialScope.url, baseRequest.requestURL)
-            ? { isTaken: false, didFail: false }
-            : undefined;
-        const prepareRetryRequest =
-          retryBodyCopy === undefined
-            ? undefined
-            : (request: InterceptedRequest): InterceptedRequest => {
-                // Once per phase: a parent client's chain may have taken it already.
-                if (retryBodyCopy.isTaken) {
-                  return request;
-                }
-                retryBodyCopy.isTaken = true;
-                let body: unknown;
-                try {
-                  body = copyRequestBody(request.body);
-                } catch (error) {
-                  retryBodyCopy.didFail = true;
-                  throw error;
-                }
-                return { ...request, body };
-              };
-        // Whether a retry-phase request with this URL is held to the hop's own URL, body
-        // and headers (see below): on a hop to an origin the caller never chose, one the
-        // interceptors left on the hop's host and did not send back to the caller's own
-        // origin. A URL that is not a string, or names no host, chose no destination.
+          isCrossOrigin(credentialScope.url, baseRequest.requestURL);
+        // Whether a retry-phase request with this URL is held to the hop's own request:
+        // on a hop to an origin the caller never chose, one the interceptors left on the
+        // hop's host and did not send back to the caller's own origin. A URL that is not
+        // a string, or names no host, chose no destination.
         const isHeldToHop = (requestURL: unknown): boolean => {
-          if (retryBodyCopy === undefined) {
+          if (!isHopOnUnchosenOrigin) {
             return false;
           }
 
@@ -2677,7 +2716,6 @@ export class BaseHTTPClient {
 
           // Snapshotted as the initial phase in `_execute` does, and skipped on the
           // same condition; see there.
-          isRetryIntercepted = retryRun.isIntercepted;
           if (!retryRun.isIntercepted) {
             retryIntercept = retryRun.result;
           } else if (isInterceptorCancel(retryRun.result)) {
@@ -2691,6 +2729,18 @@ export class BaseHTTPClient {
             failedRetryRequest = retryIntercept;
             this._assertRequestIsSupported(retryIntercept);
             this._assertInterceptorResolvedURL(retryIntercept.requestURL);
+            isRetryHeld =
+              retryRun.isIntercepted && isHeldToHop(retryIntercept.requestURL);
+            // The attempt's body, and a `307`/`308` replay's; see `copyChainResultBody`.
+            // A request held to the hop's own sends the hop's body, never this one, which
+            // is only asked whether it sends anything (see
+            // `withoutAddedCrossOriginCredentials`), so it is not copied.
+            if (retryRun.isBodyHandedOut && !isRetryHeld) {
+              retryIntercept = copyChainResultBody(
+                retryIntercept,
+                retryBodyCopy,
+              );
+            }
           }
         } catch (error) {
           // Terminal failure — no further attempts. _execute notifies error observers
@@ -2712,12 +2762,14 @@ export class BaseHTTPClient {
           return endBeforeDispatch(
             isHeld ? baseRequest : failedRetryRequest,
             {
-              errorCode: retryBodyCopy?.didFail
+              errorCode: retryBodyCopy.didFail
                 ? 'request_setup_error'
                 : 'interceptor_error',
               adapterCause: normalizeError(error),
             },
-            undefined,
+            // A body that failed to copy is reported as it came, not read again; the
+            // hop's own is reported built.
+            retryBodyCopy.didFail && !isHeld ? 'unbuildable' : undefined,
             !isHeld && typeof failedRetryURL === 'string'
               ? failedRetryURL
               : undefined,
@@ -2752,9 +2804,8 @@ export class BaseHTTPClient {
         // credential scope reads it below, so it is left alone. So is a hop the server
         // kept on the caller's own origin, which is no origin the caller never chose, and
         // a retry the interceptor sends back to exactly that origin. Stripped silently, as
-        // `_sanitizeRedirectRequest` strips the hop's own. A hop on an origin the caller
-        // never chose is the one whose body was copied for the chain (`retryBodyCopy`).
-        if (isRetryIntercepted && isHeldToHop(retryIntercept.requestURL)) {
+        // `_sanitizeRedirectRequest` strips the hop's own.
+        if (isRetryHeld) {
           try {
             attemptRequest = withoutAddedCrossOriginCredentials(
               retryIntercept,
@@ -2763,13 +2814,13 @@ export class BaseHTTPClient {
             );
           } catch (error) {
             // Telling whether the hop's body or the interceptors' sends nothing reads it -
-            // the hop's is the caller's value - and a body that cannot be read fails here
-            // as it fails being built on any other hop: as the request's setup, with the
-            // attempt it already started ended. Reported as the hop's own request, as a
-            // stripped attempt would have gone out: the interceptors' carries what they
-            // added - a token in the URL or a header - and the response, the error and
-            // host-filtered observers would name a credentialed request to the host the
-            // server chose.
+            // the interceptors' is the value they returned, uncopied - and a body that
+            // cannot be read fails here as it fails being built on any other hop: as the
+            // request's setup, with the attempt it already started ended. Reported as
+            // the hop's own request, as a stripped attempt would have gone out: the
+            // interceptors' carries what they added - a token in the URL or a header - and
+            // the response, the error and host-filtered observers would name a
+            // credentialed request to the host the server chose.
             return endBeforeDispatch(baseRequest, {
               errorCode: 'request_setup_error',
               adapterCause: normalizeError(error),
@@ -4702,6 +4753,11 @@ export class BaseHTTPClient {
    * request they pass is one this client built, with its headers through `mergeHeaders`,
    * which normalizes them exactly as the snapshot would, so there is nothing caller-owned
    * to take a copy of. The redirect phase snapshots regardless; see there.
+   *
+   * `isBodyHandedOut` says whether any interceptor's function was called, and so was
+   * handed the request's body and may still hold it: the phase then copies the body of
+   * the chain's result (see `copyChainResultBody`), so one that changes the object it
+   * returned later - from an observer, say - changes no later attempt or replay.
    */
   private async _runInterceptors<R extends InterceptedRequest>(
     request: R,
@@ -4717,8 +4773,12 @@ export class BaseHTTPClient {
     /** See `InterceptorChainOptions.prepareRequest`: shared by both chains, so it decides once. */
     prepareRequest?: (request: InterceptedRequest) => InterceptedRequest,
   ): Promise<
-    | { result: R; isIntercepted: false }
-    | { result: InterceptedRequest | InterceptorCancel; isIntercepted: true }
+    | { result: R; isIntercepted: false; isBodyHandedOut: false }
+    | {
+        result: InterceptedRequest | InterceptorCancel;
+        isIntercepted: true;
+        isBodyHandedOut: boolean;
+      }
   > {
     const parentManager = this._parentClient?._requestInterceptors;
 
@@ -4728,7 +4788,7 @@ export class BaseHTTPClient {
       (parentManager === undefined || parentManager.isEmpty) &&
       this._requestInterceptors.isEmpty
     ) {
-      return { result: request, isIntercepted: false };
+      return { result: request, isIntercepted: false, isBodyHandedOut: false };
     }
 
     // None for a parent with nothing registered: its chain would hand back the request
@@ -4749,6 +4809,8 @@ export class BaseHTTPClient {
     // Whether the parent's chain called any interceptor's function this phase: with none
     // called, its result is `request` itself, untouched.
     let didParentCallInterceptor = false;
+    // Whether either chain called any interceptor's function this phase.
+    let isBodyHandedOut = false;
 
     if (parentChain) {
       current = await parentChain(request, phase, chainContext, {
@@ -4756,12 +4818,13 @@ export class BaseHTTPClient {
         onCopyFailure,
         onInterceptorCalled: () => {
           didParentCallInterceptor = true;
+          isBodyHandedOut = true;
         },
         ...(prepareRequest ? { prepareRequest } : {}),
       });
 
       if (isInterceptorCancel(current) || isCancelled()) {
-        return { result: current, isIntercepted: true };
+        return { result: current, isIntercepted: true, isBodyHandedOut };
       }
     }
 
@@ -4776,9 +4839,14 @@ export class BaseHTTPClient {
         isCancelled,
         isInterceptorResult: didParentCallInterceptor,
         onCopyFailure,
+        onInterceptorCalled: () => {
+          isBodyHandedOut = true;
+        },
         ...(prepareRequest ? { prepareRequest } : {}),
       }),
       isIntercepted: true,
+      // Read once the chain has run, after the line above.
+      isBodyHandedOut,
     };
   }
 
@@ -5274,9 +5342,11 @@ function snapshotClientConfigFields(config: SubClientConfig) {
 }
 
 /**
- * The bodies of one attempt, built from the caller's body before the adapter is handed
+ * The bodies of one attempt, built from the request's body before the adapter is handed
  * any: the one sent, and, when `isObserved`, the observers' own, so nothing an observer
- * does to theirs reaches the adapter or a later attempt.
+ * does to theirs reaches the adapter or a later attempt. On an attempt the request's body
+ * is the client's own copy (see `copyRequestBody`), which no caller holds; a best-effort
+ * snapshot of a request that failed before one existed may be handed any value.
  */
 function buildAttemptBodies(
   rawBody: unknown,
@@ -5287,15 +5357,16 @@ function buildAttemptBodies(
   // explicitly instead of being stringified into `{}`.
   assertSupportedRequestBody(rawBody);
 
-  // A JSON body is read once, by `JSON.stringify` - from the caller's value itself, so
-  // what JSON reads from prototypes (a nested `URL`'s or class instance's `toJSON`,
-  // another realm's `Date`) is honored - and the observers' copy is parsed back from the
-  // bytes sent. A deep copy taken beside the serialization read the caller's value a
-  // second time: a getter, or a change in between, made `rawBody` differ from what went
+  // A JSON body is serialized once, by `JSON.stringify` - or not at all: the client's
+  // copy is sent as the text it was read back from (see `copiedJSONText`) - and the
+  // observers' copy is parsed back from the bytes sent, so `rawBody` is exactly what went
   // out. Parsed for each attempt, so an observer that changes it changes no other
   // attempt's - every observer of one attempt shares the one copy.
   if (Array.isArray(rawBody) || isPlainJSONBodyObject(rawBody)) {
-    const { body, contentType } = serializeBody(rawBody);
+    const { body, contentType } = serializeBody(
+      rawBody,
+      copiedJSONText(rawBody),
+    );
 
     return {
       sentBody: body,
@@ -5314,11 +5385,13 @@ function buildAttemptBodies(
     };
   }
 
-  // Bytes and form data are sent as the client's own copy, which no observer is handed:
-  // their `body` and `rawBody` are one copy of it, taken now - before the adapter can
-  // change or transfer what it was handed. NodeAdapter writes a FormData's parts as it
-  // walks them, so a redirect- or retry-phase observer changing the one being sent, while
-  // its upload was still under way, changed parts not yet written.
+  // Bytes and form data are sent as a copy taken for this attempt, so an adapter that
+  // changes or transfers what it was handed leaves the request's own body - the next
+  // attempt's, and a replay's - alone. No observer is handed that copy: their `body` and
+  // `rawBody` are one copy of it, taken now - before the adapter can change or transfer
+  // it. NodeAdapter writes a FormData's parts as it walks them, so a redirect- or
+  // retry-phase observer changing the one being sent, while its upload was still under
+  // way, changed parts not yet written.
   const sentBody = cloneBodyValue(rawBody);
   const { body, contentType } = serializeBody(sentBody);
   let observed: ObservedBodies | undefined;
@@ -5330,29 +5403,13 @@ function buildAttemptBodies(
       const copy = isSent ? (cloneBodyValue(body) as typeof body) : body;
       observed = { body: copy, rawBody: copy };
     } else {
-      // A string, or nothing: `rawBody` is what the caller gave, `undefined` included.
+      // A string, or nothing: `rawBody` is the request's body as it is, `undefined`
+      // included.
       observed = { body, rawBody: sentBody };
     }
   }
 
   return { sentBody: body, contentType, observed };
-}
-
-function cloneBodyValue(body: unknown): unknown {
-  if (body instanceof FormData) {
-    const cloned = new FormData();
-
-    for (const [key, value] of body.entries()) {
-      cloned.append(key, value);
-    }
-
-    return cloned;
-  } else if (isRequestBodyBytes(body)) {
-    // Read through its internal slots, so another realm's is copied into this one's.
-    return new Uint8Array(body);
-  }
-
-  return body;
 }
 
 /**
@@ -6032,39 +6089,41 @@ function comparableHost(url: string): string {
   return extractHostname(url).toLowerCase().replace(/\.$/, '');
 }
 
-/** The copy of a hop's body a retry phase's interceptors were handed; see `copyRequestBody`. */
-interface RetryBodyCopy {
-  isTaken: boolean;
+/** Whether a phase's copy of a body failed; see `copyChainResultBody`. */
+interface BodyCopyOutcome {
   didFail: boolean;
 }
 
-/**
- * A request body as a value the caller does not hold: a JSON body as the data it
- * serializes to, read back - so it serializes to the same text, every nested `toJSON`
- * already applied, where a structural copy would lose them - and bytes or form data as
- * the client's own copy (see `cloneBodyValue`). A string, `null` or `undefined` cannot be
- * changed in place and is returned as it is.
- *
- * A JSON body whose top-level `toJSON` answers something other than an object or an
- * array - `null`, a string, a number, nothing - reads back as that value, which is no
- * JSON body: a string is sent as text, `null` as no body at all, and a number is refused.
- * Such a copy is wrapped as a plain object whose own `toJSON` answers it, so it is still
- * a JSON body and serializes to exactly the text the caller's does. There is nothing in
- * it to edit in place, and the caller's value is not handed over either.
- */
-function copyRequestBody(body: unknown): unknown {
-  if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
-    const text: unknown = JSON.stringify(body);
-    // A top-level `toJSON` that answers `undefined` serializes to nothing.
-    const parsed: unknown =
-      typeof text === 'string' ? JSON.parse(text) : undefined;
+/** The copy of a hop's body a retry phase's interceptors were handed; see `copyRequestBody`. */
+interface RetryBodyCopy extends BodyCopyOutcome {
+  isTaken: boolean;
+}
 
-    return Array.isArray(parsed) || isPlainJSONBodyObject(parsed)
-      ? parsed
-      : { toJSON: () => parsed };
+/**
+ * A chain's result with its body as the client's own copy (see `copyRequestBody`), for a
+ * phase whose interceptors were handed the request's body: one may keep the object it
+ * returned - or the one it was handed - and change it later, from an observer or an
+ * `onAttemptEnd`, which would otherwise reach a later attempt or a `307`/`308` replay.
+ * Taken once the result has passed the phase's checks, so a body of an unsupported type
+ * is still refused as the interceptor's, and only for a result whose body is sent: a
+ * retry held to a hop's own request sends the hop's body. A body that cannot be copied - a `toJSON` that
+ * throws, a `Proxy` over a form - is the body's failure, as one that cannot be
+ * serialized is, not an interceptor's: `outcome.didFail` is set before it throws, and the
+ * phase reports it as `request_setup_error`.
+ */
+function copyChainResultBody(
+  request: ResolvedRequest,
+  outcome: BodyCopyOutcome,
+): ResolvedRequest {
+  let body: unknown;
+  try {
+    body = copyRequestBody(request.body);
+  } catch (error) {
+    outcome.didFail = true;
+    throw error;
   }
 
-  return cloneBodyValue(body);
+  return { ...request, body };
 }
 
 /**
@@ -6104,11 +6163,11 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
 
 /**
  * Whether a body sends anything: by the rule `emptyRequestBody` reads a body by - none, an
- * empty string, no bytes, or a form with no entries sends nothing. On an attempt's body as
- * the client serialized it (see `buildAttemptBodies`), its own copy, the reads cannot
- * throw. On a cross-origin hop's own body, the caller's value (see
- * `withoutAddedCrossOriginCredentials`), they can, and its caller fails the request as
- * `request_setup_error`.
+ * empty string, no bytes, or a form with no entries sends nothing. Every body it is asked
+ * about is one of the client's own copies - an attempt's body as the client serialized it
+ * (see `buildAttemptBodies`), or a cross-origin hop's (see
+ * `withoutAddedCrossOriginCredentials`) - so the reads are not expected to throw; a
+ * caller that is handed a throw fails the request as `request_setup_error`.
  */
 function sendsRequestBody(body: unknown): boolean {
   return emptyRequestBody(body) === undefined;

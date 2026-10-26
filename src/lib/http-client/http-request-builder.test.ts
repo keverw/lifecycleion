@@ -831,3 +831,133 @@ test('PR review round 72a: an array in params or headers is copied when given, s
   );
   expect(seen).toEqual(['a', 'a']);
 });
+
+test('PR review round 72b: a body is copied when it is handed to a setter, so a later change to it is not sent', async () => {
+  const json = { a: 1, nested: { b: 2 } };
+  const bytes = new Uint8Array([1, 2, 3]);
+  const form = new FormData();
+  form.append('a', '1');
+
+  const forwarded: unknown[] = [];
+  for (const [set, change] of [
+    [
+      (builder: HTTPRequestBuilder) => builder.json(json),
+      () => {
+        json.a = 99;
+        json.nested.b = 99;
+      },
+    ],
+    [
+      (builder: HTTPRequestBuilder) => builder.body(bytes),
+      () => {
+        bytes[0] = 99;
+      },
+    ],
+    [
+      (builder: HTTPRequestBuilder) => builder.formData(form),
+      () => {
+        form.append('b', '2');
+      },
+    ],
+  ] as const) {
+    const { builder, requireContext } = makeBuilder();
+    set(builder);
+    change();
+    await builder.send();
+    forwarded.push(requireContext().options.body);
+  }
+
+  expect(forwarded[0]).toEqual({ a: 1, nested: { b: 2 } });
+  expect(forwarded[0]).not.toBe(json);
+  expect(Array.from(forwarded[1] as Uint8Array)).toEqual([1, 2, 3]);
+  expect(forwarded[1]).not.toBe(bytes);
+  expect([...(forwarded[2] as FormData).entries()]).toEqual([['a', '1']]);
+  expect(forwarded[2]).not.toBe(form);
+
+  // The same through the request options.
+  const optionBody = { a: 1 };
+  const { sendFn, requireContext } = makeSendFn();
+  const optionBuilder = new HTTPRequestBuilder('POST', '/x', sendFn, {
+    body: optionBody,
+  });
+  optionBody.a = 2;
+  await optionBuilder.send();
+
+  expect(requireContext().options.body).toEqual({ a: 1 });
+});
+
+test('PR review round 72b: a body whose getter or toJSON throws throws from the setter, and the builder keeps its body', async () => {
+  const getterBody = {
+    get token(): string {
+      throw new Error('getter failed');
+    },
+  };
+  const toJSONBody = {
+    toJSON(): never {
+      throw new Error('toJSON failed');
+    },
+  };
+  const { builder, requireContext } = makeBuilder();
+  builder.json({ kept: true });
+
+  expect(() => builder.json(getterBody)).toThrow('getter failed');
+  expect(() => builder.body(toJSONBody)).toThrow('toJSON failed');
+  expect(
+    () =>
+      new HTTPRequestBuilder('POST', '/x', makeSendFn().sendFn, {
+        body: toJSONBody,
+      }),
+  ).toThrow('toJSON failed');
+
+  await builder.send();
+
+  expect(requireContext().options.body).toEqual({ kept: true });
+});
+
+test('PR review round 72b: a JSON body is kept as the data it serializes to', async () => {
+  class Point {
+    public x = 1;
+  }
+  const when = new Date('2020-01-02T03:04:05.000Z');
+  const { builder, requireContext } = makeBuilder();
+  await builder
+    .json({ when, point: new Point(), dropped: undefined, list: [undefined] })
+    .send();
+
+  const body = requireContext().options.body as Record<string, unknown>;
+  expect(body).toEqual({
+    when: '2020-01-02T03:04:05.000Z',
+    point: { x: 1 },
+    list: [null],
+  });
+  expect(Object.getPrototypeOf(body.point)).toBe(Object.prototype);
+  expect(Object.hasOwn(body, 'dropped')).toBe(false);
+});
+
+test('PR review round 72b: a form body is copied from the entries it holds, not ones it reports', async () => {
+  const form = new FormData();
+  form.append('a', '1');
+  // Its own `entries` reports an entry the form does not hold.
+  Object.defineProperty(form, 'entries', {
+    value: () => {
+      const reported = new FormData();
+      reported.append('injected', 'x');
+      return reported.entries();
+    },
+  });
+
+  const { builder, requireContext } = makeBuilder();
+  builder.formData(form);
+  await builder.send();
+
+  expect([
+    ...FormData.prototype.entries.call(
+      requireContext().options.body as FormData,
+    ),
+  ]).toEqual([['a', '1']]);
+
+  // A `Proxy` over a form has no internal slots to read entries from.
+  expect(() =>
+    makeBuilder().builder.formData(new Proxy(new FormData(), {})),
+  ).toThrow();
+});

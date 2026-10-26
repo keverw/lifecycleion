@@ -8407,7 +8407,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(errorCodes).toEqual(['interceptor_error']);
   });
 
-  test('unsupported request body gets request_setup_error code', async () => {
+  test('an unsupported request body is refused as it is handed over', async () => {
     let wasAdapterCalled = false;
 
     const adapter: HTTPAdapter = {
@@ -8432,24 +8432,24 @@ describe('HTTPClient — phase-aware interceptors', () => {
       errorCodes.push(err.code);
     });
 
-    const builder = client
-      .post('https://example.com/test')
-      .body(new URLSearchParams({ a: '1' }));
-    const res = await builder.send();
-
-    expect(wasAdapterCalled).toBe(false);
-    expect(res.status).toBe(0);
-    expect(res.isNetworkError).toBe(false);
-    expect(res.isFailed).toBe(true);
-    expect(builder.state).toBe('failed');
-    expect(builder.attemptCount).toBe(0);
-    expect(builder.error?.code).toBe('request_setup_error');
-    expect(builder.error?.message).toBe('Request setup failed');
-    expect(builder.error?.cause?.message).toMatch(
+    // Refused by the setter, as `params()` refuses a query it cannot copy: there is no
+    // copy of the body to take, so nothing is sent and no error is reported.
+    const builder = client.post('https://example.com/test');
+    expect(() => builder.body(new URLSearchParams({ a: '1' }))).toThrow(
       /Unsupported request body type/i,
     );
-    expect(builder.error?.isRetriesExhausted).toBe(false);
-    expect(errorCodes).toEqual(['request_setup_error']);
+    expect(() =>
+      client.post('https://example.com/test', {
+        body: new URLSearchParams({ a: '1' }),
+      }),
+    ).toThrow(TypeError);
+    expect(builder.state).toBe('pending');
+
+    const res = await builder.send();
+
+    expect(res.status).toBe(200);
+    expect(wasAdapterCalled).toBe(true);
+    expect(errorCodes).toEqual([]);
   });
 
   test('error observer receives the effective request timeout on setup failures', async () => {
@@ -8474,10 +8474,11 @@ describe('HTTPClient — phase-aware interceptors', () => {
       observedTimeout = req.timeout;
     });
 
+    // `streamResponse` needs NodeAdapter: refused at setup, before any attempt.
     const res = await client
       .post('https://example.com/test')
       .timeout(6_789)
-      .body(new URLSearchParams({ a: '1' }))
+      .streamResponse(() => null)
       .send();
 
     expect(wasAdapterCalled).toBe(false);

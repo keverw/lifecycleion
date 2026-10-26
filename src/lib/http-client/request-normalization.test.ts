@@ -670,17 +670,6 @@ test("a request interceptor's filter that throws fails the request as intercepto
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
   let didRun = false;
-  client.addRequestInterceptor(
-    (request) => {
-      didRun = true;
-      return request;
-    },
-    { bodyContainsKeys: ['data'] },
-  );
-  const codes: string[] = [];
-  client.addErrorObserver((error) => {
-    codes.push(error.code);
-  });
   const body = new Proxy(
     {},
     {
@@ -695,8 +684,22 @@ test("a request interceptor's filter that throws fails the request as intercepto
       },
     },
   );
+  // The caller's body is copied as it is handed over, so the body the filter cannot read
+  // is one an earlier interceptor returned.
+  client.addRequestInterceptor((request) => ({ ...request, body }));
+  client.addRequestInterceptor(
+    (request) => {
+      didRun = true;
+      return request;
+    },
+    { bodyContainsKeys: ['data'] },
+  );
+  const codes: string[] = [];
+  client.addErrorObserver((error) => {
+    codes.push(error.code);
+  });
 
-  const response = await client.post('/x', { body }).send();
+  const response = await client.post('/x', { body: { data: 1 } }).send();
 
   expect(response.isFailed).toBe(true);
   expect(codes).toEqual(['interceptor_error']);
@@ -1205,19 +1208,22 @@ test('PR review round 48: with no observer registered no body is parsed back or 
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
   // Attempt hooks are handed events, not the request, so they ask for no bodies.
   const hookEvents: number[] = [];
+  const form = new FormData();
+  form.set('a', '1');
+  // Built before the spies: the body setters copy the body as it is handed over, and
+  // what is counted here is the work `send()` does.
+  const builders = [
+    client.post('/x').json({ a: 1 }),
+    client.post('/x').json({ a: 1 }),
+    client.post('/x').formData(form),
+    client.post('/x').formData(form),
+  ];
   const parse = spyOn(JSON, 'parse');
   const entries = spyOn(FormData.prototype, 'entries');
 
   try {
-    const form = new FormData();
-    form.set('a', '1');
-    for (const send of [
-      () => client.post('/x').json({ a: 1 }),
-      () => client.post('/x').json({ a: 1 }),
-      () => client.post('/x').formData(form),
-      () => client.post('/x').formData(form),
-    ]) {
-      await send()
+    for (const builder of builders) {
+      await builder
         .onAttemptStart((event) => hookEvents.push(event.attemptNumber))
         .onAttemptEnd((event) => hookEvents.push(event.attemptNumber))
         .send();
@@ -1226,8 +1232,8 @@ test('PR review round 48: with no observer registered no body is parsed back or 
     expect(calls).toBe(4);
     expect(hookEvents).toHaveLength(8);
     expect(parse).toHaveBeenCalledTimes(0);
-    // Twice per request: the copy sent, taken from the caller's form, and one look at
-    // whether that copy sends anything.
+    // Twice per request: the copy sent, taken from the request's own form, and one look
+    // at whether that copy sends anything.
     expect(entries).toHaveBeenCalledTimes(4);
   } finally {
     parse.mockRestore();
@@ -1243,15 +1249,19 @@ test('PR review round 48: a request ended before dispatch builds no observer bod
   client.addRequestInterceptor(() => {
     throw new Error('refused');
   });
+  const form = new FormData();
+  form.set('a', '1');
+  // Built before the spies, which count the work `send()` does: the setters copy the
+  // body as it is handed over.
+  const jsonBuilder = client.post('/x').json({ a: 1 });
+  const multipartBuilder = client.post('/x').formData(form);
   const parse = spyOn(JSON, 'parse');
   const stringify = spyOn(JSON, 'stringify');
   const entries = spyOn(FormData.prototype, 'entries');
 
   try {
-    const form = new FormData();
-    form.set('a', '1');
-    const json = await client.post('/x').json({ a: 1 }).send();
-    const multipart = await client.post('/x').formData(form).send();
+    const json = await jsonBuilder.send();
+    const multipart = await multipartBuilder.send();
 
     expect(json.status).toBe(0);
     expect(multipart.status).toBe(0);
@@ -1269,6 +1279,12 @@ test("PR review round 48: an observer's body and rawBody are plain data fields, 
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
   const seen: unknown[] = [];
+  const form = new FormData();
+  form.set('a', '1');
+  // Built before the spy, which counts the work `send()` does: the setter copies the
+  // form as it is handed over.
+  const jsonBuilder = client.post('/x').json({ a: 1 });
+  const formBuilder = client.post('/form').formData(form);
   const entries = spyOn(FormData.prototype, 'entries');
 
   try {
@@ -1282,11 +1298,9 @@ test("PR review round 48: an observer's body and rawBody are plain data fields, 
       request.rawBody = 'replaced';
       seen.push(request.rawBody);
     });
-    const form = new FormData();
-    form.set('a', '1');
 
-    await client.post('/x').json({ a: 1 }).send();
-    await client.post('/form').formData(form).send();
+    await jsonBuilder.send();
+    await formBuilder.send();
 
     expect(seen).toEqual([
       true,
@@ -1509,8 +1523,9 @@ test("PR review round 46: a retry-phase observer changing rawBody changes neithe
   const response = await client.put('/x').json(body).send();
 
   expect(response.status).toBe(200);
-  // Once per attempt: the bytes and the observers' copy come from the one read.
-  expect(reads).toBe(2);
+  // Once, as the body is handed to `.json()`: every attempt's bytes and the observers'
+  // copies come from that one read.
+  expect(reads).toBe(1);
   expect(sent).toEqual([
     '{"nested":{"value":1},"token":"fixed"}',
     '{"nested":{"value":1},"token":"fixed"}',
@@ -13306,29 +13321,71 @@ test("PR review round 58: a cross-origin hop's own body goes out with its own bo
   expect(sentToTarget[1]?.headers).not.toHaveProperty('content-language');
 });
 
-test("PR review round 58: a body that cannot be copied for a cross-origin hop's retry interceptors fails as request_setup_error", async () => {
-  const { adapter } = crossOriginReplayAdapter('https://evil.example/next');
+test("PR review round 58: a retry interceptor's body that cannot be copied, on a cross-origin hop held to its own body, sends the hop's own", async () => {
+  const { adapter, sentToTarget } = crossOriginReplayAdapter(
+    'https://evil.example/next',
+  );
   const client = new HTTPClient({
     adapter,
     followRedirects: true,
     retryPolicy: crossOriginRetryPolicy,
   });
-  client.addRequestInterceptor((request) => request, { phases: ['retry'] });
+  // The caller's body is copied as it is handed over, so the body that cannot be copied
+  // is one a retry interceptor returns. The hop is held to its own body, so that one is
+  // never sent, and is not copied either.
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      body: {
+        toJSON: () => {
+          throw new Error('not copyable');
+        },
+      },
+    }),
+    { phases: ['retry'] },
+  );
   let reads = 0;
   const builder = client.put('https://api.example/start').json({
     toJSON: () => {
-      // The first attempt and the hop serialize it; the copy is the third read.
-      if (++reads === 3) {
-        throw new Error('not copyable');
-      }
+      reads++;
       return { a: 1 };
     },
   });
 
-  await builder.send();
+  const response = await builder.send();
 
-  expect(reads).toBe(3);
-  expect(builder.error?.code).toBe('request_setup_error');
+  expect(reads).toBe(1);
+  expect(response.status).toBe(200);
+  expect(builder.error).toBeNull();
+  expect(sentToTarget.map((request) => request.body)).toEqual([
+    JSON.stringify({ a: 1 }),
+    JSON.stringify({ a: 1 }),
+  ]);
+});
+
+test("PR review round 72b: a retry interceptor's BigInt body on a cross-origin hop held to its own body sends the hop's own", async () => {
+  const { adapter, sentToTarget } = crossOriginReplayAdapter(
+    'https://evil.example/next',
+  );
+  const client = new HTTPClient({
+    adapter,
+    followRedirects: true,
+    retryPolicy: crossOriginRetryPolicy,
+  });
+  client.addRequestInterceptor((request) => ({ ...request, body: { n: 1n } }), {
+    phases: ['retry'],
+  });
+  const builder = client.put('https://api.example/start').json({ a: 1 });
+
+  const response = await builder.send();
+
+  expect(response.status).toBe(200);
+  expect(builder.error).toBeNull();
+  expect(builder.attemptCount).toBe(3);
+  expect(sentToTarget.map((request) => request.body)).toEqual([
+    JSON.stringify({ a: 1 }),
+    JSON.stringify({ a: 1 }),
+  ]);
 });
 
 test("PR review round 58: a parent client's and a sub-client's retry interceptors share one copy of a cross-origin hop's body", async () => {
@@ -13535,8 +13592,9 @@ test('PR review round 59: bodyContainsKeys matches a cross-origin hop body as it
   const sameOrigin = await matched('https://api.example/next');
   const crossOrigin = await matched('https://evil.example/next');
 
-  // A key holding `undefined` is a key; a class instance is not traversed.
-  expect(sameOrigin).toEqual(['opt', 'inner']);
+  // The body is the data it serializes to, copied as it was handed to `.json()`: the
+  // `undefined` member is dropped, and the class instance is a plain object.
+  expect(sameOrigin).toEqual(['inner.x', 'inner']);
   expect(crossOrigin).toEqual(sameOrigin);
 });
 
@@ -13612,7 +13670,7 @@ test('PR review round 59: an abandoned POST with a body reports non_idempotent_m
   expect(builder.error?.isRetriesExhausted).toBe(false);
 });
 
-test("PR review round 59: a parent client's declining filter reads a cross-origin hop's own body, and the sub-client's first matching interceptor gets the copy", async () => {
+test("PR review round 59: retry interceptors' filters on a cross-origin hop read the hop's body, and the sub-client's first matching interceptor edits a copy of it, not what the hop sends", async () => {
   class Inner {
     public x = 1;
   }
@@ -13625,23 +13683,23 @@ test("PR review round 59: a parent client's declining filter reads a cross-origi
     retryPolicy: crossOriginRetryPolicy,
   });
   const calls: string[] = [];
-  // Matches the copy, where `inner` is a plain object, but not the hop's own body.
+  // Declines the hop's own body.
   parent.addRequestInterceptor(
     (request) => {
       calls.push('parent');
       return request;
     },
-    { phases: ['retry'], bodyContainsKeys: ['inner.x'] },
+    { phases: ['retry'], bodyContainsKeys: ['missing'] },
   );
   const child = parent.createSubClient();
-  // Matches the hop's own body, where `opt` holds `undefined`, but not the copy.
+  // Matches the hop's own body, and its function is handed the copy.
   child.addRequestInterceptor(
     (request) => {
       calls.push('child');
       (request.body as Record<string, unknown>).token = 'SECRET';
       return request;
     },
-    { phases: ['retry'], bodyContainsKeys: ['opt'] },
+    { phases: ['retry'], bodyContainsKeys: ['inner.x'] },
   );
   const body = { inner: new Inner(), opt: undefined as unknown };
 
@@ -14253,13 +14311,10 @@ test('PR review round 71: a Uint8Array body from another realm is sent as its by
   expect(observed).toHaveLength(1);
   expect(Array.from(observed[0] as Uint8Array)).toEqual([1, 2, 3]);
 
-  // No internal slot, so no bytes to copy: refused before anything is sent.
-  const proxied = client
-    .post('/upload')
-    .body(new Proxy(new Uint8Array([1, 2, 3]), {}));
-  await proxied.send();
-
-  expect(proxied.error?.code).toBe('request_setup_error');
+  // No internal slot, so no bytes to copy: refused as it is handed over.
+  expect(() =>
+    client.post('/upload').body(new Proxy(new Uint8Array([1, 2, 3]), {})),
+  ).toThrow(/Unsupported request body type/);
   expect(received).toHaveLength(1);
 });
 
@@ -14455,4 +14510,427 @@ test('PR review round 72a: a redirect-phase response observer that pushes onto a
 
   expect(response.status).toBe(200);
   expect(seen).toEqual(['a, b', 'a, b']);
+});
+
+/**
+ * An adapter that answers each attempt from `answers`, by its place in the request, and
+ * records what each attempt sent: a string as it is, bytes as their numbers, and a form
+ * as its entries.
+ */
+function roundSeventyTwoBAdapter(
+  answers: Array<{ status: number; location?: string }>,
+): { adapter: HTTPAdapter; sent: unknown[]; urls: string[] } {
+  const sent: unknown[] = [];
+  const urls: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      const { body } = request;
+      sent.push(
+        body instanceof Uint8Array
+          ? Array.from(body)
+          : body instanceof FormData
+            ? [...body.entries()]
+            : body,
+      );
+      urls.push(request.requestURL);
+      const answer = answers[sent.length - 1] ?? { status: 200 };
+      const headers: Record<string, string> = {};
+      if (answer.location !== undefined) {
+        headers.location = answer.location;
+      }
+      return Promise.resolve({ status: answer.status, headers, body: null });
+    },
+  };
+  return { adapter, sent, urls };
+}
+
+const roundSeventyTwoBRetryPolicy = {
+  strategy: 'fixed',
+  maxRetryAttempts: 2,
+  delayMS: 0,
+} as const;
+
+test('PR review round 72b: a body changed after it is handed to the builder and before send() is not sent', async () => {
+  const { adapter, sent } = roundSeventyTwoBAdapter([]);
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  const json = { a: 1, nested: { b: 2 } };
+  const jsonBuilder = client.post('/x').json(json);
+  json.a = 99;
+  json.nested.b = 99;
+  (json as Record<string, unknown>).added = true;
+
+  const optionJSON = { a: 1 };
+  const optionBuilder = client.post('/x', { body: optionJSON });
+  optionJSON.a = 99;
+
+  const bytes = new Uint8Array([1, 2, 3]);
+  const bytesBuilder = client.post('/x').body(bytes);
+  bytes[0] = 99;
+
+  const form = new FormData();
+  form.append('a', '1');
+  const formBuilder = client.post('/x').formData(form);
+  form.append('token', 'SECRET');
+  form.set('a', 'changed');
+
+  await jsonBuilder.send();
+  await optionBuilder.send();
+  await bytesBuilder.send();
+  await formBuilder.send();
+
+  expect(sent).toEqual([
+    '{"a":1,"nested":{"b":2}}',
+    '{"a":1}',
+    [1, 2, 3],
+    [['a', '1']],
+  ]);
+});
+
+test('PR review round 72b: a body changed from onAttemptEnd between attempts is not sent on the retry, nor reported', async () => {
+  const { adapter, sent } = roundSeventyTwoBAdapter([
+    { status: 503 },
+    { status: 200 },
+  ]);
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: roundSeventyTwoBRetryPolicy,
+  });
+  const reported: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    reported.push(request.rawBody);
+  });
+  const json = { a: 1 };
+  const bytes = new Uint8Array([1, 2, 3]);
+
+  await client
+    .put('/x')
+    .json(json)
+    .onAttemptEnd(() => {
+      json.a++;
+    })
+    .send();
+  await client
+    .put('/x')
+    .body(bytes)
+    .onAttemptEnd(() => {
+      bytes[0] = 99;
+    })
+    .send();
+
+  expect(sent).toEqual(['{"a":1}', '{"a":1}', [1, 2, 3]]);
+  expect(reported[0]).toEqual({ a: 1 });
+});
+
+test('PR review round 72b: a 307 replay sends the body as it was handed over, whatever the caller changed since', async () => {
+  for (const status of [307, 308]) {
+    const { adapter, sent, urls } = roundSeventyTwoBAdapter([
+      { status, location: '/next' },
+      { status: 200 },
+    ]);
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      followRedirects: true,
+    });
+    const json = { a: 1 };
+
+    await client
+      .post('/start')
+      .json(json)
+      .onAttemptEnd(() => {
+        json.a = 99;
+      })
+      .send();
+
+    expect(urls).toEqual(['http://api.test/start', 'http://api.test/next']);
+    expect(sent).toEqual(['{"a":1}', '{"a":1}']);
+  }
+});
+
+test('PR review round 72b: a retry interceptor that edits the body in place does not add to it again on each retry', async () => {
+  const { adapter, sent } = roundSeventyTwoBAdapter([
+    { status: 503 },
+    { status: 503 },
+    { status: 200 },
+  ]);
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: roundSeventyTwoBRetryPolicy,
+  });
+  client.addRequestInterceptor(
+    (request) => {
+      const body = request.body as { a: number; retries?: number };
+      body.retries = (body.retries ?? 0) + 1;
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+  const json = { a: 1 };
+
+  await client.put('/x').json(json).send();
+
+  expect(sent).toEqual([
+    '{"a":1}',
+    '{"a":1,"retries":1}',
+    '{"a":1,"retries":1}',
+  ]);
+  expect(json).toEqual({ a: 1 });
+});
+
+test('PR review round 72b: a body an interceptor returns and changes later does not reach a later attempt or a replay', async () => {
+  // An initial-phase interceptor's body, changed before the retry.
+  const initial = roundSeventyTwoBAdapter([{ status: 503 }, { status: 200 }]);
+  const initialClient = new HTTPClient({
+    adapter: initial.adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: roundSeventyTwoBRetryPolicy,
+  });
+  const initialBody = { token: 'first' };
+  initialClient.addRequestInterceptor((request) => ({
+    ...request,
+    body: initialBody,
+  }));
+
+  await initialClient
+    .put('/x')
+    .json({ a: 1 })
+    .onAttemptEnd(() => {
+      initialBody.token = 'changed';
+    })
+    .send();
+
+  expect(initial.sent).toEqual(['{"token":"first"}', '{"token":"first"}']);
+
+  // A retry-phase interceptor's body, changed before the 307 replay of that retry.
+  const retry = roundSeventyTwoBAdapter([
+    { status: 503 },
+    { status: 307, location: '/next' },
+    { status: 200 },
+  ]);
+  const retryClient = new HTTPClient({
+    adapter: retry.adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    retryPolicy: roundSeventyTwoBRetryPolicy,
+  });
+  const retryBody = { token: 'retry' };
+  retryClient.addRequestInterceptor(
+    (request) => ({ ...request, body: retryBody }),
+    { phases: ['retry'] },
+  );
+
+  await retryClient
+    .put('/start')
+    .json({ a: 1 })
+    .onAttemptEnd((event) => {
+      // After the retry that sent it, which the server answered with the 307.
+      if (event.attemptNumber === 2) {
+        retryBody.token = 'changed';
+      }
+    })
+    .send();
+
+  expect(retry.urls).toEqual([
+    'http://api.test/start',
+    'http://api.test/start',
+    'http://api.test/next',
+  ]);
+  expect(retry.sent).toEqual([
+    '{"a":1}',
+    '{"token":"retry"}',
+    '{"token":"retry"}',
+  ]);
+  // A redirect-phase interceptor's body, changed before the hop's retry.
+  const redirect = roundSeventyTwoBAdapter([
+    { status: 307, location: '/next' },
+    { status: 503 },
+    { status: 200 },
+  ]);
+  const redirectClient = new HTTPClient({
+    adapter: redirect.adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    retryPolicy: roundSeventyTwoBRetryPolicy,
+  });
+  const redirectBody = { token: 'hop' };
+  redirectClient.addRequestInterceptor(
+    (request) => ({ ...request, body: redirectBody }),
+    { phases: ['redirect'] },
+  );
+
+  await redirectClient
+    .put('/start')
+    .json({ a: 1 })
+    .onAttemptEnd((event) => {
+      if (event.attemptNumber === 2) {
+        redirectBody.token = 'changed';
+      }
+    })
+    .send();
+
+  expect(redirect.urls).toEqual([
+    'http://api.test/start',
+    'http://api.test/next',
+    'http://api.test/next',
+  ]);
+  expect(redirect.sent).toEqual([
+    '{"a":1}',
+    '{"token":"hop"}',
+    '{"token":"hop"}',
+  ]);
+});
+
+test('PR review round 72b: a body whose getter or toJSON throws throws from the setter, and nothing is sent', () => {
+  const { adapter, sent } = roundSeventyTwoBAdapter([]);
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  expect(() =>
+    client.post('/x').json({
+      toJSON(): never {
+        throw new Error('toJSON failed');
+      },
+    }),
+  ).toThrow('toJSON failed');
+  expect(() =>
+    client.post('/x', {
+      body: {
+        get token(): string {
+          throw new Error('getter failed');
+        },
+      },
+    }),
+  ).toThrow('getter failed');
+  expect(sent).toEqual([]);
+});
+
+test('PR review round 72b: a Date in a JSON body reaches interceptors as its ISO string and is sent as before', async () => {
+  const { adapter, sent } = roundSeventyTwoBAdapter([]);
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const seen: unknown[] = [];
+  client.addRequestInterceptor((request) => {
+    seen.push((request.body as { when: unknown }).when);
+    return request;
+  });
+  const when = new Date('2020-01-02T03:04:05.000Z');
+
+  await client.post('/x').json({ when }).send();
+
+  expect(seen).toEqual(['2020-01-02T03:04:05.000Z']);
+  expect(sent).toEqual([JSON.stringify({ when })]);
+});
+
+test('PR review round 72b: an interceptor that edits the body it is handed in place sends its edit, in the initial and redirect phases', async () => {
+  const { adapter, sent } = roundSeventyTwoBAdapter([
+    { status: 307, location: '/next' },
+    { status: 200 },
+  ]);
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  client.addRequestInterceptor(
+    (request, phase) => {
+      (request.body as Record<string, unknown>)[phase.type] = true;
+      return request;
+    },
+    { phases: ['initial', 'redirect'] },
+  );
+
+  await client.put('/start').json({ a: 1 }).send();
+
+  expect(sent).toEqual([
+    '{"a":1,"initial":true}',
+    '{"a":1,"initial":true,"redirect":true}',
+  ]);
+});
+
+test('PR review round 72b: a request an interceptor edits in place and then ends is reported with its edit', async () => {
+  for (const end of ['throw', 'cancel'] as const) {
+    const { adapter, sent } = roundSeventyTwoBAdapter([]);
+    const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+    const reported: unknown[] = [];
+    client.addErrorObserver((_error, request) => {
+      reported.push(request.body, request.rawBody);
+    });
+    client.addRequestInterceptor((request) => {
+      (request.body as Record<string, unknown>).edited = true;
+      if (end === 'throw') {
+        throw new Error('interceptor failed');
+      }
+      return null;
+    });
+
+    await client.post('/x').json({ a: 1 }).send();
+
+    expect(sent).toEqual([]);
+    expect(reported).toEqual(['{"a":1,"edited":true}', { a: 1, edited: true }]);
+  }
+});
+
+test('PR review round 72b: a JSON body is serialized once, when it is handed over, however many attempts send or replay it', async () => {
+  const { adapter, sent } = roundSeventyTwoBAdapter([
+    { status: 503 },
+    { status: 307, location: '/next' },
+    { status: 200 },
+  ]);
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    retryPolicy: roundSeventyTwoBRetryPolicy,
+  });
+  client.addResponseObserver(() => {});
+  const stringify = spyOn(JSON, 'stringify');
+
+  try {
+    await client.put('/start').json({ marker: 1 }).send();
+
+    const bodySerializations = stringify.mock.calls.filter(
+      ([value]) =>
+        typeof value === 'object' && value !== null && 'marker' in value,
+    );
+    expect(bodySerializations).toHaveLength(1);
+  } finally {
+    stringify.mockRestore();
+  }
+
+  expect(sent).toEqual(['{"marker":1}', '{"marker":1}', '{"marker":1}']);
+});
+
+test("PR review round 72b: a parent client's interceptor body changed later does not reach a later attempt", async () => {
+  const { adapter, sent } = roundSeventyTwoBAdapter([
+    { status: 503 },
+    { status: 200 },
+  ]);
+  const parent = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: roundSeventyTwoBRetryPolicy,
+  });
+  const parentBody = { token: 'parent' };
+  parent.addRequestInterceptor(
+    (request) => ({ ...request, body: parentBody }),
+    { phases: ['initial'] },
+  );
+  const child = parent.createSubClient();
+  // Declines, so no sub-client interceptor's function is called.
+  child.addRequestInterceptor((request) => request, {
+    phases: ['initial'],
+    bodyContainsKeys: ['missing'],
+  });
+
+  await child
+    .put('/x')
+    .json({ a: 1 })
+    .onAttemptEnd(() => {
+      parentBody.token = 'changed';
+    })
+    .send();
+
+  expect(sent).toEqual(['{"token":"parent"}', '{"token":"parent"}']);
 });

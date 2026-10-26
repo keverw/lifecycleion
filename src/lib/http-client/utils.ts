@@ -1276,9 +1276,14 @@ export function isBrowserEnvironment(): boolean {
 }
 
 /**
- * Serializes the request body and returns the body + inferred content-type.
+ * Serializes the request body and returns the body + inferred content-type. `jsonText`,
+ * when given, is the JSON text a JSON body is already known to serialize to - a copy the
+ * client took (see `copiedJSONText`) - and is sent as it is, not serialized again.
  */
-export function serializeBody(body: unknown): {
+export function serializeBody(
+  body: unknown,
+  jsonText?: string,
+): {
   body: string | Uint8Array | FormData | null;
   contentType: string | null;
 } {
@@ -1295,13 +1300,13 @@ export function serializeBody(body: unknown): {
   } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
     // `JSON.stringify` answers `undefined` for a top-level `toJSON` that does: nothing is
     // sent, so nothing is typed as JSON either.
-    const serialized = JSON.stringify(body) as string | undefined;
+    const serialized: unknown = jsonText ?? JSON.stringify(body);
 
-    return serialized === undefined
-      ? { body: null, contentType: null }
-      : { body: serialized, contentType: 'application/json; charset=utf-8' };
+    return typeof serialized === 'string'
+      ? { body: serialized, contentType: 'application/json; charset=utf-8' }
+      : { body: null, contentType: null };
   } else {
-    throw new Error(
+    throw new TypeError(
       'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.',
     );
   }
@@ -1320,7 +1325,7 @@ export function assertSupportedRequestBody(body: unknown): void {
     return;
   }
 
-  throw new Error(
+  throw new TypeError(
     'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.',
   );
 }

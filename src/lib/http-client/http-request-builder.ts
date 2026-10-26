@@ -5,6 +5,7 @@ import { validateMaxResponseBytes, validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { defineEntry } from '../internal/define-entry';
 import { lowerCaseHeaderName } from './utils';
+import { copyRequestBody } from './internal/request-body-copy';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -164,31 +165,38 @@ export class HTTPRequestBuilder<T = unknown> {
 
   /**
    * An object or array body, sent as JSON. The same as `.body(data)`: serialization is
-   * decided by the value's type when the request is sent, so a string here is sent as
-   * `text/plain` and a number is refused - see the Body Types table in the docs for
-   * sending a JSON primitive.
+   * decided by the value's type, so a string here is sent as `text/plain` and a number
+   * is refused - see the Body Types table in the docs for sending a JSON primitive.
    */
   public json(data: unknown): this {
     this._assertNotSent('json');
-    this._body = data;
+    this._body = copyRequestBody(data);
     return this;
   }
 
   public formData(data: FormData): this {
     this._assertNotSent('formData');
-    this._body = data;
+    this._body = copyRequestBody(data);
     return this;
   }
 
   public text(data: string): this {
     this._assertNotSent('text');
-    this._body = data;
+    this._body = copyRequestBody(data);
     return this;
   }
 
+  /**
+   * The request body, copied now into one the client owns (see `copyRequestBody`), as
+   * `headers()` and `params()` copy theirs: a change to the caller's value after this
+   * call reaches nothing the request sends or reports, on any attempt, retry or
+   * `307`/`308` replay. A JSON body is the data it serializes to, so interceptors see a
+   * `Date` as its ISO string. Throws now on a body of an unsupported type, and on one
+   * whose copy throws - a getter or `toJSON`, a `BigInt` or a circular reference.
+   */
   public body(data: unknown): this {
     this._assertNotSent('body');
-    this._body = data;
+    this._body = copyRequestBody(data);
     return this;
   }
 

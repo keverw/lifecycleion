@@ -7,6 +7,7 @@ import {
 import { normalizeStandardMethod } from './internal/http-method';
 import { isPlainRecord } from './internal/plain-record';
 import { adoptPromise } from '../internal/adopt-promise';
+import { releaseRequestBody } from './internal/request-body-copy';
 import {
   CallbackRegistry,
   copyCallbackPhase,
@@ -79,9 +80,10 @@ export interface InterceptorChainOptions {
   /**
    * Called once, as the first interceptor's function this phase calls is about to be
    * called - after its filter, which reads the request as it was handed over - and its
-   * answer read in place of the request: the client hands interceptors on a redirect hop
-   * to an origin the caller never chose a copy of the hop's body this way, so one that
-   * edits the body in place edits neither the caller's value nor what that hop sends.
+   * answer read in place of the request: the client hands retry-phase interceptors a copy
+   * of the hop's body this way, so one that edits the body in place edits neither the
+   * body the hop's later attempts start from nor what a hop to an origin the caller never
+   * chose sends.
    * The filters up to and including that interceptor's read the request as handed over,
    * as on any other hop; the filters after it read the prepared request, or whatever an
    * interceptor returned in its place. A request no interceptor's function is called
@@ -169,6 +171,10 @@ async function runInterceptors(
     }
 
     onInterceptorCalled?.();
+
+    // Caller code may keep the body it is handed and change it in place, so a JSON copy
+    // the client took is no longer sent as the text it was read from.
+    releaseRequestBody(current.body);
 
     // Adopted, not awaited as it is: an interceptor is caller code, and one returning
     // a native promise with its own `constructor` and a no-op `then` would hang the

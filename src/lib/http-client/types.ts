@@ -578,6 +578,10 @@ export type RequestHeadersInput = Record<
 export interface HTTPRequestOptions {
   headers?: RequestHeadersInput;
   params?: Record<string, unknown>;
+  /**
+   * Copied when the request is built, as `.body()` copies it: a later change to the value
+   * is not sent. See `HTTPRequestBuilder.body`.
+   */
   body?: unknown;
   /** Null or undefined inherits the client's configured `timeout`. */
   timeout?: number | null;
@@ -1140,14 +1144,14 @@ export type AttemptRequest = Omit<
   body?: string | Uint8Array | FormData | null;
   /**
    * The attempt's body before serialization, for observers that need the payload as well
-   * as the adapter-facing `body`, built for each attempt from the caller's body (after
+   * as the adapter-facing `body`, built for each attempt from the request's body (after
    * interceptors), when `body` is. A JSON body is the value sent, parsed back from `body`
    * (so a `toJSON` is applied and a `Date` is its ISO string); a `Uint8Array` or
    * `FormData` body is the same copy as `body`, so redacting it in place leaves the bytes
    * on the wire alone; a string is the string. Changing or replacing it reaches neither
-   * the adapter nor a later attempt. When the body could not be built - a JSON body
-   * `JSON.stringify` refuses, an unsupported type - `body` is `null` and this is the
-   * caller's own value.
+   * the adapter nor a later attempt. When a body an interceptor returned could not be
+   * copied or built - a JSON body `JSON.stringify` refuses, an unsupported type - `body` is
+   * `null` and this is the value the interceptor returned.
    */
   rawBody?: unknown;
   /** Effective per-attempt timeout in ms. */
