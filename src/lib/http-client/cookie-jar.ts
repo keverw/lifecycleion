@@ -6,7 +6,6 @@ import { describeValue } from '../internal/describe-value';
 import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
 import { assertHeaderRecord } from './internal/plain-record';
-import { lowerCaseHeaderName } from './internal/header-utils';
 import { asciiLowercase } from './internal/http-method';
 import { isNullish } from '../internal/is-nullish';
 import { isHeaderSafeCookieText } from './internal/cookie-text';
@@ -599,7 +598,7 @@ export class CookieJar {
     // found it rather than holding the cookies that came before the bad line.
     const lines: string[] = [];
     for (const [name, raw] of Object.entries(headers)) {
-      if (lowerCaseHeaderName(name) !== 'set-cookie' || isNullish(raw)) {
+      if (asciiLowercase(name) !== 'set-cookie' || isNullish(raw)) {
         continue;
       }
 

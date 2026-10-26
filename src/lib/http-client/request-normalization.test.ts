@@ -41,7 +41,10 @@ import { knownBodyByteLength } from './internal/progress';
 import { readBinaryByteLength } from '../internal/binary-view';
 import { utf8ByteLength } from './internal/utf8-length';
 import { createResponseBodySource } from './internal/response-decoding';
-import { isIdentityContentEncoding } from './internal/response-limit';
+import {
+  isIdentityContentEncoding,
+  parseContentLength,
+} from './internal/response-limit';
 import { sleep } from '../sleep';
 import {
   matchesCORSCredentialsList,
@@ -16212,4 +16215,50 @@ test('PR review round 79: a contentTypeHeaders entry trimmed of a no-break space
       contentTypeHeaders: [' application/json\t'],
     }),
   ).not.toThrow();
+});
+
+test('PR review round 80: a hosts entry with a no-break space beside * is refused, not read as the global *', async () => {
+  const client = new HTTPClient();
+  for (const entry of [' *', '* ', '  api.example.com']) {
+    expect(() =>
+      client.addRequestInterceptor((request) => request, { hosts: [entry] }),
+    ).toThrow(TypeError);
+  }
+  // A filter not registered through a client matches no host with one either.
+  expect(
+    matchesFilter(
+      { hosts: [' *'] },
+      { requestURL: 'https://other.test/x' },
+      'request',
+    ),
+  ).toBe(false);
+
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const scoped = new HTTPClient({ adapter });
+  const seen: string[] = [];
+  scoped.addRequestInterceptor(
+    (request) => {
+      seen.push('*');
+      return request;
+    },
+    { hosts: ['*'] },
+  );
+  scoped.addRequestInterceptor(
+    (request) => {
+      seen.push('spaced');
+      return request;
+    },
+    { hosts: [' *\t'] },
+  );
+  await scoped.get('http://other.test/x').send();
+  expect(seen).toEqual(['*', 'spaced']);
+});
+
+test('PR review round 80: a Content-Length is trimmed of HTTP whitespace only', () => {
+  expect(parseContentLength(' 10\t')).toBe(10);
+  expect(parseContentLength(['10 ', '\t10'])).toBe(10);
+  // NO-BREAK SPACE is not HTTP whitespace: Fetch and Node read no length from these.
+  expect(parseContentLength('10\u00A0')).toBeUndefined();
+  expect(parseContentLength('\u00A010')).toBeUndefined();
 });

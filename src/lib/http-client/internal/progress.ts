@@ -2,6 +2,7 @@ import type { AdapterProgressEvent } from '../types';
 import { safeHandleCallback } from '../../safe-handle-callback';
 import { readBinaryByteLength } from '../../internal/binary-view';
 import { utf8ByteLength } from './utf8-length';
+import { isNullish } from '../../internal/is-nullish';
 
 /**
  * Wrap a caller's progress callback so a throw from it cannot be mistaken for a transport
@@ -30,14 +31,8 @@ export function guardProgressCallback(
   callback: ((event: AdapterProgressEvent) => void) | undefined | null,
   label: string,
 ): ((event: AdapterProgressEvent) => void) | undefined {
-  // `== null`, so `null` is "none" as well as `undefined`. The bare `?.()` call sites this
-  // replaced skipped a `null` hook exactly as they skipped an absent one, and narrowing the
-  // check to `undefined` turned that silent no-op into a `safeHandleCallback` report of a
-  // non-function on the global `'error'` channel - once per progress event, for a JavaScript
-  // caller who simply passed `null`. `BaseHTTPClient` normalizes falsy hooks before they
-  // reach here, so this is the direct-adapter path, but the doc above says "when the caller
-  // supplied none" and `null` is that.
-  if (callback === undefined || callback === null) {
+  // `null` is none too, not a non-function to report on every progress event.
+  if (isNullish(callback)) {
     return undefined;
   }
 
@@ -59,7 +54,7 @@ export function guardProgressCallback(
  * rather than a stand-in `1`.
  */
 export function knownBodyByteLength(body: unknown): number | undefined {
-  if (body === undefined || body === null) {
+  if (isNullish(body)) {
     return 0;
   }
 

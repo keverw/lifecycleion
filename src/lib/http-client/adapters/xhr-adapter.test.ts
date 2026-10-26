@@ -3537,6 +3537,27 @@ describe('XHRAdapter - PR review round 67', () => {
   });
 });
 
+describe('XHRAdapter - PR review round 80', () => {
+  test('PR review round 80: a response header value keeps a trailing 0xA0 byte, trimmed of HTTP whitespace only', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    // `à` in UTF-8 is 0xC3 0xA0, which a header read as latin1 gives as `\u00C3\u00A0`.
+    lastXHR.getAllResponseHeadersResult =
+      'content-disposition: attachment; filename=\u00C3\u00A0\r\nx-padded:\t value \t\r\n';
+    lastXHR.simulateLoad();
+    const response = await promise;
+    expect(response.headers['content-disposition']).toBe(
+      'attachment; filename=\u00C3\u00A0',
+    );
+    expect(response.headers['x-padded']).toBe('value');
+  });
+});
+
 describe('XHRAdapter - PR review round 74', () => {
   test('PR review round 74: the bytes it is handed are given to xhr.send() before send() returns, which copies them there', async () => {
     const body = new Uint8Array([1, 2, 3, 4]);

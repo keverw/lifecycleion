@@ -16,9 +16,7 @@ import type { RequestHeadersInput } from '../types';
  * maps the Kelvin sign U+212A to `k`, turning `X-Key` - a name every transport refuses -
  * into the valid `x-key`, and grouping it with a real `x-key`.
  */
-export function lowerCaseHeaderName(name: string): string {
-  return asciiLowercase(name);
-}
+export const lowerCaseHeaderName: (name: string) => string = asciiLowercase;
 
 /**
  * A header value as every header normalizer reads it - the one rule they share, so a

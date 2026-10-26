@@ -3,6 +3,7 @@ import { copyArrayValue } from './internal/array-copy';
 import { describeValue } from '../internal/describe-value';
 import { parse } from 'tldts';
 import { endsInANumber } from '../domain-utils/helpers';
+import { asciiLowercase } from './internal/http-method';
 
 /**
  * Caller adjustments to the Public Suffix List the jar scopes cookies with.
@@ -45,11 +46,11 @@ export interface PublicSuffixOverrides {
   remove?: readonly string[];
 }
 
-/** A hostname label list, lowercased, with a trailing root dot dropped. */
+/** A hostname label list, lowercased in ASCII, with a trailing root dot dropped. */
 function toLabels(hostname: string): string[] {
   const trimmed = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
 
-  return trimmed.toLowerCase().split('.');
+  return asciiLowercase(trimmed).split('.');
 }
 
 /**
@@ -79,9 +80,11 @@ function normalizeSuffix(
   // A leading dot is how Set-Cookie writes a domain, and it is the likeliest thing a
   // caller copies in from one. Accepted and dropped, as `Domain=` itself is.
   const stripped = entry.startsWith('.') ? entry.slice(1) : entry;
-  const normalized = stripped.endsWith('.')
-    ? stripped.slice(0, -1).toLowerCase()
-    : stripped.toLowerCase();
+  // Lowercased in ASCII only, so a typo is refused below: `toLowerCase` turned the Kelvin
+  // sign in `\u212Aorp.internal` into the `k` of a valid `korp.internal`.
+  const normalized = asciiLowercase(
+    stripped.endsWith('.') ? stripped.slice(0, -1) : stripped,
+  );
 
   if (normalized === '') {
     throw new TypeError(`${entryName} is empty`);

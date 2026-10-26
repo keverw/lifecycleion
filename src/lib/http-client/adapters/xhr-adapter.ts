@@ -3,6 +3,7 @@ import {
   describeRefusedHeader,
   requestHeaderPairs,
   lowerCaseHeaderName,
+  trimHTTPWhitespace,
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
@@ -821,9 +822,13 @@ function parseXHRResponseHeaders(
       continue;
     }
 
-    // Lowercase to normalize across servers (header names are case-insensitive)
-    const key = lowerCaseHeaderName(line.slice(0, colonIndex).trim());
-    const value = line.slice(colonIndex + 1).trim();
+    // Lowercase to normalize across servers (header names are case-insensitive).
+    // Trimmed of HTTP whitespace only: `trim()` also took U+00A0, the 0xA0 byte a value
+    // read as latin1 may end with (the second byte of a UTF-8 `à`).
+    const key = lowerCaseHeaderName(
+      trimHTTPWhitespace(line.slice(0, colonIndex)),
+    );
+    const value = trimHTTPWhitespace(line.slice(colonIndex + 1));
 
     if (!key) {
       // Colon at position 0 — no name; skip

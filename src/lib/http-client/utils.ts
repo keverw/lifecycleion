@@ -1423,13 +1423,25 @@ const ANY_HOST: HostPattern = { kind: 'any' };
 const NO_HOST: HostPattern = { kind: 'never' };
 
 /**
- * Whether a `hosts` pattern is `*` alone, trimmed. Not `*.`: that is an empty label after
- * the wildcard - what `*.${domain}` gives with the domain unset - and read as `*` it sent
- * a host-scoped interceptor's token to every host. It matches nothing, as in the domain
- * matchers, and is refused when the filter is added.
+ * Whether a `hosts` pattern is `*` alone, trimmed of HTTP whitespace (spaces, tabs and line breaks). Not `*.`: that is an
+ * empty label after the wildcard - what `*.${domain}` gives with the domain unset - and
+ * read as `*` it sent a host-scoped interceptor's token to every host. It matches nothing,
+ * as in the domain matchers, and is refused when the filter is added. Nor `*` with a
+ * no-break space beside it, which `trim()` would take: see {@link hasNonHTTPWhitespaceEdge}.
  */
 export function isGlobalHostPattern(pattern: string): boolean {
-  return pattern.trim() === '*';
+  return trimHTTPWhitespace(pattern) === '*';
+}
+
+/**
+ * Whether a `hosts` pattern, trimmed of HTTP whitespace, still has whitespace at an end -
+ * a no-break space picked up from pasted config. Such a pattern matches nothing, and is
+ * refused when the filter is added: `trim()` took it, so `' *'` with a no-break space was
+ * the global `*` and a host-scoped interceptor's token went to every host.
+ */
+export function hasNonHTTPWhitespaceEdge(pattern: string): boolean {
+  const trimmed = trimHTTPWhitespace(pattern);
+  return trimmed.trim() !== trimmed;
 }
 
 /**
@@ -1438,6 +1450,10 @@ export function isGlobalHostPattern(pattern: string): boolean {
  * wildcard's checks look its tail up in the Public Suffix List.
  */
 export function readHostPattern(pattern: string): HostPattern {
+  if (hasNonHTTPWhitespaceEdge(pattern)) {
+    return NO_HOST;
+  }
+
   if (isGlobalHostPattern(pattern)) {
     return ANY_HOST;
   }

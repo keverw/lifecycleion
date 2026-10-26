@@ -3,6 +3,7 @@ import { isRealmRootPrototype } from './plain-record';
 import { copyArrayValue } from './array-copy';
 import { trimHTTPWhitespace } from './header-utils';
 import {
+  hasNonHTTPWhitespaceEdge,
   isGlobalHostPattern,
   normalizeFilterMethods,
   readHostPattern,
@@ -34,10 +35,13 @@ const FILTER_LISTS: Record<
   }
 > = {
   phases: { entryType: 'string' },
-  // Trimmed first, as the matcher trims an entry before reading it.
+  // Trimmed first, of HTTP whitespace, as the matcher trims an entry before reading it.
   hosts: {
     entryType: 'string',
-    check: (entry) => describeUnmatchableHostPattern(entry.trim()),
+    check: (entry) =>
+      hasNonHTTPWhitespaceEdge(entry)
+        ? 'has a no-break space or other whitespace besides spaces, tabs and line breaks at an end, so it can never match'
+        : describeUnmatchableHostPattern(trimHTTPWhitespace(entry)),
   },
   schemes: { entryType: 'string', allowed: ['http', 'https'] },
   bodyContainsKeys: { entryType: 'string' },
