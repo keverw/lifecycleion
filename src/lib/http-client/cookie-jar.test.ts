@@ -3709,3 +3709,205 @@ test('PR review round 69: clearExpiredCookies leaves a cookie stored while it re
   expect(jar.clearExpiredCookies()).toBe(0);
   expect(jar.getCookieHeaderString(url)).toBe('a=2');
 });
+
+test('PR review round 72: a stored cookie edited past the lifetime cap expires at the cap', () => {
+  const capMS = 400 * 24 * 3600 * 1000;
+  let clock = 1_000_000;
+  const nowSpy = spyOn(Date, 'now').mockImplementation(() => clock);
+
+  try {
+    const url = 'https://example.com/';
+    const jar = new CookieJar();
+
+    for (const name of ['a', 'b']) {
+      jar.setCookie({
+        name,
+        value: '1',
+        domain: 'example.com',
+        path: '/',
+        hostOnly: true,
+        maxAge: 3600,
+      });
+    }
+
+    // Edited through the live objects `getAllCookies()` hands out, past the cap.
+    for (const stored of jar.getAllCookies()) {
+      if (stored.name === 'a') {
+        stored.maxAge = 1e10;
+      } else {
+        delete stored.maxAge;
+        stored.expires = new Date(clock + 5000 * 24 * 3600 * 1000);
+      }
+    }
+
+    clock += capMS - 1;
+    expect(jar.getCookieHeaderString(url)).toBe('a=1; b=1');
+    // Reported as `setCookie` would have stored them.
+    const [a, b] = jar.getCookiesFor(url);
+    expect(a?.maxAge).toBe(400 * 24 * 3600);
+    expect(b?.expires?.getTime()).toBe(1_000_000 + capMS);
+
+    clock += 1;
+    expect(jar.getCookieHeaderString(url)).toBe('');
+    expect(jar.clearExpiredCookies()).toBe(2);
+    expect(jar.getAllCookies()).toEqual([]);
+  } finally {
+    nowSpy.mockRestore();
+  }
+});
+
+test('PR review round 72: fromJSON refuses an entry it cannot read and reads a Date by its time', () => {
+  const jar = new CookieJar();
+  jar.setCookie({ name: 'old', value: '1', domain: 'example.com', path: '/' });
+  const cookie = {
+    name: 'a',
+    value: '1',
+    domain: 'example.com',
+    path: '/',
+    hostOnly: true,
+    createdAt: Date.now(),
+  };
+
+  // A getter that throws is a refused entry, not an error out of the restore.
+  const unreadable = { ...cookie, name: 'bad' };
+  Object.defineProperty(unreadable, 'value', {
+    enumerable: true,
+    get() {
+      throw new RangeError('boom');
+    },
+  });
+  expect(jar.fromJSON({ cookies: [cookie, unreadable] })).toBe(1);
+  expect(jar.getAllCookies().map((c) => c.name)).toEqual(['a']);
+
+  // An element that cannot be read is a payload that cannot be read: the jar is kept.
+  const entries: unknown[] = [{ ...cookie, name: 'b' }];
+  Object.defineProperty(entries, 1, {
+    get() {
+      throw new RangeError('boom');
+    },
+  });
+  expect(() =>
+    jar.fromJSON({ cookies: entries } as Parameters<CookieJar['fromJSON']>[0]),
+  ).toThrow(TypeError);
+  expect(jar.getAllCookies().map((c) => c.name)).toEqual(['a']);
+
+  // A sound `Date` whose own `getTime` answers `NaN` is restored at its real time.
+  const expires = new Date(Date.now() + 3600 * 1000);
+  Object.defineProperty(expires, 'getTime', { value: () => Number.NaN });
+  expect(jar.fromJSON({ cookies: [{ ...cookie, expires }] })).toBe(1);
+  expect(jar.getAllCookies()[0]?.expires?.getTime()).toBe(
+    Date.prototype.getTime.call(expires),
+  );
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
+});
+
+test('PR review round 72: the lifetime cap is measured from when the jar stored the cookie', () => {
+  const capMS = 400 * 24 * 3600 * 1000;
+  const start = 1_000_000;
+  let clock = start;
+  const nowSpy = spyOn(Date, 'now').mockImplementation(() => clock);
+
+  try {
+    const url = 'https://example.com/';
+    const jar = new CookieJar();
+    const base = {
+      value: '1',
+      domain: 'example.com',
+      path: '/',
+      hostOnly: true,
+    };
+
+    jar.setCookie({ ...base, name: 'a', maxAge: 3600 });
+    jar.setCookie({ ...base, name: 'b', maxAge: 3600 });
+    // Untampered: capped by `setCookie`, and a session cookie is never capped.
+    jar.setCookie({ ...base, name: 'c', maxAge: 1e10 });
+    jar.setCookie({ ...base, name: 's' });
+
+    // `createdAt` moved forward with the lifetime, through the live objects.
+    for (const stored of jar.getAllCookies()) {
+      if (stored.name === 'a') {
+        stored.maxAge = 1e10;
+        stored.createdAt = clock + 1e13;
+      } else if (stored.name === 'b') {
+        delete stored.maxAge;
+        stored.expires = new Date(clock + 2e13);
+        stored.createdAt = clock + 1e13;
+      }
+    }
+
+    clock = start + capMS - 1;
+    expect(jar.getCookieHeaderString(url)).toBe('a=1; b=1; c=1; s=1');
+    const reported = new Map(
+      jar.getCookiesFor(url).map((cookie) => [cookie.name, cookie]),
+    );
+    const a = reported.get('a');
+    expect((a?.createdAt ?? 0) + (a?.maxAge ?? 0) * 1000).toBe(start + capMS);
+    expect(reported.get('b')?.expires?.getTime()).toBe(start + capMS);
+    expect(reported.get('c')?.maxAge).toBe(400 * 24 * 3600);
+
+    clock = start + capMS + 24 * 3600 * 1000;
+    expect(jar.getCookieHeaderString(url)).toBe('s=1');
+
+    // Replaced past its deadline, `a` was already gone, so it takes a new place.
+    jar.setCookie({ ...base, name: 'd' });
+    clock += 1;
+    jar.setCookie({ ...base, name: 'a' });
+    expect(jar.getCookieHeaderString(url)).toBe('s=1; d=1; a=1');
+
+    expect(jar.clearExpiredCookies()).toBe(2);
+    expect(
+      jar
+        .getAllCookies()
+        .map((cookie) => cookie.name)
+        .sort(),
+    ).toEqual(['a', 'd', 's']);
+  } finally {
+    nowSpy.mockRestore();
+  }
+});
+
+test('PR review round 72: fromJSON refuses a cookies array whose length cannot be read', () => {
+  const jar = new CookieJar();
+  jar.setCookie({ name: 'old', value: '1', domain: 'example.com', path: '/' });
+  const cookies = new Proxy([], {
+    get(target, key, receiver) {
+      if (key === 'length') {
+        throw new RangeError('boom');
+      }
+
+      return Reflect.get(target, key, receiver) as unknown;
+    },
+  });
+
+  expect(() => jar.fromJSON({ cookies })).toThrow(TypeError);
+  expect(jar.getAllCookies().map((c) => c.name)).toEqual(['old']);
+});
+
+test('PR review round 72: a stored cookie whose createdAt was moved far forward is still sent and still guards its Secure name', () => {
+  const jar = new CookieJar();
+  jar.setCookie({
+    name: 's',
+    value: '1',
+    domain: 'example.com',
+    path: '/',
+    hostOnly: true,
+    secure: true,
+    maxAge: 3600,
+  });
+  const [stored] = jar.getAllCookies();
+  if (stored) {
+    stored.createdAt = 1e300;
+  }
+
+  // An insecure response cannot shadow it, and it is still sent.
+  jar.processResponseHeaders(
+    { 'set-cookie': 's=evil; Path=/' },
+    'http://example.com/',
+  );
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('s=1');
+
+  // Reported with the creation time the jar stored it with, so a round trip keeps it.
+  const restored = new CookieJar();
+  restored.fromJSON(jar.toJSON());
+  expect(restored.getCookieHeaderString('https://example.com/')).toBe('s=1');
+});

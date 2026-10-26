@@ -136,10 +136,7 @@ import {
   isAnsweredBodyOverLimit,
   makeResponseTooLargeError,
 } from './internal/response-limit';
-import {
-  readBinaryByteLength,
-  typedArrayNameOf,
-} from '../internal/binary-view';
+import { readBinaryByteLength } from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
   adoptPromise,
@@ -6076,7 +6073,7 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
     return undefined;
   }
 
-  if (typedArrayNameOf(body) === 'Uint8Array') {
+  if (isRequestBodyBytes(body)) {
     return readBinaryByteLength(body) === 0
       ? { body: new Uint8Array(0) }
       : undefined;

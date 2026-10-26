@@ -8352,7 +8352,7 @@ test('PR review round 3: MockAdapter holds a route body to maxResponseBytes by i
   expect(response.streamErrorCode).toBe('response_too_large');
 });
 
-test('PR review round 4: a params value is read once, so the override check and the query agree', () => {
+test('PR review round 4: a params value is read once, so the override check and the query agree', async () => {
   let reads = 0;
   const params = {
     get page(): string | undefined {
@@ -8360,10 +8360,12 @@ test('PR review round 4: a params value is read once, so the override check and 
       return reads === 1 ? '3' : undefined;
     },
   };
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter });
 
-  expect(buildURL(undefined, 'http://api.test/x?page=1', params)).toBe(
-    'http://api.test/x?page=3',
-  );
+  await client.get('http://api.test/x?page=1').params(params).send();
+
+  expect(adapter.requests[0]?.requestURL).toBe('http://api.test/x?page=3');
   expect(reads).toBe(1);
 });
 

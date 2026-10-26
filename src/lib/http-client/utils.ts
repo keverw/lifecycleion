@@ -17,6 +17,7 @@ import {
 } from './internal/header-utils';
 import { normalizeDomain } from '../domain-utils/domain-utils';
 import {
+  checkDNSLength,
   compileWildcardPattern,
   isIPAddress,
   matchesCompiledWildcard,
@@ -124,22 +125,17 @@ function topLevelKeyOf(key: string): string {
  * CDN assets, or URLs returned by APIs; for strict per-origin clients, prefer
  * relative paths and a dedicated client or `HTTPClient.createSubClient()` per
  * origin.
+ *
+ * `params` is read more than once - the override check and the query - so it is given as
+ * `HTTPRequestBuilder.params()` copied it: each top-level value a data property, read once
+ * from the caller's object.
  */
 export function buildURL(
   baseURL: string | undefined,
   path: string,
-  givenParams?: Record<string, unknown>,
+  params?: Record<string, unknown>,
 ): string {
   let url: string;
-  // Each top-level value read once: the override check below and the serialized query
-  // read the same values, where a getter answering differently gave them different ones.
-  let params: Record<string, unknown> | undefined;
-  if (givenParams) {
-    params = {};
-    for (const [key, value] of Object.entries(givenParams)) {
-      defineEntry(params, key, value);
-    }
-  }
 
   const absoluteHref = tryAbsoluteWebHref(path);
 
@@ -1366,8 +1362,8 @@ export function extractHostname(url: string): string {
 /** One `hosts` pattern read once, by {@link readHostPattern}. */
 export type HostPattern =
   /**
-   * `*` alone: any host a request URL can carry, as documented - including one the
-   * domain matcher cannot read (`-edge.example.com`), which every other pattern skips.
+   * `*` alone: any host a request URL can carry, as documented - including one no other
+   * pattern reads (`a!b.example.com`).
    */
   | { readonly kind: 'any' }
   /** An exact name, normalized. */
@@ -1413,6 +1409,22 @@ export function readHostPattern(pattern: string): HostPattern {
 }
 
 /**
+ * A request hostname the domain matcher refuses but the URL parser produced, read as the
+ * parser wrote it, or `''`. The matcher holds a name to DNS's rule that no label starts or
+ * ends with a hyphen; the URL parser does not, and a request goes to `-edge.example.com`,
+ * so a wildcard such as `*.example.com` matches it as it matches its neighbours. Otherwise
+ * held to what the matcher reads - letters, digits, `_` and hyphens, within DNS lengths -
+ * and one trailing dot dropped, as the matcher drops it.
+ */
+function readParsedHostname(hostname: string): string {
+  const name = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
+
+  return /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/.test(name) && checkDNSLength(name)
+    ? name
+    : '';
+}
+
+/**
  * A request's hostname as one filter check reads it: normalized, and told whether it is
  * an IP address, each at most once and only if a pattern asks.
  */
@@ -1423,7 +1435,8 @@ class CheckedHost {
   constructor(public readonly hostname: string) {}
 
   public get normalized(): string {
-    this.normalizedName ??= normalizeDomain(this.hostname);
+    this.normalizedName ??=
+      normalizeDomain(this.hostname) || readParsedHostname(this.hostname);
     return this.normalizedName;
   }
 

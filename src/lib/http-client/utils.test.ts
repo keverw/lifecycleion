@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { CookieJar } from './cookie-jar';
+import { HTTPClient } from './http-client';
+import { MockAdapter } from './adapters/mock-adapter';
 import {
   assertSupportedAdapterRuntimeAndConfig,
   buildURL,
@@ -1159,6 +1161,43 @@ describe('matchesHostPattern', () => {
     test('rejects **.localhost patterns', () => {
       expect(matchesHostPattern('a.b.localhost', '**.localhost')).toBe(false);
     });
+  });
+
+  test('PR review round 72: a wildcard matches a host with a hyphen at a label edge, as the URL parser reads it', async () => {
+    // DNS refuses the edge hyphen, the URL parser does not, and a request goes there.
+    expect(matchesHostPattern('-edge.example.com', '*.example.com')).toBe(true);
+    expect(matchesHostPattern('a.edge-.example.com', '**.example.com')).toBe(
+      true,
+    );
+    // An IDN label whose Unicode form starts with a hyphen, as the parser encodes it.
+    expect(matchesHostPattern('-ñ.example.com', '*.example.com')).toBe(true);
+    expect(matchesHostPattern('-edge.example.com.', '*.example.com')).toBe(
+      true,
+    );
+    // Still label by label: not another site's, nor more than one label for `*`.
+    expect(matchesHostPattern('-edge.example.org', '*.example.com')).toBe(
+      false,
+    );
+    expect(matchesHostPattern('a.-edge.example.com', '*.example.com')).toBe(
+      false,
+    );
+    expect(matchesHostPattern('-edge.example.com', 'example.com')).toBe(false);
+
+    const adapter = new MockAdapter();
+    adapter.routes.get('/x', () => ({ status: 200 }));
+    const client = new HTTPClient({ adapter });
+    const seen: string[] = [];
+    client.addRequestInterceptor(
+      (request) => {
+        seen.push(request.requestURL);
+        return request;
+      },
+      { hosts: ['*.example.com'] },
+    );
+
+    await client.get('https://-edge.example.com/x').send();
+
+    expect(seen).toEqual(['https://-edge.example.com/x']);
   });
 });
 
