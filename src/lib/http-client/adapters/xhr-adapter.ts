@@ -3,8 +3,8 @@ import {
   describeRefusedHeader,
   requestHeaderPairs,
   lowerCaseHeaderName,
-  trimHTTPWhitespace,
 } from '../internal/header-utils';
+import { trimHTTPWhitespace } from '../../internal/ascii-text';
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { knownBodyByteLength } from '../internal/progress';

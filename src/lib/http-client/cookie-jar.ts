@@ -6,7 +6,12 @@ import { describeValue } from '../internal/describe-value';
 import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
 import { assertHeaderRecord } from './internal/plain-record';
-import { asciiLowercase } from './internal/http-method';
+import {
+  asciiLowercase,
+  hasWhitespaceEdge,
+  isBlankText,
+  trimSpacesAndTabs,
+} from '../internal/ascii-text';
 import { isNullish } from '../internal/is-nullish';
 import { isHeaderSafeCookieText } from './internal/cookie-text';
 
@@ -837,7 +842,7 @@ export class CookieJar {
     // misspelled `scope` (`'Domain'`) cleared by hostname and quietly left the domain's
     // other cookies in place.
     const [host, scope] = args as unknown[];
-    if (typeof host !== 'string' || host.trim() === '') {
+    if (typeof host !== 'string' || isBlankText(host)) {
       const got =
         typeof host !== 'string'
           ? describeValue(host)
@@ -1125,7 +1130,7 @@ export class CookieJar {
 
     // Keep malformed whitespace and repeated trailing dots invalid rather than
     // letting the general domain helper trim them into a different scope.
-    if (raw.trim() !== raw || raw.endsWith('..')) {
+    if (hasWhitespaceEdge(raw) || raw.endsWith('..')) {
       return '';
     }
 
@@ -2068,20 +2073,4 @@ export class CookieJar {
       );
     }
   }
-}
-
-/** `text` without leading and trailing spaces and tabs, the only whitespace RFC 6265bis trims. */
-function trimSpacesAndTabs(text: string): string {
-  let start = 0;
-  let end = text.length;
-
-  while (start < end && (text[start] === ' ' || text[start] === '\t')) {
-    start++;
-  }
-
-  while (end > start && (text[end - 1] === ' ' || text[end - 1] === '\t')) {
-    end--;
-  }
-
-  return text.slice(start, end);
 }

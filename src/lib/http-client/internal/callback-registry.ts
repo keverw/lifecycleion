@@ -1,9 +1,11 @@
 import { isNullish } from '../../internal/is-nullish';
 import { isRealmRootPrototype } from './plain-record';
 import { copyArrayValue } from './array-copy';
-import { trimHTTPWhitespace } from './header-utils';
 import {
   hasNonHTTPWhitespaceEdge,
+  trimHTTPWhitespace,
+} from '../../internal/ascii-text';
+import {
   isGlobalHostPattern,
   normalizeFilterMethods,
   readHostPattern,
@@ -40,7 +42,7 @@ const FILTER_LISTS: Record<
     entryType: 'string',
     check: (entry) =>
       hasNonHTTPWhitespaceEdge(entry)
-        ? 'has a no-break space or other whitespace besides spaces, tabs and line breaks at an end, so it can never match'
+        ? 'has a no-break space or other whitespace besides spaces, tabs, CRs and LFs at an end, so it can never match'
         : describeUnmatchableHostPattern(trimHTTPWhitespace(entry)),
   },
   schemes: { entryType: 'string', allowed: ['http', 'https'] },

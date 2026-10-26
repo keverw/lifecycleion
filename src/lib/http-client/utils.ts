@@ -1,9 +1,13 @@
 import {
-  asciiLowercase,
-  asciiUppercase,
   describeNonTokenMethod,
   normalizeStandardMethod,
 } from './internal/http-method';
+import {
+  asciiLowercase,
+  asciiUppercase,
+  hasNonHTTPWhitespaceEdge,
+  trimHTTPWhitespace,
+} from '../internal/ascii-text';
 import { REDIRECT_STATUS_CODES } from './consts';
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
@@ -16,7 +20,6 @@ import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
 import {
   lowerCaseHeaderName,
   presentHeaderValue,
-  trimHTTPWhitespace,
 } from './internal/header-utils';
 import { normalizeDomain } from '../domain-utils/domain-utils';
 import {
@@ -1423,7 +1426,7 @@ const ANY_HOST: HostPattern = { kind: 'any' };
 const NO_HOST: HostPattern = { kind: 'never' };
 
 /**
- * Whether a `hosts` pattern is `*` alone, trimmed of HTTP whitespace (spaces, tabs and line breaks). Not `*.`: that is an
+ * Whether a `hosts` pattern is `*` alone, trimmed of HTTP whitespace (space, tab, CR and LF). Not `*.`: that is an
  * empty label after the wildcard - what `*.${domain}` gives with the domain unset - and
  * read as `*` it sent a host-scoped interceptor's token to every host. It matches nothing,
  * as in the domain matchers, and is refused when the filter is added. Nor `*` with a
@@ -1431,17 +1434,6 @@ const NO_HOST: HostPattern = { kind: 'never' };
  */
 export function isGlobalHostPattern(pattern: string): boolean {
   return trimHTTPWhitespace(pattern) === '*';
-}
-
-/**
- * Whether a `hosts` pattern, trimmed of HTTP whitespace, still has whitespace at an end -
- * a no-break space picked up from pasted config. Such a pattern matches nothing, and is
- * refused when the filter is added: `trim()` took it, so `' *'` with a no-break space was
- * the global `*` and a host-scoped interceptor's token went to every host.
- */
-export function hasNonHTTPWhitespaceEdge(pattern: string): boolean {
-  const trimmed = trimHTTPWhitespace(pattern);
-  return trimmed.trim() !== trimmed;
 }
 
 /**

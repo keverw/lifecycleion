@@ -50,6 +50,7 @@ import {
   readBinaryByteLength,
   typedArrayNameOf,
 } from '../../internal/binary-view';
+import { asciiLowercase } from '../../internal/ascii-text';
 
 export class FetchAdapter implements HTTPAdapter {
   constructor() {
@@ -613,6 +614,6 @@ function isFetchDispatchRefusal(error: Error): boolean {
   return (
     code === 'UND_ERR_INVALID_ARG' ||
     code === 'UND_ERR_NOT_SUPPORTED' ||
-    (typeof message === 'string' && message.toLowerCase() === 'bad port')
+    (typeof message === 'string' && asciiLowercase(message) === 'bad port')
   );
 }

@@ -3,7 +3,7 @@ import { copyArrayValue } from './internal/array-copy';
 import { describeValue } from '../internal/describe-value';
 import { parse } from 'tldts';
 import { endsInANumber } from '../domain-utils/helpers';
-import { asciiLowercase } from './internal/http-method';
+import { asciiLowercase } from '../internal/ascii-text';
 
 /**
  * Caller adjustments to the Public Suffix List the jar scopes cookies with.

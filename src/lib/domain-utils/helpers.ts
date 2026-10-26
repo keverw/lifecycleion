@@ -1,5 +1,10 @@
 import { toASCII, toUnicode } from 'tr46';
 import { getPublicSuffix } from 'tldts';
+import {
+  asciiLowercase,
+  hasNonHTTPWhitespaceEdge,
+  trimHTTPWhitespace,
+} from '../internal/ascii-text';
 
 // Defense-in-depth: cap label processing to avoid pathological patterns
 export const MAX_LABELS = 32;
@@ -16,6 +21,17 @@ export const INVALID_DOMAIN_CHARS = /[/?#:[\]@\\]/;
 export const INTERNAL_PSEUDO_TLDS = Object.freeze(
   new Set<string>(['localhost', 'local', 'test', 'internal']),
 );
+
+/**
+ * A list entry or input as every domain helper reads it: trimmed of HTTP whitespace
+ * (space, tab, CR and LF), or `undefined` when other whitespace - a no-break space
+ * picked up from pasted config - is left at an end. Such text is invalid and matches
+ * nothing, as `normalizeOrigin` refuses it, rather than being trimmed into another entry:
+ * `trim()` took it, so `'\u00A0*'` was the global `*`.
+ */
+export function readTrimmedEntry(text: string): string | undefined {
+  return hasNonHTTPWhitespaceEdge(text) ? undefined : trimHTTPWhitespace(text);
+}
 
 // Helper functions for wildcard pattern validation
 export function isAllWildcards(s: string): boolean {
@@ -226,7 +242,7 @@ function canonicalizeIPAddressLiteral(host: string): string | null {
       const hostname = new URL(`http://${host}/`).hostname;
 
       if (isIPv6(hostname)) {
-        return hostname.replace(/^\[|\]$/g, '').toLowerCase();
+        return asciiLowercase(hostname.replace(/^\[|\]$/g, ''));
       }
     } catch {
       // Fall through to regular domain normalization, which refuses the brackets.
@@ -257,7 +273,7 @@ export function canonicalizeBracketedIPv6Content(content: string): string {
   } catch {
     // Callers normally validate before canonicalizing; keep this helper
     // non-throwing as a defensive fallback.
-    return content.toLowerCase();
+    return asciiLowercase(content);
   }
 }
 
@@ -531,7 +547,11 @@ function hasLabelLongerThan(host: string, max: number): boolean {
 }
 
 function normalizeHostText(domain: string, isWholeHost: boolean): string {
-  let trimmed = domain.trim();
+  let trimmed = readTrimmedEntry(domain);
+
+  if (trimmed === undefined) {
+    return '';
+  }
 
   // Normalize Unicode dots BEFORE checking IP for consistent behavior
   trimmed = toAsciiDots(trimmed);
@@ -635,7 +655,8 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
 export function normalizeWildcardPattern(pattern: string): string {
   // Not NFC-normalized first: each label goes through TR46, which normalizes after
   // mapping, as the URL parser does (see `normalizeHostText`).
-  let trimmed = pattern.trim().replace(/[．。｡]/g, '.'); // normalize Unicode dot variants to ASCII
+  // Trimmed of HTTP whitespace only: any other whitespace left is refused below.
+  let trimmed = trimHTTPWhitespace(pattern).replace(/[．。｡]/g, '.'); // normalize Unicode dot variants to ASCII
 
   // The whole pattern, before it is split into labels that each pass the per-label
   // guard alone (see `isHostTooLongToNormalize`).

@@ -1,8 +1,9 @@
+import { normalizeStandardMethod } from './internal/http-method';
 import {
   asciiLowercase,
   asciiUppercase,
-  normalizeStandardMethod,
-} from './internal/http-method';
+  isBlankText,
+} from '../internal/ascii-text';
 import { isSignalAbortedQuietly } from './internal/request-fields';
 import { isAbortError } from './internal/adapter-error';
 import { defineEntry } from '../internal/define-entry';
@@ -5535,7 +5536,7 @@ function assertLabelArgument(label: unknown, method: string): void {
     );
   }
 
-  if (label.trim().length === 0) {
+  if (isBlankText(label)) {
     throw new Error(
       `HTTPClient.${method}() requires a non-empty, non-whitespace label.`,
     );
@@ -6197,7 +6198,7 @@ function getSignalCancelReason(signal: AbortSignal): string | undefined {
  * server chose as `evil.example`, not the caller choosing a new one.
  */
 function comparableHost(url: string): string {
-  return extractHostname(url).toLowerCase().replace(/\.$/, '');
+  return asciiLowercase(extractHostname(url)).replace(/\.$/, '');
 }
 
 /** Whether a phase's copy of a body failed; see `copyChainResultBody`. */

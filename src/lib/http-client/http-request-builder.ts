@@ -5,6 +5,7 @@ import { validateMaxResponseBytes, validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { defineEntry } from '../internal/define-entry';
 import { lowerCaseHeaderName } from './utils';
+import { isBlankText } from '../internal/ascii-text';
 import { copyRequestBody } from './internal/request-body-copy';
 import { copyArrayValue, copyParamArrayValue } from './internal/array-copy';
 import {
@@ -254,7 +255,7 @@ export class HTTPRequestBuilder<T = unknown> {
       );
     }
 
-    if (label.trim().length === 0) {
+    if (isBlankText(label)) {
       throw new Error(
         'HTTPRequestBuilder.label() requires a non-empty, non-whitespace label.',
       );

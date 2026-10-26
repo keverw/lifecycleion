@@ -19,7 +19,13 @@ import {
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
   MAX_LABELS,
+  readTrimmedEntry,
 } from './helpers';
+import {
+  asciiLowercase,
+  hasNonHTTPWhitespaceEdge,
+  trimHTTPWhitespace,
+} from '../internal/ascii-text';
 
 export function safeParseURL(input: string): URL | null {
   try {
@@ -147,7 +153,7 @@ function foldOriginDots(text: string): string {
   // `text` is already cleaned by `toOriginText`, so its scheme is where the parser sees it.
   const scheme = /^([a-z][a-z\d+.-]*):/i.exec(text)?.[1];
 
-  if (scheme !== undefined && !isSpecialScheme(`${scheme.toLowerCase()}:`)) {
+  if (scheme !== undefined && !isSpecialScheme(`${asciiLowercase(scheme)}:`)) {
     return text;
   }
 
@@ -231,7 +237,7 @@ export function normalizeOrigin(origin: string): string {
 
     // Normalize hostname with punycode, as the URL parser read it. See
     // `normalizeOriginHostname`.
-    const protocolLower = url.protocol.toLowerCase();
+    const protocolLower = asciiLowercase(url.protocol);
     const normalizedHostname = normalizeOriginHostname(
       protocolLower,
       url.hostname,
@@ -253,11 +259,12 @@ export function normalizeOrigin(origin: string): string {
     const rawBracketContent = bracketMatch ? bracketMatch[1] : null;
 
     // Decode only for IPv6 detection, not for output
-    const hostnameForIpv6Check = (
-      rawBracketContent ? rawBracketContent : normalizedHostname
-    )
-      .replace(/%25/g, '%')
-      .toLowerCase();
+    const hostnameForIpv6Check = asciiLowercase(
+      (rawBracketContent ? rawBracketContent : normalizedHostname).replace(
+        /%25/g,
+        '%',
+      ),
+    );
 
     if (isIPv6(hostnameForIpv6Check)) {
       // Canonicalize bracket content using shared helper (do not decode %25)
@@ -387,8 +394,12 @@ function matchesWildcardOriginIn(
   // Normalize Unicode dots before URL parsing for consistency
   const normalizedOrigin = foldOriginDots(originText);
   // Trimmed, as `validateConfigEntry` and `matchesOriginList` read it: ` https://*`
-  // matched nothing here alone.
-  const normalizedPattern = toAsciiDots(pattern.trim());
+  // matched nothing here alone. Of HTTP whitespace only - see `readTrimmedEntry`.
+  const trimmedPattern = readTrimmedEntry(pattern);
+  if (trimmedPattern === undefined) {
+    return false;
+  }
+  const normalizedPattern = toAsciiDots(trimmedPattern);
 
   if (
     hasDanglingPortInAuthority(normalizedOrigin) ||
@@ -403,7 +414,7 @@ function matchesWildcardOriginIn(
 
   // For CORS, only http/https are relevant; reject other schemes early when parsed.
   if (originURL) {
-    const scheme = originURL.protocol.toLowerCase();
+    const scheme = asciiLowercase(originURL.protocol);
     if (scheme !== 'http:' && scheme !== 'https:') {
       return false;
     }
@@ -425,7 +436,7 @@ function matchesWildcardOriginIn(
   }
 
   // Protocol-only wildcards: require valid URL parsing for security
-  const patternLower = normalizedPattern.toLowerCase();
+  const patternLower = asciiLowercase(normalizedPattern);
 
   if (patternLower === 'https://*' || patternLower === 'http://*') {
     if (!originURL) {
@@ -434,7 +445,7 @@ function matchesWildcardOriginIn(
 
     const want = patternLower === 'https://*' ? 'https:' : 'http:';
     return (
-      originURL.protocol.toLowerCase() === want &&
+      asciiLowercase(originURL.protocol) === want &&
       hasValidWildcardOriginHost(originURL)
     );
   }
@@ -450,7 +461,7 @@ function matchesWildcardOriginIn(
     return false;
   }
 
-  const originProtocol = originURL.protocol.slice(0, -1).toLowerCase(); // Remove trailing ":" and lowercase
+  const originProtocol = asciiLowercase(originURL.protocol.slice(0, -1)); // Remove trailing ":" and lowercase
 
   // Handle protocol-specific domain wildcards: https://*.example.com
   if (normalizedPattern.includes('://')) {
@@ -463,17 +474,17 @@ function matchesWildcardOriginIn(
     }
 
     // Protocol must match exactly
-    if (originProtocol !== patternProtocol.toLowerCase()) {
+    if (originProtocol !== asciiLowercase(patternProtocol)) {
       return false;
     }
 
     // Fast reject: domain pattern must contain at least one wildcard and not be all-wildcards
-    // - read without leading whitespace, as the domain matcher reads it: `https:// *`
+    // - read without leading HTTP whitespace, as the domain matcher reads it: `https:// *`
     // became the protocol wildcard `https://*`, which `validateConfigEntry` refuses. A
     // trailing space is the validator's own trim, and `https://* ` still matches.
     if (
       !domainPattern.includes('*') ||
-      isAllWildcards(domainPattern.trimStart())
+      isAllWildcards(trimHTTPWhitespace(domainPattern))
     ) {
       return false;
     }
@@ -629,8 +640,11 @@ function compiledDomainList(
   // than becoming `undefined` entries that throw.
   const source = allowedDomains.slice();
 
-  // Trim and filter out empty entries first
-  const cleaned = source.map((s) => s.trim()).filter((s) => s.length > 0);
+  // Trim and filter out empty entries first - and any edged with whitespace other than
+  // spaces, tabs, CRs and LFs, which match nothing (see `readTrimmedEntry`).
+  const cleaned = source
+    .map((s) => readTrimmedEntry(s) ?? '')
+    .filter((s) => s.length > 0);
 
   // Validate: throw if any origin-style patterns are present
   const originLike = cleaned.filter((s) => ORIGIN_LIKE.test(s));
@@ -833,6 +847,10 @@ export type ValidationResult = {
   wildcardKind: WildcardKind;
 };
 
+/** Why an entry edged with whitespace other than spaces, tabs, CRs and LFs is refused. */
+const WHITESPACE_EDGE_INFO =
+  'whitespace other than spaces, tabs, CRs and LFs at an end (it can never match)';
+
 function isValidPortString(port: string): boolean {
   if (!/^\d+$/.test(port)) {
     return false;
@@ -847,8 +865,16 @@ export function validateConfigEntry(
   context: 'domain' | 'origin',
   options?: { allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean },
 ): ValidationResult {
-  const raw = (entry ?? '').trim();
   const SCHEME_RE = /^[a-z][a-z0-9+\-.]*$/i;
+  // Trimmed of HTTP whitespace, as the matchers trim it; see `readTrimmedEntry`.
+  const raw = readTrimmedEntry(entry ?? '');
+  if (raw === undefined) {
+    return {
+      valid: false,
+      info: WHITESPACE_EDGE_INFO,
+      wildcardKind: 'none',
+    };
+  }
   if (!raw) {
     return { valid: false, info: 'empty entry', wildcardKind: 'none' };
   }
@@ -905,8 +931,17 @@ export function validateConfigEntry(
 
   // Helper: domain-wildcard structural checks (no URL chars, full labels, etc.)
   function validateDomainWildcard(pattern: string): ValidationResult {
+    // A host after `scheme://` has not been trimmed yet: held to the same rule.
+    if (hasNonHTTPWhitespaceEdge(pattern)) {
+      return {
+        valid: false,
+        info: WHITESPACE_EDGE_INFO,
+        wildcardKind: 'none',
+      };
+    }
+
     // Normalize Unicode dots and trim
-    const trimmed = pattern.trim().replace(/[．。｡]/g, '.'); // normalize Unicode dot variants to ASCII
+    const trimmed = trimHTTPWhitespace(pattern).replace(/[．。｡]/g, '.'); // normalize Unicode dot variants to ASCII
 
     if (INVALID_DOMAIN_CHARS.test(trimmed)) {
       return {
@@ -973,7 +1008,7 @@ export function validateConfigEntry(
   function validateExactDomain(s: string): ValidationResult {
     // The literal string "null" is origin-only; reject it explicitly
     // rather than relying on PSL classification of unknown single-label TLDs.
-    if (s.toLowerCase() === 'null') {
+    if (asciiLowercase(s) === 'null') {
       return {
         valid: false,
         info: '"null" is not a valid domain entry',
@@ -1078,7 +1113,7 @@ export function validateConfigEntry(
     return validateExactDomain(raw);
   }
 
-  const scheme = raw.slice(0, schemeIdx).toLowerCase();
+  const scheme = asciiLowercase(raw.slice(0, schemeIdx));
   const rest = raw.slice(schemeIdx + 3);
 
   if (!SCHEME_RE.test(scheme)) {
@@ -1288,7 +1323,7 @@ export function validateConfigEntry(
 
   const hostDots = toAsciiDots(host);
   // A non-special scheme's host is opaque to the URL parser, never an address.
-  const isOpaqueHost = !isSpecialScheme(`${scheme.toLowerCase()}:`);
+  const isOpaqueHost = !isSpecialScheme(`${asciiLowercase(scheme)}:`);
 
   // An opaque host is percent-encoded by the URL parser where it is not ASCII - Unicode
   // dots included, which are not folded for it - and a matched origin is read through
@@ -1412,11 +1447,11 @@ function parseExactOriginForMatching(entry: string): {
     normalizedOrigin,
     // Read as `normalizeOrigin` reads it.
     normalizedHostname: normalizeOriginHostname(
-      url.protocol.toLowerCase(),
+      asciiLowercase(url.protocol),
       url.hostname,
     ),
     isOpaqueHost:
-      !isSpecialScheme(url.protocol.toLowerCase()) &&
+      !isSpecialScheme(asciiLowercase(url.protocol)) &&
       !url.hostname.startsWith('['),
   };
 }
@@ -1434,7 +1469,8 @@ function hasOriginExtras(text: string): boolean {
 }
 
 function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
-  const trimmed = pattern.trim().replace(/[．。｡]/g, '.');
+  // Already trimmed by the list; held to its rule here too (see `readTrimmedEntry`).
+  const trimmed = trimHTTPWhitespace(pattern).replace(/[．。｡]/g, '.');
 
   function isValidCredentialWildcardHost(written: string): boolean {
     // One trailing dot dropped, as the other matchers drop it: its empty last label
@@ -1442,7 +1478,8 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
     // `matchesOriginList` both accept.
     // Leading and trailing whitespace dropped, as the other matchers drop it: `https://
     // *.example.com` is valid to `validateConfigEntry` and matches in `matchesOriginList`.
-    const host = written.trim();
+    // Of HTTP whitespace only; any other whitespace left is refused below.
+    const host = trimHTTPWhitespace(written);
 
     if (isHostTooLongToNormalize(host)) {
       return false;
@@ -1501,7 +1538,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
     return isValidCredentialWildcardHost(trimmed);
   }
 
-  const scheme = trimmed.slice(0, schemeIdx).toLowerCase();
+  const scheme = asciiLowercase(trimmed.slice(0, schemeIdx));
   const host = trimmed.slice(schemeIdx + 3);
 
   if ((scheme !== 'http' && scheme !== 'https') || host === '*') {
@@ -1530,7 +1567,9 @@ export function matchesOriginList(
   allowedOrigins: string[],
   opts: { treatNoOriginAsAllowed?: boolean } = {},
 ): boolean {
-  const cleaned = allowedOrigins.map((s) => s.trim()).filter(Boolean);
+  const cleaned = allowedOrigins
+    .map((s) => readTrimmedEntry(s) ?? '')
+    .filter(Boolean);
 
   if (!origin) {
     // Only allow requests without Origin header if explicitly opted in AND "*" is in the list
@@ -1615,7 +1654,9 @@ export function matchesCORSCredentialsList(
     return false;
   }
 
-  const cleaned = allowedOrigins.map((s) => s.trim()).filter(Boolean);
+  const cleaned = allowedOrigins
+    .map((s) => readTrimmedEntry(s) ?? '')
+    .filter(Boolean);
 
   const allowWildcard = !!options.allowWildcardSubdomains;
   // The list's own compiled patterns (see `originListPatterns`).
@@ -1726,7 +1767,9 @@ export interface ParsedHost {
  * // => { domain: '', port: '' }
  */
 export function parseHostHeader(host: string): ParsedHost {
-  const trimmedHost = host.trim();
+  // Of HTTP whitespace only: a value with other whitespace at an end (a no-break space)
+  // is malformed, as the URL parser refuses such a host.
+  const trimmedHost = readTrimmedEntry(host);
 
   if (!trimmedHost) {
     return { domain: '', port: '' };
@@ -1861,7 +1904,7 @@ function readIPv4Entry(
 
   // Against what was written - but for a trailing dot, which the domain path does not
   // remark on either - so an entry that differs only by its spelling says so.
-  const written = rawHost.replace(/\.$/, '').toLowerCase();
+  const written = asciiLowercase(rawHost.replace(/\.$/, ''));
 
   return ipv4.address === written
     ? { address: ipv4.address }

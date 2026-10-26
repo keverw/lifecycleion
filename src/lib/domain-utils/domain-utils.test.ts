@@ -3750,3 +3750,112 @@ describe('hyphens in IDN labels', () => {
     expect(normalizeDomain('a-ñ.com')).not.toBe('');
   });
 });
+
+describe('PR review round 81', () => {
+  const NBSP = '\u00A0';
+
+  it('PR review round 81: an entry edged with a no-break space is invalid and never matches, as normalizeOrigin refuses it', () => {
+    expect(normalizeOrigin(`https://example.com${NBSP}`)).toBe('');
+
+    for (const entry of [
+      `https://example.com${NBSP}`,
+      `${NBSP}example.com`,
+      `${NBSP}*.example.com`,
+      `https://${NBSP}*.example.com`,
+      `\u2003https://example.com`,
+    ]) {
+      expect(validateConfigEntry(entry, 'origin').valid).toBe(false);
+      expect(validateConfigEntry(entry, 'origin').info).toContain(
+        'whitespace other than spaces, tabs, CRs and LFs',
+      );
+    }
+    expect(validateConfigEntry(`example.com${NBSP}`, 'domain').valid).toBe(
+      false,
+    );
+    expect(
+      validateConfigEntry(`${NBSP}*`, 'origin', { allowGlobalWildcard: true })
+        .valid,
+    ).toBe(false);
+
+    expect(
+      matchesOriginList('https://example.com', [`https://example.com${NBSP}`]),
+    ).toBe(false);
+    expect(matchesOriginList('https://example.com', [`${NBSP}*`])).toBe(false);
+    expect(
+      matchesOriginList(undefined, [`${NBSP}*`], {
+        treatNoOriginAsAllowed: true,
+      }),
+    ).toBe(false);
+    expect(
+      matchesOriginList('https://a.example.com', [`*.example.com${NBSP}`]),
+    ).toBe(false);
+    expect(
+      matchesCORSCredentialsList('https://example.com', [
+        `https://example.com${NBSP}`,
+      ]),
+    ).toBe(false);
+    expect(
+      matchesCORSCredentialsList(
+        'https://a.example.com',
+        [`https://*.example.com${NBSP}`],
+        { allowWildcardSubdomains: true },
+      ),
+    ).toBe(false);
+    expect(matchesDomainList('example.com', [`example.com${NBSP}`])).toBe(
+      false,
+    );
+    expect(matchesDomainList('a.example.com', [`${NBSP}*.example.com`])).toBe(
+      false,
+    );
+    expect(
+      matchesWildcardOrigin('https://a.example.com', `${NBSP}*.example.com`),
+    ).toBe(false);
+    expect(matchesWildcardDomain('a.example.com', `*.example.com${NBSP}`)).toBe(
+      false,
+    );
+    expect(normalizeDomain(`example.com${NBSP}`)).toBe('');
+    expect(normalizeDomain(`example.com\uFEFF`)).toBe('');
+    expect(parseHostHeader(`example.com:8080${NBSP}`)).toEqual({
+      domain: '',
+      port: '',
+    });
+  });
+
+  it('PR review round 81: an entry edged with spaces, tabs, CRs and LFs is trimmed as before', () => {
+    expect(validateConfigEntry(' https://example.com\t', 'origin')).toEqual({
+      valid: true,
+      wildcardKind: 'none',
+    });
+    expect(validateConfigEntry('\n*.example.com \r', 'domain').valid).toBe(
+      true,
+    );
+    expect(
+      matchesOriginList('https://example.com', [' https://example.com\t']),
+    ).toBe(true);
+    expect(matchesOriginList('https://example.com', ['\t*\n'])).toBe(true);
+    expect(
+      matchesCORSCredentialsList('https://example.com', ['\texample.com ']),
+    ).toBe(true);
+    expect(matchesDomainList('a.example.com', [' *.example.com\t'])).toBe(true);
+    expect(
+      matchesWildcardOrigin(
+        'https://a.example.com',
+        ' https://*.example.com\n',
+      ),
+    ).toBe(true);
+    expect(normalizeDomain('  api.test\t')).toBe('api.test');
+    expect(parseHostHeader(' example.com:8080\t')).toEqual({
+      domain: 'example.com',
+      port: '8080',
+    });
+  });
+
+  it('PR review round 81: an origin entry scheme is lowercased in ASCII only', () => {
+    // `toLowerCase` read the Kelvin sign as `k`, a scheme the URL parser never reads.
+    expect(validateConfigEntry('\u212Aa://x.example', 'origin')).toEqual({
+      valid: false,
+      info: 'invalid scheme in origin',
+      wildcardKind: 'none',
+    });
+  });
+});

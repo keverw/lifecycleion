@@ -1,4 +1,4 @@
-import { asciiUppercase } from '../internal/http-method';
+import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
 import { isHTTPToken } from '../internal/http-token';
 import { isHeaderSafeCookieText } from '../internal/cookie-text';
 import { formEntries } from '../internal/form-entries';
@@ -908,8 +908,10 @@ function parseCookieHeader(
       continue;
     }
 
-    const name = part.slice(0, eqIdx).trim();
-    const value = decodeCookieValue(part.slice(eqIdx + 1).trim());
+    // Trimmed of spaces and tabs only, as the cookie jar trims: `trim()` also took a
+    // trailing U+00A0 - the last byte of a UTF-8 `à` read as latin1 - from a jar value.
+    const name = trimSpacesAndTabs(part.slice(0, eqIdx));
+    const value = decodeCookieValue(trimSpacesAndTabs(part.slice(eqIdx + 1)));
 
     // The first of a repeated name wins, as common server parsers (the `cookie` package
     // behind Express and Fastify) read it: the client sends the most specific path first.

@@ -1,23 +1,8 @@
 import { HTTP_METHODS } from '../consts';
 import { isHTTPToken } from './http-token';
+import { asciiUppercase } from '../../internal/ascii-text';
 
 const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set(HTTP_METHODS);
-
-/**
- * `text` with its ASCII letters uppercased, and nothing else: `toUpperCase` would also
- * turn `poſt` (U+017F) into `POST`.
- */
-export function asciiUppercase(text: string): string {
-  return text.replace(/[a-z]/g, (letter) => letter.toUpperCase());
-}
-
-/**
- * `text` with its ASCII letters lowercased, and nothing else: `toLowerCase` would also
- * turn `TRAC\u212A` (KELVIN SIGN) into `track`.
- */
-export function asciiLowercase(text: string): string {
-  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-}
 
 /**
  * What is wrong with `method` as a method name - completing "the method …" - or

@@ -9564,3 +9564,34 @@ describe('NodeAdapter - PR review round 74', () => {
     }
   });
 });
+
+describe('NodeAdapter - PR review round 81', () => {
+  test('PR review round 81: an empty ca view is refused however its own byteLength getter answers', () => {
+    class Claims extends Uint8Array {
+      public override get byteLength(): number {
+        return 1;
+      }
+    }
+
+    expect(() => new NodeAdapter({ ca: new Claims(0) as Buffer })).toThrow(
+      /ca holds no certificate/,
+    );
+    expect(
+      () =>
+        new NodeAdapter({
+          mtls: {
+            cert: 'cert',
+            key: 'key',
+            ca: ['pem', new Claims(0) as Buffer],
+          },
+        }),
+    ).toThrow(/mtls\.ca holds no certificate/);
+    // A string of whitespace holds no certificate either, a no-break space included.
+    expect(() => new NodeAdapter({ ca: '\u00A0\n' })).toThrow(
+      /ca holds no certificate/,
+    );
+    expect(
+      () => new NodeAdapter({ ca: new Uint8Array(1) as Buffer }),
+    ).not.toThrow();
+  });
+});

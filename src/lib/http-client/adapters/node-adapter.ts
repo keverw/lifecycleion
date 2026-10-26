@@ -1,4 +1,5 @@
-import { asciiUppercase } from '../internal/http-method';
+import { asciiUppercase, isBlankText } from '../../internal/ascii-text';
+import { readBinaryByteLength } from '../../internal/binary-view';
 import {
   defineHiddenTags,
   makeAbortError,
@@ -4270,8 +4271,10 @@ function assertTrustAnchors(value: unknown, name: string): void {
   const isEmpty = (entry: unknown): boolean =>
     entry === null ||
     entry === undefined ||
-    (typeof entry === 'string' && entry.trim() === '') ||
-    (ArrayBuffer.isView(entry) && entry.byteLength === 0);
+    (typeof entry === 'string' && isBlankText(entry)) ||
+    // Measured through the intrinsic getter: a subclass's own `byteLength` may claim
+    // bytes an empty view does not hold.
+    (ArrayBuffer.isView(entry) && readBinaryByteLength(entry) === 0);
   // Every entry, not `some`, which skips a hole: the list is this adapter's own copy, and
   // its iterator reads a hole as the `undefined` it is.
   const hasEmptyEntry = (list: unknown[]): boolean => {

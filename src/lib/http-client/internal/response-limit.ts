@@ -3,8 +3,11 @@
  * {@link AdapterRequest.maxResponseBytes}.
  */
 
-import { asciiLowercase, asciiUppercase } from './http-method';
-import { trimHTTPWhitespace } from './header-utils';
+import {
+  asciiLowercase,
+  asciiUppercase,
+  trimHTTPWhitespace,
+} from '../../internal/ascii-text';
 import {
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,

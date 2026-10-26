@@ -8,7 +8,7 @@ import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
 import { isHTTPToken } from './http-token';
 import { copyArrayValue } from './array-copy';
-import { asciiLowercase } from './http-method';
+import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 import type { RequestHeadersInput } from '../types';
 
 /**
@@ -82,17 +82,6 @@ export function deleteHeader(
 
 /** Empty, or only the whitespace `fetch` trims from a header value (tab, LF, CR, space). */
 const HTTP_WHITESPACE_ONLY = /^[\t\n\r ]*$/;
-
-/** That same whitespace at either end of a value; `trim()` also takes U+00A0 and more. */
-const HTTP_WHITESPACE_EDGES = /^[\t\n\r ]+|[\t\n\r ]+$/g;
-
-/**
- * `text` without the HTTP whitespace (tab, LF, CR, space) at either end, as a header
- * value's parts are trimmed: `trim()` would also take a no-break space and others.
- */
-export function trimHTTPWhitespace(text: string): string {
-  return text.replace(HTTP_WHITESPACE_EDGES, '');
-}
 
 /**
  * A header value's comma-separated values, split as the Fetch standard's "get, decode,

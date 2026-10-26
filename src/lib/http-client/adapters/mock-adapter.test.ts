@@ -2664,3 +2664,31 @@ describe('MockAdapter - PR review round 72a', () => {
     );
   });
 });
+
+describe('MockAdapter - PR review round 81', () => {
+  test('PR review round 81: a cookie is trimmed of spaces and tabs only, as the jar trims it, so a jar value ending in 0xA0 arrives whole', async () => {
+    // A UTF-8 `à` read as latin1: `Ã` and a 0xA0 byte, which `trim()` took as a no-break space.
+    const value = 'caf\u00C3\u00A0';
+    const jar = new CookieJar();
+    jar.setCookie(makeCookie({ name: 'drink', value }));
+    const adapter = new MockAdapter();
+    let seen: Record<string, string> = {};
+    adapter.routes.get('/menu', (req) => {
+      seen = req.cookies;
+      return { status: 200 };
+    });
+
+    await makeClient(adapter, 'http://mock.test', { cookieJar: jar })
+      .get('/menu')
+      .send();
+    expect(seen).toEqual({ drink: value });
+
+    await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/menu',
+        headers: { cookie: ` a = 1\t;\tb=${value}` },
+      }),
+    );
+    expect(seen).toEqual({ a: '1', b: value });
+  });
+});
