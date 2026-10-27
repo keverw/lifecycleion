@@ -5670,6 +5670,26 @@ test('round 110: underscore suffix overrides; a sub-second mock maxAge keeps the
   jar.parseSetCookieHeader('t=1; Domain=svc.my_net', 'http://a.svc.my_net/');
   expect(jar.getCookieHeaderString('http://b.svc.my_net/')).toBe('');
 
+  // An edge hyphen too: the URL parser takes `-corp.example`, and the jar keeps its cookies
+  // - shared across its hosts until the suffix is declared.
+  const plainJar = new CookieJar();
+  plainJar.parseSetCookieHeader(
+    't=1; Domain=-corp.example',
+    'http://a.-corp.example/',
+  );
+  expect(plainJar.getCookieHeaderString('http://b.-corp.example/')).toBe('t=1');
+
+  const edgeJar = new CookieJar({
+    publicSuffixes: { add: ['-corp.example', 'corp-.example'] },
+  });
+  for (const suffix of ['-corp.example', 'corp-.example']) {
+    edgeJar.parseSetCookieHeader(
+      `t=1; Domain=${suffix}`,
+      `http://a.${suffix}/`,
+    );
+    expect(edgeJar.getCookieHeaderString(`http://b.${suffix}/`)).toBe('');
+  }
+
   const adapter = new MockAdapter();
   adapter.routes.get('/c', () => ({
     status: 200,
@@ -16523,4 +16543,20 @@ test('PR review round 80: a Content-Length is trimmed of HTTP whitespace only', 
   // NO-BREAK SPACE is not HTTP whitespace: Fetch and Node read no length from these.
   expect(parseContentLength('10\u00A0')).toBeUndefined();
   expect(parseContentLength('\u00A010')).toBeUndefined();
+});
+
+test('repeated Content-Length values agree by their digits, not as numbers', () => {
+  // 2^53 + 1 and 2^53 convert to the same number.
+  expect(
+    parseContentLength('9007199254740993, 9007199254740992'),
+  ).toBeUndefined();
+  expect(
+    parseContentLength(['9007199254740993', '9007199254740992']),
+  ).toBeUndefined();
+  // Leading zeros state the same length.
+  expect(parseContentLength('010, 10')).toBe(10);
+  expect(parseContentLength('0, 000')).toBe(0);
+  expect(parseContentLength('9007199254740993, 9007199254740993')).toBe(
+    9007199254740992,
+  );
 });

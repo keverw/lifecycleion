@@ -124,9 +124,9 @@ export function isIdentityContentEncoding(contentEncoding: string): boolean {
 /**
  * The byte count a `Content-Length` value states, or `undefined` when it states none this
  * can trust: absent, empty, or not a plain decimal number once trimmed of HTTP
- * whitespace. Repeated values (`10, 10`, or an array from a header seen twice) count when they agree, as RFC 9110 lets a recipient
- * read them, and are left to the body otherwise - a refusal is only made on a length the
- * response itself is unambiguous about.
+ * whitespace. Repeated values (`10, 10`, or an array from a header seen twice) count when
+ * they agree, as RFC 9110 lets a recipient read them, and are left to the body otherwise -
+ * a refusal is only made on a length the response itself is unambiguous about.
  */
 export function parseContentLength(
   value: string | string[] | null | undefined,
@@ -135,8 +135,8 @@ export function parseContentLength(
     return undefined;
   }
 
-  // Trimmed of HTTP whitespace only, as Fetch and Node read it: `trim()` also took a
-  // no-break space, so `10\u00A0` was the length 10 where they read no length.
+  // Trimmed of HTTP whitespace only, as Fetch and Node read it: `trim()` would also take
+  // a no-break space, reading `10\u00A0` as the length 10 where they read no length.
   const tokens = (Array.isArray(value) ? value.join(',') : value)
     .split(',')
     .map((token) => trimHTTPWhitespace(token));
@@ -145,9 +145,13 @@ export function parseContentLength(
     return undefined;
   }
 
-  const lengths = new Set(tokens.map((token) => Number(token)));
+  // Compared as digits, leading zeros aside, not as numbers: past 2^53 two lengths that
+  // differ convert to the same number, and would read as agreeing.
+  const lengths = new Set(
+    tokens.map((token) => token.replace(/^0+(?=\d)/, '')),
+  );
 
-  return lengths.size === 1 ? [...lengths][0] : undefined;
+  return lengths.size === 1 ? Number([...lengths][0]) : undefined;
 }
 
 /**
