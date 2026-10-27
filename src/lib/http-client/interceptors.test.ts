@@ -701,6 +701,20 @@ test('prepareRequest runs once, after the filter and before the function of the 
 });
 
 describe('filter fields polluted onto Object.prototype', () => {
+  test('a field a methods getter adds is read as the caller field it is', () => {
+    const mgr = new RequestInterceptorManager();
+    const filter: Record<string, unknown> = {
+      get methods() {
+        filter.statusCodes = [200];
+        return ['GET'];
+      },
+    };
+
+    expect(() => mgr.add((request) => request, filter)).toThrow(
+      'filter has no "statusCodes" field',
+    );
+  });
+
   test('are not read as the caller filter fields, when added or on a request', async () => {
     const polluted = Object.prototype as Record<string, unknown>;
     const mgr = new RequestInterceptorManager();
@@ -759,13 +773,10 @@ describe('filter fields polluted onto Object.prototype', () => {
     }
     const mgr = new RequestInterceptorManager();
     const calls: string[] = [];
-    mgr.add(
-      (request) => {
-        calls.push(request.method);
-        return request;
-      },
-      new HostFilter(),
-    );
+    mgr.add((request) => {
+      calls.push(request.method);
+      return request;
+    }, new HostFilter());
 
     await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
 

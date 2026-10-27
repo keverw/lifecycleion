@@ -820,13 +820,17 @@ export class CookieJar {
    *   or a host under it, and `clear('github.io', 'domain')` every `*.github.io` site's
    *   cookies. A site behind a nested private suffix is its own domain and is not
    *   cleared with its parent: `clear('amazonaws.com', 'domain')` leaves
-   *   `bucket.s3.amazonaws.com`'s cookies - unless a removal joins them, as removing
-   *   `com` makes all of `com` one site. The registrable domain is read under the
+   *   `bucket.s3.amazonaws.com`'s cookies. The registrable domain is read under the
    *   jar's `publicSuffixes`, removals included: with `herokuapp.com` removed,
    *   `clear('mine.herokuapp.com', 'domain')` clears every `*.herokuapp.com` cookie, as
-   *   `herokuapp.com` is then the site. With `uk` removed, `co.uk` is still a suffix,
-   *   so `clear('x.co.uk', 'domain')` leaves `y.co.uk`'s cookies and a `Domain=uk` one,
-   *   while `clear('uk', 'domain')` clears them all.
+   *   `herokuapp.com` is then the site, and with `com` removed,
+   *   `clear('x.example.com', 'domain')` clears every `.com` cookie but those stored at
+   *   or under a suffix still listed, such as `blogspot.com` and `app.blogspot.com`.
+   *   With `uk` removed, `co.uk` is still a suffix, so `clear('x.co.uk', 'domain')`
+   *   leaves `y.co.uk`'s cookies and a `Domain=uk` one. A removed suffix named itself is cleared whole, as
+   *   a listed one is: `clear('uk', 'domain')` clears every `.uk` cookie, and
+   *   `clear('com', 'domain')` with `com` removed every `.com` one, `app.blogspot.com`'s
+   *   and `bucket.s3.amazonaws.com`'s included.
    *
    * A `host` that is not a non-empty string, or a `scope` that is not one of the two,
    * throws: only a call with no arguments at all clears everything.
@@ -880,29 +884,28 @@ export class CookieJar {
       // The domain cleared is the host's site, not its bucket. The two differ only under
       // a removed suffix with a suffix still beneath it, which files every site below in
       // one bucket: with `uk` removed, `x.co.uk` and `y.co.uk` share the `uk` bucket, and
-      // clearing one leaves the other.
-      const domain = this.registrableDomainFor(normalizedHost);
+      // clearing one leaves the other. A removed suffix named itself is cleared as a
+      // listed one is, whole: the removal decides which hosts share cookies, not what
+      // clearing that name reaches, so `clear('uk', 'domain')` clears every `.uk` cookie
+      // with `uk` removed or not.
+      const isRemovedSuffixClear = this.isRemovedSuffix(normalizedHost);
+      const domain = isRemovedSuffixClear
+        ? normalizedHost
+        : this.registrableDomainFor(normalizedHost);
+      const isSuffixClear = isRemovedSuffixClear || this.isPublicSuffix(domain);
 
-      if (domain !== apex) {
-        return this.clearDomainWithinBucket(
-          apex,
-          domain,
-          this.isPublicSuffix(domain),
-        );
+      if (!isSuffixClear || domain !== apex) {
+        return this.clearDomainWithinBucket(apex, domain, isSuffixClear);
       }
 
       let count = 0;
 
-      // The apex bucket - and, when the host is itself a public suffix or a bare name,
-      // every bucket beneath it. Such a name has no registrable part, so each host under
-      // it is its own bucket: `clear('github.io', 'domain')` or `clear('localhost',
-      // 'domain')` cleared only the suffix's own and left `a.github.io` and
-      // `sub.localhost` in place. Only then: under an ordinary domain a bucket beneath
-      // the apex is a separate site behind a nested private suffix (`bucket.s3.amazonaws.com`
-      // under `amazonaws.com`), not part of the domain being cleared.
-      const isSuffixClear = this.isPublicSuffix(apex);
+      // A suffix or bare name with a bucket of its own: its bucket and every one beneath
+      // it. A listed suffix has no registrable part, so each site under it is a bucket of
+      // its own - `clear('github.io', 'domain')` or `clear('localhost', 'domain')` clears
+      // them all - and a removed one files every host under it in its own bucket.
       for (const [key, bucket] of [...this.buckets.entries()]) {
-        if (key === apex || (isSuffixClear && key.endsWith(`.${apex}`))) {
+        if (key === apex || key.endsWith(`.${apex}`)) {
           count += bucket.size;
           this.buckets.delete(key);
         }
@@ -1321,13 +1324,14 @@ export class CookieJar {
   }
 
   /**
-   * `clear(host, 'domain')` for a domain that shares its bucket with other sites, as one
-   * below a suffix that sits beneath a removed one does (`x.co.uk`, with `uk` removed).
-   * Removes the cookies stored for `domain` or a host under
-   * it, matched on the stored scope as the hostname clear matches: every one on a suffix
-   * clear, and otherwise those not behind a nested suffix, which is a site of its own here
-   * as it is when the domain has a bucket to itself. A cookie stored for a name above
-   * `domain` - the removed suffix itself - spans the other sites too and stays.
+   * `clear(host, 'domain')` within the domain's bucket: removes the cookies stored for
+   * `domain` or a host under it, matched on the stored scope as the hostname clear matches -
+   * every one on a suffix clear, and otherwise those not behind a public suffix beneath
+   * `domain`, which is a site of its own. A bucket holds another site only under a removed
+   * suffix: with `com` removed, `x.example.com` and `app.blogspot.com` share the `com`
+   * bucket, and `blogspot.com` keeps `app.blogspot.com` a site apart. A cookie stored for
+   * a name above `domain` - the removed suffix itself, under `x.co.uk` with `uk` removed -
+   * spans the other sites too and stays.
    */
   private clearDomainWithinBucket(
     apex: string,
@@ -1341,14 +1345,25 @@ export class CookieJar {
     }
 
     let count = 0;
+    // Answered once per stored domain: a removed suffix files every cookie beneath it in
+    // this one bucket, and each answer can take a suffix lookup per label.
+    const answers = new Map<string, boolean>();
 
     for (const [key, cookie] of bucket.entries()) {
       const storedDomain = this.storedScopes.get(cookie)?.domain;
 
-      if (
-        storedDomain !== undefined &&
-        this.isWithinDomain(storedDomain, domain, isSuffixClear)
-      ) {
+      if (storedDomain === undefined) {
+        continue;
+      }
+
+      let isWithin = answers.get(storedDomain);
+
+      if (isWithin === undefined) {
+        isWithin = this.isWithinDomain(storedDomain, domain, isSuffixClear);
+        answers.set(storedDomain, isWithin);
+      }
+
+      if (isWithin) {
         bucket.delete(key);
         count++;
       }
@@ -1450,6 +1465,15 @@ export class CookieJar {
   private apexFor(hostname: string): string {
     return this.inHostForm(hostname, (host) =>
       this.publicSuffixes.apexFor(host),
+    );
+  }
+
+  /** Whether `hostname` is a suffix this jar's `publicSuffixes.remove` opts out (see
+   *  {@link PublicSuffixResolver.isRemovedSuffix}). Never an IP literal. */
+  private isRemovedSuffix(hostname: string): boolean {
+    return (
+      this.tryCanonicalIPLiteral(hostname) === null &&
+      this.publicSuffixes.isRemovedSuffix(hostname)
     );
   }
 

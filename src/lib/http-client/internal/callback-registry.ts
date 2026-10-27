@@ -170,6 +170,13 @@ export interface FilterKind {
   readonly phases: readonly string[];
 }
 
+/** A filter's own fields, as {@link filterFieldsOf} finds them. */
+interface FilterFields {
+  readonly names: ReadonlySet<string>;
+  /** The realm root prototype the walk stopped at, or `null` for a chain without one. */
+  readonly root: object | null;
+}
+
 /**
  * Every field name a filter answers to: its own, and those it inherits from a class or
  * prototype of the caller's, since the lists are read from those too (see
@@ -180,13 +187,10 @@ export interface FilterKind {
  * from this realm stops at ours. An inherited method is behaviour rather than a field and
  * is skipped; an own field is a field whatever its value.
  */
-function filterFieldNames(filter: object): Set<string> {
+function filterFieldsOf(filter: object): FilterFields {
   const names = new Set<string>();
-  for (
-    let current: object | null = filter;
-    current !== null && !isRealmRootPrototype(current);
-    current = Object.getPrototypeOf(current) as object | null
-  ) {
+  let current: object | null = filter;
+  while (current !== null && !isRealmRootPrototype(current)) {
     for (const name of Object.getOwnPropertyNames(current)) {
       const descriptor = Object.getOwnPropertyDescriptor(current, name);
       const isInheritedMethod =
@@ -195,31 +199,43 @@ function filterFieldNames(filter: object): Set<string> {
         names.add(name);
       }
     }
+    current = Object.getPrototypeOf(current) as object | null;
   }
-  return names;
+  return { names, root: current };
 }
 
 /**
- * `filter[field]`, unless it is a value polluted onto `Object.prototype`: one the walk
- * {@link filterFieldNames} takes finds on no object of the caller's, and that is the very
- * value a realm's root prototype holds. A `hosts` polluted onto it would otherwise
- * restrict every callback added with a filter. A `Proxy` whose `get` trap answers a field
- * it holds nowhere is read as it answers.
+ * `filter[field]`, unless it is a value polluted onto `Object.prototype`: a field that is
+ * not one of `fields`, read as the very value the realm root prototype the walk stopped
+ * at holds. A `hosts` polluted onto it would otherwise restrict every callback added with
+ * a filter. A `Proxy` whose `get` trap answers a field it holds nowhere is read as it
+ * answers.
  */
-function readFilterField(filter: object, field: string): unknown {
-  const value = (filter as Record<string, unknown>)[field];
-  let current: object | null = filter;
+function readFilterField(
+  filter: object,
+  field: string,
+  fields: FilterFields,
+): unknown {
+  return unlessPolluted(
+    (filter as Record<string, unknown>)[field],
+    field,
+    fields,
+  );
+}
 
-  while (current !== null && !isRealmRootPrototype(current)) {
-    if (Object.hasOwn(current, field)) {
-      return value;
-    }
-    current = Object.getPrototypeOf(current) as object | null;
-  }
+/** `value`, read from a filter's `field`, or `undefined` where {@link readFilterField}
+ *  would find it polluted. */
+function unlessPolluted(
+  value: unknown,
+  field: string,
+  fields: FilterFields,
+): unknown {
+  const { root } = fields;
 
-  return current !== null &&
-    Object.hasOwn(current, field) &&
-    (current as Record<string, unknown>)[field] === value
+  return !fields.names.has(field) &&
+    root !== null &&
+    Object.hasOwn(root, field) &&
+    (root as Record<string, unknown>)[field] === value
     ? undefined
     : value;
 }
@@ -238,6 +254,7 @@ function quoteNames(names: readonly string[]): string {
  */
 function copyFilterLists(
   filter: Record<string, unknown>,
+  fields: FilterFields,
   label: string,
   kind: FilterKind,
   /** The phases an omitted `phases` gives, named when an empty one is refused. */
@@ -247,7 +264,7 @@ function copyFilterLists(
   // `statusCodes` on an error observer would be ignored, so it would match every error,
   // and a `contentTypes` on an interceptor would match nothing. Nullish is absent here as
   // it is below, so a filter object shared between kinds may leave the field undefined.
-  for (const field of filterFieldNames(filter)) {
+  for (const field of fields.names) {
     if (
       field !== 'methods' &&
       !kind.fields.includes(field) &&
@@ -265,7 +282,7 @@ function copyFilterLists(
     if (!kind.fields.includes(field)) {
       continue;
     }
-    const value = readFilterField(filter, field);
+    const value = readFilterField(filter, field, fields);
     if (isNullish(value)) {
       continue;
     }
@@ -327,7 +344,7 @@ type RemoveFn = () => void;
 /** One registered callback and the filter it was added with, `phases` defaulted. */
 export interface RegisteredCallback<Fn, Filter> {
   fn: Fn;
-  filter?: Filter;
+  filter: Filter;
 }
 
 /**
@@ -364,13 +381,17 @@ export class CallbackRegistry<
     }
     const source = (candidate ?? {}) as Record<string, unknown>;
     // Each field read once, into a filter of the client's own: only the fields
-    // `matchesFilter` reads are kept.
+    // `matchesFilter` reads are kept. `methods` is read before the fields are listed, so
+    // one a `methods` getter adds is listed - and refused, if this kind does not take it.
+    const methodsValue = source.methods;
+    const fields = filterFieldsOf(source);
     const methods = normalizeFilterMethods(
-      readFilterField(source, 'methods'),
+      unlessPolluted(methodsValue, 'methods', fields),
       this.label,
     );
     const lists = copyFilterLists(
       source,
+      fields,
       this.label,
       this.kind,
       this.defaultPhases as readonly string[],

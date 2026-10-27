@@ -54,9 +54,9 @@ export class ResponseObserverManager extends CallbackRegistry<
         'ResponseObserver',
         observers,
         (filter) =>
-          matchesFilterPhase(filter?.phases, phase.type) &&
+          matchesFilterPhase(filter.phases, phase.type) &&
           matchesFilter(
-            filter ?? {},
+            filter,
             {
               status: response.status,
               method: request.method,
@@ -101,9 +101,9 @@ export class ErrorObserverManager extends CallbackRegistry<
         'ErrorObserver',
         observers,
         (filter) =>
-          matchesFilterPhase(filter?.phases, phase.type) &&
+          matchesFilterPhase(filter.phases, phase.type) &&
           matchesFilter(
-            filter ?? {},
+            filter,
             {
               method: request.method,
               requestURL: request.requestURL,
@@ -131,7 +131,7 @@ export type ErrorObserverChain = (
 async function runObservers<Filter, Args extends unknown[]>(
   label: 'ResponseObserver' | 'ErrorObserver',
   observers: ReadonlyArray<RegisteredCallback<unknown, Filter>>,
-  matches: (filter: Filter | undefined) => boolean,
+  matches: (filter: Filter) => boolean,
   argsFor: () => Args,
 ): Promise<void> {
   for (const { fn, filter } of observers) {

@@ -355,8 +355,9 @@ const RESPONSE_TOO_LARGE = Symbol('response too large');
  *
  * With a limit, the body is read chunk by chunk and counted as it arrives, so a body over
  * it is cancelled - the rest neither downloaded nor held - rather than buffered whole by
- * `arrayBuffer()` and refused afterwards. Without one, or without a readable `body` (a
- * test double, an older runtime), it is read as it always was.
+ * `arrayBuffer()` and refused afterwards. Without one, or without a `body` that is a web
+ * stream or async-iterable (a test double, an XHR-based polyfill), it is read whole through
+ * `arrayBuffer()`, and checked after where there is a limit.
  */
 async function readResponseBody(
   method: string,
@@ -393,8 +394,8 @@ async function readResponseBody(
 
   // Read through a reader only where the body is a web stream. A polyfilled `fetch`
   // (node-fetch, cross-fetch) hands over a Node `Readable`, which has no `getReader`, and
-  // a test double may hand over anything: they are read whole and checked after, as
-  // before the limit was read through a reader.
+  // a test double may hand over anything: those that are not async-iterable either are
+  // read whole and checked after.
   const body: unknown = response.body;
 
   if (!body || typeof readUnknownMember(body, 'getReader') !== 'function') {

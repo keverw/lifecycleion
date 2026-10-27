@@ -132,7 +132,7 @@ async function runInterceptors(
     // the filter: an interceptor this phase never reaches (one registered for `retry`
     // alone, in the initial phase) reads no request, so it takes no copy - and cannot
     // change how a result that fails to copy is reported.
-    if (!matchesFilterPhase(filter?.phases, phase.type)) {
+    if (!matchesFilterPhase(filter.phases, phase.type)) {
       continue;
     }
 
@@ -156,7 +156,7 @@ async function runInterceptors(
 
     if (
       !matchesFilter(
-        filter ?? {},
+        filter,
         {
           method: current.method,
           requestURL: current.requestURL,

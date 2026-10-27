@@ -2545,20 +2545,84 @@ describe('CookieJar', () => {
       expect(scoped.getStoredDomains()).toEqual([{ domain: 'uk', count: 1 }]);
     });
 
-    test('clear(host, domain) on a removed suffix clears everything under it', () => {
+    test('clear(host, domain) on a removed suffix clears everything under it, as on a listed one', () => {
       const scoped = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
 
       scoped.parseSetCookieHeader('x=host; Path=/', 'https://x.co.uk/');
       scoped.parseSetCookieHeader('y=host; Path=/', 'https://a.y.org.uk/');
+      scoped.parseSetCookieHeader('plain=1; Path=/', 'https://plain.uk/');
       scoped.parseSetCookieHeader(
         'shared=uk; Domain=uk; Path=/',
         'https://x.co.uk/',
       );
       scoped.parseSetCookieHeader('other=1; Path=/', 'https://example.com/');
 
-      expect(scoped.clear('uk', 'domain')).toBe(3);
+      // `x.co.uk` and `y.org.uk` stay sites of their own, behind `co.uk` and `org.uk`,
+      // but naming `uk` itself reaches every host under it, as it does with no removal.
+      expect(scoped.clear('uk', 'domain')).toBe(4);
       expect(scoped.getStoredDomains()).toEqual([
         { domain: 'example.com', count: 1 },
+      ]);
+    });
+
+    test('clear(host, domain) on a removed TLD reaches the sites behind the suffixes still listed beneath it', () => {
+      const scoped = new CookieJar({ publicSuffixes: { remove: ['com'] } });
+
+      scoped.parseSetCookieHeader('a=1; Path=/', 'https://x.example.com/');
+      scoped.parseSetCookieHeader('b=2; Path=/', 'https://app.blogspot.com/');
+      scoped.parseSetCookieHeader(
+        'c=3; Path=/',
+        'https://bucket.s3.amazonaws.com/',
+      );
+      scoped.parseSetCookieHeader('d=4; Path=/', 'https://example.org/');
+
+      expect(scoped.clear('com.', 'domain')).toBe(0);
+      expect(scoped.clear('com', 'domain')).toBe(3);
+      expect(scoped.getStoredDomains()).toEqual([
+        { domain: 'example.org', count: 1 },
+      ]);
+    });
+
+    test('clear(host, domain) on a removed suffix beneath another removed one clears only what is under it', () => {
+      const scoped = new CookieJar({
+        publicSuffixes: { remove: ['uk', 'co.uk'] },
+      });
+
+      scoped.parseSetCookieHeader('x=host; Path=/', 'https://x.co.uk/');
+      scoped.parseSetCookieHeader('y=host; Path=/', 'https://y.org.uk/');
+      scoped.parseSetCookieHeader(
+        'shared=uk; Domain=uk; Path=/',
+        'https://x.co.uk/',
+      );
+
+      expect(scoped.clear('co.uk', 'domain')).toBe(1);
+      expect(
+        scoped
+          .getStoredDomains()
+          .map((entry) => entry.domain)
+          .sort(),
+      ).toEqual(['uk', 'y.org.uk']);
+    });
+
+    test('clear(host, domain) for the site a removal joined leaves a site behind a suffix still listed', () => {
+      // With `com` removed, every `.com` host is filed in the one `com` bucket, but
+      // `blogspot.com` is still a suffix, so `app.blogspot.com` is a site of its own.
+      const scoped = new CookieJar({ publicSuffixes: { remove: ['com'] } });
+
+      scoped.parseSetCookieHeader('a=1; Path=/', 'https://x.example.com/');
+      scoped.parseSetCookieHeader(
+        'b=2; Domain=example.com; Path=/',
+        'https://x.example.com/',
+      );
+      scoped.parseSetCookieHeader(
+        'c=3; Domain=com; Path=/',
+        'https://x.example.com/',
+      );
+      scoped.parseSetCookieHeader('d=4; Path=/', 'https://app.blogspot.com/');
+
+      expect(scoped.clear('x.example.com', 'domain')).toBe(3);
+      expect(scoped.getStoredDomains()).toEqual([
+        { domain: 'app.blogspot.com', count: 1 },
       ]);
     });
 

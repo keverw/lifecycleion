@@ -249,6 +249,17 @@ export class PublicSuffixResolver {
   }
 
   /**
+   * Whether `hostname` is a suffix of the bundled list that `publicSuffixes.remove` opts
+   * out - one whose removal took effect, as {@link apexFor} reads removals. A removal of a
+   * name the bundled list does not treat as a suffix changes nothing, and is not one.
+   */
+  public isRemovedSuffix(hostname: string): boolean {
+    const normalized = toLabels(hostname).join('.');
+
+    return this.removed.has(normalized) && isBundledPublicSuffix(normalized);
+  }
+
+  /**
    * The bucket key cookies for `hostname` are filed under: its registrable domain under
    * the bundled list and the caller's additions, or the widest removed suffix above it.
    * With `uk` removed, `x.co.uk` and `y.co.uk` share the `uk` bucket, so one bucket can
