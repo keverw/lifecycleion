@@ -8075,13 +8075,24 @@ describe('NodeAdapter — crl option (normalization)', () => {
     );
   });
 
+  test('a bundle of headers with no footers is refused promptly', () => {
+    // Each header's block ends at the first footer after it; with none left, a lazy
+    // `BEGIN[\s\S]*?END` regex scans from every remaining header to the end of the
+    // string, which takes seconds on this bundle.
+    const crl = `${fixtures.crlEmpty}\n${'-----BEGIN X509 CRL-----\n'.repeat(16_000)}`;
+    const startedAt = performance.now();
+
+    expect(() => new NodeAdapter({ crl })).toThrow(/outside any complete/);
+    expect(performance.now() - startedAt).toBeLessThan(250);
+  });
+
   test('anything outside a complete block is refused', async () => {
-    // The rule is exact: PEM blocks separated by whitespace, nothing else.
-    // Earlier heuristics tried to admit commentary while still catching a
-    // truncated CRL, and every narrowing swapped one failure for the other —
-    // an exact-armour search missed `----BEGIN`, any-triple-hyphen refused a
-    // Markdown rule, fused-hyphens refused an issuer CN of `ACME---Production`.
-    // A parser cannot tell prose from a half a CRL, so neither is accepted.
+    // The rule is exact: PEM blocks separated by whitespace, nothing else. A
+    // heuristic that admits commentary while still catching a truncated CRL
+    // swaps one failure for the other however it is narrowed — an exact-armour
+    // search misses `----BEGIN`, any-triple-hyphen refuses a Markdown rule,
+    // fused-hyphens refuse an issuer CN of `ACME---Production`. A parser cannot
+    // tell prose from half a CRL, so neither is accepted.
     const rejected = [
       '----BEGIN X509 CRL-----\nQkJCQg==', // one hyphen short
       '------BEGIN X509 CRL-----\nQkJCQg==', // one too many

@@ -3453,21 +3453,20 @@ function snapshotAdapterRequest(
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Matches one PEM-armoured CRL. The armour is fixed by RFC 7468, so this is a
-// constant rather than an option — there is exactly one correct value for it.
+// The armour around one PEM CRL. It is fixed by RFC 7468, so these are
+// constants rather than options — there is exactly one correct value for each.
 const PEM_CRL_HEADER = '-----BEGIN X509 CRL-----';
-
-const PEM_CRL_BLOCK = /-----BEGIN X509 CRL-----[\s\S]*?-----END X509 CRL-----/g;
+const PEM_CRL_FOOTER = '-----END X509 CRL-----';
 
 // Anything at all left over once every COMPLETE block has been removed.
 //
-// The rule is exact rather than a heuristic, and that is the point. Earlier
-// versions tried to tell a damaged CRL apart from a human-readable annotation
-// — first by searching for well-formed `-----BEGIN X509 CRL-----`, which
-// missed `----BEGIN` and a clipped tail; then by any triple hyphen, which
-// refused a Markdown rule; then by a hyphen run fused to text, which refused
-// an issuer CN of `ACME---Production`. Each narrowing traded a false negative
-// for a false positive, and a false negative here is a CRL dropped in silence.
+// The rule is exact rather than a heuristic, and that is the point. A rule
+// that tells a damaged CRL apart from a human-readable annotation trades a
+// false negative for a false positive whichever way it is drawn: a search for
+// well-formed `-----BEGIN X509 CRL-----` misses `----BEGIN` and a clipped
+// tail, any triple hyphen refuses a Markdown rule, and a hyphen run fused to
+// text refuses an issuer CN of `ACME---Production`. A false negative here is a
+// CRL dropped in silence.
 //
 // There is no line to draw, because a truncated CRL and a line of prose are
 // the same thing to a parser: bytes that are not a PEM block. So require that
@@ -3809,7 +3808,32 @@ function splitCRLString(withBOM: string): string | string[] {
   // A leading byte-order mark is no content: a CRL file saved with one reads as `\uFEFF`
   // as a string, or `ï»¿` once a Buffer is read as latin1, and Node's own `tls` takes it.
   const crl = withBOM.replace(/^(?:\uFEFF|\u00EF\u00BB\u00BF)/, '');
-  const blocks = crl.match(PEM_CRL_BLOCK) ?? [];
+  // Each complete block runs from a header to the first footer after it, and what lies
+  // between blocks is set aside as residue. By `indexOf`, not a lazy
+  // `BEGIN[\s\S]*?END` regex: with no footer left, that regex scans from every
+  // remaining header to the end of the string, which is quadratic in a bundle of
+  // headers whose footers are missing.
+  const blocks: string[] = [];
+  let residue = '';
+  let position = 0;
+
+  for (;;) {
+    const begin = crl.indexOf(PEM_CRL_HEADER, position);
+    const end =
+      begin === -1
+        ? -1
+        : crl.indexOf(PEM_CRL_FOOTER, begin + PEM_CRL_HEADER.length);
+
+    if (end === -1) {
+      break;
+    }
+
+    residue += crl.slice(position, begin);
+    position = end + PEM_CRL_FOOTER.length;
+    blocks.push(crl.slice(begin, position));
+  }
+
+  residue += crl.slice(position);
 
   // Returning only the complete blocks would DISCARD whatever did not match,
   // so a truncated or corrupted CRL in the bundle would vanish silently and
@@ -3822,8 +3846,6 @@ function splitCRLString(withBOM: string): string | string[] {
   // intact still swallows the damage without an error.
   //
   // So refuse anything that is not a complete block or whitespace.
-  const residue = crl.replace(PEM_CRL_BLOCK, '');
-
   if (RESIDUE_OUTSIDE_PEM_BLOCKS.test(residue)) {
     const error = new Error(
       'NodeAdapter: the `crl` value contains content outside any complete ' +
