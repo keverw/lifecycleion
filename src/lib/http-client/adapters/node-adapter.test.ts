@@ -9044,6 +9044,44 @@ test('a refreshed CRL of the wrong kind is refused as configuration, not retried
   }
 });
 
+test.each([
+  ['Buffer', (memory: ArrayBuffer) => Buffer.from(memory)],
+  ['Uint8Array', (memory: ArrayBuffer) => new Uint8Array(memory)],
+  ['DataView', (memory: ArrayBuffer) => new DataView(memory)],
+] as const)(
+  'a refreshed CRL %s over a detached buffer is refused as configuration, not retried',
+  async (_kind, viewOf) => {
+    const config: NodeAdapterConfig = { crl: getRevocationFixtures().crlEmpty };
+    const adapter = new NodeAdapter(config);
+    const requestSpy = spyOn(https, 'request');
+    let attempts = 0;
+    const memory = new ArrayBuffer(16);
+    const view = viewOf(memory);
+    structuredClone(memory, { transfer: [memory] });
+    config.crl = view;
+
+    try {
+      const builder = new HTTPClient({ adapter })
+        .get('https://crl.test/api')
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 })
+        .onAttemptEnd(() => {
+          attempts++;
+        });
+
+      const res = await builder.send();
+
+      expect(res.isFailed).toBe(true);
+      expect(attempts).toBe(1);
+      expect(builder.error?.cause?.message).toStartWith(
+        'NodeAdapter crl must be PEM',
+      );
+      expect(requestSpy).not.toHaveBeenCalled();
+    } finally {
+      requestSpy.mockRestore();
+    }
+  },
+);
+
 describe('NodeAdapter upload finalization', () => {
   test.each(['string', 'bytes', 'multipart'] as const)(
     '%s upload reports req.end failure after accepting all body bytes',

@@ -403,9 +403,7 @@ async function readResponseBody(
     // over the limit is neither read whole first nor left holding its socket.
     if (
       body &&
-      typeof (body as { [Symbol.asyncIterator]?: unknown })[
-        Symbol.asyncIterator
-      ] === 'function'
+      typeof readUnknownMember(body, Symbol.asyncIterator) === 'function'
     ) {
       const iterable = body as AsyncIterable<unknown>;
       // Text taken as well: a `Readable` given an encoding yields strings, which the

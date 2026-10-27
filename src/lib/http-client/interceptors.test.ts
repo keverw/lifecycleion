@@ -744,6 +744,53 @@ describe('filter fields polluted onto Object.prototype', () => {
     expect(calls).toEqual(['filtered', 'unfiltered']);
   });
 
+  test('a NaN polluted onto Object.prototype is not read as a filter field', () => {
+    const polluted = Object.prototype as Record<string, unknown>;
+    const mgr = new RequestInterceptorManager();
+
+    polluted.hosts = Number.NaN;
+    polluted.methods = Number.NaN;
+    try {
+      expect(() => mgr.add((request) => request)).not.toThrow();
+      expect(() =>
+        mgr.add((request) => request, { phases: ['initial'] }),
+      ).not.toThrow();
+    } finally {
+      delete polluted.hosts;
+      delete polluted.methods;
+    }
+  });
+
+  test('a field polluted onto Object.prototype as an accessor is not read', async () => {
+    const mgr = new RequestInterceptorManager();
+    const calls: string[] = [];
+    let reads = 0;
+
+    Object.defineProperty(Object.prototype, 'hosts', {
+      configurable: true,
+      get: () => {
+        reads++;
+        return ['x.invalid'];
+      },
+    });
+    try {
+      mgr.add(
+        (request) => {
+          calls.push('filtered');
+          return request;
+        },
+        { methods: ['GET'] },
+      );
+
+      await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).hosts;
+    }
+
+    expect(calls).toEqual(['filtered']);
+    expect(reads).toBe(1);
+  });
+
   test('a field a Proxy answers only from its get trap is still read', async () => {
     const mgr = new RequestInterceptorManager();
     const calls: string[] = [];

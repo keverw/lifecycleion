@@ -254,9 +254,7 @@ export class PublicSuffixResolver {
    * name the bundled list does not treat as a suffix changes nothing, and is not one.
    */
   public isRemovedSuffix(hostname: string): boolean {
-    const normalized = toLabels(hostname).join('.');
-
-    return this.removed.has(normalized) && isBundledPublicSuffix(normalized);
+    return this.isEffectiveRemoval(toLabels(hostname).join('.'));
   }
 
   /**
@@ -285,7 +283,7 @@ export class PublicSuffixResolver {
       for (let i = labels.length - 1; i >= 0; i--) {
         const candidate = labels.slice(i).join('.');
 
-        if (this.removed.has(candidate) && isBundledPublicSuffix(candidate)) {
+        if (this.isEffectiveRemoval(candidate)) {
           return candidate;
         }
       }
@@ -321,7 +319,7 @@ export class PublicSuffixResolver {
     while (domain.includes('.') && !this.isPublicSuffix(domain)) {
       const parent = domain.slice(domain.indexOf('.') + 1);
 
-      if (!this.removed.has(parent) || !isBundledPublicSuffix(parent)) {
+      if (!this.isEffectiveRemoval(parent)) {
         break;
       }
 
@@ -329,6 +327,12 @@ export class PublicSuffixResolver {
     }
 
     return domain;
+  }
+
+  /** {@link isRemovedSuffix} for a name already normalized: one place for the rule, which
+   *  `apexFor`'s buckets and `registrableDomainFor`'s sites must read alike. */
+  private isEffectiveRemoval(normalized: string): boolean {
+    return this.removed.has(normalized) && isBundledPublicSuffix(normalized);
   }
 
   /**

@@ -3644,11 +3644,12 @@ function copyToOwnMemory(bytes: Uint8Array): Buffer {
  * copy - read through its internal slots rather than its own `buffer`, `byteOffset` and
  * `byteLength`, which a subclass or an own property can override. Read so, the bytes
  * validated, copied and compared are the bytes `tls` reads from the view, not a prefix
- * it reports. A Buffer over a detached buffer reads as empty, as its own `toString` reads
- * it; any other view over one throws, as the `Buffer` constructor does.
+ * it reports. A view over a detached buffer - a Buffer, any other typed array, or a
+ * `DataView` - reads as empty, as a Buffer's own `toString` reads it, and so is refused
+ * as any empty value is rather than throwing as the `Buffer` constructor does.
  */
 function crlBytesOf(view: ArrayBufferView): Buffer {
-  if (Buffer.isBuffer(view) && readBinaryByteLength(view) === 0) {
+  if (readBinaryByteLength(view) === 0) {
     return Buffer.alloc(0);
   }
 

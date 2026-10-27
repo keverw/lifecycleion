@@ -2545,6 +2545,40 @@ describe('CookieJar', () => {
       expect(scoped.getStoredDomains()).toEqual([{ domain: 'uk', count: 1 }]);
     });
 
+    test('clear(host, domain) for a domain with a bucket of its own takes the bucket whole, without a per-cookie suffix walk', () => {
+      const plain = new CookieJar();
+      const walk = spyOn(
+        plain as unknown as { isWithinDomain: () => boolean },
+        'isWithinDomain',
+      );
+
+      for (let index = 0; index < 50; index++) {
+        plain.parseSetCookieHeader(
+          `c${String(index)}=1; Path=/`,
+          `https://h${String(index)}.example.com/`,
+        );
+      }
+
+      expect(plain.clear('example.com', 'domain')).toBe(50);
+      expect(walk).not.toHaveBeenCalled();
+    });
+
+    test('clear(host, domain) clears a cookie whose stored scope cannot be read, in its own bucket or a shared one', () => {
+      const plain = new CookieJar();
+      plain.parseSetCookieHeader('a=1; Path=/', 'https://www.example.com/');
+      const scoped = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
+      scoped.parseSetCookieHeader('b=2; Path=/', 'https://x.co.uk/');
+
+      for (const jar of [plain, scoped]) {
+        (
+          jar as unknown as { storedScopes: WeakMap<object, unknown> }
+        ).storedScopes = new WeakMap();
+      }
+
+      expect(plain.clear('example.com', 'domain')).toBe(1);
+      expect(scoped.clear('x.co.uk', 'domain')).toBe(1);
+    });
+
     test('clear(host, domain) on a removed suffix clears everything under it, as on a listed one', () => {
       const scoped = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
 

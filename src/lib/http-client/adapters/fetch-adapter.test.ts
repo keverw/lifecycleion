@@ -2230,6 +2230,31 @@ describe('FetchAdapter - body chunk types and sizes', () => {
 
     expect(decoder.decode(response.body as Uint8Array)).toBe('héllo');
   });
+
+  test('a body whose Symbol.asyncIterator throws when read is read whole through arrayBuffer()', async () => {
+    const body = {
+      get [Symbol.asyncIterator](): never {
+        throw new TypeError('not iterable');
+      },
+    };
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body,
+        arrayBuffer: () => Promise.resolve(new Uint8Array([7, 8]).buffer),
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+    });
+
+    expect([...(response.body as Uint8Array)]).toEqual([7, 8]);
+  });
 });
 
 describe('FetchAdapter - request body copy', () => {

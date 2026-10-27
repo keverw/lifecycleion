@@ -180,7 +180,7 @@ interface FilterFields {
 /**
  * Every field name a filter answers to: its own, and those it inherits from a class or
  * prototype of the caller's, since the lists are read from those too (see
- * {@link readFilterField}): a class instance's getters and a prototype's fields.
+ * {@link callerFilterValue}): a class instance's getters and a prototype's fields.
  *
  * The walk stops at a realm's root prototype (see `isRealmRootPrototype`), so a plain
  * object from a `vm` context or an iframe stops at that realm's `Object.prototype` as one
@@ -205,39 +205,31 @@ function filterFieldsOf(filter: object): FilterFields {
 }
 
 /**
- * `filter[field]`, unless it is a value polluted onto `Object.prototype`: a field that is
- * not one of `fields`, read as the very value the realm root prototype the walk stopped
- * at holds. A `hosts` polluted onto it would otherwise restrict every callback added with
- * a filter. A `Proxy` whose `get` trap answers a field it holds nowhere is read as it
- * answers.
+ * `value`, read from a filter's `field`, unless it is a value polluted onto
+ * `Object.prototype`: a field that is not one of `fields` and that the realm root
+ * prototype the walk stopped at holds - as the very value read, or through an accessor,
+ * which is not called again, and which answers every read whatever it returns. A `hosts`
+ * polluted onto it would otherwise restrict every callback added with a filter. A
+ * `Proxy` whose `get` trap answers a field it holds nowhere is read as it answers, unless
+ * the root holds an accessor of that name.
  */
-function readFilterField(
-  filter: object,
-  field: string,
-  fields: FilterFields,
-): unknown {
-  return unlessPolluted(
-    (filter as Record<string, unknown>)[field],
-    field,
-    fields,
-  );
-}
-
-/** `value`, read from a filter's `field`, or `undefined` where {@link readFilterField}
- *  would find it polluted. */
-function unlessPolluted(
+function callerFilterValue(
   value: unknown,
   field: string,
   fields: FilterFields,
 ): unknown {
-  const { root } = fields;
+  const { names, root } = fields;
 
-  return !fields.names.has(field) &&
-    root !== null &&
-    Object.hasOwn(root, field) &&
-    (root as Record<string, unknown>)[field] === value
-    ? undefined
-    : value;
+  if (names.has(field) || root === null) {
+    return value;
+  }
+
+  const descriptor = Object.getOwnPropertyDescriptor(root, field);
+
+  return descriptor === undefined ||
+    ('value' in descriptor && !Object.is(descriptor.value, value))
+    ? value
+    : undefined;
 }
 
 /** Fixed names - phases, schemes - quoted for an error message: `'initial', 'retry'`. */
@@ -282,7 +274,7 @@ function copyFilterLists(
     if (!kind.fields.includes(field)) {
       continue;
     }
-    const value = readFilterField(filter, field, fields);
+    const value = callerFilterValue(filter[field], field, fields);
     if (isNullish(value)) {
       continue;
     }
@@ -386,7 +378,7 @@ export class CallbackRegistry<
     const methodsValue = source.methods;
     const fields = filterFieldsOf(source);
     const methods = normalizeFilterMethods(
-      unlessPolluted(methodsValue, 'methods', fields),
+      callerFilterValue(methodsValue, 'methods', fields),
       this.label,
     );
     const lists = copyFilterLists(

@@ -894,18 +894,25 @@ export class CookieJar {
         : this.registrableDomainFor(normalizedHost);
       const isSuffixClear = isRemovedSuffixClear || this.isPublicSuffix(domain);
 
-      if (!isSuffixClear || domain !== apex) {
+      // The bucket is the cleared domain's alone when it is filed under that very name
+      // and no removal widened it to hold other sites - or when the domain is a suffix
+      // cleared whole. Otherwise it is shared, and only the domain's cookies are taken.
+      const isOwnBucket =
+        domain === apex && (isSuffixClear || !this.isRemovedSuffix(apex));
+
+      if (!isOwnBucket) {
         return this.clearDomainWithinBucket(apex, domain, isSuffixClear);
       }
 
       let count = 0;
 
-      // A suffix or bare name with a bucket of its own: its bucket and every one beneath
-      // it. A listed suffix has no registrable part, so each site under it is a bucket of
-      // its own - `clear('github.io', 'domain')` or `clear('localhost', 'domain')` clears
-      // them all - and a removed one files every host under it in its own bucket.
+      // The bucket, and for a suffix or bare name every one beneath it. A listed suffix has
+      // no registrable part, so each site under it is a bucket of its own -
+      // `clear('github.io', 'domain')` or `clear('localhost', 'domain')` clears them all -
+      // and a removed one files every host under it in its own bucket. Under an ordinary
+      // domain, a bucket beneath is a site behind a nested suffix, and stays.
       for (const [key, bucket] of [...this.buckets.entries()]) {
-        if (key === apex || key.endsWith(`.${apex}`)) {
+        if (key === apex || (isSuffixClear && key.endsWith(`.${apex}`))) {
           count += bucket.size;
           this.buckets.delete(key);
         }
@@ -1348,22 +1355,21 @@ export class CookieJar {
     // Answered once per stored domain: a removed suffix files every cookie beneath it in
     // this one bucket, and each answer can take a suffix lookup per label.
     const answers = new Map<string, boolean>();
+    const isWithin = (storedDomain: string): boolean => {
+      let isInDomain = answers.get(storedDomain);
+      if (isInDomain === undefined) {
+        isInDomain = this.isWithinDomain(storedDomain, domain, isSuffixClear);
+        answers.set(storedDomain, isInDomain);
+      }
+      return isInDomain;
+    };
 
     for (const [key, cookie] of bucket.entries()) {
       const storedDomain = this.storedScopes.get(cookie)?.domain;
 
-      if (storedDomain === undefined) {
-        continue;
-      }
-
-      let isWithin = answers.get(storedDomain);
-
-      if (isWithin === undefined) {
-        isWithin = this.isWithinDomain(storedDomain, domain, isSuffixClear);
-        answers.set(storedDomain, isWithin);
-      }
-
-      if (isWithin) {
+      // A cookie with no stored scope cannot be placed, so it is cleared rather than
+      // left behind by a clear meant to reach it.
+      if (storedDomain === undefined || isWithin(storedDomain)) {
         bucket.delete(key);
         count++;
       }
