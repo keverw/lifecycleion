@@ -2563,11 +2563,12 @@ describe('CookieJar', () => {
       expect(walk).not.toHaveBeenCalled();
     });
 
-    test('clear(host, domain) clears a cookie whose stored scope cannot be read, in its own bucket or a shared one', () => {
+    test('clear() places a cookie whose stored scope cannot be read by the domain its key holds', () => {
       const plain = new CookieJar();
       plain.parseSetCookieHeader('a=1; Path=/', 'https://www.example.com/');
       const scoped = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
       scoped.parseSetCookieHeader('b=2; Path=/', 'https://x.co.uk/');
+      scoped.parseSetCookieHeader('c=3; Path=/', 'https://y.co.uk/');
 
       for (const jar of [plain, scoped]) {
         (
@@ -2575,8 +2576,43 @@ describe('CookieJar', () => {
         ).storedScopes = new WeakMap();
       }
 
-      expect(plain.clear('example.com', 'domain')).toBe(1);
+      expect(plain.getStoredDomains()).toEqual([
+        { domain: 'www.example.com', count: 1 },
+      ]);
+      expect(plain.clear('www.example.com', 'hostname')).toBe(1);
+      // `y.co.uk` shares the `uk` bucket but is a site of its own, and stays.
       expect(scoped.clear('x.co.uk', 'domain')).toBe(1);
+      expect(scoped.getStoredDomains()).toEqual([
+        { domain: 'y.co.uk', count: 1 },
+      ]);
+    });
+
+    test('a removed suffix below a name that is no suffix joins the site above it', () => {
+      // `amazonaws.com` is no suffix, so with `s3.amazonaws.com` removed its tenants are
+      // part of the `amazonaws.com` site: they may set a cookie for it, and clearing
+      // any one host's domain reaches them all.
+      const scoped = new CookieJar({
+        publicSuffixes: { remove: ['s3.amazonaws.com'] },
+      });
+
+      scoped.parseSetCookieHeader(
+        'shared=1; Domain=amazonaws.com; Path=/',
+        'https://bucket.s3.amazonaws.com/',
+      );
+      scoped.parseSetCookieHeader('a=1; Path=/', 'https://x.amazonaws.com/');
+      scoped.parseSetCookieHeader(
+        'b=2; Path=/',
+        'https://other.s3.amazonaws.com/',
+      );
+      scoped.parseSetCookieHeader('c=3; Path=/', 'https://example.com/');
+
+      expect(scoped.getCookieHeaderString('https://www.amazonaws.com/')).toBe(
+        'shared=1',
+      );
+      expect(scoped.clear('bucket.s3.amazonaws.com', 'domain')).toBe(3);
+      expect(scoped.getStoredDomains()).toEqual([
+        { domain: 'example.com', count: 1 },
+      ]);
     });
 
     test('clear(host, domain) on a removed suffix clears everything under it, as on a listed one', () => {

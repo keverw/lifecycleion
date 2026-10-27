@@ -39,8 +39,10 @@ export interface PublicSuffixOverrides {
    * Suffixes to stop treating as public, even when the bundled list has them.
    *
    * Strictly widening, and the only option here that can *open* a scope: hosts under a
-   * removed suffix go back to sharing one bucket and may set cookies spanning it. The
-   * escape hatch for a private-section entry that breaks a deployment you control -
+   * removed suffix go back to sharing one bucket and may set cookies spanning it - and,
+   * where the name above it is no suffix either, spanning the registrable domain above:
+   * with `s3.amazonaws.com` removed, a bucket may set `Domain=amazonaws.com`, which is
+   * sent to every host under `amazonaws.com`. The escape hatch for a private-section entry that breaks a deployment you control -
    * removing `herokuapp.com` restores the pre-1.0 behaviour for that suffix alone.
    */
   remove?: readonly string[];
@@ -258,10 +260,32 @@ export class PublicSuffixResolver {
   }
 
   /**
+   * Whether a suffix `publicSuffixes.remove` opts out is `hostname` or a name under it - so
+   * that the bucket `hostname` keys may hold sites other than its own.
+   */
+  public hasRemovalWithin(hostname: string): boolean {
+    const normalized = toLabels(hostname).join('.');
+
+    for (const removed of this.removed) {
+      if (
+        (removed === normalized || removed.endsWith(`.${normalized}`)) &&
+        isBundledPublicSuffix(removed)
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * The bucket key cookies for `hostname` are filed under: its registrable domain under
-   * the bundled list and the caller's additions, or the widest removed suffix above it.
-   * With `uk` removed, `x.co.uk` and `y.co.uk` share the `uk` bucket, so one bucket can
-   * hold several sites (see {@link registrableDomainFor}).
+   * the bundled list and the caller's additions, or - below a removed suffix - the
+   * registrable domain the widest removed suffix above it belongs to, which is that
+   * suffix itself unless names above it are no suffix either. With `uk` removed,
+   * `x.co.uk` and `y.co.uk` share the `uk` bucket, so one bucket can hold several sites
+   * (see {@link registrableDomainFor}); with `s3.amazonaws.com` removed, its hosts are
+   * filed under `amazonaws.com`, as `www.amazonaws.com` is.
    *
    * Returns `hostname` itself when nothing sits under it: a public suffix with no
    * registrable part (`github.io`), or a bare name (`localhost`).
@@ -284,7 +308,7 @@ export class PublicSuffixResolver {
         const candidate = labels.slice(i).join('.');
 
         if (this.isEffectiveRemoval(candidate)) {
-          return candidate;
+          return this.widenPastRemoval(candidate);
         }
       }
     }
@@ -295,31 +319,58 @@ export class PublicSuffixResolver {
   /**
    * The registrable domain `hostname` belongs to under the jar's effective list - the
    * bundled list with the caller's additions and removals - and so the site it is part
-   * of. A removed suffix directly above that domain is no longer a suffix, so the domain
-   * widens to it: with `herokuapp.com` removed, `mine.herokuapp.com` belongs to
-   * `herokuapp.com`, and with `com` removed, `x.example.com` to `com`. A suffix the
-   * effective list still has stops the widening: with `uk` removed, `a.x.co.uk` belongs to
-   * `x.co.uk`, since `co.uk` is still a suffix, though it is filed in the `uk` bucket.
+   * of. A removed suffix at or directly above the listed answer is no longer a suffix, so
+   * the domain widens past it, up to the next name the effective list still treats as a
+   * suffix: with `herokuapp.com` removed, `mine.herokuapp.com` belongs to `herokuapp.com`;
+   * with `com` removed, `x.example.com` to `com`; and with `s3.amazonaws.com` removed,
+   * `bucket.s3.amazonaws.com` to `amazonaws.com`, since `amazonaws.com` is no suffix
+   * either. A suffix still listed stops the widening: with `uk` removed, `a.x.co.uk`
+   * belongs to `x.co.uk`, since `co.uk` is still a suffix, though it is filed in the `uk`
+   * bucket.
    *
    * Returns `hostname` itself when nothing sits under it: a public suffix with no
    * registrable part (`github.io`, or `co.uk` with `uk` removed), or a bare name
    * (`localhost`).
    */
   public registrableDomainFor(hostname: string): string {
-    let domain = this.listedRegistrableDomainFor(hostname);
+    const domain = this.listedRegistrableDomainFor(hostname);
 
     if (this.removed.size === 0) {
       return domain;
     }
 
-    // Widened one label at a time while the parent is a removed suffix, tested as
-    // `apexFor` tests it. Starting from the listed answer keeps bundled exception rules
-    // (`!city.kawasaki.jp`) in force. A name the effective list still treats as a suffix
-    // is a domain of its own and is not widened: with `uk` removed, `co.uk` is not `uk`.
-    while (domain.includes('.') && !this.isPublicSuffix(domain)) {
+    if (this.isEffectiveRemoval(domain)) {
+      return this.widenPastRemoval(domain);
+    }
+
+    // Only past a removal: starting from the listed answer keeps bundled exception rules
+    // (`!city.kawasaki.jp`) in force, though `kawasaki.jp` above it is no suffix. A name
+    // the effective list still treats as a suffix is a domain of its own and is not
+    // widened: with `uk` removed, `co.uk` is not `uk`.
+    if (!domain.includes('.') || this.isPublicSuffix(domain)) {
+      return domain;
+    }
+
+    const parent = domain.slice(domain.indexOf('.') + 1);
+
+    return this.isEffectiveRemoval(parent)
+      ? this.widenPastRemoval(parent)
+      : domain;
+  }
+
+  /**
+   * The registrable domain a removed suffix belongs to under the effective list: widened
+   * one label at a time until the parent is a suffix still - `herokuapp.com` stays itself
+   * below `com`, and `s3.amazonaws.com` becomes `amazonaws.com`. `apexFor` and
+   * `registrableDomainFor` both widen through it, so a site is never split across buckets.
+   */
+  private widenPastRemoval(removed: string): string {
+    let domain = removed;
+
+    while (domain.includes('.')) {
       const parent = domain.slice(domain.indexOf('.') + 1);
 
-      if (!this.isEffectiveRemoval(parent)) {
+      if (this.isPublicSuffix(parent)) {
         break;
       }
 

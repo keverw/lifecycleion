@@ -989,7 +989,8 @@ const jar = new CookieJar({
     // Stricter: no cookie may span these, and each host under them gets its own bucket.
     add: ['corp.internal', 'apps.acme-cloud.net'],
     // Wider, and the only option here that opens a scope: hosts under a removed suffix
-    // share one bucket again and may set cookies spanning it.
+    // share one bucket again and may set cookies spanning it, or spanning the registrable
+    // domain above it where that name is no suffix either.
     remove: ['herokuapp.com'],
   },
 });
@@ -1000,7 +1001,7 @@ unaffected. They are validated once in the constructor and a bad entry throws a 
 rather than being ignored - an empty suffix, a wildcard, an empty label, a character other than an ASCII letter (in either case), digit, `_` or hyphen (a Unicode suffix goes in its `xn--` form, and a look-alike such as the Kelvin sign `\u212A` is not read as `k`), a non-string, or a
 suffix named in both lists or added beneath a removed suffix. A removed ancestor
 allows shared cookies, which conflicts with an added child's tenant isolation. A typo that silently did nothing would be a scoping hole you
-would only discover as a cookie going somewhere it should not. A `remove` entry the bundled list does not treat as a suffix (`a.example.com`, or one a later list has dropped) changes nothing.
+would only discover as a cookie going somewhere it should not. A `remove` entry the bundled list does not treat as a suffix (`a.example.com`, or one a later list has dropped) changes nothing. A removed suffix whose parent is no suffix either joins the registrable domain above it: with `s3.amazonaws.com` removed, its hosts are part of the `amazonaws.com` site and may set `Domain=amazonaws.com` cookies, which are sent to every host under `amazonaws.com`, tenants of the suffixes still listed beneath it (`compute-1.amazonaws.com`) included, as a browser with that list sends them.
 
 **SameSite is stored, not enforced.** The `SameSite` attribute is parsed and kept on the stored cookie for callers to read, but `getCookiesFor()` does not consult it. This jar serves a client, not a browser: there is no navigation, no top-level "site" to compare against, and no notion of a cross-site request, so every cookie whose domain, path, expiry and `Secure` rules match is sent, whatever its `SameSite` value.
 
@@ -1053,7 +1054,7 @@ jar.clear(); // Remove all cookies - returns count removed
 jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only - returns count removed
 jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (any host's registrable domain is cleared this way) - returns count removed. A site behind a nested private suffix (bucket.s3.amazonaws.com under amazonaws.com) is its own domain and stays
 jar.clear('github.io', 'domain'); // On a public suffix or bare name, every site beneath it
-// The registrable domain is read under the jar's publicSuffixes, removals included: with remove: ['herokuapp.com'], clear('mine.herokuapp.com', 'domain') clears every *.herokuapp.com cookie, and with remove: ['com'], clear('x.example.com', 'domain') clears every .com cookie but those stored at or under a suffix still listed (blogspot.com, app.blogspot.com). With remove: ['uk'], co.uk is still a suffix, so clear('x.co.uk', 'domain') clears only x.co.uk's family - y.co.uk's cookies and a Domain=uk one stay. A removed suffix named itself is cleared whole, as a listed one is: clear('uk', 'domain') clears every .uk cookie, and with remove: ['com'], clear('com', 'domain') every .com one, app.blogspot.com's included.
+// The registrable domain is read under the jar's publicSuffixes, removals included: with remove: ['herokuapp.com'], clear('mine.herokuapp.com', 'domain') clears every *.herokuapp.com cookie, and with remove: ['com'], clear('x.example.com', 'domain') clears every .com cookie but those stored at or under a suffix still listed (blogspot.com, app.blogspot.com). With remove: ['s3.amazonaws.com'], amazonaws.com is no suffix either, so bucket.s3.amazonaws.com belongs to amazonaws.com and its clear reaches every amazonaws.com cookie but those stored at or under a suffix still listed (compute-1.amazonaws.com). With remove: ['uk'], co.uk is still a suffix, so clear('x.co.uk', 'domain') clears only x.co.uk's family - y.co.uk's cookies and a Domain=uk one stay. A removed suffix named itself is cleared whole, as a listed one is: clear('uk', 'domain') clears every .uk cookie, and with remove: ['com'], clear('com', 'domain') every .com one, app.blogspot.com's included.
 // A host that is not a non-empty string, or a missing or unknown scope, throws: only clear() with no arguments clears everything.
 
 // Inspection

@@ -554,12 +554,12 @@ export class CookieJar {
     const counts = new Map<string, number>();
 
     for (const bucket of this.buckets.values()) {
-      for (const cookie of bucket.values()) {
+      for (const [key, cookie] of bucket.entries()) {
         // The scope the cookie was filed under, not the live object: `getAllCookies()`
         // hands out the stored cookies themselves, and a `domain` written through one
         // must not move the cookie in this listing while the send path, which reads the
         // same stored scope, still sends it where it was filed.
-        const domain = this.storedScopes.get(cookie)?.domain ?? '';
+        const domain = this.storedDomainOf(key, cookie);
         counts.set(domain, (counts.get(domain) ?? 0) + 1);
       }
     }
@@ -895,10 +895,12 @@ export class CookieJar {
       const isSuffixClear = isRemovedSuffixClear || this.isPublicSuffix(domain);
 
       // The bucket is the cleared domain's alone when it is filed under that very name
-      // and no removal widened it to hold other sites - or when the domain is a suffix
-      // cleared whole. Otherwise it is shared, and only the domain's cookies are taken.
+      // and no removal is at or under that name, as one can file other sites with it - or
+      // when the domain is a suffix cleared whole. Otherwise it is shared, and only the domain's cookies
+      // are taken.
       const isOwnBucket =
-        domain === apex && (isSuffixClear || !this.isRemovedSuffix(apex));
+        domain === apex &&
+        (isSuffixClear || !this.publicSuffixes.hasRemovalWithin(apex));
 
       if (!isOwnBucket) {
         return this.clearDomainWithinBucket(apex, domain, isSuffixClear);
@@ -932,7 +934,7 @@ export class CookieJar {
         // Matched on the stored scope, as the send path matches. Comparing the live
         // `domain` let a cookie mutated through `getAllCookies()` dodge the clear while
         // `getCookieHeaderString()` went on sending it from the scope it was filed under.
-        if (this.storedScopes.get(cookie)?.domain === normalizedHost) {
+        if (this.storedDomainOf(key, cookie) === normalizedHost) {
           bucket.delete(key);
           count++;
         }
@@ -1365,11 +1367,7 @@ export class CookieJar {
     };
 
     for (const [key, cookie] of bucket.entries()) {
-      const storedDomain = this.storedScopes.get(cookie)?.domain;
-
-      // A cookie with no stored scope cannot be placed, so it is cleared rather than
-      // left behind by a clear meant to reach it.
-      if (storedDomain === undefined || isWithin(storedDomain)) {
+      if (isWithin(this.storedDomainOf(key, cookie))) {
         bucket.delete(key);
         count++;
       }
@@ -1405,6 +1403,18 @@ export class CookieJar {
     }
 
     return true;
+  }
+
+  /**
+   * The domain `cookie` was filed under: its stored scope's, or - for one found without a
+   * scope, which the jar's single insert never leaves - the domain its key was built from.
+   * Neither is the live object's `domain`, which `getAllCookies()` lets a caller rewrite.
+   */
+  private storedDomainOf(key: string, cookie: Cookie): string {
+    return (
+      this.storedScopes.get(cookie)?.domain ??
+      (JSON.parse(key) as [string, string, string, boolean])[1]
+    );
   }
 
   private pruneEmptyBucket(apex: string): void {

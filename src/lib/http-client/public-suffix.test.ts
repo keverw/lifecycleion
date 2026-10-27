@@ -43,7 +43,7 @@ describe('PublicSuffixResolver', () => {
     );
   });
 
-  test('the registrable domain widens to a removed suffix directly above it', () => {
+  test('the registrable domain widens to a removed suffix directly above it, and no further than a suffix still listed', () => {
     const heroku = new PublicSuffixResolver({ remove: ['herokuapp.com'] });
     expect(heroku.registrableDomainFor('a.mine.herokuapp.com')).toBe(
       'herokuapp.com',
@@ -61,6 +61,32 @@ describe('PublicSuffixResolver', () => {
     expect(jp.registrableDomainFor('a.city.kawasaki.jp')).toBe(
       'city.kawasaki.jp',
     );
+  });
+
+  test('a removed suffix below a name that is no suffix widens to the registrable domain above it', () => {
+    // `amazonaws.com` is no suffix, so with `s3.amazonaws.com` removed its hosts belong
+    // to `amazonaws.com`, as `www.amazonaws.com` does - one site, in one bucket.
+    const s3 = new PublicSuffixResolver({ remove: ['s3.amazonaws.com'] });
+    for (const host of [
+      'bucket.s3.amazonaws.com',
+      's3.amazonaws.com',
+      'www.amazonaws.com',
+    ]) {
+      expect(s3.registrableDomainFor(host)).toBe('amazonaws.com');
+      expect(s3.apexFor(host)).toBe('amazonaws.com');
+    }
+    expect(s3.hasRemovalWithin('amazonaws.com')).toBe(true);
+    expect(s3.hasRemovalWithin('example.com')).toBe(false);
+
+    // A suffix the caller added above the removal stops the widening there.
+    const added = new PublicSuffixResolver({
+      add: ['amazonaws.com'],
+      remove: ['s3.amazonaws.com'],
+    });
+    expect(added.registrableDomainFor('bucket.s3.amazonaws.com')).toBe(
+      's3.amazonaws.com',
+    );
+    expect(added.apexFor('bucket.s3.amazonaws.com')).toBe('s3.amazonaws.com');
   });
 
   test('rejects normalized contradictory overrides and malformed suffixes', () => {

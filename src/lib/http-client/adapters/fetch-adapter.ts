@@ -387,8 +387,12 @@ async function readResponseBody(
     ? parseContentLength(response.headers.get('content-length'))
     : undefined;
 
+  // The body and its reading methods each read once and guarded, as a polyfill's or test
+  // double's response may carry any getter: one that throws reads as absent.
+  const body = readUnknownMember(response, 'body');
+
   if (declaredLength !== undefined && declaredLength > maxResponseBytes) {
-    cancelBodyQuietly(response.body);
+    cancelBodyQuietly(body);
     return RESPONSE_TOO_LARGE;
   }
 
@@ -396,23 +400,26 @@ async function readResponseBody(
   // (node-fetch, cross-fetch) hands over a Node `Readable`, which has no `getReader`, and
   // a test double may hand over anything: those that are not async-iterable either are
   // read whole and checked after.
-  const body: unknown = response.body;
+  const getReader = readUnknownMember(body, 'getReader');
 
-  if (!body || typeof readUnknownMember(body, 'getReader') !== 'function') {
+  if (typeof getReader !== 'function') {
     // A Node `Readable` is async-iterable: read it a chunk at a time as well, so a body
-    // over the limit is neither read whole first nor left holding its socket.
-    if (
-      body &&
-      typeof readUnknownMember(body, Symbol.asyncIterator) === 'function'
-    ) {
-      const iterable = body as AsyncIterable<unknown>;
+    // over the limit is neither read whole first nor left holding its socket. Iterated
+    // through the method read here, not read again by `for await`.
+    const iterate = readUnknownMember(body, Symbol.asyncIterator);
+
+    if (typeof iterate === 'function') {
+      const iterable: AsyncIterable<unknown> = {
+        [Symbol.asyncIterator]: () =>
+          Reflect.apply(iterate, body, []) as AsyncIterator<unknown>,
+      };
       // Text taken as well: a `Readable` given an encoding yields strings, which the
       // polyfill's own `arrayBuffer()` joins as it joins `Buffer`s.
       return await readBodyWithin(
         iterable,
         maxResponseBytes,
         () => {
-          cancelBodyQuietly(iterable);
+          cancelBodyQuietly(body);
         },
         true,
       );
@@ -423,7 +430,11 @@ async function readResponseBody(
     return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
   }
 
-  const reader = (body as ReadableStream<unknown>).getReader();
+  const reader = Reflect.apply(
+    getReader,
+    body,
+    [],
+  ) as ReadableStreamDefaultReader<unknown>;
 
   // Cancelled, not awaited: the cancel settles once the stream has let go, and the
   // answer here does not depend on when that is.

@@ -2255,6 +2255,71 @@ describe('FetchAdapter - body chunk types and sizes', () => {
 
     expect([...(response.body as Uint8Array)]).toEqual([7, 8]);
   });
+
+  test('a response whose body getter throws is read whole through arrayBuffer()', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        get body(): never {
+          throw new TypeError('body unreadable');
+        },
+        arrayBuffer: () => Promise.resolve(new Uint8Array([7, 8]).buffer),
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+    });
+
+    expect([...(response.body as Uint8Array)]).toEqual([7, 8]);
+  });
+
+  test.each([
+    ['Symbol.asyncIterator', Symbol.asyncIterator],
+    ['getReader', 'getReader'],
+  ] as const)(
+    'a body whose %s getter answers once is read through the method it answered',
+    async (_name, key) => {
+      const { Readable } = await import('node:stream');
+      const source =
+        key === 'getReader'
+          ? new Response(new Uint8Array([1, 2, 3])).body!
+          : Readable.from([new Uint8Array([1, 2, 3])]);
+      const method = (source as any)[key] as () => unknown;
+      let reads = 0;
+      const body = {
+        get [key](): unknown {
+          reads++;
+          if (reads > 1) {
+            throw new TypeError('read again');
+          }
+          return (...args: unknown[]) => Reflect.apply(method, source, args);
+        },
+      };
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          type: 'basic',
+          headers: new Headers(),
+          body,
+          arrayBuffer: () => Promise.reject(new Error('not read whole')),
+        });
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 100,
+      });
+
+      expect([...(response.body as Uint8Array)]).toEqual([1, 2, 3]);
+      expect(reads).toBe(1);
+    },
+  );
 });
 
 describe('FetchAdapter - request body copy', () => {
