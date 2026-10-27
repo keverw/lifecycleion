@@ -22,15 +22,32 @@ export function asciiLowercase(text: string): string {
   return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
 }
 
-/** The whitespace `fetch` trims from a header value (tab, LF, CR, space), at either end. */
-const HTTP_WHITESPACE_EDGES = /^[\t\n\r ]+|[\t\n\r ]+$/g;
+/** Whether `char` is HTTP whitespace (tab, LF, CR, space), what `fetch` trims from a header value. */
+function isHTTPWhitespace(char: string | undefined): boolean {
+  return char === ' ' || char === '\t' || char === '\n' || char === '\r';
+}
 
 /**
  * `text` without the HTTP whitespace (tab, LF, CR, space) at either end, as a header
  * value's parts are trimmed: `trim()` would also take a no-break space and others.
+ *
+ * By index, not `/^[\t\n\r ]+|[\t\n\r ]+$/g`: that unanchored `$` branch rescans a
+ * whitespace run from each of its positions when the run does not end the string, so it
+ * takes seconds on a server's header value of 64 KB of spaces between two letters.
  */
 export function trimHTTPWhitespace(text: string): string {
-  return text.replace(HTTP_WHITESPACE_EDGES, '');
+  let start = 0;
+  let end = text.length;
+
+  while (start < end && isHTTPWhitespace(text[start])) {
+    start++;
+  }
+
+  while (end > start && isHTTPWhitespace(text[end - 1])) {
+    end--;
+  }
+
+  return text.slice(start, end);
 }
 
 /** `text` without leading and trailing spaces and tabs, the only whitespace RFC 6265bis trims. */

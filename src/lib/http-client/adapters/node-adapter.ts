@@ -1619,9 +1619,14 @@ export class NodeAdapter implements HTTPAdapter {
         const reportUploadProgress = (event: AdapterProgressEvent): void => {
           // Tracked before the dedupe gate, so the stall watchdog sees every report the
           // writers make rather than only the ones the caller is told about. Bytes the
-          // socket accepted end a run of source waits; see `sourceStallSince`.
+          // socket accepted end a run of source waits; see `sourceStallSince`. The built-in
+          // writers report bytes only before they turn to the source, but a report made
+          // while one is parked there starts a new run from now rather than none, which
+          // would leave that wait without a grace to run out - as `noteUploadProgress` does
+          // in the client.
           if (event.loaded > uploadedBytesSeen) {
-            sourceStallSince = undefined;
+            sourceStallSince =
+              sourceWaitSince !== undefined ? performance.now() : undefined;
           }
 
           uploadedBytesSeen = event.loaded;
