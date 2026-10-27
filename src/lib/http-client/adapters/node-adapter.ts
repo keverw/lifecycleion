@@ -166,12 +166,12 @@ const MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS =
 /**
  * One writable's absorber, and the means to push its deadline out.
  *
- * `extend` is carried alongside the listener because the absorber is shared but its
- * {@link PENDING_WRITABLE_ERROR_WINDOW_MS} backstop was not: only the request that
- * *attached* it scheduled one. A later request finding an absorber already in place
- * inherited whatever was left of the first request's second - which for a request settling
- * at the end of that window is no window at all - and its own `onWritableError` had just
- * been taken off by `cleanup`, so the late `'error'` it was covering for arrived with no
+ * `extend` is carried alongside the listener because the absorber is shared, while a
+ * {@link PENDING_WRITABLE_ERROR_WINDOW_MS} backstop scheduled only by the request that
+ * *attached* it would cover that request alone. A later request finding an absorber already in place would
+ * inherit whatever was left of the first request's second - which for a request settling
+ * at the end of that window is no window at all - and its own `onWritableError` has just
+ * been taken off by `cleanup`, so the late `'error'` it covers for would arrive with no
  * listener at all. Every request that relies on the absorber pushes the deadline out, up to
  * {@link MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS}.
  */
@@ -183,11 +183,10 @@ interface PendingWritableErrorEntry {
    * `false` means the absorber has spent its
    * {@link MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS} and detached itself, so the caller is
    * covered by nothing and must attach one of its own. Returning it is what closes the
-   * gap: the extension was treated as unconditional, so a request finding an expired
-   * absorber had it torn down on its behalf and then returned satisfied, while `cleanup`
-   * took its own `onWritableError` off a turn later - leaving the writable with no
-   * `'error'` listener at all, which is the uncaught exception this whole mechanism
-   * exists to prevent.
+   * gap: were the extension unconditional, a request finding an expired absorber would
+   * have it torn down on its behalf and return satisfied, while `cleanup` takes its own
+   * `onWritableError` off a turn later - leaving the writable with no `'error'` listener
+   * at all, which is the uncaught exception this whole mechanism exists to prevent.
    */
   readonly extend: () => boolean;
 }
@@ -212,9 +211,9 @@ const deliveredWritableErrors = new WeakSet<object>();
  * Called from every route that settles a request with a writable failure, not only from
  * the `'error'` listener. Node hands the *same* error object to `write`'s callback and
  * then emits it as `'error'`, and by then `cleanup` has taken `onWritableError` off - so
- * claiming it in that listener alone left the absorber reporting every ordinary
+ * claiming it in that listener alone would leave the absorber reporting every ordinary
  * streamed-download failure a second time, on the global channel, for an error the caller
- * already had as `errorCause`.
+ * already has as `errorCause`.
  */
 function claimWritableError(error: unknown): void {
   try {
@@ -474,21 +473,21 @@ export class NodeAdapter implements HTTPAdapter {
     dropBodilessContentLength(request);
 
     // This adapter frames every body itself with a `Content-Length`. A caller's
-    // `Transfer-Encoding` went out beside it - both on one message, which RFC 9112 6.1
-    // forbids a sender to do: strict servers answer 400, and a lenient proxy chain can
-    // read the two framings differently (request smuggling). Refused, as undici refuses
-    // it, and not retried: every attempt carries the same header.
+    // `Transfer-Encoding` would go out beside it - both on one message, which RFC 9112
+    // 6.1 forbids a sender to do: strict servers answer 400, and a lenient proxy chain
+    // can read the two framings differently (request smuggling). Refused, as undici
+    // refuses it, and not retried: every attempt carries the same header.
     //
     // Nor a protocol switch: an `Upgrade` header or a `CONNECT` request is answered with a
     // socket handed over through `'upgrade'` / `'connect'`, not a response, and this
-    // adapter reads responses - such a request never settled, or settled as a timeout
-    // standing in for the `101` the server sent.
+    // adapter reads responses - such a request would never settle, or would settle as a
+    // timeout standing in for the `101` the server sent.
     //
     // Nor `Expect`: Node sends the headers at once for one, so the `Content-Length` the
-    // adapter sets afterwards threw on a request with a body (a string body as an
+    // adapter sets afterwards would throw on a request with a body (a string body as an
     // `adapter_error`, a `FormData` one as a transport failure, retried and failing the
-    // same each time), and a bodiless one went out chunked rather than with no length -
-    // and RFC 9110 has no `100-continue` on a request without content anyway.
+    // same each time), and a bodiless one would go out chunked rather than with no
+    // length - and RFC 9110 has no `100-continue` on a request without content anyway.
     for (const name of Object.keys(request.headers)) {
       const refusalMessage = REFUSED_REQUEST_HEADERS.get(
         lowerCaseHeaderName(name),
@@ -530,9 +529,9 @@ export class NodeAdapter implements HTTPAdapter {
       );
     }
 
-    // Refused, not sent: any other scheme went out as plaintext HTTP - a `wss://` URL to
-    // port 80, its userinfo as Basic auth. `HTTPClient` checks this first; a caller
-    // driving the adapter directly did not.
+    // Refused, not sent: any other scheme would go out as plaintext HTTP - a `wss://` URL
+    // to port 80, its userinfo as Basic auth. `HTTPClient` checks this first; a caller
+    // driving the adapter directly does not.
     if (parsedURL.protocol !== 'http:' && parsedURL.protocol !== 'https:') {
       throw nonRetryableAdapterErrorFrom(
         new TypeError(
@@ -610,15 +609,15 @@ export class NodeAdapter implements HTTPAdapter {
     //
     // `servername` and `mtls.cert` / `mtls.key` are the caller's TLS *identity*: the name
     // it meant to talk to and the certificate it authenticates with. Applied to every
-    // `https:` request, they followed a `Location` header wherever it pointed - a
-    // cross-origin redirect had the adapter present the caller's client certificate to,
-    // and send the configured SNI to, a host the caller never named and the remote server
-    // chose. The client passes `initialURL` so a hop can be told from the request that
-    // started it; the identity is withheld when the origin (scheme, host and port)
-    // differs.
+    // `https:` request, they would follow a `Location` header wherever it pointed - a
+    // cross-origin redirect would have the adapter present the caller's client
+    // certificate to, and send the configured SNI to, a host the caller never named and
+    // the remote server chose. The client passes `initialURL` so a hop can be told from
+    // the request that started it; the identity is withheld when the origin (scheme, host
+    // and port) differs.
     //
     // Absent `initialURL` - the adapter driven directly - is the request itself, so the
-    // identity applies as it always did. An `initialURL` that cannot be parsed is treated
+    // identity applies unconditionally. An `initialURL` that cannot be parsed is treated
     // as cross-origin (`isCrossOrigin`): it cannot be shown to be the same origin, and
     // failing closed withholds an identity rather than presenting one.
     const isCrossOriginHop =
@@ -648,11 +647,12 @@ export class NodeAdapter implements HTTPAdapter {
       // Withheld on a cross-origin hop, on the same rule as `mtls.cert` and `servername`
       // below: the socket is the caller's chosen endpoint, often a privileged one
       // (`/var/run/docker.sock`), and a `Location` is the remote server's choice. Applied
-      // unconditionally, a redirect to another host never left the socket - the bytes
-      // stayed on that privileged endpoint and only the request line and `Host` header
-      // changed, turning a redirect into a request the caller never made against the very
-      // socket it configured. The hop still happens, over TCP to the host the `Location`
-      // actually names, which is where that redirect would have gone without a socket.
+      // unconditionally, a redirect to another host would never leave the socket - the
+      // bytes would stay on that privileged endpoint and only the request line and `Host`
+      // header would change, turning a redirect into a request the caller never made
+      // against the very socket it configured. The hop still happens, over TCP to the
+      // host the `Location` actually names, which is where that redirect would have gone
+      // without a socket.
       options.socketPath = socketPath;
       options.hostname = urlOptions.hostname;
       options.port = urlOptions.port;
@@ -761,9 +761,10 @@ export class NodeAdapter implements HTTPAdapter {
      * Carried on the response as {@link AdapterResponse.requestBodySettled} and never
      * waited for: the response is the server's real answer and is delivered as soon as
      * it is complete, which is usually before the upload it answered over has finished.
-     * Waiting for the writer instead is what this must not do - it turned a `413` that
-     * stopped reading into a network error with the server's explanation dropped, and
-     * let an abort during the wait discard a response that had already arrived in full.
+     * Waiting for the writer instead is what this must not do - it would turn a `413`
+     * that stopped reading into a network error with the server's explanation dropped,
+     * and let an abort during the wait discard a response that had already arrived in
+     * full.
      *
      * Resolves, never rejects: a caller that ignores it must not be handed an unhandled
      * rejection for an upload it never asked about.
@@ -785,11 +786,12 @@ export class NodeAdapter implements HTTPAdapter {
      * The `'abort'` listeners this request put on `request.signal`, as the means to take
      * them off again.
      *
-     * Attached with `{ once: true }`, so an abort removes them itself; nothing removed
-     * them when the request ended any other way. The signal is per attempt today, so that
-     * was one dead listener on a signal about to be collected rather than a growing pile -
-     * but `XHRAdapter` takes its listener off on `loadend` and `MockAdapter` on exit, and a
-     * caller driving this adapter directly with a long-lived signal was owed the same.
+     * Attached with `{ once: true }`, so an abort removes them itself; without these
+     * removers, nothing would remove them when the request ends any other way. The client's signal
+     * is per attempt, so that would be one dead listener on a signal about to be
+     * collected rather than a growing pile - but `XHRAdapter` takes its listener off on
+     * `loadend` and `MockAdapter` on exit, and a caller driving this adapter directly
+     * with a long-lived signal is owed the same.
      *
      * Released by {@link releaseAbortListeners}, which runs on every terminal path and
      * removes nothing until *both* the response promise and the upload have settled. Not
@@ -925,11 +927,12 @@ export class NodeAdapter implements HTTPAdapter {
                *
                * The one window where "the response side always settles on its own" is not
                * true. `res`'s own `'error'`, `'aborted'` and `'close'` handlers are
-               * installed by `streamResponseBody`, which does not run until the factory has
-               * resolved, so a socket reset during an `await`ed factory reached nothing:
-               * the request `'error'` handler stood down on {@link didReceiveResponse},
-               * `res` had no listeners to see it, and the adapter promise never settled -
-               * the caller hung until its own signal.
+               * installed by `streamResponseBody`, which does not run until the factory
+               * has resolved. Without this, a socket reset during an `await`ed factory
+               * would reach nothing: the request `'error'` handler stands down on
+               * {@link didReceiveResponse}, `res` has no listeners to see it, and the
+               * adapter promise would never settle - the caller would hang until its own
+               * signal.
                *
                * One-shot: cleared on its first call, while the setup itself stays pending.
                * Aborting the stream signal is what lets the factory's own cleanup listeners
@@ -953,13 +956,14 @@ export class NodeAdapter implements HTTPAdapter {
          *
          * A body write that fails after this is not the failure worth reporting. A server is
          * free to send a complete early response - a 413 or a 401 with `Connection: close` -
-         * while the body is still uploading, and tearing that socket down is how it says so.
-         * The writers then reject (the chunk truly was not accepted), and the `catch`
-         * handlers below used to answer that with `req.destroy()` and a synthetic
-         * `status: 0, isTransportError: true`, racing the real response to `resolve`: the
-         * caller got a fabricated transport error instead of the server's actual status,
-         * and the destroy tore down the connection the response was still arriving on.
-         * With a response in hand the response path is the one that gets to answer.
+         * while the body is still uploading, and tearing that socket down is how it says
+         * so. The writers then reject (the chunk truly was not accepted). Were the
+         * `catch` handlers below to answer that with `req.destroy()` and a synthetic
+         * `status: 0, isTransportError: true`, racing the real response to `resolve`, the
+         * caller would get a fabricated transport error instead of the server's actual
+         * status, and the destroy would tear down the connection the response is still
+         * arriving on. With a response in hand the response path is the one that gets to
+         * answer.
          */
         let didReceiveResponse = false;
 
@@ -977,8 +981,9 @@ export class NodeAdapter implements HTTPAdapter {
         let receivedResponse: http.IncomingMessage | undefined;
         /**
          * Lets go of a decoded response body - its decoders and the response under it - when
-         * the request no longer wants it: a cancel, a timeout, a teardown. Without it, a small
-         * compressed body that had arrived whole went on inflating after the request settled.
+         * the request no longer wants it: a cancel, a timeout, a teardown. Without it, a
+         * small compressed body that had arrived whole would go on inflating after the
+         * request settled.
          */
         let releaseResponseBody: (() => void) | undefined;
         /**
@@ -999,8 +1004,8 @@ export class NodeAdapter implements HTTPAdapter {
          * already on the wire, and the caller is handed the early status as a clean success.
          *
          * So a writer that is still going is left to finish: it ends the request itself on
-         * success, and on failure the `catch` below destroys what is left. Nothing is leaked
-         * either way, which is what the destroy was added for.
+         * success, and on failure the `catch` below destroys what is left. Nothing is
+         * leaked either way, which is what that destroy is there for.
          */
         let isWritingBody = false;
 
@@ -1019,7 +1024,7 @@ export class NodeAdapter implements HTTPAdapter {
          * bytes, or `undefined` once it has accepted some. The source grace runs from here
          * rather than from {@link sourceWaitSince}: a read that comes back with nothing - a
          * `stream()` yielding empty chunks - has given the socket nothing to accept, and
-         * timed from each read, such a source was never out of its grace. See
+         * timed from each read, such a source would never be out of its grace. See
          * {@link watchForStalledUpload}.
          */
         let sourceStallSince: number | undefined;
@@ -1088,14 +1093,15 @@ export class NodeAdapter implements HTTPAdapter {
          *
          * Progress is bytes the socket accepted, and a writer parked on its *source* makes
          * none either: a multipart `File` on a slow or contended disk can leave
-         * `Blob.stream()`'s `read()` outstanding for longer than the grace, with the socket
-         * perfectly willing. That used to be destroyed as a stall too - a healthy upload the
-         * server had already acked, cut short over a slow read. The writer now says when it
-         * is waiting on the source, and that wait is given {@link UPLOAD_SOURCE_STALL_GRACE_MS}
-         * instead: long, because a disk read that has not answered in a minute is stuck rather
-         * than slow, and bounded, because a source that never answers is the parked writer
-         * the hang below was fixed for. When the read comes back, the socket's grace starts
-         * over from that moment: the writer has only then turned to the socket.
+         * `Blob.stream()`'s `read()` outstanding for longer than the grace, with the
+         * socket perfectly willing. Treated as a stall, that would destroy a healthy
+         * upload the server had already acked, cut short over a slow read. So the
+         * writer says when it is waiting on the source, and that wait is given
+         * {@link UPLOAD_SOURCE_STALL_GRACE_MS} instead: long, because a disk read that has
+         * not answered in a minute is stuck rather than slow, and bounded, because a
+         * source that never answers is the parked writer whose hang is described below.
+         * When the read comes back, the socket's grace starts over from that moment: the
+         * writer has only then turned to the socket.
          *
          * The source grace runs from the first wait since the socket last accepted bytes,
          * not from each read, so reads that answer with nothing do not keep a source in it.
@@ -1144,11 +1150,12 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            // The socket's grace runs from when the writer turned to it. A source read that
-            // ended part-way through this window - after a tick that landed mid-read, or
-            // between two ticks - left the chunk it produced only the rest of the window to
-            // be accepted, and a healthy upload was destroyed as stalled with the socket
-            // given a fraction of its grace. Watched on for what remains of it.
+            // The socket's grace runs from when the writer turned to it. A source read
+            // that ends part-way through this window - after a tick that landed mid-read,
+            // or between two ticks - leaves the chunk it produced only the rest of the
+            // window to be accepted; were it judged at the window's end, a healthy upload
+            // would be destroyed as stalled with the socket given a fraction of its grace.
+            // Watched on for what remains of it.
             if (
               uploadedBytesSeen === bytesAtLastTick &&
               sourceWaitSince === undefined &&
@@ -1166,17 +1173,18 @@ export class NodeAdapter implements HTTPAdapter {
             if (uploadedBytesSeen === bytesAtLastTick) {
               // Answered here, as `reportWriteErrorAfterResponse` answers it, and for the
               // same reason: the destroy below is not guaranteed to reach the writer. A
-              // writer parked inside `Blob.stream()`'s `read()` has no pending `req.write`
-              // to reject, so it never returns to run `endBodyWrite`, and
-              // `await response.requestBodySettled` waited forever on an upload this
-              // watchdog had already given up on. Settled first, so a `destroy()` that
+              // writer parked inside `Blob.stream()`'s `read()` has no pending
+              // `req.write` to reject, so it never returns to run `endBodyWrite`, and
+              // `await response.requestBodySettled` would wait forever on an upload this
+              // watchdog has already given up on. Settled first, so a `destroy()` that
               // throws cannot leave the caller waiting - which also makes this the answer
               // the caller sees: `settleBodyOutcome` is first-call-wins, so a writer that
-              // does notice the destroy and reports its own `EPIPE` afterwards is recorded
-              // nowhere. That is the trade this makes deliberately. An upload the watchdog
-              // reached had made no progress for a full grace window, so "stalled after the
-              // response arrived" is the failure worth reporting, and the alternative -
-              // waiting for a writer that may never return - is the hang this closes.
+              // does notice the destroy and reports its own `EPIPE` afterwards is
+              // recorded nowhere. That is the trade this makes deliberately. An upload
+              // the watchdog reached had made no progress for a full grace window, so
+              // "stalled after the response arrived" is the failure worth reporting, and
+              // the alternative - waiting for a writer that may never return - is the
+              // hang this closes.
               const stalled = new Error(
                 sourceWaitSince === undefined
                   ? 'Request body upload stalled after the response arrived'
@@ -1189,22 +1197,23 @@ export class NodeAdapter implements HTTPAdapter {
               // puts every other late upload failure there: the docs promise that a
               // failure after the response is reported whether or not anyone awaits
               // `requestBodySettled`, and this one - the watchdog cutting an upload short
-              // seconds after a clean `2xx` was read - is the example they give. It was the
-              // one late failure that settled the promise and said nothing else, so a
-              // caller who never awaited it heard nothing. Rendered for the console rung
-              // for the reason given there. After the settle, so a report that throws
-              // cannot leave the caller waiting; before the destroy, so a writer that
-              // notices the teardown and reports its own `EPIPE` finds the one-shot
-              // already taken and does not put a second line on the channel for the same
-              // upload. The one-shot is honoured in the other direction too: a write
-              // failure reported from the request's `'error'` handler settles the outcome
-              // but leaves `isWritingBody` set on purpose (see `settleBodyOutcome`), and
-              // hands the request to a grace deadline of its own rather than destroying
-              // it, so this tick still runs and would otherwise say "stalled" over an
-              // upload already reported as reset. The settle and the destroy still happen
-              // here: the first is a no-op the second time, the second is the teardown
-              // that deadline was going to do anyway. Not for an upload this adapter tore
-              // down itself, which `reportWriteErrorAfterResponse` does not report either.
+              // seconds after a clean `2xx` was read - is the example they give. Settling
+              // the promise alone would make it the one late failure that says nothing
+              // else, so a caller who never awaits it would hear nothing. Rendered for
+              // the console rung for the reason given there. After the settle, so a
+              // report that throws cannot leave the caller waiting; before the destroy,
+              // so a writer that notices the teardown and reports its own `EPIPE` finds
+              // the one-shot already taken and does not put a second line on the channel
+              // for the same upload. The one-shot is honoured in the other direction too:
+              // a write failure reported from the request's `'error'` handler settles the
+              // outcome but leaves `isWritingBody` set on purpose (see
+              // `settleBodyOutcome`), and hands the request to a grace deadline of its
+              // own rather than destroying it, so this tick still runs and would
+              // otherwise say "stalled" over an upload already reported as reset. The
+              // settle and the destroy still happen here: the first is a no-op the second
+              // time, the second is the teardown that deadline was going to do anyway.
+              // Not for an upload this adapter tore down itself, which
+              // `reportWriteErrorAfterResponse` does not report either.
               if (
                 !didReportWriteErrorAfterResponse &&
                 !isOwnTeardownAfterResponse()
@@ -1252,12 +1261,12 @@ export class NodeAdapter implements HTTPAdapter {
         /**
          * Open the outcome promise, so it exists from the moment the request has a body.
          *
-         * Opened here rather than at the first write, which is where it used to be created:
-         * the write branches are the last thing in this executor, so everything that can
-         * throw before them - a signal that was already aborted, a `streamResponse` factory
-         * that refused - threw with no promise to tag, `HTTPClient` omitted the field, and
-         * `await` answered `undefined`, the documented value for a body that went out in
-         * full. Nothing had gone out at all.
+         * Opened here rather than at the first write: the write branches are the last
+         * thing in this executor, so opened there, everything that can throw before
+         * them - a signal that was already aborted, a `streamResponse` factory that
+         * refused - would throw with no promise to tag, `HTTPClient` would omit the
+         * field, and `await` would answer `undefined`, the documented value for a body
+         * that went out in full, when nothing had gone out at all.
          *
          * Idempotent: the two write branches still announce themselves through
          * {@link beginBodyWrite}, and the promise they find is the one already handed to
@@ -1290,8 +1299,8 @@ export class NodeAdapter implements HTTPAdapter {
          * *without* declaring the writer finished: a write error that lands after the
          * response has arrived is reported and left to the grace deadline, and
          * `isWritingBody` still gates the response-close handler's choice between the
-         * stall watchdog and an immediate `destroy`. Flipping it there would have changed
-         * that teardown as a side effect of answering the caller.
+         * stall watchdog and an immediate `destroy`. Flipping it there would change that
+         * teardown as a side effect of answering the caller.
          *
          * Idempotent through `upload.settle`, which is cleared on the first call: a
          * promise resolves once, and the second settle would be silently dropped anyway.
@@ -1313,9 +1322,10 @@ export class NodeAdapter implements HTTPAdapter {
         const endBodyWrite = (failure?: unknown): void => {
           isWritingBody = false;
 
-          // The stall watchdog has nothing left to watch. Its next tick would only return,
-          // but until then the timer held this whole executor - the delivered response
-          // body among it - for up to a grace window after the upload had ended.
+          // The stall watchdog has nothing left to watch. Its next tick would only
+          // return, but until then the timer would hold this whole executor - the
+          // delivered response body among it - for up to a grace window after the upload
+          // has ended.
           if (stallWatchdogTimer !== undefined) {
             clearTimeout(stallWatchdogTimer);
             stallWatchdogTimer = undefined;
@@ -1328,12 +1338,13 @@ export class NodeAdapter implements HTTPAdapter {
          * Resolve with an adapter response, carrying the upload outcome on every one.
          *
          * {@link AdapterResponse.requestBodySettled} is documented as present on every
-         * bodied request, and attaching it at the individual `resolve` sites only put it
-         * on the two that succeeded. The responses that most need it are the other ones:
-         * an early-ack `200` whose *response* body then fails resolves through
-         * `isStreamError`, and that is exactly the shape where the writer was still
+         * bodied request, and attaching it at the individual `resolve` sites would only
+         * put it on the two that succeed. The responses that most need it are the other
+         * ones: an early-ack `200` whose *response* body then fails resolves through
+         * `isStreamError`, and that is exactly the shape where the writer is still
          * running and its failure is the only record of a body that never went out.
-         * `await undefined` is `undefined`, so omitting it there reported a clean upload.
+         * `await undefined` is `undefined`, so omitting it there would report a clean
+         * upload.
          *
          * Spread first so a caller that passes its own value still wins.
          */
@@ -1365,10 +1376,10 @@ export class NodeAdapter implements HTTPAdapter {
          * reason every resolve goes through `settleResponse`: `requestBodySettled` is
          * documented as present on every bodied request, and the paths that throw are the
          * ones where it carries the most - a cancel or a timeout tears the request down
-         * mid-upload, and the writer's failure is then the only record that the body never
-         * went out. With the promise stranded in this closure, `HTTPClient` built its
-         * response without the field, and `await undefined` reported a clean upload for a
-         * body that was cut off.
+         * mid-upload, and the writer's failure is then the only record that the body
+         * never went out. With the promise stranded in this closure, `HTTPClient` would
+         * build its response without the field, and `await undefined` would report a
+         * clean upload for a body that was cut off.
          *
          * A synchronous throw out of this executor cannot reach here - it never runs another
          * handler - so the work itself lives in `settleRequestBodyForThrow`, which the
@@ -1452,10 +1463,11 @@ export class NodeAdapter implements HTTPAdapter {
               );
 
               // And no blanket teardown: an answered request may still be uploading to a
-              // server that is reading it, or streaming its response in, and destroying it
-              // here cut both short. Once a response has arrived its `'close'` handler owns
-              // that decision, and hands a writer still running to the stall watchdog. A
-              // request answered without one has nothing left in flight to protect.
+              // server that is reading it, or streaming its response in, and destroying
+              // it here would cut both short. Once a response has arrived its `'close'`
+              // handler owns that decision, and hands a writer still running to the stall
+              // watchdog. A request answered without one has nothing left in flight to
+              // protect.
               if (!didReceiveResponse) {
                 try {
                   destroyRequestQuietly(req);
@@ -1475,12 +1487,13 @@ export class NodeAdapter implements HTTPAdapter {
         if (classifiedBody !== undefined) {
           openBodyOutcome();
         } else if (request.body !== undefined && request.body !== null) {
-          // Refused rather than dropped: anything else - an `ArrayBuffer`, a `Blob`, a plain
-          // object, another realm's `FormData` - went out as no body at all, and the request
-          // succeeded without it. `HTTPClient` serializes bodies first; this is the adapter
-          // called directly. Here, before the 0% upload event and before the request is
-          // created, so a request refused before it is sent reports no upload start and
-          // opens no connection, as in FetchAdapter and XHRAdapter.
+          // Refused rather than dropped: anything else - an `ArrayBuffer`, a `Blob`, a
+          // plain object, another realm's `FormData` - would go out as no body at all,
+          // and the request would succeed without it. `HTTPClient` serializes bodies
+          // first; this is the adapter called directly. Here, before the 0% upload event
+          // and before the request is created, so a request refused before it is sent
+          // reports no upload start and opens no connection, as in FetchAdapter and
+          // XHRAdapter.
           const refusal = new TypeError(
             'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
           );
@@ -1492,12 +1505,13 @@ export class NodeAdapter implements HTTPAdapter {
          * A body write that failed after the server had already answered.
          *
          * Not fabricated into a transport error - the response path answers with the real
-         * status, which is the whole point of {@link didReceiveResponse} - but not dropped
-         * either. The writers raise more than socket teardown: `serializeMultipartFormData`
-         * throws when a `File` yields fewer bytes than its `Blob.size`, which is a body that
-         * went out short of its `Content-Length` with no transport failure anywhere, and
-         * returning here left that on nothing - not the response, not `errorCause`, not the
-         * global channel - while the caller read the status as a clean success.
+         * status, which is the whole point of {@link didReceiveResponse} - but not
+         * dropped either. The writers raise more than socket teardown:
+         * `serializeMultipartFormData` throws when a `File` yields fewer bytes than its
+         * `Blob.size`, which is a body that went out short of its `Content-Length` with
+         * no transport failure anywhere, and returning here would leave that on nothing -
+         * not the response, not `errorCause`, not the global channel - while the caller
+         * reads the status as a clean success.
          *
          * Reported here rather than carried on the response: the response is the server's
          * real answer, and the client treats any `isTransportError` as a network failure -
@@ -1506,13 +1520,13 @@ export class NodeAdapter implements HTTPAdapter {
          * That is the outcome `didReceiveResponse` exists to prevent.
          */
         const reportWriteErrorAfterResponse = (error: unknown): void => {
-          // Once per request, because a single upload-side socket failure arrives twice: the
-          // writer's own per-write `req.once('error', ...)` rejects with it, and this
-          // request's `'error'` handler is handed the same error a tick later. Both then
-          // rendered the same failure onto the host's `'error'` channel and armed a grace
-          // deadline of their own, so one reset read as two and the request carried two
-          // pending destroys. The body is over after the first, and everything below is
-          // about ending a request that has already been given up on.
+          // Once per request, because a single upload-side socket failure arrives twice:
+          // the writer's own per-write `req.once('error', ...)` rejects with it, and this
+          // request's `'error'` handler is handed the same error a tick later. Unguarded,
+          // both would render the same failure onto the host's `'error'` channel and arm
+          // a grace deadline of their own, so one reset would read as two and the request
+          // would carry two pending destroys. The body is over after the first, and
+          // everything below is about ending a request that has already been given up on.
           if (didReportWriteErrorAfterResponse) {
             return;
           }
@@ -1529,21 +1543,23 @@ export class NodeAdapter implements HTTPAdapter {
             return;
           }
 
-          // This body is over, so answer `requestBodySettled` now rather than leaving it to
-          // the writer. Nothing below settles it: the request is reported and then handed to
-          // the grace deadline, and a writer blocked in `Blob.stream()`'s `read()` never
-          // returns to notice - `await response.requestBodySettled` then hung for the whole
-          // grace window on an upload that was already dead. Settled before the report, so a
-          // failure in reporting cannot leave the caller waiting.
+          // This body is over, so answer `requestBodySettled` now rather than leaving it
+          // to the writer. Nothing below settles it: the request is reported and then
+          // handed to the grace deadline, and a writer blocked in `Blob.stream()`'s
+          // `read()` never returns to notice - `await response.requestBodySettled` would
+          // then hang for the whole grace window on an upload that is already dead.
+          // Settled before the report, so a failure in reporting cannot leave the caller
+          // waiting.
           settleBodyOutcome(failure);
 
           try {
-            // Rendered for the console rung, the convention every other `reportToHost` caller
-            // follows. Without it that rung is handed the raw `Error`, and a process with no
-            // `'error'` listener printed `stack`, `cause` and whatever they carry - a request
-            // URL and its query string among them - in the clear, which is the one thing the
-            // rendered line exists to avoid. The listener still gets the `Error` itself, so a
-            // consumer's own redaction settings are unaffected.
+            // Rendered for the console rung, the convention every other `reportToHost`
+            // caller follows. Without it that rung is handed the raw `Error`, and a
+            // process with no `'error'` listener would print `stack`, `cause` and
+            // whatever they carry - a request URL and its query string among them - in
+            // the clear, which is the one thing the rendered line exists to avoid. The
+            // listener still gets the `Error` itself, so a consumer's own redaction
+            // settings are unaffected.
             reportToHost(failure, () => describeError(failure));
           } catch {
             // Nothing left to report with; the response still carries the real status.
@@ -1710,7 +1726,7 @@ export class NodeAdapter implements HTTPAdapter {
             // --- Response streaming (NodeAdapter-only feature) ---
             //
             // Only offered on HTTP 200 responses that carry a body - a `HEAD` answer
-            // has none, and a factory called for it opened (or truncated) a sink for
+            // has none, and a factory called for it would open (or truncate) a sink for
             // nothing. All others bypass the factory and return a normal buffered
             // response. This prevents:
             //   1. Accidentally streaming error bodies (you'd lose the error detail)
@@ -1773,8 +1789,9 @@ export class NodeAdapter implements HTTPAdapter {
               // shape check below and into `streamResponseBody`.
               let isCancelReturn = false;
               // A decoding failure found while the factory set up its sink is the body's
-              // own error, held for the reader that never attached; the raw response's
-              // close that follows reported it as a generic one, the cause dropped.
+              // own error, held for the reader that never attached; left to the raw
+              // response's close that follows, it would be reported as a generic one, the
+              // cause dropped.
               let stopWatchingDecodeFailure: (() => void) | undefined;
               const setupFailed = (error: Error): void => {
                 pendingStreamSetup?.failOnSocketError?.(
@@ -1839,8 +1856,8 @@ export class NodeAdapter implements HTTPAdapter {
                 res.once('close', setupClosed);
                 // And the decoded body's own failure: a corrupt body that finished
                 // arriving fails in decoding after the raw response's last event, so
-                // setup heard of it from nothing and an async factory waited until the
-                // timeout - or for ever with none.
+                // setup would hear of it from nothing and an async factory would wait
+                // until the timeout - or for ever with none.
                 stopWatchingDecodeFailure = body.onFailure?.(setupFailed);
                 // Called from a microtask, not from the response event's own turn: a sink
                 // the factory fails before handing it over - `destroy(error)`, sync or
@@ -1848,7 +1865,7 @@ export class NodeAdapter implements HTTPAdapter {
                 // `nextTick`, and Node and Bun run those only once the microtasks queued
                 // ahead of them are done. From here, the continuation that attaches this
                 // request's listener is one of them; from the event's own turn the error
-                // went first, to no listener at all - an uncaught exception.
+                // would go first, to no listener at all - an uncaught exception.
                 await Promise.resolve(undefined);
                 // Cancelled, timed out, or the response failed meanwhile: the factory is
                 // not asked for a sink nothing will write to.
@@ -2149,15 +2166,15 @@ export class NodeAdapter implements HTTPAdapter {
               activeBufferedResponse = undefined;
 
               // Copied once, into a fresh array: `Buffer.concat` and a copy of its result
-              // held the body twice over. Empty bytes for a body that arrived empty, as
-              // FetchAdapter and XHRAdapter hand one over; `null` for an answer with no
-              // body (`HEAD`, `204`, `205`, `304`), as they hand that over.
+              // would hold the body twice over. Empty bytes for a body that arrived
+              // empty, as FetchAdapter and XHRAdapter hand one over; `null` for an answer
+              // with no body (`HEAD`, `204`, `205`, `304`), as they hand that over.
               const responseBody = hasBody
                 ? concatChunks(chunks, loadedBytes)
                 : null;
 
               // The pieces let go once copied: an early-ack upload still running keeps
-              // this closure alive, and held the body twice over until it finished.
+              // this closure alive, and would hold the body twice over until it finishes.
               chunks.length = 0;
 
               settleResponse({
@@ -2175,7 +2192,8 @@ export class NodeAdapter implements HTTPAdapter {
             ): void => {
               // The pieces let go, as `'end'` lets them go: an early-ack upload still
               // running keeps this closure alive, and a body that failed part-way - a
-              // decoding failure near its end - was held whole until the upload finished.
+              // decoding failure near its end - would be held whole until the upload
+              // finishes.
               // Also on the guarded way out, for a response a cancel or timeout already
               // answered: its abort listener cannot reach these.
               chunks.length = 0;
@@ -2235,8 +2253,8 @@ export class NodeAdapter implements HTTPAdapter {
         }));
 
         // A socket handed over instead of a response - a `101` the server sent unasked, a
-        // tunnel - is not one this adapter can read. Unhandled, Node destroyed it and
-        // emitted neither `'response'` nor `'error'`, so the request never settled.
+        // tunnel - is not one this adapter can read. Unhandled, Node destroys it and
+        // emits neither `'response'` nor `'error'`, so the request would never settle.
         const onSocketHandover = (
           _response: unknown,
           socket: { destroy?: () => void } | undefined,
@@ -2267,14 +2285,15 @@ export class NodeAdapter implements HTTPAdapter {
           }
 
           // The server has already answered, so the response path is the one that gets to
-          // answer - the same rule the write-path `catch` handlers follow, reached from the
-          // other entry point. An upload-side `EPIPE` / `ECONNRESET` fires *both*: those
-          // handlers stood down on `didReceiveResponse` while this one went on resolving a
-          // fabricated `{ status: 0, isTransportError: true }`, and `resolve` is
-          // first-call-wins - so whenever that error landed before the response body was
-          // fully in, a real `413` with a truncated body was replaced by a transport error,
-          // its status and the server's explanation thrown away. Measured against a server
-          // that answers `413` and then resets mid-upload: `status: 0`, `read ECONNRESET`.
+          // answer - the same rule the write-path `catch` handlers follow, reached from
+          // the other entry point. An upload-side `EPIPE` / `ECONNRESET` fires *both*:
+          // those handlers stand down on `didReceiveResponse`, and were this one to go on
+          // resolving a fabricated `{ status: 0, isTransportError: true }` - `resolve` is
+          // first-call-wins - then whenever that error lands before the response body is
+          // fully in, a real `413` with a truncated body would be replaced by a transport
+          // error, its status and the server's explanation thrown away. Against a server
+          // that answers `413` and then resets mid-upload, that reads `status: 0`,
+          // `read ECONNRESET`.
           //
           // The response side always settles on its own - `'end'`, or the `'error'`,
           // `'aborted'` and `'close'` handlers that answer with the real status and
@@ -2298,20 +2317,21 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            // Only a request whose body writer is still unfinished can have a body write to
-            // report. Without this, an ordinary interrupted download - a bodiless GET whose
-            // connection resets mid-response, already answered correctly by the `res`
-            // handlers with the real status and `isStreamError` - was also rendered onto the
-            // global `'error'` channel and armed a grace deadline for a writer that never
-            // existed.
+            // Only a request whose body writer is still unfinished can have a body write
+            // to report. Without this, an ordinary interrupted download - a bodiless GET
+            // whose connection resets mid-response, already answered correctly by the
+            // `res` handlers with the real status and `isStreamError` - would also be
+            // rendered onto the global `'error'` channel and arm a grace deadline for a
+            // writer that never existed.
             //
-            // `upload.settle`, not `upload.outcome`: the outcome promise is opened for every
-            // bodied request and stays set for the life of it, so a POST whose body went out
-            // in full and was `end()`-ed, then cut short by a reset while the response was
-            // still arriving, hit the same false positive this guard exists to prevent - and
-            // burned the one-shot `didReportWriteErrorAfterResponse` on a writer that had
-            // already finished. `settle` is cleared the moment the writer settles, so it
-            // reads as exactly "a body write is still outstanding".
+            // `upload.settle`, not `upload.outcome`: the outcome promise is opened for
+            // every bodied request and stays set for the life of it, so a POST whose body
+            // went out in full and was `end()`-ed, then cut short by a reset while the
+            // response was still arriving, would hit the same false positive this guard
+            // exists to prevent - and burn the one-shot
+            // `didReportWriteErrorAfterResponse` on a writer that has already finished.
+            // `settle` is cleared the moment the writer settles, so it reads as exactly
+            // "a body write is still outstanding".
             if (upload.settle !== null) {
               reportWriteErrorAfterResponse(error);
             }
@@ -2321,14 +2341,15 @@ export class NodeAdapter implements HTTPAdapter {
 
           // The body writer is over too, for the reason `reportWriteErrorAfterResponse`
           // settles it: the request is failing and about to be torn down, and a writer
-          // parked inside `Blob.stream()`'s `read()` has no pending `req.write` to reject,
-          // so it never returns to run `endBodyWrite`. Nothing else would answer here - the
-          // stall watchdog is armed only from the response's `'close'`, which a request that
-          // never got a response does not reach - so `await response.requestBodySettled`
-          // waited forever, and the client's own `settleUploadBeforeNextDispatch` waited
-          // with it: a retryable `PUT` whose socket reset mid-upload hung instead of
-          // retrying. First-call-wins, so a writer that does notice the teardown and reports
-          // its own `EPIPE` afterwards changes nothing.
+          // parked inside `Blob.stream()`'s `read()` has no pending `req.write` to
+          // reject, so it never returns to run `endBodyWrite`. Nothing else would answer
+          // here - the stall watchdog is armed only from the response's `'close'`, which
+          // a request that never got a response does not reach - so
+          // `await response.requestBodySettled` would wait forever, and the client's own
+          // `settleUploadBeforeNextDispatch` would wait with it: a retryable `PUT` whose
+          // socket resets mid-upload would hang instead of retrying. First-call-wins, so
+          // a writer that does notice the teardown and reports its own `EPIPE` afterwards
+          // changes nothing.
           //
           // `isWritingBody` is deliberately left as it is: this answers the caller and does
           // not claim the writer has stopped.
@@ -2493,10 +2514,11 @@ export class NodeAdapter implements HTTPAdapter {
           // caller tearing its own request down - or a per-attempt timeout doing it -
           // parks the writer's rejection here too, and against an endpoint that answers
           // early (a `413`, a redirect, an early `2xx`) `didReceiveResponse` is already
-          // true, so every cancelled upload put a spurious transport failure on the
-          // host's global `'error'` channel for a teardown that was asked for. The
-          // outcome is settled above either way; `failRequest` is first-call-wins, so
-          // the abort listener's own answer stands where it got there first.
+          // true, so without this every cancelled upload would put a spurious transport
+          // failure on the host's global `'error'` channel for a teardown that was asked
+          // for. The outcome is settled above either way; `failRequest` is
+          // first-call-wins, so the abort listener's own answer stands where it got there
+          // first.
           //
           // Read guarded, as `req.on('error')` reads it, so the write failure is reported
           // below rather than escaping to `observeTaskFailure`. See `readIsAborted`.
@@ -2605,7 +2627,7 @@ export class NodeAdapter implements HTTPAdapter {
           );
         } else {
           // No body (any other was refused above) — fire 100% upload immediately and end
-          // the request. (A caller's `Content-Length` was taken off the request; see
+          // the request. (A caller's `Content-Length` has been taken off the request; see
           // `dropBodilessContentLength`.)
           reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
           req.end();
@@ -2648,12 +2670,12 @@ export class NodeAdapter implements HTTPAdapter {
  *
  * Progress here is coarse: `writeRequestBodyChunked` reports once per accepted
  * {@link REQUEST_BODY_CHUNK_SIZE} chunk, once its write callback has run, so a receiver
- * that has answered and then goes quiet for a moment - busy with what it already has, or a
- * TCP window that closed while it works - reports nothing for the whole pause. Anything
+ * that has answered and then goes quiet for a moment - busy with what it already has, or
+ * a TCP window that closed while it works - reports nothing for the whole pause. Anything
  * shorter than a pause like that cuts a body the server was still reading, which is the
  * failure this watchdog exists to avoid, not to cause; at one second a two-second pause
- * truncated an 8 MiB upload at 6.8 MiB and handed the caller the early status as a clean
- * success.
+ * would truncate an 8 MiB upload at 6.8 MiB and hand the caller the early status as a
+ * clean success.
  *
  * Five seconds is past any such pause on a connection that is still alive. What is left
  * is a bound rather than a promise: a receiver that stops reading for longer than this
@@ -2686,8 +2708,8 @@ async function streamResponseBody(
     let loadedBytes = 0;
     // Every byte handed to `write`, whether or not its optional callback is ever called:
     // a sink that reports failure by `'error'` alone never calls it, and the terminal
-    // event below, sent once `end` has called back clean, read only the callbacks' count
-    // and said `loaded: 0` for a body the sink had taken whole.
+    // event below, sent once `end` has called back clean, would read only the callbacks'
+    // count and say `loaded: 0` for a body the sink had taken whole.
     let handedBytes = 0;
 
     // Deduplication guard — same as buffered download: when Content-Length is
@@ -2700,8 +2722,8 @@ async function streamResponseBody(
     let didReceiveEnd = false;
 
     const cleanup = (): void => {
-      // Before the removal, and on *every* settle path rather than only the three that
-      // asked for it explicitly. `cleanup` takes `onWritableError` off unconditionally, so
+      // Before the removal, and on *every* settle path rather than only the `write`/`end`
+      // failure paths that also call it. `cleanup` takes `onWritableError` off unconditionally, so
       // the moment it runs the writable has no `'error'` listener of ours left - and an
       // `'error'` event with no listener is an uncaught exception that ends the process.
       // (A writable with no removal method is the one shape this does not cover, and
@@ -2711,13 +2733,13 @@ async function streamResponseBody(
       // A late error reaches it with no request registered and is reported through the
       // host error reporter, as the absorber would report it.)
       //
-      // The three call sites that asked were the ones where a `write`/`end` throw made the
-      // late error obvious, which left the ordinary paths uncovered: `settle(true)` on
-      // success, and all four response-side settles. A real `fs.WriteStream` closes its
-      // descriptor asynchronously *after* `'finish'`, so streaming a 200 to a file, then
-      // having `fs.close(fd)` fail with `EIO` or `ENOSPC`, emitted `'error'` into exactly
-      // that gap. Nothing about that path throws, so nothing about it looked like it
-      // needed an absorber.
+      // Those failure paths are the ones where a `write`/`end` error makes the late error
+      // obvious, and relying on them alone would leave the ordinary paths
+      // uncovered: `settle(true)` on success, and all four response-side settles. A real
+      // `fs.WriteStream` closes its descriptor asynchronously *after* `'finish'`, so
+      // streaming a 200 to a file, then having `fs.close(fd)` fail with `EIO` or
+      // `ENOSPC`, emits `'error'` into exactly that gap. Nothing about that path throws,
+      // so nothing about it looks like it needs an absorber.
       //
       // Cheap and idempotent to call here: it is keyed on the writable through a `WeakMap`,
       // returns immediately when one is already attached, and takes itself back off on
@@ -2768,8 +2790,9 @@ async function streamResponseBody(
       // Normalized like every other failure path in this function. The parameter is typed
       // `Error` because `WritableLike` declares the listener that way, but the value is
       // whatever the writable emitted, and a hand-written one is under no obligation to
-      // emit an `Error` at all - so this was the last route by which a non-`Error` could
-      // reach `AdapterResponse.errorCause`, which also declares an `Error`.
+      // emit an `Error` at all - so left raw, this would be a route by which a
+      // non-`Error` could reach `AdapterResponse.errorCause`, which also declares an
+      // `Error`.
       settle({
         code: 'stream_write_error',
         cause: normalizeError(error),
@@ -2820,11 +2843,11 @@ async function streamResponseBody(
 
           // `write`'s callback is a failure channel in its own right, as `WritableLike`
           // says: a write fails "either through the callback given to `write`/`end` or as
-          // an `'error'` event". Dropping the error here was the one hole left in the set
-          // of signals this function already honours - `end`'s callback and `errored` -
-          // and it settled a truncated download as a success for a writable that reports
-          // only this way. A real Node stream also emits `'error'`, and `settle` is
-          // idempotent, so the two cannot both take effect.
+          // an `'error'` event". Dropping the error here would leave a hole in the set of
+          // signals this function honours - `end`'s callback and `errored` - and settle a
+          // truncated download as a success for a writable that reports only this way. A
+          // real Node stream also emits `'error'`, and `settle` is idempotent, so the two
+          // cannot both take effect.
           //
           // Absorbed first, exactly as the `write`-throw and `end`-callback paths do:
           // `settle` runs `cleanup`, which detaches the `'error'` listener, so a real
@@ -2879,7 +2902,8 @@ async function streamResponseBody(
       // listener that undoes it is already detached and nothing can ever resume the
       // response. A real Node stream does not do this - it is a hand-written writable
       // that reports synchronously - and the caller destroys the request on a stream
-      // failure, so today this pauses a response that is about to be torn down anyway.
+      // failure, so without the check this would only pause a response that is about to
+      // be torn down anyway.
       // Pausing a stream whose resume path has been dismantled is wrong regardless of
       // who cleans up after it.
       if (!canContinue && !isSettled) {
@@ -3009,8 +3033,9 @@ async function streamResponseBody(
     // Through `attachWritableListener`, which for a writable that defines neither `off`
     // nor `removeListener` registers with one permanent listener per event instead of
     // adding another of its own. `off` and `removeListener` are both optional on
-    // `WritableLike`, and a sink reused across requests accumulated two listeners plus the
-    // retained request closure behind each of them, request after request.
+    // `WritableLike`, and a sink reused across requests would otherwise accumulate two
+    // listeners plus the retained request closure behind each of them, request after
+    // request.
     attachWritableListener(writable, 'drain', onWritableDrain);
     attachWritableListener(writable, 'error', onWritableError);
     attachWritableListener(writable, 'close', onWritableClose);
@@ -3037,8 +3062,8 @@ async function streamResponseBody(
  * {@link discardUnstreamedWritable} with this attached first.
  *
  * Keyed on the writable rather than on the request, because `streamResponse` may hand
- * the same sink to several requests at once. A per-request absorber meant a dozen
- * concurrent failures on one shared writable attached a dozen listeners within the
+ * the same sink to several requests at once. With a per-request absorber, a dozen
+ * concurrent failures on one shared writable would attach a dozen listeners within the
  * same turn, before any removal ran, which is the `MaxListenersExceededWarning` this
  * is meant to avoid. One absorber per writable is also all that is needed: it is
  * attached with `on`, not `once`, so it keeps absorbing for as long as it is there
@@ -3131,9 +3156,9 @@ function absorbPendingWritableError(writable: WritableLike): void {
       removeListener('close', onClose);
     } catch {
       // Not the same trade as the `'error'` removal above, because the `'error'`
-      // listener is already off by the time this runs. Keeping the entry here said
-      // an absorber was attached when none was, so every later failure on this
-      // writable short-circuited and attached nothing - and `cleanup` had taken that
+      // listener is already off by the time this runs. Keeping the entry here would say
+      // an absorber is attached when none is, so every later failure on this writable
+      // would short-circuit and attach nothing - and `cleanup` has taken that
       // request's own `onWritableError` off too, leaving the late `'error'` event
       // with no listener at all, which is the uncaught exception this exists to
       // prevent. A stale `onClose` is the lesser cost and an inert one: it only
@@ -3156,10 +3181,10 @@ function absorbPendingWritableError(writable: WritableLike): void {
   // Cancelled by a renewal, which is what `generation` counts. The queued removal
   // only knows that *at the time it was scheduled* nothing further was expected; a
   // request settling in the meantime calls `extend` and is handed a fresh window, and
-  // tearing the absorber down anyway left that request covered by nothing - the same
-  // uncaught-`'error'` gap, reached from the other side. The `'close'` and backstop
-  // paths call `detach` directly and are unaffected: those are deliveries, not
-  // guesses about one.
+  // tearing the absorber down anyway would leave that request covered by nothing - the
+  // same uncaught-`'error'` gap, reached from the other side. The `'close'` and backstop
+  // paths call `detach` directly and are unaffected: those are deliveries, not guesses
+  // about one.
   const scheduleDetach = (): void => {
     const scheduledAt = generation;
 
@@ -3180,13 +3205,12 @@ function absorbPendingWritableError(writable: WritableLike): void {
   };
 
   const absorb = (error?: unknown): void => {
-    // Reported, then absorbed. "Already reported through `settle`" held while this
-    // listener only ever ran after a failed request had been settled with the error in
-    // hand; it stopped holding once the absorber was attached on the success path too.
-    // A sink that accepted every byte and then failed its own `close(fd)` inside this
-    // window - a truncated file, reported to the caller as a completed download - had
-    // its error discarded here with no trace anywhere: not on the response, not on the
-    // global `'error'` channel, not in the log. Absorbing an event so it cannot kill
+    // Reported, then absorbed. The error cannot be assumed already reported through
+    // `settle`: the absorber is attached on the success path too, so a sink that
+    // accepted every byte and then failed its own `close(fd)` inside this window - a
+    // truncated file, reported to the caller as a completed download - would otherwise
+    // have its error discarded here with no trace anywhere: not on the response, not on
+    // the global `'error'` channel, not in the log. Absorbing an event so it cannot kill
     // the process is the job; deciding nobody needs to know is not.
     //
     // Guarded, and deliberately not allowed to rethrow: this runs as an `'error'`
@@ -3194,8 +3218,7 @@ function absorbPendingWritableError(writable: WritableLike): void {
     // mechanism exists to prevent.
     reportUnclaimedWritableError(error);
 
-    // Beyond the report, this exists to keep the event from
-    // going unhandled.
+    // Beyond the report, this exists to keep the event from going unhandled.
     //
     // Stands down a turn after delivery, not on it. `streamResponse` may hand the same
     // writable to several requests at once and one absorber covers them all, so
@@ -3236,9 +3259,9 @@ function absorbPendingWritableError(writable: WritableLike): void {
     // Out of lifetime, so this is the last word rather than another window: see
     // `MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS` for why an unconditional restart is a
     // deadline that never arrives. Too little left for a whole window counts as out:
-    // renewed with the remainder, a request settling near the cap was covered for a few
-    // milliseconds, and a late error inside the window it relied on went uncaught. Out,
-    // it attaches a fresh absorber with a whole window of its own.
+    // renewed with the remainder, a request settling near the cap would be covered for a
+    // few milliseconds, and a late error inside the window it relied on would go
+    // uncaught. Out, it attaches a fresh absorber with a whole window of its own.
     if (remainingLifetime < PENDING_WRITABLE_ERROR_WINDOW_MS) {
       detach();
 
@@ -3268,8 +3291,9 @@ function absorbPendingWritableError(writable: WritableLike): void {
       }
     } catch {
       // No way to schedule it. Whatever was already pending still stands, and on the
-      // attach path that is nothing - the two signals above are the bound, which is the
-      // behaviour that shipped before this one existed.
+      // attach path that is nothing - the two signals above, delivery and `'close'`, are
+      // then the bound, with the turn-counted removal queued there in place of a refused
+      // `'close'`.
     }
 
     return true;
@@ -3290,14 +3314,14 @@ function absorbPendingWritableError(writable: WritableLike): void {
   // Bounded by delivery, and by the stream's own teardown, rather than by a turn of
   // the loop counted from here.
   //
-  // A `setImmediate` scheduled at this point used to remove it unconditionally, on the
-  // measurement that a failed write emits within the same turn. That is not true of
+  // A `setImmediate` scheduled at this point would remove it unconditionally, on the
+  // assumption that a failed write emits within the same turn. That is not true of
   // every stream: a real `fs.WriteStream` destroys itself through an asynchronous
   // `fs.close(fd)` before it emits, so the error lands a poll phase later - after the
-  // removal had run and after `cleanup` had taken `onWritableError` off too. With no
-  // listener left, Node turned a `stream_write_error` this had already reported
-  // correctly into an uncaught exception that killed the process. It could not be
-  // caught here either: Bun emits inside the window, so the suite never saw it.
+  // removal has run and after `cleanup` has taken `onWritableError` off too. With no
+  // listener left, Node would turn a `stream_write_error` this had already reported
+  // correctly into an uncaught exception that kills the process. Nor would a Bun run
+  // catch it: Bun emits inside the window, so a suite run there never sees it.
   //
   // Both signals are used because neither alone is enough. `absorb` cannot cover a
   // writable that is never going to emit at all - a hand-written {@link WritableLike}
@@ -3310,9 +3334,8 @@ function absorbPendingWritableError(writable: WritableLike): void {
     // Neither bound is available: this writable would not take the `'close'` listener,
     // and `absorb` only fires if the error actually arrives. A writable that emits
     // nothing at all would keep the absorber for as long as it lives - so fall back to
-    // the turn-counted removal. It is the
-    // timing that was wrong for a real stream, and a writable that refuses a listener
-    // is not one.
+    // the turn-counted removal. That timing is wrong for a real stream, and a writable
+    // that refuses a listener is not one.
     scheduleDetach();
   }
 
@@ -3373,10 +3396,10 @@ function ignoreWritableError(): void {
 
 /**
  * The request without a caller's `Content-Length` when it has no body, as the bodied
- * paths replace it: sent with no body after it, the server waited for bytes that never
- * came, and on a pooled keep-alive socket took them from the next request. Taken off the
- * request itself - its headers are this adapter's own copy, so in place - so the effective
- * headers reported to observers do not put it back.
+ * paths replace it: sent with no body after it, the server would wait for bytes that
+ * never come, and on a pooled keep-alive socket take them from the next request. Taken
+ * off the request itself - its headers are this adapter's own copy, so in place - so the
+ * effective headers reported to observers do not put it back.
  */
 function dropBodilessContentLength(request: AdapterRequest): void {
   if (request.body === undefined || request.body === null) {
@@ -3523,7 +3546,7 @@ function normalizeCRL(
   //
   // An array's entries are each read once, into one of this adapter's own, and that copy
   // is what is compared, normalized and kept: read again for the cache key, an entry
-  // whose getter answers differently left a key that was never validated.
+  // whose getter answers differently would leave a key that was never validated.
   const given = snapshotCRLInput(crl);
   const last = lastParsedCRLs.get(owner);
   if (last !== undefined && isSameCRLInput(last.input, given)) {
@@ -3557,8 +3580,8 @@ function normalizeCRL(
   assertCRLParses(normalized);
   // Kept as a copy this adapter owns, not the caller's: a single-block buffer normalizes
   // to the caller's own, which goes out as it is now, and a later value with the same
-  // bytes in another buffer was answered with that one - which its owner may since have
-  // reused for something else.
+  // bytes in another buffer would be answered with that one - which its owner may since
+  // have reused for something else.
   // One copy, not two: a value that normalized to itself keeps its input copy as its
   // normalized form too.
   const input = copyCRLInput(given);
@@ -4237,10 +4260,11 @@ function markStreamFactoryError(
   };
 
   // Always a fresh carrier, with the caller's error on `cause` (the client reports that
-  // cause). Tagging the caller's own error in place shared the tags between requests that
-  // threw the same object - a rethrown `await storageReady`, a module-level sentinel - so
-  // one request read another's headers, `Authorization` among them, and its status and
-  // `Set-Cookie`; and it left the request's headers attached to the caller's object.
+  // cause). Tagging the caller's own error in place would share the tags between requests
+  // that threw the same object - a rethrown `await storageReady`, a module-level
+  // sentinel - so one request would read another's headers, `Authorization` among them,
+  // and its status and `Set-Cookie`; and it would leave the request's headers attached
+  // to the caller's object.
   const carrier = new Error(
     readErrorMessage(normalized) ?? 'Stream factory failed',
     { cause: error },

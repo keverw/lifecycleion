@@ -259,7 +259,7 @@ test('an abort while a streamed writable is finishing fires the factory signal',
 
 test('request header values are converted once, when send() is called', async () => {
   // Converted again at settle time, inside a response callback, a `toString` that throws
-  // was an uncaught exception and the send never settled.
+  // would be an uncaught exception and the send would never settle.
   const server = http.createServer((_req, res) => {
     res.end('ok');
   });
@@ -694,9 +694,9 @@ describe('post-header stream aborts report why the retry stopped', () => {
 describe('NodeAdapter streamResponse factory failures', () => {
   test("the factory is called on the caller's request, not on the adapter's copy", async () => {
     // `send()` reads every member of the request once, into a plain object of its own.
-    // Calling `streamResponse` off that copy handed a class-instance request's method the
-    // copy as `this`, so a factory reading its own fields threw and the download failed
-    // as a setup error.
+    // Calling `streamResponse` off that copy would hand a class-instance request's method
+    // the copy as `this`, so a factory reading its own fields would throw and the
+    // download would fail as a setup error.
     const net = await import('node:net');
 
     const server = net.createServer((socket) => {
@@ -854,8 +854,8 @@ describe('NodeAdapter streamResponse factory failures', () => {
     ['undefined', undefined],
     ['a number', 42],
     ['a string', 'download.bin'],
-    // Objects that are neither a cancel nor a sink. These passed the old primitive-only
-    // check and failed on the first `write` as a `stream_write_error` on a 200.
+    // Objects that are neither a cancel nor a sink. A primitive-only check would let
+    // these through, to fail on the first `write` as a `stream_write_error` on a 200.
     ['an empty object', {}],
     ['a cancel object with cancel: false', { cancel: false }],
     ['an object with write but no end', { write: () => true }],
@@ -863,10 +863,10 @@ describe('NodeAdapter streamResponse factory failures', () => {
   ] as const)(
     'a factory returning %s fails setup without retrying or leaking its connection',
     async (_label, returned) => {
-      // A factory that forgot its `return`. It is neither a cancel nor a sink, and it
-      // used to reach the stream pipe, throw there, and be retried as a network error:
-      // the factory called once per attempt, each leaving its connection open with the
-      // response still streaming in, and its signal never fired.
+      // A factory that forgot its `return`. It is neither a cancel nor a sink; let
+      // through, it would reach the stream pipe, throw there, and be retried as a network
+      // error: the factory called once per attempt, each leaving its connection open with
+      // the response still streaming in, and its signal would never fire.
       let requests = 0;
       let closedResponses = 0;
       const server = http.createServer((_req, res) => {
@@ -1398,9 +1398,9 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   });
 
   test('a cross-origin redirect hop does not stay on the unix socket', async () => {
-    // The socket is the caller's chosen endpoint, often a privileged one. A `Location`
-    // to another host used to keep `socketPath` and change only the request line, so the
-    // redirect became a second request against that same socket - the same class of
+    // The socket is the caller's chosen endpoint, often a privileged one. A hop to another
+    // host that kept `socketPath` and changed only the request line would make the
+    // redirect a second request against that same socket - the same class of
     // retargeting `mtls.cert` and `servername` are already withheld for.
     const req = new MockClientRequest();
     let capturedOptions: http.RequestOptions | undefined;
@@ -2601,7 +2601,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         .send();
 
       // PUT is idempotent, so a half-written body is no reason to stop trying —
-      // a blanket veto here used to suppress this.
+      // a blanket veto here would suppress this.
       expect(requestCalls).toBe(2);
       expect(response.status).toBe(200);
     } finally {
@@ -2858,9 +2858,9 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   test('the stall watchdog leaves a writer waiting on a slow source alone', async () => {
     // Progress is bytes the socket accepted, and a writer parked in `Blob.stream()`'s
     // `read()` makes none - so a multipart `File` on a slow disk, with the server already
-    // answered, was destroyed as "stalled" after five seconds of the socket doing nothing
-    // wrong. The writer now says when it is waiting on the source, and that wait has a
-    // grace of its own.
+    // answered, would be destroyed as "stalled" after five seconds of the socket doing
+    // nothing wrong. The writer says when it is waiting on the source, and that wait has
+    // a grace of its own.
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
 
@@ -3259,13 +3259,13 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
   test('the stall watchdog settles the upload outcome it gives up on', async () => {
     // `endBodyWrite` and `reportWriteErrorAfterResponse` both answer `requestBodySettled`
-    // because the writer may never come back to answer it itself. The watchdog destroyed
-    // the request and answered nothing: a writer parked with no pending callback - inside
-    // `Blob.stream()`'s `read()`, or on a `write` that never calls back - has nothing for
-    // the destroy to reject, so it never returns to notice, and
-    // `await response.requestBodySettled` waited forever on an upload this had already
-    // given up on. That is the exact hang `reportWriteErrorAfterResponse` documents fixing,
-    // reached through the other door.
+    // because the writer may never come back to answer it itself. A watchdog that only
+    // destroyed the request would answer nothing: a writer parked with no pending
+    // callback - inside `Blob.stream()`'s `read()`, or on a `write` that never calls
+    // back - has nothing for the destroy to reject, so it never returns to notice, and
+    // `await response.requestBodySettled` would wait forever on an upload this has
+    // already given up on. That is the exact hang `reportWriteErrorAfterResponse`
+    // documents, reached through the other door.
     //
     // A `write` that accepts the chunk and never acknowledges it is the parked writer in
     // its smallest form: `destroy()` on this request emits nothing, exactly as a reader
@@ -3293,8 +3293,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     );
 
     // The docs promise every late upload failure on the host's `'error'` channel whether
-    // or not anyone awaits the promise, and name the watchdog as one of them. It was the
-    // one late failure that settled the promise and said nothing else.
+    // or not anyone awaits the promise, and name the watchdog as one of them. Settling
+    // the promise alone would make it the one late failure that says nothing else.
     const reports: ErrorEvent[] = [];
     const onError = (event: Event): void => {
       reports.push(event as ErrorEvent);
@@ -3368,9 +3368,9 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   test('PR review round 52: a response torn down while the writer waits on its source settles the upload', async () => {
     // The adapter destroys the request itself here - a body over `maxResponseBytes` - and a
     // writer parked inside `Blob.stream()`'s `read()` has no pending `req.write` for that
-    // destroy to reject. Nothing woke it, so `requestBodySettled` never settled: the
-    // watchdog stood down on a destroyed request, and the client waits on that promise
-    // before a retry or redirect.
+    // destroy to reject. Nothing else would wake it, so were the watchdog to stand down
+    // on a destroyed request, `requestBodySettled` would never settle - and the client
+    // waits on that promise before a retry or redirect.
     const req = new ClosingMockClientRequest();
     const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
 
@@ -3476,10 +3476,10 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   });
 
   test('PR review round 52: the stall watchdog still bounds a destroyed upload whose writer never hears of it', async () => {
-    // A request destroyed with no `'close'` reaching the writer: the watchdog used to stand
-    // down on `req.destroyed` with the outcome still open, so the source grace it documents
-    // bounded nothing. It now settles once that grace runs out. The adapter tore this one
-    // down itself, so nothing is reported to the host.
+    // A request destroyed with no `'close'` reaching the writer: were the watchdog to
+    // stand down on `req.destroyed` with the outcome still open, the source grace it
+    // documents would bound nothing. It settles once that grace runs out. The adapter
+    // tore this one down itself, so nothing is reported to the host.
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
 
@@ -3546,10 +3546,11 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   test('a socket error while the streamResponse factory is still opening settles', async () => {
     // The one window where "the response side always settles on its own" is not true.
     // `res`'s own handlers are installed by `streamResponseBody`, which does not run until
-    // the factory has resolved - so a socket reset during an `await`ed factory reached
-    // nothing at all: the request's `'error'` handler stood down because the headers had
-    // already arrived, `res` had no listeners to see it, and the adapter promise never
-    // settled. The caller hung until its own signal, with no timeout of the adapter's own.
+    // the factory has resolved - so unhandled, a socket reset during an `await`ed factory
+    // would reach nothing at all: the request's `'error'` handler stands down because the
+    // headers have already arrived, `res` has no listeners to see it, and the adapter
+    // promise would never settle. The caller would hang until its own signal, with no
+    // timeout of the adapter's own.
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {
       'content-type': 'application/octet-stream',
@@ -3793,13 +3794,13 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   });
 
   test('a second request sharing a writable gets its own absorber window', async () => {
-    // One absorber covers every request sharing the writable, and only the request that
-    // *attached* it scheduled the backstop that takes it off. A later request settling near
-    // the end of that window inherited whatever was left of it - which can be no window at
-    // all - while `cleanup` had just removed its own `'error'` listener, so the late error
-    // the absorber exists for arrived with nothing attached. Each request that relies on it
-    // now pushes the deadline out, and an absolute lifetime keeps "pushes it out" from
-    // meaning "forever".
+    // One absorber covers every request sharing the writable. Were only the request that
+    // *attached* it to schedule the backstop that takes it off, a later request settling
+    // near the end of that window would inherit whatever was left of it - which can be no
+    // window at all - while `cleanup` has just removed its own `'error'` listener, so the
+    // late error the absorber exists for would arrive with nothing attached. Each request
+    // that relies on it pushes the deadline out, and an absolute lifetime keeps "pushes
+    // it out" from meaning "forever".
     const writable = new EventEmitter() as unknown as WritableLike;
 
     writable.write = () => true;
@@ -3887,8 +3888,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           queueMicrotask(() => {
             // `WritableLike` declares the listener as taking an `Error`, but the value is
             // whatever the writable emitted, and a hand-written one is under no
-            // obligation. This was the last route by which a non-`Error` could reach
-            // `AdapterResponse.errorCause`, which also declares an `Error`.
+            // obligation. Left raw, this would be a route by which a non-`Error` could
+            // reach `AdapterResponse.errorCause`, which also declares an `Error`.
             (writable as unknown as EventEmitter).emit('error', 'disk full');
           });
         });
@@ -4062,7 +4063,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   test('a write that fails only through its callback is a stream_write_error', async () => {
     // The third way a writable can report a failed write, alongside `end`'s callback and
     // `errored`: the callback handed to `write` itself, which `WritableLike` names as a
-    // failure channel. Dropping it settled a truncated download as a success.
+    // failure channel. Dropping it would settle a truncated download as a success.
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {
       'content-type': 'application/octet-stream',
@@ -4337,18 +4338,19 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(emitter.listenerCount('error')).toBe(1);
 
     // Released a turn after the error was delivered, not a turn after it was attached.
-    // A `setImmediate` scheduled at attach time used to release it unconditionally, and
+    // A `setImmediate` scheduled at attach time would release it unconditionally, and
     // that lands *before* a real `fs.WriteStream` emits - it closes its fd asynchronously
-    // first - so the error it was attached to absorb arrived to no listener at all and
-    // killed the process. Counting from delivery instead keeps the siblings above covered
-    // and still bounds the listener's life.
+    // first - so the error it was attached to absorb would arrive to no listener at all
+    // and kill the process. Counting from delivery instead keeps the siblings above
+    // covered and still bounds the listener's life.
     //
     // *Unless* a later request renewed it in the meantime, which the twelve above did.
     // The deferred release is a guess that nothing further is expected, and a renewal is
-    // the evidence that it was wrong: releasing anyway took the absorber off the very
-    // requests that had just been told they were covered by it, and `cleanup` had removed
-    // each of their own `onWritableError` - the uncaught `'error'` this exists to prevent,
-    // reached from the other side. The renewed backstop below is what bounds it instead.
+    // the evidence that it was wrong: releasing anyway would take the absorber off the
+    // very requests that had just been told they were covered by it, and `cleanup` has
+    // removed each of their own `onWritableError` - the uncaught `'error'` this exists to
+    // prevent, reached from the other side. The renewed backstop below is what bounds it
+    // instead.
     await new Promise<void>((done) => {
       setImmediate(done);
     });
@@ -4433,11 +4435,12 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   test('a writable with no removal method gets one listener, not one per request', async () => {
     // `off`/`removeListener` are optional on `WritableLike`, and a listener attached to a
     // writable without either could never be removed: the request's own `'drain'` and
-    // `'error'` piled up two per request plus the closure behind each, and an absorber
-    // attached there could never be taken back either. Attaching none at all is not the
-    // answer, because `'error'` is a channel `WritableLike` documents as sufficient on its
-    // own - a sink that reports only that way would settle a truncated download as a
-    // success. So one permanent listener per event fans out to whoever is listening now.
+    // `'error'` would pile up two per request plus the closure behind each, and an
+    // absorber attached there could never be taken back either. Attaching none at all is
+    // not the answer, because `'error'` is a channel `WritableLike` documents as
+    // sufficient on its own - a sink that reports only that way would settle a truncated
+    // download as a success. So one permanent listener per event fans out to whoever is
+    // listening now.
     const handlers: ((error: Error) => void)[] = [];
     const track = (event: string, listener: (error: Error) => void): void => {
       if (event === 'error') {
@@ -4528,18 +4531,19 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(reports.length).toBe(1);
     expect(reports[0]?.error).toBe(lateError);
 
-    // And a second request through the same sink adds none: this is what a reused sink
-    // used to pay two listeners and a retained request closure for, every time.
+    // And a second request through the same sink adds none: without the fan-out, a reused
+    // sink would pay two listeners and a retained request closure for this, every time.
     await runOnce();
 
     expect(handlers.length).toBe(1);
   });
 
   test('the permanent fan-out stops reporting unclaimed errors once the window has passed', async () => {
-    // The permanent listener never detaches, so reporting every `'error'` that reached it
-    // with no request registered put each error a long-lived sink's owner handles itself
-    // on the host's global channel, for the life of the writable. It reports within the
-    // window a detachable writable's absorber would have, and only absorbs after that.
+    // The permanent listener never detaches, so reporting every `'error'` that reaches it
+    // with no request registered would put each error a long-lived sink's owner handles
+    // itself on the host's global channel, for the life of the writable. It reports
+    // within the window a detachable writable's absorber would have, and only absorbs
+    // after that.
     const handlers: ((error: Error) => void)[] = [];
     const writable = {
       write: () => true,
@@ -4622,9 +4626,10 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   });
 
   test('a request settling near the absorber lifetime cap still gets a full window', async () => {
-    // Renewing an absorber close to its lifetime cap gave the request only what was left
-    // of it - a few milliseconds - so a late error inside the window it relied on found
-    // no listener. Too little left is now out of lifetime: a fresh absorber is attached.
+    // Renewing an absorber close to its lifetime cap would give the request only what was
+    // left of it - a few milliseconds - so a late error inside the window it relied on
+    // would find no listener. Too little left counts as out of lifetime: a fresh absorber
+    // is attached.
     const sink = new EventEmitter() as EventEmitter & {
       write: () => boolean;
       end: () => never;
@@ -4733,8 +4738,9 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   ] as const)(
     'a sink %s factory returns already failing settles with its error, not an uncaught one',
     async (_label, makeSink) => {
-      // A stream destroyed with an error emits it on a `nextTick`, which ran ahead of the
-      // adapter's listener when the factory was called from the response event's own turn.
+      // A stream destroyed with an error emits it on a `nextTick`, which would run ahead
+      // of the adapter's listener were the factory called from the response event's own
+      // turn.
       const req = new MockClientRequest();
       const res = new MockIncomingMessage(200, {
         'content-type': 'application/octet-stream',
@@ -5009,8 +5015,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     // The writable an async factory hands back after the request was aborted is destroyed
     // with a listener attached first. On a writable with no `off`/`removeListener`, that
     // listener is the permanent fan-out - registered into and at once deregistered from -
-    // and an `'error'` reaching it with nothing registered was dropped without a trace,
-    // where the absorber on a detachable writable reports it.
+    // and an `'error'` reaching it with nothing registered must be reported, as the
+    // absorber on a detachable writable reports it, not dropped without a trace.
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {
       'content-type': 'application/octet-stream',
@@ -5417,12 +5423,12 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   });
 
   test('a writable that fails after a successful stream does not kill the process', async () => {
-    // `cleanup` removes this request's own `onWritableError` on *every* settle path, but
-    // only the three `write`/`end` throw sites asked for the shared absorber - so the
-    // ordinary success path left the writable with no `'error'` listener at all. A real
-    // `fs.WriteStream` closes its descriptor asynchronously *after* `'finish'`, so
+    // `cleanup` removes this request's own `onWritableError` on *every* settle path, so
+    // were only the `write`/`end` failure paths to ask for the shared absorber, the
+    // ordinary success path would leave the writable with no `'error'` listener at all. A
+    // real `fs.WriteStream` closes its descriptor asynchronously *after* `'finish'`, so
     // streaming a 200 to a file and then having `fs.close(fd)` fail with `EIO` or
-    // `ENOSPC` emitted `'error'` into exactly that gap: an uncaught exception, from the
+    // `ENOSPC` emits `'error'` into exactly that gap: an uncaught exception, from the
     // stream failure this adapter had already reported correctly.
     const writable = new EventEmitter() as EventEmitter & WritableLike;
     writable.write = () => true;
@@ -5576,7 +5582,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
         // At most one `'error'` listener, and the same one every time - not zero.
         //
-        // `cleanup` now leaves the shared pending-error absorber attached on every settle
+        // `cleanup` leaves the shared pending-error absorber attached on every settle
         // path, because it takes this request's own `onWritableError` off on all of them
         // and an `'error'` event with no listener ends the process. A real `fs.WriteStream`
         // closes its descriptor *after* `'finish'`, so a failing `fs.close(fd)` lands
@@ -6245,9 +6251,9 @@ describe('NodeAdapter via HTTPClient', () => {
     // A complete answer mid-upload, with the connection kept alive: a proxy replying
     // `413` before the body is finished is the ordinary shape of this. The write then
     // fails or parks, and the response path deliberately answers over it - but
-    // `req.end()` only ever runs on the write path's success, so nothing finished the
-    // request and the socket was held, unfinished and unusable, until the server's own
-    // timeout.
+    // `req.end()` only ever runs on the write path's success, so left at that, nothing
+    // would finish the request and the socket would be held, unfinished and unusable,
+    // until the server's own timeout.
     let didCloseSocket = false;
     let receivedBytes = 0;
 
@@ -6306,16 +6312,17 @@ describe('NodeAdapter via HTTPClient', () => {
     // the request sits unfinished on a keep-alive socket until the server times it out.
     // See `UPLOAD_STALL_GRACE_MS`.
     //
-    // Observed through `requestBodySettled` rather than through the server's own `'close'`,
-    // and with a reader that never resumes. Watching the server side needed the socket
-    // reading again to see the client's reset, and resuming it to look put the upload back
-    // in motion: the watchdog re-arms for as long as progress is being made, so a resume
-    // inside any of its windows let the 8 MB finish, left nothing to tear down, and failed
-    // an assertion about a teardown that correctly never happened. Measured: the upload
-    // parks at ~1.7 MB, dribbles a few KB as the kernel probes the closed window, and the
-    // first window that sees none of it destroys the request - here at ~15 s, which is why
-    // the timeout below is generous. The writer's own outcome says the same thing the
-    // socket close did, from the side that is not racing.
+    // Observed through `requestBodySettled` rather than through the server's own
+    // `'close'`, and with a reader that never resumes. Watching the server side would
+    // need the socket reading again to see the client's reset, and resuming it to look
+    // would put the upload back in motion: the watchdog re-arms for as long as progress
+    // is being made, so a resume inside any of its windows would let the 8 MB finish,
+    // leave nothing to tear down, and fail an assertion about a teardown that correctly
+    // never happened. Measured: the upload parks at ~1.7 MB, dribbles a few KB as the
+    // kernel probes the closed window, and the first window that sees none of it destroys
+    // the request - here at ~15 s, which is why the timeout below is generous. The
+    // writer's own outcome says the same thing the socket close did, from the side that
+    // is not racing.
     const server = net.createServer((socket) => {
       socket.on('error', () => {
         // The client's teardown reaches this side as a reset.
@@ -6535,11 +6542,12 @@ describe('NodeAdapter via HTTPClient', () => {
   }, 20000);
 
   test('a bodied request aborted before any write still carries the upload outcome', async () => {
-    // The window the mid-upload fix left open. The outcome promise used to be created by
-    // the first write, and the write branches are the last thing the adapter does - so a
-    // signal that was already aborted threw from above them with nothing to tag, the field
-    // was omitted, and `await` answered `undefined`: the documented value for a body that
-    // went out in full, for one that never started. Opened with the request instead.
+    // Guards the window before the first write. Were the outcome promise created by the
+    // first write - and the write branches are the last thing the adapter does - a signal
+    // that was already aborted would throw from above them with nothing to tag, the field
+    // would be omitted, and `await` would answer `undefined`: the documented value for a
+    // body that went out in full, for one that never started. It is opened with the
+    // request.
     const controller = new AbortController();
 
     controller.abort();
@@ -6643,11 +6651,12 @@ describe('NodeAdapter via HTTPClient', () => {
   test('a response that fails mid-stream still carries `requestBodySettled`', async () => {
     const net = await import('node:net');
 
-    // The shape the field exists for, and the one it was missing from: an early-ack `200`
-    // whose *response* body then fails while the upload is still parked behind it. The
-    // response resolves through `isStreamError`, and attaching the promise only to the two
-    // success paths meant `await response.requestBodySettled` gave `undefined` here - which
-    // is exactly what a clean upload looks like, for a body that never went out.
+    // The shape the field exists for, and the one it is easiest to miss: an early-ack
+    // `200` whose *response* body then fails while the upload is still parked behind it.
+    // The response resolves through `isStreamError`, and attaching the promise only to
+    // the two success paths would mean `await response.requestBodySettled` gives
+    // `undefined` here - which is exactly what a clean upload looks like, for a body that
+    // never went out.
     const server = net.createServer((socket) => {
       socket.on('error', () => {
         // The teardown below reaches this side as a reset; nothing here asserts on it.
@@ -6787,14 +6796,14 @@ describe('NodeAdapter via HTTPClient', () => {
   test('an upload reset before the response body is in keeps the real status', async () => {
     const net = await import('node:net');
 
-    // The write-path `catch` handlers stand down on `didReceiveResponse` and leave the real
-    // status to the response path; `req.on('error')` did not, and an upload-side
-    // `ECONNRESET` fires both. `resolve` is first-call-wins, so whenever that error landed
-    // before the response body was fully in, the server's answer was replaced by a
-    // fabricated `{ status: 0, isTransportError: true }` - the same overlay the
-    // early-response handling exists to prevent, reached from the other entry point. The
-    // response here is deliberately left short of its `Content-Length` so the reset wins
-    // the race every run.
+    // The write-path `catch` handlers stand down on `didReceiveResponse` and leave the
+    // real status to the response path; `req.on('error')` must as well, since an
+    // upload-side `ECONNRESET` fires both. `resolve` is first-call-wins, so otherwise,
+    // whenever that error lands before the response body is fully in, the server's answer
+    // would be replaced by a fabricated `{ status: 0, isTransportError: true }` - the
+    // same overlay the early-response handling exists to prevent, reached from the other
+    // entry point. The response here is deliberately left short of its `Content-Length`
+    // so the reset wins the race every run.
     const server = net.createServer((socket) => {
       socket.on('error', () => {
         // The reset below reaches this side too.
@@ -6839,9 +6848,9 @@ describe('NodeAdapter via HTTPClient', () => {
   test('an abort while the upload is still running keeps a response already received', async () => {
     const net = await import('node:net');
 
-    // The other thing waiting for the writer broke. The answer is complete at once and the
-    // upload runs on behind it, so a signal that fires in that window must not turn a
-    // response the caller already has into an `AbortError`.
+    // The other thing that waiting for the writer would break. The answer is complete at once
+    // and the upload runs on behind it, so a signal that fires in that window must not
+    // turn a response the caller already has into an `AbortError`.
     const server = net.createServer((socket) => {
       socket.on('error', () => {
         // Only the assertions below decide the outcome.
@@ -7964,10 +7973,10 @@ describe('NodeAdapter — crl option (normalization)', () => {
   });
 
   test('a string with no CRL armour at all is refused', async () => {
-    // Previously passed through so Node could reject it with
-    // ERR_CRYPTO_OPERATION_FAILED. It is still refused, just with a message
-    // that names the actual problem. A non-PEM string is never valid here —
-    // DER belongs in a Buffer, which skips this path entirely.
+    // Refused here rather than passed through for Node to reject with
+    // ERR_CRYPTO_OPERATION_FAILED, so the message names the actual problem.
+    // A non-PEM string is never valid here — DER belongs in a Buffer, which
+    // skips this path entirely.
     let rejection: unknown;
 
     try {
@@ -8034,7 +8043,7 @@ describe('NodeAdapter — crl option (normalization)', () => {
     // lost or gained a hyphen still marks a CRL that was cut short, but it
     // matches no exact-string search — so the entry would be dropped and the
     // bundle would enforce silently with one CRL missing. Every one of these
-    // produced blocks.length === 1 and passed an exact-armour check.
+    // produces blocks.length === 1 and would pass an exact-armour check.
     const damaged = [
       '----BEGIN X509 CRL-----\nQkJCQg==', // one hyphen short
       '------BEGIN X509 CRL-----\nQkJCQg==', // one too many
@@ -8762,7 +8771,7 @@ test('rejects malformed initial CRLs before any request or retry', () => {
 
 test('a refreshed CRL that fails validation is a non-retryable adapter_error', async () => {
   // Whitespace passes the constructor's check; the refresh is what is malformed. It is
-  // normalized per request, and its failure used to be retried as a network error.
+  // normalized per request, and its failure must not be retried as a network error.
   const config: NodeAdapterConfig = { crl: getRevocationFixtures().crlEmpty };
   const adapter = new NodeAdapter(config);
   const requestSpy = spyOn(https, 'request');
@@ -9027,11 +9036,11 @@ test('a response arriving after the signal aborted does not call the streamRespo
 });
 
 test('PR review round 52: an aborted compressed download lets go of a sink whose destroy says nothing', async () => {
-  // The abort releases the decoded body, and a destroyed one delivered nothing more - not
-  // even the `'close'` a destroyed raw response still emits - so the pipe into the sink
-  // never settled and never took its listeners off. A hand-written sink whose `destroy()`
-  // emits no `'close'` of its own kept this request's `'drain'`, `'error'` and `'close'`
-  // listeners for good, one set per aborted download.
+  // The abort releases the decoded body, and a destroyed one delivers nothing more - not
+  // even the `'close'` a destroyed raw response still emits - so left to those events,
+  // the pipe into the sink would never settle or take its listeners off. A hand-written
+  // sink whose `destroy()` emits no `'close'` of its own would keep this request's
+  // `'drain'`, `'error'` and `'close'` listeners for good, one set per aborted download.
   const server = http.createServer((_req, res) => {
     res.writeHead(200, {
       'content-type': 'application/octet-stream',
@@ -9094,11 +9103,11 @@ test('PR review round 52: an aborted compressed download lets go of a sink whose
 
 test('PR review round 54: an early-ack upload of a large File part goes out in full while the server reads on', async () => {
   // Node and Bun stop emitting `'drain'` on a request whose response has ended while the
-  // upload has not, though each write's callback still runs. The writer waited for both,
-  // and every `File` chunk is larger than the request's high-water mark, so the first one
-  // written after the `200` had been read waited for good. Five seconds later the stall
-  // watchdog cut the body short - "stalled after the response arrived", on the host's
-  // `'error'` channel - with the server still reading it.
+  // upload has not, though each write's callback still runs. A writer waiting for both -
+  // and every `File` chunk is larger than the request's high-water mark - would wait for
+  // good on the first one written after the `200` had been read. Five seconds later the
+  // stall watchdog would cut the body short - "stalled after the response arrived", on
+  // the host's `'error'` channel - with the server still reading it.
   const fileSize = 16 * 1024 * 1024;
   let receivedBody:
     Promise<{ body: Buffer; contentLength: string }> | undefined;
@@ -9185,11 +9194,12 @@ test('PR review round 54: an early-ack upload of a large File part goes out in f
 
 test('PR review round 54: a FormData part whose getter throws in the sizing pass is refused as non-retryable', async () => {
   // The sizing pass reads the caller's `name`, `type` and `size` before any byte is
-  // written, and it was not guarded as the part's `stream()` is: a throw there reached
-  // the adapter untagged and settled as `status: 0` with `isTransportError`, so an
-  // idempotent `PUT` was retried to fail the same way each time. Called on the adapter
-  // directly: `HTTPClient` copies a `FormData` before sending it, and Bun's `append` turns
-  // a `File` subclass into a plain `File`, which would leave nothing here to throw.
+  // written, and is guarded as the part's `stream()` reads are: unguarded, a throw there
+  // would reach the adapter untagged and settle as `status: 0` with `isTransportError`, so an
+  // idempotent `PUT` would be retried to fail the same way each time. Called on the
+  // adapter directly: `HTTPClient` copies a `FormData` before sending it, and Bun's
+  // `append` turns a `File` subclass into a plain `File`, which would leave nothing here
+  // to throw.
   const failure = new Error('type getter failed');
 
   class ThrowingTypeFile extends File {
@@ -9252,10 +9262,10 @@ test('PR review round 54: a FormData part whose getter throws in the sizing pass
 });
 
 test('PR review round 54: the socket gets its full grace after a source read that ends just before a watchdog tick', async () => {
-  // The watchdog's window ran from its last tick, not from when the writer turned to the
-  // socket. A source read that ended a moment before the tick left the chunk it produced
-  // only that moment to be accepted, and the upload was destroyed as stalled with the
-  // socket given a fraction of its five seconds.
+  // Were the watchdog's window to run from its last tick, not from when the writer turned
+  // to the socket, a source read that ended a moment before the tick would leave the
+  // chunk it produced only that moment to be accepted, and the upload would be destroyed
+  // as stalled with the socket given a fraction of its five seconds.
   const SOURCE_DELAY_MS = 4_700;
   const SOCKET_DELAY_MS = 1_000;
   let fileChunks = 0;
@@ -9353,10 +9363,10 @@ for (const [label, contentEncoding] of [
 ] as const) {
   test(`PR review round 55: ${label} during an early-ack upload is not reported as an upload failure`, async () => {
     // The decoded body destroys its response when the body fails to decode, or when its
-    // coding chain is refused, and with the response still arriving that takes the socket -
-    // and the upload still running on it - down too. The writer's failure then reached the
-    // host's `'error'` channel as a late upload failure, for a connection this adapter had
-    // torn down itself.
+    // coding chain is refused, and with the response still arriving that takes the
+    // socket - and the upload still running on it - down too. Not recognised as this
+    // adapter's own, the writer's failure would then reach the host's `'error'` channel
+    // as a late upload failure, for a connection this adapter had torn down itself.
     const server = http.createServer((req, res) => {
       req.on('data', () => {
         req.pause();
@@ -9478,9 +9488,9 @@ test('PR review round 55: a decode failure on a body that arrived whole while a 
 
 test('PR review round 55: a reset while a stream factory sets up is reported as an upload failure, as it is for a buffered body', async () => {
   // A socket reset with the upload still running is the network's failure, and a reset
-  // on a buffered body put it on the host's `'error'` channel. The same reset while an
-  // async factory was still opening its sink was handled as this adapter's own teardown
-  // and said nothing.
+  // on a buffered body puts it on the host's `'error'` channel. The same reset while an
+  // async factory is still opening its sink must not be handled as this adapter's own
+  // teardown and say nothing.
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/octet-stream' });
     res.write('partial');
@@ -9542,9 +9552,9 @@ test('PR review round 55: a reset while a stream factory sets up is reported as 
 
 test('PR review round 55: an abort after the body arrived takes the pipe off a sink whose end never calls back', async () => {
   // A hand-written sink whose `end` has not called back, and whose `destroy()` emits no
-  // `'close'`: the abort destroyed it and answered the request, but the pipe waited for
-  // that `'close'` to settle, so its listeners stayed on the sink and the response task
-  // stayed pending for as long as the sink lived.
+  // `'close'`: the abort destroys it and answers the request, but a pipe that waited for
+  // that `'close'` to settle would leave its listeners on the sink and the response task
+  // pending for as long as the sink lived.
   const server = http.createServer((_req, res) => {
     res.end('the whole body');
   });
@@ -9619,8 +9629,8 @@ test('PR review round 55: an abort after the body arrived takes the pipe off a s
 });
 
 test('PR review round 55: the stall watchdog timer is cleared once an early-ack upload finishes', async () => {
-  // The watchdog armed as the early response closed was left pending when the writer
-  // finished. Its tick would only have returned, but until then it held the request's
+  // Left pending once the writer finishes, the watchdog armed as the early response
+  // closed would only return on its tick, but until then it would hold the request's
   // whole scope - the delivered response body among it - for up to five seconds.
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-length': '2' });
