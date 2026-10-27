@@ -1,6 +1,8 @@
 import {
   arrayBufferKindOf,
   readBinaryByteLength,
+  readTypedArrayBuffer,
+  readTypedArrayByteOffset,
 } from '../../internal/binary-view';
 
 /**
@@ -46,13 +48,13 @@ export function concatChunks(
 function isWholeOfPlainBuffer(chunk: Uint8Array, byteLength: number): boolean {
   if (
     Object.getPrototypeOf(chunk) !== Uint8Array.prototype ||
-    Reflect.get(Uint8Array.prototype, 'byteOffset', chunk) !== 0 ||
+    readTypedArrayByteOffset(chunk) !== 0 ||
     readBinaryByteLength(chunk) !== byteLength
   ) {
     return false;
   }
 
-  const buffer = Reflect.get(Uint8Array.prototype, 'buffer', chunk) as object;
+  const buffer = readTypedArrayBuffer(chunk);
 
   return (
     Object.getPrototypeOf(buffer) === ArrayBuffer.prototype &&

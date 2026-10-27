@@ -55,6 +55,16 @@ const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   'byteLength',
 )?.get;
 
+const TYPED_ARRAY_BUFFER = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  'buffer',
+)?.get;
+
+const TYPED_ARRAY_BYTE_OFFSET = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  'byteOffset',
+)?.get;
+
 const TYPED_ARRAY_LENGTH = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype) as object,
   'length',
@@ -86,6 +96,43 @@ const SHARED_ARRAY_BUFFER_BYTE_LENGTH =
         ?.get
     : undefined;
 /* eslint-enable @typescript-eslint/unbound-method */
+
+/**
+ * A typed array's `buffer`, read through the intrinsic getter rather than the value's own,
+ * which a subclass or an own property can override. Throws, as the getter does, for a
+ * value that is not a typed array.
+ */
+export function readTypedArrayBuffer(view: ArrayBufferView): ArrayBufferLike {
+  return Reflect.apply(
+    TYPED_ARRAY_BUFFER as () => unknown,
+    view,
+    [],
+  ) as ArrayBufferLike;
+}
+
+/** A typed array's `byteOffset`, read as {@link readTypedArrayBuffer} reads its buffer. */
+export function readTypedArrayByteOffset(view: ArrayBufferView): number {
+  return Reflect.apply(
+    TYPED_ARRAY_BYTE_OFFSET as () => unknown,
+    view,
+    [],
+  ) as number;
+}
+
+/**
+ * `view` as a plain `Uint8Array` over the same bytes - a view, not a copy - built from the
+ * intrinsic `buffer`, `byteOffset` and `byteLength` getters rather than the view's own,
+ * which a subclass or an own property can override. Throws for a value that is not a
+ * typed array, as those getters do, and for one over a detached buffer, as the
+ * `Uint8Array` constructor does.
+ */
+export function plainBytesView(view: ArrayBufferView): Uint8Array {
+  return new Uint8Array(
+    readTypedArrayBuffer(view),
+    readTypedArrayByteOffset(view),
+    Reflect.apply(TYPED_ARRAY_BYTE_LENGTH as () => unknown, view, []) as number,
+  );
+}
 
 /** Binary template lookup exposes numeric elements and intrinsic length, not expandos. */
 export function readBinaryTemplateMember(value: object, key: string): unknown {

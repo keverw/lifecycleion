@@ -25,6 +25,7 @@ import {
   asciiLowercase,
   hasNonHTTPWhitespaceEdge,
   trimHTTPWhitespace,
+  trimWhere,
 } from '../internal/ascii-text';
 
 export function safeParseURL(input: string): URL | null {
@@ -94,19 +95,10 @@ function isSpecialScheme(protocol: string): boolean {
  * header takes: in any other, they never saw the host the parser then decoded.
  */
 function toOriginText(text: string): string | undefined {
-  let cleaned = text.replace(/[\t\n\r]/g, '');
-  let start = 0;
-  let end = cleaned.length;
-
-  while (start < end && cleaned.charCodeAt(start) <= 0x20) {
-    start++;
-  }
-
-  while (end > start && cleaned.charCodeAt(end - 1) <= 0x20) {
-    end--;
-  }
-
-  cleaned = cleaned.slice(start, end);
+  const cleaned = trimWhere(
+    text.replace(/[\t\n\r]/g, ''),
+    (code) => code <= 0x20,
+  );
 
   // `scheme://` followed directly by the authority: the parser skips any further `/` or
   // `\` after a special scheme and ends its authority at `\` too, so `https:///ex%61mple.com`

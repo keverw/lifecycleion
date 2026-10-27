@@ -6368,12 +6368,19 @@ function getSignalCancelReason(signal: AbortSignal): string | undefined {
 }
 
 /**
- * A request URL's host as the credential-scope rule compares it: lowercased, and with a
- * fully qualified name's trailing dot dropped, so `evil.example.` is the same host the
- * server chose as `evil.example`, not the caller choosing a new one.
+ * A request URL's host as the credential-scope rule compares it: lowercased, and with
+ * every trailing dot dropped, so `evil.example.` and `evil.example..` are the same host
+ * the server chose as `evil.example`, not the caller choosing a new one.
  */
 function comparableHost(url: string): string {
-  return asciiLowercase(extractHostname(url)).replace(/\.$/, '');
+  const host = asciiLowercase(extractHostname(url));
+  let end = host.length;
+
+  while (end > 0 && host[end - 1] === '.') {
+    end--;
+  }
+
+  return host.slice(0, end);
 }
 
 /** Whether a phase's copy of a body failed; see `copyChainResultBody`. */

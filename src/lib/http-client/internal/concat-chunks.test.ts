@@ -47,4 +47,26 @@ describe('concatChunks', () => {
 
     expect(concatChunks([chunk], 3)).toBe(chunk);
   });
+
+  test('a lone chunk is judged by its internal slots, not its own properties', () => {
+    // A view one byte into its buffer, claiming to start at 0 over a buffer of its own.
+    const chunk = new Uint8Array([0, 1, 2, 3]).subarray(1);
+    Object.defineProperties(chunk, {
+      byteOffset: { value: 0 },
+      buffer: { value: new ArrayBuffer(3) },
+    });
+
+    const result = concatChunks([chunk], 3);
+
+    expect(result).not.toBe(chunk);
+    expect([...result]).toEqual([1, 2, 3]);
+  });
+
+  test('a lone empty chunk over a detached buffer is the result as it is', () => {
+    const buffer = new ArrayBuffer(0);
+    const chunk = new Uint8Array(buffer);
+    structuredClone(buffer, { transfer: [buffer] });
+
+    expect(concatChunks([chunk], 0)).toBe(chunk);
+  });
 });

@@ -40,6 +40,7 @@
  */
 
 import { types } from 'node:util';
+import { plainBytesView } from '../../internal/binary-view';
 import { markNonRetryableAdapterError } from './adapter-error';
 import { formEntries } from './form-entries';
 import type { AdapterProgressEvent } from '../types';
@@ -411,7 +412,7 @@ export async function serializeMultipartFormData(
             let bytes: Uint8Array;
 
             try {
-              bytes = toPlainBytes(chunk);
+              bytes = plainBytesView(chunk);
             } catch (error) {
               throw sourceReadFailure(error);
             }
@@ -512,35 +513,6 @@ export async function serializeMultipartFormData(
       `Request body source produced fewer bytes than its Content-Length: ${String(uploadedBytes)} of ${String(totalSize)}`,
     );
   }
-}
-
-/**
- * `chunk` as a plain `Uint8Array` over the same bytes - a view, not a copy - built from
- * `%TypedArray%.prototype`'s own `buffer`, `byteOffset` and `byteLength` getters rather
- * than the chunk's, which a subclass can override. Read when called rather than captured
- * at load, as this library reads built-ins everywhere: it defends against the caller's
- * values, not against built-ins replaced after import.
- */
-function toPlainBytes(chunk: Uint8Array): Uint8Array {
-  const typedArrayPrototype = Object.getPrototypeOf(
-    Uint8Array.prototype,
-  ) as object;
-  const readIntrinsic = (
-    key: 'buffer' | 'byteOffset' | 'byteLength',
-  ): unknown => {
-    const getter: unknown = Reflect.get(
-      Object.getOwnPropertyDescriptor(typedArrayPrototype, key) ?? {},
-      'get',
-    );
-
-    return Reflect.apply(getter as () => unknown, chunk, []);
-  };
-
-  return new Uint8Array(
-    readIntrinsic('buffer') as ArrayBuffer,
-    readIntrinsic('byteOffset') as number,
-    readIntrinsic('byteLength') as number,
-  );
 }
 
 async function cancelReaderQuietly(

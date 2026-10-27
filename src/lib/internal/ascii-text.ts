@@ -22,48 +22,51 @@ export function asciiLowercase(text: string): string {
   return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
 }
 
-/** Whether `char` is HTTP whitespace (tab, LF, CR, space), what `fetch` trims from a header value. */
-function isHTTPWhitespace(char: string | undefined): boolean {
-  return char === ' ' || char === '\t' || char === '\n' || char === '\r';
+/**
+ * `text` without the characters `isTrimmed` picks, by UTF-16 code unit, at either end. By
+ * index rather than a regex: a `[...]+$` branch rescans a run from each of its positions
+ * when the run does not end the string, so it takes seconds on 64 KB of spaces between
+ * two letters, and the strings trimmed here include a server's header values.
+ */
+export function trimWhere(
+  text: string,
+  isTrimmed: (code: number) => boolean,
+): string {
+  let start = 0;
+  let end = text.length;
+
+  while (start < end && isTrimmed(text.charCodeAt(start))) {
+    start++;
+  }
+
+  while (end > start && isTrimmed(text.charCodeAt(end - 1))) {
+    end--;
+  }
+
+  return text.slice(start, end);
+}
+
+/** Whether `code` is HTTP whitespace (tab, LF, CR, space), what `fetch` trims from a header value. */
+function isHTTPWhitespace(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
 }
 
 /**
  * `text` without the HTTP whitespace (tab, LF, CR, space) at either end, as a header
  * value's parts are trimmed: `trim()` would also take a no-break space and others.
- *
- * By index, not `/^[\t\n\r ]+|[\t\n\r ]+$/g`: that unanchored `$` branch rescans a
- * whitespace run from each of its positions when the run does not end the string, so it
- * takes seconds on a server's header value of 64 KB of spaces between two letters.
  */
 export function trimHTTPWhitespace(text: string): string {
-  let start = 0;
-  let end = text.length;
+  return trimWhere(text, isHTTPWhitespace);
+}
 
-  while (start < end && isHTTPWhitespace(text[start])) {
-    start++;
-  }
-
-  while (end > start && isHTTPWhitespace(text[end - 1])) {
-    end--;
-  }
-
-  return text.slice(start, end);
+/** Whether `code` is a space or a tab. */
+function isSpaceOrTab(code: number): boolean {
+  return code === 0x20 || code === 0x09;
 }
 
 /** `text` without leading and trailing spaces and tabs, the only whitespace RFC 6265bis trims. */
 export function trimSpacesAndTabs(text: string): string {
-  let start = 0;
-  let end = text.length;
-
-  while (start < end && (text[start] === ' ' || text[start] === '\t')) {
-    start++;
-  }
-
-  while (end > start && (text[end - 1] === ' ' || text[end - 1] === '\t')) {
-    end--;
-  }
-
-  return text.slice(start, end);
+  return trimWhere(text, isSpaceOrTab);
 }
 
 /** Whitespace `trim()` takes - any of it - at either end. */
