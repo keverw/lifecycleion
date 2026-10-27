@@ -309,41 +309,14 @@ describe('RequestInterceptorManager', () => {
     expect(phases).toEqual(['initial', 'retry']);
   });
 
-  test('empty phases filter — does not restrict matching', async () => {
+  test('an empty phases filter is refused, not read as every phase', () => {
     const mgr = new RequestInterceptorManager();
-    const phases: string[] = [];
 
-    mgr.add(
-      (req, phase) => {
-        phases.push(phase.type);
-        return req;
-      },
-      { phases: [] },
+    // Omitting `phases` gives `['initial']`, so reading `[]` as every phase would turn
+    // an interceptor whose phase list came out empty loose on retry and redirect hops.
+    expect(() => mgr.add((request) => request, { phases: [] })).toThrow(
+      "HTTPClient request interceptor filter phases is empty; omit it for the default phases ('initial'), or list each of 'initial', 'retry', 'redirect' to match every phase",
     );
-
-    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
-    await mgr.snapshot()(
-      makeRequest(),
-      {
-        type: 'retry',
-        attempt: 2,
-        maxAttempts: 3,
-      },
-      makeContext(),
-    );
-    await mgr.snapshot()(
-      makeRequest(),
-      {
-        type: 'redirect',
-        hop: 1,
-        from: 'a',
-        to: 'b',
-        statusCode: 301,
-      },
-      makeContext(),
-    );
-
-    expect(phases).toEqual(['initial', 'retry', 'redirect']);
   });
 
   test('interceptor can cancel by returning { cancel: true }', async () => {
@@ -379,6 +352,97 @@ describe('RequestInterceptorManager', () => {
 
     await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
     expect(calls).toEqual([1]);
+  });
+
+  test.each([1, 2])(
+    'a cancel that lands while interceptor %d of 2 runs ends the chain with a cancel of its own',
+    async (cancellingInterceptor) => {
+      const mgr = new RequestInterceptorManager();
+      const calls: number[] = [];
+      let isCancelled = false;
+      for (const interceptor of [1, 2]) {
+        mgr.add((req) => {
+          calls.push(interceptor);
+          if (interceptor === cancellingInterceptor) {
+            isCancelled = true;
+          }
+          return { ...req, requestURL: 'https://other.example.com/' };
+        });
+      }
+
+      const result = await mgr.snapshot()(
+        makeRequest(),
+        { type: 'initial' },
+        makeContext(),
+        { isCancelled: () => isCancelled },
+      );
+
+      // Not the interceptor's request: the cancel says what happened, and carries no
+      // reason of its own, as the caller reads that from whatever cancelled.
+      expect(isInterceptorCancel(result)).toBe(true);
+      expect(result).toEqual({ cancel: true });
+      expect(calls).toEqual(cancellingInterceptor === 1 ? [1] : [1, 2]);
+    },
+  );
+
+  test.each(['return undefined', 'throw'] as const)(
+    'a cancel made while an interceptor runs is answered before its result is read (%s)',
+    async (ending) => {
+      const mgr = new RequestInterceptorManager();
+      let isCancelled = false;
+      const failure = new Error('refresh failed');
+      mgr.add(() => {
+        isCancelled = true;
+        if (ending === 'throw') {
+          throw failure;
+        }
+        return undefined as unknown as InterceptedRequest;
+      });
+      const chain = mgr.snapshot();
+
+      const result = await chain(
+        makeRequest(),
+        { type: 'initial' },
+        makeContext(),
+        { isCancelled: () => isCancelled },
+      );
+
+      expect(isInterceptorCancel(result)).toBe(true);
+
+      // Without the cancel, each is the failure it is.
+      let failed: unknown;
+      try {
+        await chain(makeRequest(), { type: 'initial' }, makeContext(), {
+          isCancelled: () => false,
+        });
+      } catch (error) {
+        failed = error;
+      }
+      if (ending === 'throw') {
+        expect(failed).toBe(failure);
+      } else {
+        expect(failed).toBeInstanceOf(TypeError);
+      }
+    },
+  );
+
+  test('a chain that starts cancelled runs no interceptor and answers a cancel', async () => {
+    const mgr = new RequestInterceptorManager();
+    let calls = 0;
+    mgr.add((req) => {
+      calls++;
+      return req;
+    });
+
+    const result = await mgr.snapshot()(
+      makeRequest(),
+      { type: 'initial' },
+      makeContext(),
+      { isCancelled: () => true },
+    );
+
+    expect(isInterceptorCancel(result)).toBe(true);
+    expect(calls).toBe(0);
   });
 
   test('phase context is passed to the interceptor', async () => {

@@ -78,8 +78,10 @@ import type {
   AdapterType,
   HTTPAdapter,
   HTTPMethod,
+  HTTPResponse,
   InterceptedRequest,
   InterceptorPhaseName,
+  RequestInterceptor,
 } from './types';
 
 /** A cookie jar whose storing of a response fails. */
@@ -2291,7 +2293,7 @@ test('cancelAll does not count or cancel a request started while it runs', async
   expect((await cleanup)?.isCancelled).toBe(false);
 });
 
-test('an empty filter list is refused when the callback is added, except phases', () => {
+test('an empty filter list is refused when the callback is added, phases included', () => {
   const client = new HTTPClient();
   for (const field of [
     'statusCodes',
@@ -2301,17 +2303,20 @@ test('an empty filter list is refused when the callback is added, except phases'
     'contentTypes',
     'contentTypeHeaders',
     'bodyContainsKeys',
+    'phases',
   ]) {
     expect(() => client.addResponseObserver(() => {}, { [field]: [] })).toThrow(
       /empty/,
     );
   }
-  expect(() =>
-    client.addRequestInterceptor((request) => request, { hosts: [] }),
-  ).toThrow(/empty/);
-
-  const remove = client.addResponseObserver(() => {}, { phases: [] });
-  remove();
+  for (const field of ['hosts', 'phases']) {
+    expect(() =>
+      client.addRequestInterceptor((request) => request, { [field]: [] }),
+    ).toThrow(/empty/);
+  }
+  expect(() => client.addErrorObserver(() => {}, { phases: [] })).toThrow(
+    /empty/,
+  );
 });
 
 test('MockAdapter omits a HEAD response body whatever the method case', async () => {
@@ -2858,6 +2863,229 @@ test('a cancel that lands while interceptors or redirect observers run ends the 
     expect(response.isCancelled).toBe(true);
     expect(builder.state).toBe('cancelled');
     expect(sent).toHaveLength(phase === 'initial' ? 0 : 1);
+  }
+});
+
+/**
+ * Each interceptor phase, the path that reaches it, and the URL a request ended in that
+ * phase before dispatch reports: the target as it was before the phase's interceptors ran.
+ */
+const INTERCEPTOR_PHASE_CASES = [
+  ['initial', '/x', 'http://api.test/x'],
+  ['retry', '/flaky', 'http://api.test/flaky'],
+  ['redirect', '/r', 'http://api.test/b'],
+] as const;
+
+/**
+ * Send a request - with `body` as JSON, when given - through `phase` with `interceptors`
+ * registered for it, to an adapter that redirects `/r` to `/b` with a `307`, so a body is
+ * replayed, and answers `/flaky` with a `503` the first time, and report what was sent and
+ * what the error observers were handed.
+ */
+async function sendThroughInterceptorPhase(
+  phase: InterceptorPhaseName,
+  path: string,
+  interceptors: Array<
+    (
+      request: InterceptedRequest,
+      builder: ReturnType<HTTPClient['get']>,
+    ) => ReturnType<RequestInterceptor>
+  >,
+  body?: Record<string, unknown>,
+): Promise<{
+  response: HTTPResponse<unknown>;
+  builder: ReturnType<HTTPClient['get']>;
+  sent: AdapterRequest[];
+  observed: Array<{
+    requestURL: string;
+    headers: Record<string, unknown>;
+    rawBody: unknown;
+  }>;
+}> {
+  const sent: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request: AdapterRequest) => {
+      sent.push(request);
+      return Promise.resolve<AdapterResponse>(
+        request.requestURL.endsWith('/r')
+          ? { status: 307, headers: { location: '/b' }, body: null }
+          : request.requestURL.endsWith('/flaky') && sent.length === 1
+            ? { status: 503, headers: {}, body: null }
+            : { status: 200, headers: {}, body: null },
+      );
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+  });
+  const observed: Array<{
+    requestURL: string;
+    headers: Record<string, unknown>;
+    rawBody: unknown;
+  }> = [];
+  client.addErrorObserver((_error, request) => {
+    observed.push({
+      requestURL: request.requestURL,
+      headers: request.headers,
+      rawBody: request.rawBody,
+    });
+  });
+  // eslint-disable-next-line prefer-const -- assigned after the callbacks that read it
+  let builder: ReturnType<HTTPClient['get']>;
+  for (const interceptor of interceptors) {
+    client.addRequestInterceptor((request) => interceptor(request, builder), {
+      phases: [phase],
+    });
+  }
+  builder = body === undefined ? client.get(path) : client.get(path).json(body);
+  const response = await builder.send();
+
+  return { response, builder, sent, observed };
+}
+
+test('a cancel that lands mid-chain reports the request as it was before the interceptors ran', async () => {
+  for (const [phase, path, reportedURL] of INTERCEPTOR_PHASE_CASES) {
+    // The first cancels, and hands on a request the client would refuse to send; the
+    // second never runs. The chain ends cancelled, so that request is never read.
+    const { response, builder, sent, observed } =
+      await sendThroughInterceptorPhase(phase, path, [
+        (request, builder) => {
+          builder.cancel('stop');
+          return { ...request, requestURL: 'ftp://api.test/moved' };
+        },
+        (request) => request,
+      ]);
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.code).toBe('cancelled');
+    expect(builder.error?.cancelReason).toBe('stop');
+    expect(response.requestURL).toBe(reportedURL);
+    expect(observed.map((request) => request.requestURL)).toEqual([
+      reportedURL,
+    ]);
+    expect(sent).toHaveLength(phase === 'initial' ? 0 : 1);
+  }
+});
+
+test('an interceptor that edits the request in place and is then cancelled leaves the reported URL and headers as the client built them', async () => {
+  for (const [phase, path, reportedURL] of INTERCEPTOR_PHASE_CASES) {
+    const { response, builder, sent, observed } =
+      await sendThroughInterceptorPhase(
+        phase,
+        path,
+        [
+          async (request, builder) => {
+            request.headers.authorization = 'SECRET';
+            request.requestURL = 'http://api.test/moved';
+            (request.body as Record<string, unknown>).edited = true;
+            builder.cancel('stop');
+            await Promise.resolve();
+            return request;
+          },
+        ],
+        { a: 1 },
+      );
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('stop');
+    expect(response.requestURL).toBe(reportedURL);
+    expect(observed).toHaveLength(1);
+    expect(observed[0].requestURL).toBe(reportedURL);
+    expect(observed[0].headers).not.toHaveProperty('authorization');
+    // The body is copied for the retry and redirect phases' interceptors, not the
+    // initial phase's, which are handed the builder's own.
+    expect(observed[0].rawBody).toEqual(
+      phase === 'initial' ? { a: 1, edited: true } : { a: 1 },
+    );
+    // Nor did the edit reach the hop that answered, in the redirect phase.
+    expect(sent.map((request) => 'authorization' in request.headers)).toEqual(
+      phase === 'initial' ? [] : [false],
+    );
+  }
+});
+
+test('an interceptor that edits the request in place and returns it sends the edit', async () => {
+  for (const [phase, path] of INTERCEPTOR_PHASE_CASES) {
+    const { response, sent } = await sendThroughInterceptorPhase(phase, path, [
+      (request) => {
+        request.headers.authorization = 'TOKEN';
+        request.body = 'edited';
+        request.method = 'POST';
+        return request;
+      },
+    ]);
+
+    expect(response.isFailed).toBe(false);
+    const last = sent[sent.length - 1];
+    expect(last.headers.authorization).toBe('TOKEN');
+    expect(last.method).toBe('POST');
+    expect(last.body).toBe('edited');
+  }
+});
+
+test('a cancel made while an interceptor runs ends the request cancelled, whatever it then returns or throws', async () => {
+  for (const ending of ['return undefined', 'throw'] as const) {
+    for (const [phase, path, reportedURL] of INTERCEPTOR_PHASE_CASES) {
+      const { response, builder, observed } = await sendThroughInterceptorPhase(
+        phase,
+        path,
+        [
+          (request, builder) => {
+            builder.cancel('stop');
+            request.requestURL = 'https://other.example/';
+            if (ending === 'throw') {
+              throw new Error('refresh failed');
+            }
+            return undefined as unknown as InterceptedRequest;
+          },
+        ],
+      );
+
+      // A cancel, not the `interceptor_error` the value or the throw would be alone.
+      expect(response.isCancelled).toBe(true);
+      expect(builder.error?.code).toBe('cancelled');
+      expect(builder.error?.cancelReason).toBe('stop');
+      expect(builder.error?.cause).toBeUndefined();
+      expect(response.requestURL).toBe(reportedURL);
+      expect(observed.map((request) => request.requestURL)).toEqual([
+        reportedURL,
+      ]);
+    }
+  }
+});
+
+test("a cancel made while the chain's result is copied ends the request as a cancel, reported as the client built it", async () => {
+  for (const [phase, path, reportedURL] of INTERCEPTOR_PHASE_CASES) {
+    const { response, builder, observed } = await sendThroughInterceptorPhase(
+      phase,
+      path,
+      [
+        (_request, builder) => ({
+          requestURL: 'http://api.test/other',
+          method: 'GET',
+          headers: {},
+          get body(): unknown {
+            builder.cancel('stop');
+            throw new Error('body read failed');
+          },
+        }),
+      ],
+    );
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.code).toBe('cancelled');
+    expect(builder.error?.cancelReason).toBe('stop');
+    expect(response.requestURL).toBe(reportedURL);
+    expect(response.redirectHistory).toEqual(
+      phase === 'redirect' ? [reportedURL] : [],
+    );
+    expect(observed.map((request) => request.requestURL)).toEqual([
+      reportedURL,
+    ]);
   }
 });
 
@@ -14855,6 +15083,8 @@ test('PR review round 72b: an interceptor that edits the body it is handed in pl
 });
 
 test('PR review round 72b: a request an interceptor edits in place and then ends is reported with its edit', async () => {
+  // The initial phase hands its interceptors the builder's own body, so an edit made in
+  // place is in the request it reports.
   for (const end of ['throw', 'cancel'] as const) {
     const { adapter, sent } = roundSeventyTwoBAdapter([]);
     const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
@@ -14875,6 +15105,29 @@ test('PR review round 72b: a request an interceptor edits in place and then ends
     expect(sent).toEqual([]);
     expect(reported).toEqual(['{"a":1,"edited":true}', { a: 1, edited: true }]);
   }
+
+  // Returned and then refused: the result is reported, its text read from the edited
+  // body rather than the text of the copy it was handed.
+  const { adapter, sent } = roundSeventyTwoBAdapter([]);
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const reported: unknown[] = [];
+  client.addErrorObserver((error, request) => {
+    reported.push(error.code, request.body, request.rawBody);
+  });
+  client.addRequestInterceptor((request) => {
+    (request.body as Record<string, unknown>).edited = true;
+    request.method = 'CONNECT';
+    return request;
+  });
+
+  await client.post('/x').json({ a: 1 }).send();
+
+  expect(sent).toEqual([]);
+  expect(reported).toEqual([
+    'interceptor_error',
+    '{"a":1,"edited":true}',
+    { a: 1, edited: true },
+  ]);
 });
 
 test('PR review round 72b: a JSON body is serialized once, when it is handed over, however many attempts send or replay it', async () => {

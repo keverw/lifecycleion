@@ -341,32 +341,12 @@ describe('ResponseObserverManager', () => {
     expect(phases).toEqual(['redirect', 'final']);
   });
 
-  test('empty phases filter — does not restrict matching', async () => {
+  test('an empty phases filter is refused, not read as every phase', () => {
     const mgr = new ResponseObserverManager();
-    const phases: string[] = [];
 
-    mgr.add(
-      (_, _req, phase) => {
-        phases.push(phase.type);
-      },
-      { phases: [] },
+    expect(() => mgr.add(() => {}, { phases: [] })).toThrow(
+      "HTTPClient response observer filter phases is empty; omit it for the default phases ('final'), or list each of 'retry', 'redirect', 'final' to match every phase",
     );
-
-    await mgr.snapshot()(makeResponse(), makeRequest(), {
-      type: 'retry',
-      attempt: 1,
-      maxAttempts: 3,
-    });
-    await mgr.snapshot()(makeResponse(), makeRequest(), {
-      type: 'redirect',
-      hop: 1,
-      from: 'a',
-      to: 'b',
-      statusCode: 301,
-    });
-    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
-
-    expect(phases).toEqual(['retry', 'redirect', 'final']);
   });
 });
 
@@ -502,26 +482,12 @@ describe('ErrorObserverManager', () => {
     expect(phases).toEqual(['final', 'retry', 'final']);
   });
 
-  test('empty phases filter — does not restrict matching', async () => {
+  test('an empty phases filter is refused, not read as every phase', () => {
     const mgr = new ErrorObserverManager();
-    const phases: string[] = [];
 
-    mgr.add(
-      (_, _req, phase) => {
-        phases.push(phase.type);
-      },
-      { phases: [] },
+    expect(() => mgr.add(() => {}, { phases: [] })).toThrow(
+      "HTTPClient error observer filter phases is empty; omit it for the default phases ('final'), or list each of 'retry', 'final' to match every phase",
     );
-
-    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
-    await mgr.snapshot()(makeError(), makeRequest(), {
-      type: 'retry',
-      attempt: 2,
-      maxAttempts: 3,
-    });
-    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
-
-    expect(phases).toEqual(['final', 'retry', 'final']);
   });
 });
 

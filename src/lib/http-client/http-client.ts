@@ -211,6 +211,37 @@ function isBodyCopyFailure(copy: BodyCopyOutcome, error: unknown): boolean {
   return copy.didFail && !methodRefusals.has(error as Error);
 }
 
+/** How a phase's interceptor run ended; see `endInterceptorPhase`. */
+type InterceptorPhaseEnd =
+  | { isCancelled: false; request: ResolvedRequest }
+  | { isCancelled: true; cancelReason: string | undefined };
+
+/**
+ * How a phase's interceptor run ends, read once the phase has its result: cancelled when
+ * the chain answered a cancel or the request was cancelled - while the interceptors ran,
+ * or while the phase copied and checked their result - and otherwise with the request to
+ * send. `result` is `undefined` when that copy or check failed after the cancel landed,
+ * which ends the phase as the cancel, not as the failure. Each phase reports a cancel
+ * from the request it held before its interceptors ran. A `cancel()` made first - one
+ * that answered `'cancelled'` - keeps its reason, or its lack of one, over an
+ * interceptor's.
+ */
+function endInterceptorPhase(
+  result: ResolvedRequest | InterceptorCancel | undefined,
+  cancelSignal: AbortSignal,
+): InterceptorPhaseEnd {
+  if (cancelSignal.aborted) {
+    return {
+      isCancelled: true,
+      cancelReason: getSignalCancelReason(cancelSignal),
+    };
+  }
+  if (result === undefined || isInterceptorCancel(result)) {
+    return { isCancelled: true, cancelReason: result?.reason };
+  }
+  return { isCancelled: false, request: result };
+}
+
 /** The headers carried across a cross-origin redirect (see `_sanitizeRedirectRequest`). */
 const CROSS_ORIGIN_SAFE_HEADERS: ReadonlySet<string> = new Set([
   'accept',
@@ -1023,8 +1054,9 @@ export class BaseHTTPClient {
         // If none did, the refusal is still the caller's own, reported as it would be with
         // no interceptor registered.
         let callerMethodRefusal: Error | undefined;
-        // Read now: the interceptors are handed this very object, and one may rewrite it
-        // in place before the comparison below.
+        // Read from the request the client built, of which the interceptors are handed a
+        // copy - its own fields and header record, the same body (see
+        // `handedRequestPreparer`).
         const callerMethod = interceptedRequest.method;
         const hasCallerBody = hasRequestBody(interceptedRequest.body);
         try {
@@ -1041,9 +1073,17 @@ export class BaseHTTPClient {
 
         // Run interceptors (initial phase)
         const initialPhase: InterceptorPhase = { type: 'initial' };
-        let interceptResult: ResolvedRequest | InterceptorCancel;
+        // Left unset by a failure that a cancel made first turns into that cancel.
+        let interceptResult: ResolvedRequest | InterceptorCancel | undefined;
         let initialRequestCandidate: InterceptedRequest = finalRequest;
-        const initialBodyCopy: BodyCopyOutcome = { didFail: false };
+        // The interceptors are handed a copy of the request with its own header record and
+        // the same body (see `handedRequestPreparer`), so a cancel or a failure below
+        // reports `finalRequest` with the URL, method and headers the client built, and the
+        // body as an interceptor may have edited it in place.
+        const initialBodyCopy: HandedBodyCopy = {
+          isTaken: false,
+          didFail: false,
+        };
 
         try {
           const initialRun = await this._runInterceptors(
@@ -1059,6 +1099,10 @@ export class BaseHTTPClient {
             (failed) => {
               initialRequestCandidate = failed;
             },
+            handedRequestPreparer(initialBodyCopy, {
+              headers: true,
+              body: false,
+            }),
           );
 
           // Taken for the rest of the phase through `snapshotInterceptedRequest`. A
@@ -1095,100 +1139,94 @@ export class BaseHTTPClient {
             this._assertRequestBodyFitsMethod(interceptResult);
           }
         } catch (error) {
-          // A cancel made before the failure - by the interceptor that then threw, say -
-          // told its caller it cancelled the request, so it ends cancelled.
-          const isCancelled = cancelSignal.aborted;
-          const response = this._buildResponse<T>({
-            adapterResponse: null,
-            requestID,
-            wasCancelled: isCancelled,
-            wasTimeout: false,
-            adapterType: this._adapterType,
-            initialURL: url,
-            // The interceptor's request may be what failed - a `requestURL` getter
-            // that throws - so its URL is read best-effort, falling back to the
-            // request's own, rather than turning this into a `request_setup_error`.
-            requestURL: readStringMember(
-              initialRequestCandidate,
-              'requestURL',
-              url,
-            ),
-            redirectHistory: [],
-            isNetworkErrorOverride: false,
-          });
-
-          // A method refusal the caller's own request already had, which no interceptor
-          // changed - same method, and for the GET and HEAD rule a body or none as
-          // before; a CONNECT, TRACE or TRACK is refused whatever its body - is the
-          // caller's mistake, reported as the `request_setup_error` it is with no
-          // interceptor registered.
-          const isCallersOwnRefusal =
-            callerMethodRefusal !== undefined &&
-            methodRefusals.has(error as Error) &&
-            readStringMember(initialRequestCandidate, 'method', '') ===
-              callerMethod &&
-            (!bodyMethodRefusals.has(error as Error) ||
-              hasRequestBody(
-                readObjectMember(initialRequestCandidate, 'body'),
-              ) === hasCallerBody);
-          // So is a body the interceptors returned that cannot be copied (see
-          // `isBodyCopyFailure`).
-          const isSetupError =
-            isCallersOwnRefusal || isBodyCopyFailure(initialBodyCopy, error);
-          const normalizedError = isCancelled
-            ? this._makeError(
-                response,
-                requestID,
-                false,
-                undefined,
-                undefined,
-                getSignalCancelReason(cancelSignal),
-              )
-            : this._makeError(
-                response,
-                requestID,
-                false,
-                isSetupError ? 'request_setup_error' : 'interceptor_error',
-                normalizeError(error),
-              );
-
-          // And counted as it is there: `0`, a setup error before any attempt, not the
-          // `null` of a request the interceptors ended.
-          if (!isCancelled && isSetupError) {
-            callbacks.setAttemptCount(0);
-          }
-
-          callbacks.setError(normalizedError);
-          trackedCallbacks.setState(isCancelled ? 'cancelled' : 'failed');
-          callbacks.setResponse(response);
-
-          await this._runErrorObservers(
-            normalizedError,
-            this._bestEffortAttemptRequestFromPending(
-              initialRequestCandidate,
-              attemptLimits,
+          // A cancel made before the failure - while the chain's result was copied, by a
+          // getter that cancelled and then threw, say - told its caller it cancelled the
+          // request, so it ends cancelled, as the cancel below ends it: reported from
+          // `finalRequest`, not from what the interceptors returned. (The chain answers a
+          // cancel itself for an interceptor that cancelled and then threw.)
+          if (!cancelSignal.aborted) {
+            const response = this._buildResponse<T>({
+              adapterResponse: null,
               requestID,
-              // The URL the response and error name, so a host filter agrees with them.
-              { fallbackURL: url },
-              // A body that failed to copy is not read a second time; it is reported as
-              // it came.
-              initialBodyCopy.didFail ? 'unbuildable' : undefined,
-            ),
-            {
-              type: 'final',
-            },
-          );
+              wasCancelled: false,
+              wasTimeout: false,
+              adapterType: this._adapterType,
+              initialURL: url,
+              // The interceptor's request may be what failed - a `requestURL` getter
+              // that throws - so its URL is read best-effort, falling back to the
+              // request's own, rather than turning this into a `request_setup_error`.
+              requestURL: readStringMember(
+                initialRequestCandidate,
+                'requestURL',
+                url,
+              ),
+              redirectHistory: [],
+              isNetworkErrorOverride: false,
+            });
 
-          return response;
+            // A method refusal the caller's own request already had, which no
+            // interceptor changed - same method, and for the GET and HEAD rule a body or
+            // none as before; a CONNECT, TRACE or TRACK is refused whatever its body - is
+            // the caller's mistake, reported as the `request_setup_error` it is with no
+            // interceptor registered.
+            const isCallersOwnRefusal =
+              callerMethodRefusal !== undefined &&
+              methodRefusals.has(error as Error) &&
+              readStringMember(initialRequestCandidate, 'method', '') ===
+                callerMethod &&
+              (!bodyMethodRefusals.has(error as Error) ||
+                hasRequestBody(
+                  readObjectMember(initialRequestCandidate, 'body'),
+                ) === hasCallerBody);
+            // So is a body the interceptors returned that cannot be copied (see
+            // `isBodyCopyFailure`).
+            const isSetupError =
+              isCallersOwnRefusal || isBodyCopyFailure(initialBodyCopy, error);
+            const normalizedError = this._makeError(
+              response,
+              requestID,
+              false,
+              isSetupError ? 'request_setup_error' : 'interceptor_error',
+              normalizeError(error),
+            );
+
+            // And counted as it is there: `0`, a setup error before any attempt, not the
+            // `null` of a request the interceptors ended.
+            if (isSetupError) {
+              callbacks.setAttemptCount(0);
+            }
+
+            callbacks.setError(normalizedError);
+            trackedCallbacks.setState('failed');
+            callbacks.setResponse(response);
+
+            await this._runErrorObservers(
+              normalizedError,
+              this._bestEffortAttemptRequestFromPending(
+                initialRequestCandidate,
+                attemptLimits,
+                requestID,
+                // The URL the response and error name, so a host filter agrees with
+                // them.
+                { fallbackURL: url },
+                // A body that failed to copy is not read a second time; it is reported
+                // as it came.
+                initialBodyCopy.didFail ? 'unbuildable' : undefined,
+              ),
+              {
+                type: 'final',
+              },
+            );
+
+            return response;
+          }
         }
 
         // A cancel that landed while the interceptors ran - `cancelAll()` during an
         // awaited token refresh, say - ends the request here as an interceptor's cancel
         // does: before any attempt begins.
-        if (isInterceptorCancel(interceptResult) || cancelSignal.aborted) {
-          const interceptorReason = isInterceptorCancel(interceptResult)
-            ? interceptResult.reason
-            : undefined;
+        const initialEnd = endInterceptorPhase(interceptResult, cancelSignal);
+        if (initialEnd.isCancelled) {
           const cancelledResponse = this._buildResponse<T>({
             adapterResponse: null,
             requestID,
@@ -1206,11 +1244,7 @@ export class BaseHTTPClient {
             false,
             undefined,
             undefined,
-            // A `cancel()` made first - one that returned `'cancelled'` - keeps its reason, or
-            // its lack of one.
-            cancelSignal.aborted
-              ? getSignalCancelReason(cancelSignal)
-              : interceptorReason,
+            initialEnd.cancelReason,
           );
           callbacks.setError(error);
           trackedCallbacks.setState('cancelled');
@@ -1222,8 +1256,7 @@ export class BaseHTTPClient {
               finalRequest,
               attemptLimits,
               requestID,
-              // The URL the response names: `finalRequest` was handed to the
-              // interceptors, which could have rewritten it before cancelling.
+              // The URL the response names.
               { reportedURL: url },
             ),
             {
@@ -1234,7 +1267,7 @@ export class BaseHTTPClient {
           return cancelledResponse;
         }
 
-        finalRequest = interceptResult;
+        finalRequest = initialEnd.request;
 
         // Cookie header is not merged here: _dispatchRequestAttempts applies the jar on
         // every adapter attempt (first try and retries) after internal + interceptor headers.
@@ -1694,13 +1727,15 @@ export class BaseHTTPClient {
             // for the new target (e.g. refresh auth tokens). Retry-phase
             // interceptors run inside _dispatchRequestAttempts if the hop itself
             // needs retrying.
-            let redirectIntercept: ResolvedRequest | InterceptorCancel;
+            // Left unset by a failure that a cancel made first turns into that cancel.
+            let redirectIntercept:
+              ResolvedRequest | InterceptorCancel | undefined;
             let failedRedirectRequest: InterceptedRequest = redirectRequest;
             let redirectInterceptURL = redirectURL;
-            // The interceptors are handed a copy of the hop's body, as the retry phase's
-            // are (see `bodyCopyPreparer`): the hop's own is the body the hop that
-            // answered was sent from, kept as it was for the reports a cancel or a failure
-            // here makes, and a runtime's `fetch` may still hold its bytes.
+            // The interceptors are handed copies of the hop's headers and body (see
+            // `handedRequestPreparer`): the hop's own is the request
+            // the hop that answered was sent with, kept as it was for the reports a cancel
+            // or a failure here makes, and a runtime's `fetch` may still hold its bytes.
             const redirectBodyCopy: HandedBodyCopy = {
               isTaken: false,
               didFail: false,
@@ -1723,7 +1758,10 @@ export class BaseHTTPClient {
                 (failed) => {
                   failedRedirectRequest = failed;
                 },
-                bodyCopyPreparer(redirectBodyCopy),
+                handedRequestPreparer(redirectBodyCopy, {
+                  headers: true,
+                  body: true,
+                }),
               );
               if (isInterceptorCancel(redirectRunResult)) {
                 redirectIntercept = redirectRunResult;
@@ -1766,52 +1804,57 @@ export class BaseHTTPClient {
                 this._assertRequestBodyFitsMethod(redirectIntercept);
               }
             } catch (error) {
-              observerRequest = this._bestEffortAttemptRequestFromPending(
-                failedRedirectRequest,
-                attemptLimits,
-                requestID,
-                { fallbackURL: redirectURL },
-                // See the initial phase's.
-                redirectBodyCopy.didFail ? 'unbuildable' : undefined,
-              );
-              response = this._buildResponse<T>({
-                adapterResponse: null,
-                requestID,
-                wasCancelled: false,
-                wasTimeout: false,
-                adapterType: this._adapterType,
-                initialURL: initialRequestURL,
-                // The interceptor's request may be what failed; see the initial phase.
-                requestURL: readStringMember(
+              // A cancel made before the failure ends the hop as the cancel below does,
+              // as the initial phase's does; see there.
+              if (!cancelSignal.aborted) {
+                observerRequest = this._bestEffortAttemptRequestFromPending(
                   failedRedirectRequest,
-                  'requestURL',
-                  redirectURL,
-                ),
-                redirectHistory: nextRedirectHistory,
-                undispatchedRedirect: {
-                  url: detectedTargetURL,
-                  isRecorded: true,
-                },
-                isNetworkErrorOverride: false,
-              });
+                  attemptLimits,
+                  requestID,
+                  { fallbackURL: redirectURL },
+                  // See the initial phase's.
+                  redirectBodyCopy.didFail ? 'unbuildable' : undefined,
+                );
+                response = this._buildResponse<T>({
+                  adapterResponse: null,
+                  requestID,
+                  wasCancelled: false,
+                  wasTimeout: false,
+                  adapterType: this._adapterType,
+                  initialURL: initialRequestURL,
+                  // The interceptor's request may be what failed; see the initial phase.
+                  requestURL: readStringMember(
+                    failedRedirectRequest,
+                    'requestURL',
+                    redirectURL,
+                  ),
+                  redirectHistory: nextRedirectHistory,
+                  undispatchedRedirect: {
+                    url: detectedTargetURL,
+                    isRecorded: true,
+                  },
+                  isNetworkErrorOverride: false,
+                });
 
-              // A body that could not be copied is the body's failure; see
-              // `isBodyCopyFailure`.
-              errorCode = isBodyCopyFailure(redirectBodyCopy, error)
-                ? 'request_setup_error'
-                : 'interceptor_error';
-              adapterCause = normalizeError(error);
+                // A body that could not be copied is the body's failure; see
+                // `isBodyCopyFailure`.
+                errorCode = isBodyCopyFailure(redirectBodyCopy, error)
+                  ? 'request_setup_error'
+                  : 'interceptor_error';
+                adapterCause = normalizeError(error);
 
-              break;
+                break;
+              }
             }
 
             // A cancel that landed while they ran ends the hop as theirs does.
-            if (
-              isInterceptorCancel(redirectIntercept) ||
-              cancelSignal.aborted
-            ) {
-              // The target as it was before the interceptors ran, not re-read from the
-              // request they were handed, which they may have changed.
+            const redirectEnd = endInterceptorPhase(
+              redirectIntercept,
+              cancelSignal,
+            );
+            if (redirectEnd.isCancelled) {
+              // The target as it was before the interceptors ran, not re-read from what
+              // they returned.
               const cancelledRequestURL = redirectTargetURL;
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 redirectRequest,
@@ -1820,12 +1863,7 @@ export class BaseHTTPClient {
                 // See the initial phase's cancel.
                 { reportedURL: redirectTargetURL },
               );
-              // As the initial phase's: an earlier `cancel()` keeps its reason.
-              const redirectCancelReason = cancelSignal.aborted
-                ? getSignalCancelReason(cancelSignal)
-                : isInterceptorCancel(redirectIntercept)
-                  ? redirectIntercept.reason
-                  : undefined;
+              const redirectCancelReason = redirectEnd.cancelReason;
               // Marked as the retry phase's interceptor cancel is, which also aborts the
               // hop that answered: an early 307 to a bodied PUT may still be uploading.
               cancelEntry(trackedRequest, redirectCancelReason);
@@ -1857,7 +1895,7 @@ export class BaseHTTPClient {
             // never sees a `file:` or `data:` URL either way.
             if (!isAbsoluteWebURL(redirectInterceptURL)) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
-                redirectIntercept,
+                redirectEnd.request,
                 attemptLimits,
                 requestID,
               );
@@ -1900,7 +1938,7 @@ export class BaseHTTPClient {
             let sanitizedRedirectRequest: ResolvedRequest;
             try {
               sanitizedRedirectRequest = this._sanitizeRedirectRequest(
-                redirectIntercept,
+                redirectEnd.request,
                 {
                   // fromURL is the redirect target URL (what the interceptor received).
                   // This sanitize only strips headers if the interceptor rewrote the
@@ -1911,16 +1949,16 @@ export class BaseHTTPClient {
                   // same origin and nothing is stripped, preserving any headers the
                   // interceptor added (e.g. Authorization for the redirect target).
                   //
-                  // The target as it was before the interceptors ran, not re-read from the
-                  // request they were handed: one that rewrote that object in place would
-                  // otherwise compare its new host with itself and keep the credentials.
+                  // The target as it was before the interceptors ran, from the hop's own
+                  // request, of which they were handed a copy: compared with what they
+                  // returned, never with itself.
                   fromURL: redirectTargetURL,
                   cookieJar: jar ?? undefined,
                 },
               );
             } catch (error) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
-                redirectIntercept,
+                redirectEnd.request,
                 attemptLimits,
                 requestID,
               );
@@ -2680,7 +2718,8 @@ export class BaseHTTPClient {
             ? { redirect: { ...hopContext.redirect } }
             : {}),
         };
-        let retryIntercept: ResolvedRequest | InterceptorCancel;
+        // Left unset by a failure that a cancel made first turns into that cancel.
+        let retryIntercept: ResolvedRequest | InterceptorCancel | undefined;
         let failedRetryRequest: InterceptedRequest = baseRequest;
         // Whether the interceptors' request is held to the hop's own; see below.
         let isRetryHeld = false;
@@ -2689,8 +2728,10 @@ export class BaseHTTPClient {
           requestID,
           attemptNumber,
         );
-        // Taken before the chain runs: an interceptor may write into the headers it was
-        // handed, which would otherwise make a header it added look like one it was given.
+        // The record the interceptors are handed as it is - built for this retry, it needs
+        // no copy (see `handedRequestPreparer`) - so its names are taken before the chain
+        // runs: an interceptor may write into it, which would otherwise make a header it
+        // added look like one it was given.
         const retryInputHeaderNames = new Set(Object.keys(retryInputHeaders));
         // The interceptors are handed a copy of the hop's body (see `copyRequestBody`):
         // the hop's own is the body every attempt of the hop starts from, and an
@@ -2706,7 +2747,10 @@ export class BaseHTTPClient {
           isTaken: false,
           didFail: false,
         };
-        const prepareRetryRequest = bodyCopyPreparer(retryBodyCopy);
+        const prepareRetryRequest = handedRequestPreparer(retryBodyCopy, {
+          headers: false,
+          body: true,
+        });
         // Whether this hop is on an origin the caller never chose, where a retry-phase
         // request is held to the hop's own URL, body and headers (see below).
         const isHopOnUnchosenOrigin =
@@ -2783,45 +2827,49 @@ export class BaseHTTPClient {
             }
           }
         } catch (error) {
-          // Terminal failure — no further attempts. _execute notifies error observers
-          // with phase `final` (same as all settled errors), not `retry`. A body that
-          // could not be copied is the body's failure, as one that cannot be serialized
-          // is, not an interceptor's, but on a GET or HEAD the rule refuses (see
-          // `_copyChainResultBody`). On a hop held to its own request, reported as that
-          // request, as a stripped attempt would have gone out: the interceptors' carries
-          // what they added - a token in the URL or a header - and the response, the error
-          // and host-filtered observers would name a credentialed request to the host the
-          // server chose. The URL is read once and the one read is reported, so a getter
-          // answering differently on a second read cannot name the hop with what the
-          // interceptors added.
-          const failedRetryURL = readObjectMember(
-            failedRetryRequest,
-            'requestURL',
-          );
-          const isHeld = isHeldToHop(failedRetryURL);
+          // A cancel made before the failure ends the attempt as the cancel below does,
+          // as the initial phase's does; see there.
+          if (!cancelSignal.aborted) {
+            // Terminal failure — no further attempts. _execute notifies error observers
+            // with phase `final` (same as all settled errors), not `retry`. A body that
+            // could not be copied is the body's failure, as one that cannot be serialized
+            // is, not an interceptor's, but on a GET or HEAD the rule refuses (see
+            // `_copyChainResultBody`). On a hop held to its own request, reported as that
+            // request, as a stripped attempt would have gone out: the interceptors' carries
+            // what they added - a token in the URL or a header - and the response, the error
+            // and host-filtered observers would name a credentialed request to the host the
+            // server chose. The URL is read once and the one read is reported, so a getter
+            // answering differently on a second read cannot name the hop with what the
+            // interceptors added.
+            const failedRetryURL = readObjectMember(
+              failedRetryRequest,
+              'requestURL',
+            );
+            const isHeld = isHeldToHop(failedRetryURL);
 
-          return endBeforeDispatch(
-            isHeld ? baseRequest : failedRetryRequest,
-            {
-              errorCode: isBodyCopyFailure(retryBodyCopy, error)
-                ? 'request_setup_error'
-                : 'interceptor_error',
-              adapterCause: normalizeError(error),
-            },
-            // A body that failed to copy is reported as it came, not read again; the
-            // hop's own is reported built.
-            retryBodyCopy.didFail && !isHeld ? 'unbuildable' : undefined,
-            !isHeld && typeof failedRetryURL === 'string'
-              ? failedRetryURL
-              : undefined,
-          );
+            return endBeforeDispatch(
+              isHeld ? baseRequest : failedRetryRequest,
+              {
+                errorCode: isBodyCopyFailure(retryBodyCopy, error)
+                  ? 'request_setup_error'
+                  : 'interceptor_error',
+                adapterCause: normalizeError(error),
+              },
+              // A body that failed to copy is reported as it came, not read again; the
+              // hop's own is reported built.
+              retryBodyCopy.didFail && !isHeld ? 'unbuildable' : undefined,
+              !isHeld && typeof failedRetryURL === 'string'
+                ? failedRetryURL
+                : undefined,
+            );
+          }
         }
 
-        if (isInterceptorCancel(retryIntercept)) {
-          // As the initial phase's: an earlier `cancel()` keeps its reason.
-          const retryCancelReason = cancelSignal.aborted
-            ? getSignalCancelReason(cancelSignal)
-            : retryIntercept.reason;
+        // A cancel that landed while they ran, or while their result was copied, ends the
+        // attempt as theirs does, reported as the hop's own request.
+        const retryEnd = endInterceptorPhase(retryIntercept, cancelSignal);
+        if (retryEnd.isCancelled) {
+          const retryCancelReason = retryEnd.cancelReason;
           return endBeforeDispatch(baseRequest, {
             wasCancelled: true,
             ...(retryCancelReason !== undefined
@@ -2849,7 +2897,7 @@ export class BaseHTTPClient {
         if (isRetryHeld) {
           try {
             attemptRequest = withoutAddedCrossOriginCredentials(
-              retryIntercept,
+              retryEnd.request,
               retryInputHeaderNames,
               baseRequest,
             );
@@ -2881,7 +2929,7 @@ export class BaseHTTPClient {
             });
           }
         } else {
-          attemptRequest = retryIntercept;
+          attemptRequest = retryEnd.request;
         }
       }
 
@@ -4850,7 +4898,10 @@ export class BaseHTTPClient {
     request: R,
     phase: InterceptorPhase,
     context: RequestInterceptorContext,
-    /** Whether the request was cancelled, after which no further interceptor runs. */
+    /**
+     * Whether the request was cancelled, after which no further interceptor runs and a
+     * chain that runs answers a cancel (see `InterceptorChainOptions.isCancelled`).
+     */
     isCancelled: () => boolean,
     /**
      * Handed an interceptor's result that could not be copied for the next interceptor,
@@ -4910,7 +4961,9 @@ export class BaseHTTPClient {
         ...(prepareRequest ? { prepareRequest } : {}),
       });
 
-      if (isInterceptorCancel(current) || isCancelled()) {
+      // A cancel that lands after the parent's chain answers is the chain's below to
+      // answer: it runs no interceptor once the request is cancelled.
+      if (isInterceptorCancel(current)) {
         return { result: current, isIntercepted: true, isBodyHandedOut };
       }
     }
@@ -5061,8 +5114,8 @@ export class BaseHTTPClient {
       /** The URL the response falls back to when `requestURL` cannot be read. */
       fallbackURL?: string;
       /**
-       * The URL the response and error report, used in place of `requestURL`: the request
-       * was handed to interceptors, which could have rewritten it in place.
+       * The URL the response and error report, used in place of `requestURL`, so the
+       * observers are handed the request the response names.
        */
       reportedURL?: string;
     } = {},
@@ -6329,8 +6382,9 @@ interface BodyCopyOutcome {
 }
 
 /**
- * The copy of a hop's body a retry or redirect phase's interceptors were handed; see
- * `copyRequestBody`.
+ * Whether a phase has prepared the request it hands its interceptors (see
+ * `handedRequestPreparer`), and whether a copy of the body - that one, or the chain's
+ * result's - failed.
  */
 interface HandedBodyCopy extends BodyCopyOutcome {
   isTaken: boolean;
@@ -6338,25 +6392,48 @@ interface HandedBodyCopy extends BodyCopyOutcome {
 
 /**
  * A phase's `prepareRequest` (see `InterceptorChainOptions`): the request with a copy of
- * its body, taken once per phase - a parent client's chain may have taken it already - and
- * recorded in `copy`, a copy that fails with it.
+ * each part `copies` names, taken once per phase - a parent client's chain may have taken
+ * it already - and a body copy that fails recorded in `copy`. A part it copies is one the
+ * phase keeps - for the report a cancel or a failure makes, and in the redirect phase as
+ * the request the hop that answered was sent with - so an interceptor that edits it in
+ * place, `request.headers.authorization = ...`, edits only the request it returns:
+ *
+ * - The initial phase copies the header record alone. Its body is the builder's copy,
+ *   handed over as it is, since copying it again for every request an interceptor runs
+ *   for would cost as much as the first copy - a large JSON body parsed again, an upload's
+ *   bytes held a third time - so a request that ends in that phase is reported with an
+ *   interceptor's in-place edit of its body.
+ * - The redirect phase copies both.
+ * - The retry phase copies the body alone: its header record is built for each retry (see
+ *   `_withInternalRequestHeaders`), and nothing else holds it.
+ *
+ * The record is the client's own - built through `mergeHeaders`, or the hop's - so copying
+ * it reads no caller code.
  */
-function bodyCopyPreparer(
+function handedRequestPreparer(
   copy: HandedBodyCopy,
+  copies: { headers: boolean; body: boolean },
 ): (request: InterceptedRequest) => InterceptedRequest {
   return (request) => {
     if (copy.isTaken) {
       return request;
     }
     copy.isTaken = true;
-    let body: unknown;
-    try {
-      body = copyRequestBody(request.body);
-    } catch (error) {
-      copy.didFail = true;
-      throw error;
+    const prepared = { ...request };
+    if (copies.headers) {
+      prepared.headers = copyHeaderRecord(
+        request.headers as Record<string, string | string[]>,
+      );
     }
-    return { ...request, body };
+    if (copies.body) {
+      try {
+        prepared.body = copyRequestBody(request.body);
+      } catch (error) {
+        copy.didFail = true;
+        throw error;
+      }
+    }
+    return prepared;
   };
 }
 

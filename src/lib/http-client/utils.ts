@@ -1618,16 +1618,18 @@ function matchesContentTypePattern(
 }
 
 /**
- * Whether a filter's `phases` reach `phaseType`: no list, or an empty one, reaches every
- * phase. Asked before {@link matchesFilter}, which reads the request and leaves `phases`
- * to this: it reads only the filter, so the interceptor chain asks it before it copies the
- * request the rest reads, and an observer the phase never reaches reads nothing.
+ * Whether a filter's `phases` reach `phaseType`: no list reaches every phase. A
+ * registered filter always has one - its own, never empty, as adding the callback refuses
+ * an empty list, or the kind's default. Asked before {@link matchesFilter}, which reads
+ * the request and leaves `phases` to this: it reads only the filter, so the interceptor
+ * chain asks it before it copies the request the rest reads, and an observer the phase
+ * never reaches reads nothing.
  */
 export function matchesFilterPhase(
   phases: readonly RequestPhaseName[] | undefined,
   phaseType: RequestPhaseName,
 ): boolean {
-  return !phases || phases.length === 0 || phases.includes(phaseType);
+  return !phases || phases.includes(phaseType);
 }
 
 /**

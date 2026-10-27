@@ -60,7 +60,11 @@ export type InterceptorChain = (
 ) => Promise<InterceptedRequest | InterceptorCancel>;
 
 export interface InterceptorChainOptions {
-  /** Whether the request was cancelled, after which no further interceptor runs. */
+  /**
+   * Whether the request was cancelled, after which no further interceptor runs and the
+   * chain returns a cancel of its own, with no reason: the caller reads the reason from
+   * whatever cancelled the request.
+   */
   isCancelled?: () => boolean;
   /**
    * Whether `request` may be an interceptor's result - a parent client's chain's - rather
@@ -81,10 +85,12 @@ export interface InterceptorChainOptions {
   /**
    * Called once, as the first interceptor's function this phase calls is about to be
    * called - after its filter, which reads the request as it was handed over - and its
-   * answer read in place of the request: the client hands retry- and redirect-phase
-   * interceptors a copy of the hop's body this way, so one that edits the body in place
-   * edits neither the body the hop's later attempts start from, what a hop to an origin
-   * the caller never chose sends, nor an upload still under way.
+   * answer read in place of the request: the client hands each phase's interceptors a
+   * copy of the parts of the request it keeps this way - the header record in the initial
+   * phase, the body in the retry phase, both in the redirect phase - so one that edits
+   * them in place edits neither the request a cancel or a failure reports, the body the
+   * hop's later attempts start from, what a hop to an origin the caller never chose
+   * sends, nor an upload still under way.
    * The filters up to and including that interceptor's read the request as handed over,
    * as on any other hop; the filters after it read the prepared request, or whatever an
    * interceptor returned in its place. A request no interceptor's function is called
@@ -119,7 +125,7 @@ async function runInterceptors(
     // A cancel made by an earlier interceptor, or while it ran, ends the chain: the request
     // is not dispatched, so the rest - a token refresh, say - has nothing to prepare.
     if (isCancelled?.()) {
-      return current;
+      break;
     }
 
     // Asked first, and only here - `matchesFilter` leaves `phases` to it - as it reads only
@@ -177,17 +183,36 @@ async function runInterceptors(
     // the client took is no longer sent as the text it was read from.
     releaseRequestBody(current.body);
 
-    // Adopted, not awaited as it is: an interceptor is caller code, and one returning
-    // a native promise with its own `constructor` and a no-op `then` would hang the
-    // request. See `adoptPromise()`.
-    const { value: result } = await adoptPromise(
-      // The context too, its `redirectHistory` with it: one shared per chain let an
-      // interceptor that pushed to it or rewrote a field change what the next was told.
-      fn(current, copyCallbackPhase(phase), {
-        ...context,
-        redirectHistory: [...context.redirectHistory],
-      }),
-    );
+    let result: Awaited<ReturnType<RequestInterceptor>>;
+    try {
+      // Adopted, not awaited as it is: an interceptor is caller code, and one returning
+      // a native promise with its own `constructor` and a no-op `then` would hang the
+      // request. See `adoptPromise()`.
+      ({ value: result } = await adoptPromise(
+        // The context too, its `redirectHistory` with it: one shared per chain let an
+        // interceptor that pushed to it or rewrote a field change what the next was told.
+        fn(current, copyCallbackPhase(phase), {
+          ...context,
+          redirectHistory: [...context.redirectHistory],
+        }),
+      ));
+    } catch (error) {
+      // A cancel made before the interceptor threw - by that interceptor, say - ends the
+      // chain as a cancel, not a failure: whoever cancelled was told the request is
+      // cancelled, and it never goes out, so the error is dropped as its result would be.
+      if (isCancelled?.()) {
+        break;
+      }
+      throw error;
+    }
+
+    // A cancel made while the interceptor ran ends the chain before its result is read:
+    // that result is never sent, so a value that is no request - `undefined` from an
+    // interceptor that cancelled and returned nothing - is not refused, and a request it
+    // returned is neither copied nor reported.
+    if (isCancelled?.()) {
+      break;
+    }
 
     // null is shorthand for { cancel: true } with no reason
     if (result === null) {
@@ -220,7 +245,13 @@ async function runInterceptors(
     isCurrentUncopied = true;
   }
 
-  return current;
+  // A cancel, of the chain's own, rather than the request it reached - which may be an
+  // interceptor's result, not yet copied: the request is not sent, so nothing reads that
+  // result, and the chain's answer says it was cancelled, so every phase ends it as it
+  // ends an interceptor's cancel. Asked here, once, for every way out of the loop above,
+  // and for a cancel made while a result was read as a cancel or not - a `Proxy` whose
+  // `has` trap cancels.
+  return isCancelled?.() ? makeInterceptorCancel(undefined) : current;
 }
 
 /**
@@ -324,6 +355,10 @@ export type ResolvedRequest = Omit<InterceptedRequest, 'headers'> & {
  */
 const interceptorCancels = new WeakSet<object>();
 
+/**
+ * A cancel of the client's own, which {@link isInterceptorCancel} tells from a request,
+ * carrying `reason` when there is one.
+ */
 function makeInterceptorCancel(reason: string | undefined): InterceptorCancel {
   const cancel: InterceptorCancel =
     reason !== undefined ? { cancel: true, reason } : { cancel: true };

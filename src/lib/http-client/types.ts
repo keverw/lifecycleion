@@ -963,7 +963,7 @@ export interface RequestInterceptorFilter extends PhaseFilter {
    * `retry`, `redirect`. (`final` never reaches interceptors.)
    *
    * Default: `['initial']`. Pass `['initial', 'retry', 'redirect']` to re-run on every attempt.
-   * Pass `[]` to match all phases.
+   * An empty list is refused when the interceptor is added.
    */
   phases?: InterceptorPhaseName[];
   /** Match against the outgoing request body. */
@@ -994,7 +994,8 @@ export interface ResponseObserverFilter extends PhaseFilter {
    * Which events run this observer: **OR** over phase type. Valid values: `retry`,
    * `redirect`, `final`. (`initial` never reaches response observers.)
    *
-   * Default: `['final']`. Pass `[]` to match all phases.
+   * Default: `['final']`. Pass `['retry', 'redirect', 'final']` to match every phase. An
+   * empty list is refused when the observer is added.
    */
   phases?: ResponseObserverPhaseName[];
   statusCodes?: number[];
@@ -1040,7 +1041,8 @@ export interface ErrorObserverFilter extends PhaseFilter {
    * observers (redirect errors surface as `final`; retry errors on redirect
    * hops carry `redirect` context inside the `retry` phase).
    *
-   * Default: `['final']`. Pass `[]` to match all phases.
+   * Default: `['final']`. Pass `['retry', 'final']` to match every phase. An empty list
+   * is refused when the observer is added.
    */
   phases?: ErrorObserverPhaseName[];
 }

@@ -1599,12 +1599,6 @@ describe('matchesFilterPhase', () => {
     expect(matchesFilterPhase(undefined, 'redirect')).toBe(true);
   });
 
-  test('empty phases do not gate matching', () => {
-    expect(matchesFilterPhase([], 'initial')).toBe(true);
-    expect(matchesFilterPhase([], 'retry')).toBe(true);
-    expect(matchesFilterPhase([], 'final')).toBe(true);
-  });
-
   test('list is OR: match if current event type is included', () => {
     expect(matchesFilterPhase(['retry', 'redirect'], 'initial')).toBe(false);
     expect(matchesFilterPhase(['retry', 'redirect'], 'retry')).toBe(true);

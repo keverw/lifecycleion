@@ -199,6 +199,11 @@ function filterFieldNames(filter: object): Set<string> {
   return names;
 }
 
+/** Fixed names - phases, schemes - quoted for an error message: `'initial', 'retry'`. */
+function quoteNames(names: readonly string[]): string {
+  return names.map((name) => `'${name}'`).join(', ');
+}
+
 /**
  * The lists of `filter`, each read once, checked and copied - so a getter is not read
  * again, and a list the caller changes later does not change what matches. Nullish means
@@ -210,6 +215,8 @@ function copyFilterLists(
   filter: Record<string, unknown>,
   label: string,
   kind: FilterKind,
+  /** The phases an omitted `phases` gives, named when an empty one is refused. */
+  defaultPhases: readonly string[],
 ): Record<string, unknown[]> {
   // A field this kind of callback never sees is refused, as a misnamed one is: a
   // `statusCodes` on an error observer would be ignored, so it would match every error,
@@ -247,11 +254,19 @@ function copyFilterLists(
     const list = copyArrayValue(value as unknown[]);
     // Refused rather than given a meaning: an empty list read as "match nothing" leaves a
     // callback that never runs, and read as "match everything" turns `hosts: []` from a
-    // config with no hosts into a callback that runs for every host. `phases: []` keeps
-    // its documented meaning, every phase.
-    if (list.length === 0 && field !== 'phases') {
+    // config with no hosts into a callback that runs for every host. `phases: []` is no
+    // exception: omitting `phases` gives the kind's default phases, so either reading of
+    // an empty list does something omitting it does not - "every phase" turning an auth
+    // interceptor built from a flag list that came out empty loose on redirect and retry
+    // hops. The hint says what omitting it does instead, which for `phases` is not
+    // "every request".
+    if (list.length === 0) {
       throw new TypeError(
-        `${label} filter ${field} is empty; omit it to match every request`,
+        `${label} filter ${field} is empty; ${
+          field === 'phases'
+            ? `omit it for the default phases (${quoteNames(defaultPhases)}), or list each of ${quoteNames(kind.phases)} to match every phase`
+            : 'omit it to match every request'
+        }`,
       );
     }
     for (const [index, entry] of list.entries()) {
@@ -271,7 +286,7 @@ function copyFilterLists(
       }
       if (allowed && !allowed.includes(entry as string)) {
         throw new TypeError(
-          `${entryName} is not one of ${allowed.map((name) => `'${name}'`).join(', ')}`,
+          `${entryName} is not one of ${quoteNames(allowed)}`,
         );
       }
     }
@@ -324,7 +339,12 @@ export class CallbackRegistry<
     // Each field read once, into a filter of the client's own: only the fields
     // `matchesFilter` reads are kept.
     const methods = normalizeFilterMethods(source.methods, this.label);
-    const lists = copyFilterLists(source, this.label, this.kind);
+    const lists = copyFilterLists(
+      source,
+      this.label,
+      this.kind,
+      this.defaultPhases as readonly string[],
+    );
     // Read once here, as the copy `matchesFilter` reads them from never changes.
     if (lists.hosts) {
       lists.hostPatterns = (lists.hosts as string[]).map(readHostPattern);

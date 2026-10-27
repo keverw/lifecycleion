@@ -56,18 +56,7 @@ export class RequestTracker {
    * Returns the number of requests cancelled.
    */
   public cancelAll(reason?: string): number {
-    let count = 0;
-
-    // A copy, in each of these loops: an abort listener can start a request, and walking
-    // the live map would cancel and count it too.
-
-    for (const entry of [...this.requests.values()]) {
-      if (cancelEntry(entry, reason)) {
-        count++;
-      }
-    }
-
-    return count;
+    return this.cancelWhere(() => true, reason);
   }
 
   /**
@@ -75,17 +64,7 @@ export class RequestTracker {
    * Returns the number of requests cancelled.
    */
   public cancelOwn(clientID: string, reason?: string): number {
-    let count = 0;
-
-    for (const entry of [...this.requests.values()]) {
-      if (entry.clientID === clientID) {
-        if (cancelEntry(entry, reason)) {
-          count++;
-        }
-      }
-    }
-
-    return count;
+    return this.cancelWhere((entry) => entry.clientID === clientID, reason);
   }
 
   /**
@@ -93,17 +72,7 @@ export class RequestTracker {
    * Returns the number of requests cancelled.
    */
   public cancelAllWithLabel(label: string, reason?: string): number {
-    let count = 0;
-
-    for (const entry of [...this.requests.values()]) {
-      if (entry.label === label) {
-        if (cancelEntry(entry, reason)) {
-          count++;
-        }
-      }
-    }
-
-    return count;
+    return this.cancelWhere((entry) => entry.label === label, reason);
   }
 
   /**
@@ -115,17 +84,10 @@ export class RequestTracker {
     label: string,
     reason?: string,
   ): number {
-    let count = 0;
-
-    for (const entry of [...this.requests.values()]) {
-      if (entry.clientID === clientID && entry.label === label) {
-        if (cancelEntry(entry, reason)) {
-          count++;
-        }
-      }
-    }
-
-    return count;
+    return this.cancelWhere(
+      (entry) => entry.clientID === clientID && entry.label === label,
+      reason,
+    );
   }
 
   /**
@@ -166,6 +128,27 @@ export class RequestTracker {
     }
 
     return { count: requests.length, requests };
+  }
+
+  /**
+   * Cancels each tracked request `isMatch` accepts. Returns the number this call
+   * cancelled, not counting one that was cancelled already.
+   */
+  private cancelWhere(
+    isMatch: (entry: TrackedRequest) => boolean,
+    reason: string | undefined,
+  ): number {
+    let count = 0;
+
+    // A copy: an abort listener can start a request, and walking the live map would
+    // cancel and count it too.
+    for (const entry of [...this.requests.values()]) {
+      if (isMatch(entry) && cancelEntry(entry, reason)) {
+        count++;
+      }
+    }
+
+    return count;
   }
 }
 
