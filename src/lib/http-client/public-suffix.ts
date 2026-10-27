@@ -38,12 +38,15 @@ export interface PublicSuffixOverrides {
   /**
    * Suffixes to stop treating as public, even when the bundled list has them.
    *
-   * Strictly widening, and the only option here that can *open* a scope: hosts under a
-   * removed suffix go back to sharing one bucket and may set cookies spanning it - and,
-   * where the name above it is no suffix either, spanning the registrable domain above:
-   * with `s3.amazonaws.com` removed, a bucket may set `Domain=amazonaws.com`, which is
-   * sent to every host under `amazonaws.com`. The escape hatch for a private-section entry that breaks a deployment you control -
-   * removing `herokuapp.com` restores the pre-1.0 behaviour for that suffix alone.
+   * Strictly widening, and the only option here that can *open* a scope: a host whose
+   * registrable domain a removal widens - as a browser with the same list reads it - may
+   * set cookies spanning it. With `herokuapp.com` removed, `mine.herokuapp.com` may set
+   * `Domain=herokuapp.com`; with `s3.amazonaws.com` removed, a bucket may set
+   * `Domain=amazonaws.com`, which is sent to every host under `amazonaws.com`. A suffix
+   * still listed beneath a removal keeps its tenants sites of their own: with `uk`
+   * removed, `x.co.uk` may not set `Domain=uk` while `co.uk` stays listed. The escape
+   * hatch for a private-section entry that breaks a deployment you control - removing
+   * `herokuapp.com` restores the pre-1.0 behaviour for that suffix alone.
    */
   remove?: readonly string[];
 }
@@ -174,7 +177,6 @@ function normalizeList(
 export class PublicSuffixResolver {
   private readonly added: ReadonlySet<string>;
   private readonly removed: ReadonlySet<string>;
-  private readonly hasOverrides: boolean;
 
   constructor(overrides?: PublicSuffixOverrides) {
     // Shape-checked, as every entry is: `publicSuffixes: ['corp.internal']` (the list
@@ -213,8 +215,6 @@ export class PublicSuffixResolver {
         }
       }
     }
-
-    this.hasOverrides = this.added.size > 0 || this.removed.size > 0;
   }
 
   /**
@@ -252,81 +252,26 @@ export class PublicSuffixResolver {
 
   /**
    * Whether `hostname` is a suffix of the bundled list that `publicSuffixes.remove` opts
-   * out - one whose removal took effect, as {@link apexFor} reads removals. A removal of a
-   * name the bundled list does not treat as a suffix changes nothing, and is not one.
+   * out - one whose removal took effect, as {@link registrableDomainFor} reads removals.
+   * A removal of a name the bundled list does not treat as a suffix changes nothing, and
+   * is not one.
    */
   public isRemovedSuffix(hostname: string): boolean {
     return this.isEffectiveRemoval(toLabels(hostname).join('.'));
   }
 
   /**
-   * Whether a suffix `publicSuffixes.remove` opts out is `hostname` or a name under it - so
-   * that the bucket `hostname` keys may hold sites other than its own.
-   */
-  public hasRemovalWithin(hostname: string): boolean {
-    const normalized = toLabels(hostname).join('.');
-
-    for (const removed of this.removed) {
-      if (
-        (removed === normalized || removed.endsWith(`.${normalized}`)) &&
-        this.isEffectiveRemoval(removed)
-      ) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * The bucket key cookies for `hostname` are filed under: its registrable domain under
-   * the bundled list and the caller's additions, or - below a removed suffix - the
-   * registrable domain the widest removed suffix above it belongs to, which is that
-   * suffix itself unless names above it are no suffix either. With `uk` removed,
-   * `x.co.uk` and `y.co.uk` share the `uk` bucket, so one bucket can hold several sites
-   * (see {@link registrableDomainFor}); with `s3.amazonaws.com` removed, its hosts are
-   * filed under `amazonaws.com`, as `www.amazonaws.com` is.
-   *
-   * Returns `hostname` itself when nothing sits under it: a public suffix with no
-   * registrable part (`github.io`), or a bare name (`localhost`).
-   */
-  public apexFor(hostname: string): string {
-    const labels = toLabels(hostname);
-
-    if (this.hasOverrides) {
-      // A removed ancestor is the widest domain a cookie may claim, so it must also be
-      // the bucket for every host below it. Check from the shortest candidate upward:
-      // with `com` removed, a `Domain=com` cookie must still be reachable from a host
-      // below a more-specific bundled suffix such as `app.blogspot.com`. Stopping at
-      // `blogspot.com` first would admit the cookie but file the request elsewhere.
-      //
-      // Only a removal of something the bundled list does treat as a suffix: one below
-      // a registrable domain (`a.example.com`, or a suffix a later list dropped) widened
-      // nothing, and filing its hosts under it narrowed them - `Domain=example.com` from
-      // `x.a.example.com` was refused, and a domain clear of `example.com` missed them.
-      for (let i = labels.length - 1; i >= 0; i--) {
-        const candidate = labels.slice(i).join('.');
-
-        if (this.isEffectiveRemoval(candidate)) {
-          return this.widenPastRemoval(candidate);
-        }
-      }
-    }
-
-    return this.listedRegistrableDomainFor(hostname);
-  }
-
-  /**
    * The registrable domain `hostname` belongs to under the jar's effective list - the
    * bundled list with the caller's additions and removals - and so the site it is part
-   * of. A removed suffix at or directly above the listed answer is no longer a suffix, so
-   * the domain widens past it, up to the next name the effective list still treats as a
-   * suffix: with `herokuapp.com` removed, `mine.herokuapp.com` belongs to `herokuapp.com`;
-   * with `com` removed, `x.example.com` to `com`; and with `s3.amazonaws.com` removed,
+   * of, which is also the bucket its cookies are filed under. A removed suffix at or
+   * directly above the listed answer is no longer a suffix, so the domain widens past it,
+   * up to the next name the effective list still treats as a suffix: with `herokuapp.com`
+   * removed, `mine.herokuapp.com` belongs to `herokuapp.com`; with `com` removed,
+   * `x.example.com` to `com`; and with `s3.amazonaws.com` removed,
    * `bucket.s3.amazonaws.com` to `amazonaws.com`, since `amazonaws.com` is no suffix
-   * either. A suffix still listed stops the widening: with `uk` removed, `a.x.co.uk`
-   * belongs to `x.co.uk`, since `co.uk` is still a suffix, though it is filed in the `uk`
-   * bucket.
+   * either. A suffix still listed stops the widening, as it does for a browser with the
+   * same list: with `uk` removed, `a.x.co.uk` belongs to `x.co.uk`, since `co.uk` is still
+   * a suffix, and with `com` removed, `app.blogspot.com` is still a site of its own.
    *
    * Returns `hostname` itself when nothing sits under it: a public suffix with no
    * registrable part (`github.io`, or `co.uk` with `uk` removed), or a bare name
@@ -361,8 +306,7 @@ export class PublicSuffixResolver {
   /**
    * The registrable domain a removed suffix belongs to under the effective list: widened
    * one label at a time until the parent is a suffix still - `herokuapp.com` stays itself
-   * below `com`, and `s3.amazonaws.com` becomes `amazonaws.com`. `apexFor` and
-   * `registrableDomainFor` both widen through it, so a site is never split across buckets.
+   * below `com`, and `s3.amazonaws.com` becomes `amazonaws.com`.
    */
   private widenPastRemoval(removed: string): string {
     let domain = removed;
@@ -380,8 +324,7 @@ export class PublicSuffixResolver {
     return domain;
   }
 
-  /** {@link isRemovedSuffix} for a name already normalized: one place for the rule, which
-   *  `apexFor`'s buckets and `registrableDomainFor`'s sites must read alike. */
+  /** {@link isRemovedSuffix} for a name already normalized: one place for the rule. */
   private isEffectiveRemoval(normalized: string): boolean {
     return this.removed.has(normalized) && isBundledPublicSuffix(normalized);
   }
@@ -438,8 +381,8 @@ export class PublicSuffixResolver {
 function isBundledPublicSuffix(normalized: string): boolean {
   const labels = normalized.split('.');
 
-  // Without tldts's hostname check, as `apexFor` reads it: with the check, a label
-  // starting or ending with a hyphen (`x-.ck` under `*.ck`) was read as no suffix at all,
+  // Without tldts's hostname check, as `listedRegistrableDomainFor` reads it: with the
+  // check, a label starting or ending with a hyphen (`x-.ck` under `*.ck`) was read as no suffix at all,
   // so a `Domain=x-.ck` cookie was stored for every tenant under it.
   const result = parse(normalized, {
     allowPrivateDomains: true,

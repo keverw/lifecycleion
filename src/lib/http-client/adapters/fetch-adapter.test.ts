@@ -2287,7 +2287,8 @@ describe('FetchAdapter - body chunk types and sizes', () => {
       const { Readable } = await import('node:stream');
       const source =
         key === 'getReader'
-          ? new Response(new Uint8Array([1, 2, 3])).body!
+          ? (new Response(new Uint8Array([1, 2, 3]))
+              .body as ReadableStream<Uint8Array>)
           : Readable.from([new Uint8Array([1, 2, 3])]);
       const method = (source as any)[key] as () => unknown;
       let reads = 0;

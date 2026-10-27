@@ -2517,7 +2517,7 @@ describe('CookieJar', () => {
       expect(jar.getAllCookies()).toHaveLength(0);
     });
 
-    test('clear(host, domain) under a removed suffix clears the host site, not every site the removal joined', () => {
+    test('clear(host, domain) under a removed suffix clears the host site, not the other sites behind a suffix still listed', () => {
       const scoped = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
 
       scoped.parseSetCookieHeader('x=host; Path=/', 'https://x.co.uk/');
@@ -2528,7 +2528,7 @@ describe('CookieJar', () => {
       scoped.parseSetCookieHeader('y=host; Path=/', 'https://y.co.uk/');
       scoped.parseSetCookieHeader(
         'shared=uk; Domain=uk; Path=/',
-        'https://x.co.uk/',
+        'https://plain.uk/',
       );
 
       expect(scoped.clear('www.x.co.uk', 'domain')).toBe(2);
@@ -2545,30 +2545,57 @@ describe('CookieJar', () => {
       expect(scoped.getStoredDomains()).toEqual([{ domain: 'uk', count: 1 }]);
     });
 
-    test('clear(host, domain) for a domain with a bucket of its own takes the bucket whole, without a per-cookie suffix walk', () => {
-      const plain = new CookieJar();
-      const walk = spyOn(
-        plain as unknown as { isWithinDomain: () => boolean },
-        'isWithinDomain',
-      );
+    test("a Domain= above the request host's site is refused, as browsers refuse it, under a removal", () => {
+      // With `uk` removed, `co.uk` is still a suffix: `x.co.uk` is a site of its own and
+      // may not reach `uk`, while `plain.uk`, whose site the removal widened to `uk`, may.
+      const uk = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
+      uk.parseSetCookieHeader('a=1; Domain=uk; Path=/', 'https://x.co.uk/');
+      uk.parseSetCookieHeader('b=2; Domain=uk; Path=/', 'https://plain.uk/');
+      expect(uk.getCookieHeaderString('https://x.co.uk/')).toBe('b=2');
 
-      for (let index = 0; index < 50; index++) {
-        plain.parseSetCookieHeader(
-          `c${String(index)}=1; Path=/`,
-          `https://h${String(index)}.example.com/`,
+      // With `co.uk` removed as well, `x.co.uk` belongs to the `uk` site.
+      const both = new CookieJar({
+        publicSuffixes: { remove: ['uk', 'co.uk'] },
+      });
+      both.parseSetCookieHeader('a=1; Domain=uk; Path=/', 'https://x.co.uk/');
+      expect(both.getCookieHeaderString('https://y.org.uk/')).toBe('a=1');
+
+      // `!city.kawasaki.jp` keeps `city.kawasaki.jp` a site with `jp` removed.
+      const jp = new CookieJar({ publicSuffixes: { remove: ['jp'] } });
+      for (const domain of ['kawasaki.jp', 'jp']) {
+        jp.parseSetCookieHeader(
+          `c=1; Domain=${domain}; Path=/`,
+          'https://x.city.kawasaki.jp/',
         );
       }
+      expect(jp.getStoredDomains()).toEqual([]);
 
-      expect(plain.clear('example.com', 'domain')).toBe(50);
-      expect(walk).not.toHaveBeenCalled();
+      // With `com` removed, `app.blogspot.com` may not set `Domain=com`, but is sent the
+      // one `x.example.com` sets.
+      const com = new CookieJar({ publicSuffixes: { remove: ['com'] } });
+      com.parseSetCookieHeader(
+        'd=1; Domain=com; Path=/',
+        'https://app.blogspot.com/',
+      );
+      com.parseSetCookieHeader(
+        'e=2; Domain=com; Path=/',
+        'https://x.example.com/',
+      );
+      expect(com.getCookieHeaderString('https://app.blogspot.com/')).toBe(
+        'e=2',
+      );
     });
 
     test('clear() places a cookie whose stored scope cannot be read by the domain its key holds', () => {
       const plain = new CookieJar();
       plain.parseSetCookieHeader('a=1; Path=/', 'https://www.example.com/');
-      const scoped = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
+      // With `co.uk` removed as well, `x.co.uk` and `y.org.uk` share the `uk` site and
+      // bucket, and clearing `co.uk` takes only the cookies stored at or under it.
+      const scoped = new CookieJar({
+        publicSuffixes: { remove: ['uk', 'co.uk'] },
+      });
       scoped.parseSetCookieHeader('b=2; Path=/', 'https://x.co.uk/');
-      scoped.parseSetCookieHeader('c=3; Path=/', 'https://y.co.uk/');
+      scoped.parseSetCookieHeader('c=3; Path=/', 'https://y.org.uk/');
 
       for (const jar of [plain, scoped]) {
         (
@@ -2580,10 +2607,9 @@ describe('CookieJar', () => {
         { domain: 'www.example.com', count: 1 },
       ]);
       expect(plain.clear('www.example.com', 'hostname')).toBe(1);
-      // `y.co.uk` shares the `uk` bucket but is a site of its own, and stays.
-      expect(scoped.clear('x.co.uk', 'domain')).toBe(1);
+      expect(scoped.clear('co.uk', 'domain')).toBe(1);
       expect(scoped.getStoredDomains()).toEqual([
-        { domain: 'y.co.uk', count: 1 },
+        { domain: 'y.org.uk', count: 1 },
       ]);
     });
 
@@ -2623,7 +2649,7 @@ describe('CookieJar', () => {
       scoped.parseSetCookieHeader('plain=1; Path=/', 'https://plain.uk/');
       scoped.parseSetCookieHeader(
         'shared=uk; Domain=uk; Path=/',
-        'https://x.co.uk/',
+        'https://plain.uk/',
       );
       scoped.parseSetCookieHeader('other=1; Path=/', 'https://example.com/');
 
@@ -2675,7 +2701,7 @@ describe('CookieJar', () => {
     });
 
     test('clear(host, domain) for the site a removal joined leaves a site behind a suffix still listed', () => {
-      // With `com` removed, every `.com` host is filed in the one `com` bucket, but
+      // With `com` removed, every host directly under `com` belongs to the `com` site, but
       // `blogspot.com` is still a suffix, so `app.blogspot.com` is a site of its own.
       const scoped = new CookieJar({ publicSuffixes: { remove: ['com'] } });
 
@@ -2698,8 +2724,8 @@ describe('CookieJar', () => {
 
     test('clear(host, domain) under a removed suffix leaves a site behind a nested suffix', () => {
       // With `cn` removed, `com.cn` is still a suffix, so `amazonaws.com.cn` is a site
-      // of its own in the `cn` bucket - and `s3.cn-north-1.amazonaws.com.cn` a suffix
-      // beneath it, whose tenants are sites of their own again.
+      // of its own - and `s3.cn-north-1.amazonaws.com.cn` a suffix beneath it, whose
+      // tenants are sites of their own again.
       const scoped = new CookieJar({ publicSuffixes: { remove: ['cn'] } });
 
       scoped.parseSetCookieHeader(
