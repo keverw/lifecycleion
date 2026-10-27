@@ -4393,6 +4393,93 @@ test.each(['evil.example./', 'evil.example../'])(
   },
 );
 
+test('a retry that drops the extra dots from a redirect host is held to that hop', async () => {
+  const seen: Array<{ scope: string; authorization: unknown }> = [];
+  const client = new HTTPClient({
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+    adapter: {
+      getType: () => 'node',
+      send: (request: AdapterRequest) => {
+        if (request.requestURL.startsWith('https://a.test')) {
+          return Promise.resolve({
+            status: 307,
+            headers: { location: 'https://evil.example../next' },
+            body: null,
+          });
+        }
+        seen.push({
+          scope: new URL(request.initialURL ?? '').host,
+          authorization: request.headers.authorization,
+        });
+        return Promise.resolve({
+          status: seen.length === 1 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    },
+  });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      requestURL: request.requestURL.replace('evil.example..', 'evil.example'),
+      headers: { ...request.headers, authorization: 'Bearer secret' },
+    }),
+    { phases: ['retry'] },
+  );
+
+  await client.get('https://a.test/start').send();
+
+  expect(seen).toEqual([
+    { scope: 'a.test', authorization: undefined },
+    { scope: 'a.test', authorization: undefined },
+  ]);
+});
+
+test('a retry URL that names no host leaves the credential scope where it was', async () => {
+  const scopes: string[] = [];
+  let attemptsAtNext = 0;
+  const client = new HTTPClient({
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+    adapter: {
+      getType: () => 'node',
+      send: (request: AdapterRequest) => {
+        if (request.requestURL.endsWith('/start')) {
+          return Promise.resolve({
+            status: 307,
+            headers: { location: 'https://a.test/next' },
+            body: null,
+          });
+        }
+        scopes.push(new URL(request.initialURL ?? '').host);
+        attemptsAtNext++;
+        return Promise.resolve({
+          status: attemptsAtNext < 3 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    },
+  });
+  // The first retry goes to `https://./next`, which names no host; the second comes back.
+  let retries = 0;
+  client.addRequestInterceptor(
+    (request) => {
+      retries++;
+      return retries === 1
+        ? { ...request, requestURL: 'https://./next' }
+        : request;
+    },
+    { phases: ['retry'] },
+  );
+
+  await client.get('https://a.test/start').send();
+
+  expect(scopes).toEqual(['a.test', 'a.test', 'a.test']);
+});
+
 test('a leading-bracket key is overridden', () => {
   expect(buildURL(undefined, '/a?[x]=1&y=2', { x: 2 })).toBe('/a?y=2&x=2');
 });

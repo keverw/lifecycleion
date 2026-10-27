@@ -319,7 +319,9 @@ export interface CookieJarOptions {
  */
 export class CookieJar {
   // Outer key: apex domain from the Public Suffix List (e.g. 'example.co.uk'), or the
-  //            hostname itself for IPs and bare names like localhost
+  //            hostname itself for IPs and bare names like localhost. Under a
+  //            `publicSuffixes.remove` entry, the removed suffix, holding every site
+  //            beneath it - so a bucket is not always one site.
   // Inner key: composite 'name@domain/path' for deduplication
   private buckets: Map<string, Map<string, Cookie>> = new Map();
 
@@ -813,11 +815,18 @@ export class CookieJar {
    *   leaving other subdomains untouched. e.g. `clear('api.example.com', 'hostname')`
    *   does not touch cookies stored for `example.com`.
    * - `clear(host, 'domain')` — removes all cookies for the entire domain family
-   *   (apex + all subdomains). e.g. `clear('api.example.com', 'domain')` clears
-   *   everything in the `example.com` apex bucket, and `clear('github.io', 'domain')`
-   *   every `*.github.io` site's cookies. A site behind a nested private suffix is its
-   *   own domain and is not cleared with its parent: `clear('amazonaws.com', 'domain')`
-   *   leaves `bucket.s3.amazonaws.com`'s cookies.
+   *   (the host's registrable domain + all subdomains). e.g.
+   *   `clear('api.example.com', 'domain')` clears every cookie stored for `example.com`
+   *   or a host under it, and `clear('github.io', 'domain')` every `*.github.io` site's
+   *   cookies. A site behind a nested private suffix is its own domain and is not
+   *   cleared with its parent: `clear('amazonaws.com', 'domain')` leaves
+   *   `bucket.s3.amazonaws.com`'s cookies - unless a removal joins them, as removing
+   *   `com` makes all of `com` one site. The registrable domain is read under the
+   *   jar's `publicSuffixes`, removals included: with `herokuapp.com` removed,
+   *   `clear('mine.herokuapp.com', 'domain')` clears every `*.herokuapp.com` cookie, as
+   *   `herokuapp.com` is then the site. With `uk` removed, `co.uk` is still a suffix,
+   *   so `clear('x.co.uk', 'domain')` leaves `y.co.uk`'s cookies and a `Domain=uk` one,
+   *   while `clear('uk', 'domain')` clears them all.
    *
    * A `host` that is not a non-empty string, or a `scope` that is not one of the two,
    * throws: only a call with no arguments at all clears everything.
@@ -868,6 +877,20 @@ export class CookieJar {
     const apex = this.apexFor(normalizedHost);
 
     if (scope === 'domain') {
+      // The domain cleared is the host's site, not its bucket. The two differ only under
+      // a removed suffix with a suffix still beneath it, which files every site below in
+      // one bucket: with `uk` removed, `x.co.uk` and `y.co.uk` share the `uk` bucket, and
+      // clearing one leaves the other.
+      const domain = this.registrableDomainFor(normalizedHost);
+
+      if (domain !== apex) {
+        return this.clearDomainWithinBucket(
+          apex,
+          domain,
+          this.isPublicSuffix(domain),
+        );
+      }
+
       let count = 0;
 
       // The apex bucket - and, when the host is itself a public suffix or a bare name,
@@ -1297,6 +1320,72 @@ export class CookieJar {
     return cookie;
   }
 
+  /**
+   * `clear(host, 'domain')` for a domain that shares its bucket with other sites, as one
+   * below a suffix that sits beneath a removed one does (`x.co.uk`, with `uk` removed).
+   * Removes the cookies stored for `domain` or a host under
+   * it, matched on the stored scope as the hostname clear matches: every one on a suffix
+   * clear, and otherwise those not behind a nested suffix, which is a site of its own here
+   * as it is when the domain has a bucket to itself. A cookie stored for a name above
+   * `domain` - the removed suffix itself - spans the other sites too and stays.
+   */
+  private clearDomainWithinBucket(
+    apex: string,
+    domain: string,
+    isSuffixClear: boolean,
+  ): number {
+    const bucket = this.buckets.get(apex);
+
+    if (!bucket) {
+      return 0;
+    }
+
+    let count = 0;
+
+    for (const [key, cookie] of bucket.entries()) {
+      const storedDomain = this.storedScopes.get(cookie)?.domain;
+
+      if (
+        storedDomain !== undefined &&
+        this.isWithinDomain(storedDomain, domain, isSuffixClear)
+      ) {
+        bucket.delete(key);
+        count++;
+      }
+    }
+
+    this.pruneEmptyBucket(apex);
+    return count;
+  }
+
+  /** Whether `storedDomain` is `domain` or a host under it, and - unless `domain` is a
+   *  suffix being cleared whole - not at or under a public suffix beneath `domain`. */
+  private isWithinDomain(
+    storedDomain: string,
+    domain: string,
+    isSuffixClear: boolean,
+  ): boolean {
+    if (storedDomain !== domain && !storedDomain.endsWith(`.${domain}`)) {
+      return false;
+    }
+
+    if (isSuffixClear) {
+      return true;
+    }
+
+    for (
+      let name = storedDomain;
+      name !== domain;
+      name = name.slice(name.indexOf('.') + 1)
+    ) {
+      if (this.isPublicSuffix(name)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   private pruneEmptyBucket(apex: string): void {
     if (this.buckets.get(apex)?.size === 0) {
       this.buckets.delete(apex);
@@ -1359,17 +1448,38 @@ export class CookieJar {
    *  a trailing-dot host's cookies are a domain of their own, as they are on the send
    *  path, and `clear()` by `domain` reaches one form and not the other. */
   private apexFor(hostname: string): string {
+    return this.inHostForm(hostname, (host) =>
+      this.publicSuffixes.apexFor(host),
+    );
+  }
+
+  /** The registrable domain `hostname` belongs to under this jar's suffix rules - its
+   *  site, which differs from its bucket only under a removed suffix with a suffix still
+   *  beneath it (see {@link PublicSuffixResolver.registrableDomainFor}). IPs and the
+   *  trailing dot are read as `apexFor` reads them. */
+  private registrableDomainFor(hostname: string): string {
+    return this.inHostForm(hostname, (host) =>
+      this.publicSuffixes.registrableDomainFor(host),
+    );
+  }
+
+  /** `resolve`'s answer for `hostname`, a canonical IP literal standing for itself and a
+   *  trailing dot carried over onto the answer. */
+  private inHostForm(
+    hostname: string,
+    resolve: (host: string) => string,
+  ): string {
     const ip = this.tryCanonicalIPLiteral(hostname);
 
     if (ip !== null) {
       return ip;
     }
 
-    const apex = this.publicSuffixes.apexFor(hostname);
+    const domain = resolve(hostname);
 
-    return hostname.endsWith('.') && apex !== '' && !apex.endsWith('.')
-      ? `${apex}.`
-      : apex;
+    return hostname.endsWith('.') && domain !== '' && !domain.endsWith('.')
+      ? `${domain}.`
+      : domain;
   }
 
   private getOrCreateBucket(apex: string): Map<string, Cookie> {

@@ -2517,6 +2517,117 @@ describe('CookieJar', () => {
       expect(jar.getAllCookies()).toHaveLength(0);
     });
 
+    test('clear(host, domain) under a removed suffix clears the host site, not every site the removal joined', () => {
+      const scoped = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
+
+      scoped.parseSetCookieHeader('x=host; Path=/', 'https://x.co.uk/');
+      scoped.parseSetCookieHeader(
+        'x=domain; Domain=x.co.uk; Path=/',
+        'https://www.x.co.uk/',
+      );
+      scoped.parseSetCookieHeader('y=host; Path=/', 'https://y.co.uk/');
+      scoped.parseSetCookieHeader(
+        'shared=uk; Domain=uk; Path=/',
+        'https://x.co.uk/',
+      );
+
+      expect(scoped.clear('www.x.co.uk', 'domain')).toBe(2);
+      expect(scoped.getCookieHeaderString('https://x.co.uk/')).toBe(
+        'shared=uk',
+      );
+      expect(scoped.getCookieHeaderString('https://y.co.uk/')).toBe(
+        'y=host; shared=uk',
+      );
+
+      // `co.uk` is still a suffix, so clearing it reaches every site beneath it - but
+      // not the `Domain=uk` cookie above it.
+      expect(scoped.clear('co.uk', 'domain')).toBe(1);
+      expect(scoped.getStoredDomains()).toEqual([{ domain: 'uk', count: 1 }]);
+    });
+
+    test('clear(host, domain) on a removed suffix clears everything under it', () => {
+      const scoped = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
+
+      scoped.parseSetCookieHeader('x=host; Path=/', 'https://x.co.uk/');
+      scoped.parseSetCookieHeader('y=host; Path=/', 'https://a.y.org.uk/');
+      scoped.parseSetCookieHeader(
+        'shared=uk; Domain=uk; Path=/',
+        'https://x.co.uk/',
+      );
+      scoped.parseSetCookieHeader('other=1; Path=/', 'https://example.com/');
+
+      expect(scoped.clear('uk', 'domain')).toBe(3);
+      expect(scoped.getStoredDomains()).toEqual([
+        { domain: 'example.com', count: 1 },
+      ]);
+    });
+
+    test('clear(host, domain) under a removed suffix leaves a site behind a nested suffix', () => {
+      // With `cn` removed, `com.cn` is still a suffix, so `amazonaws.com.cn` is a site
+      // of its own in the `cn` bucket - and `s3.cn-north-1.amazonaws.com.cn` a suffix
+      // beneath it, whose tenants are sites of their own again.
+      const scoped = new CookieJar({ publicSuffixes: { remove: ['cn'] } });
+
+      scoped.parseSetCookieHeader(
+        'a=1; Path=/',
+        'https://www.amazonaws.com.cn/',
+      );
+      scoped.parseSetCookieHeader(
+        'b=2; Path=/',
+        'https://bucket.s3.cn-north-1.amazonaws.com.cn/',
+      );
+      scoped.parseSetCookieHeader('c=3; Path=/', 'https://other.com.cn/');
+
+      expect(scoped.clear('amazonaws.com.cn', 'domain')).toBe(1);
+      expect(
+        scoped
+          .getStoredDomains()
+          .map((entry) => entry.domain)
+          .sort(),
+      ).toEqual(['bucket.s3.cn-north-1.amazonaws.com.cn', 'other.com.cn']);
+    });
+
+    test('clear(host, domain) under a single removed suffix clears every site it joined', () => {
+      // With `herokuapp.com` removed, it is the registrable domain of every host under
+      // it, so `mine.herokuapp.com` and `other.herokuapp.com` are one site.
+      const scoped = new CookieJar({
+        publicSuffixes: { remove: ['herokuapp.com'] },
+      });
+
+      scoped.parseSetCookieHeader('a=1; Path=/', 'https://mine.herokuapp.com/');
+      scoped.parseSetCookieHeader(
+        'b=2; Path=/',
+        'https://other.herokuapp.com/',
+      );
+      scoped.parseSetCookieHeader(
+        'shared=heroku; Domain=herokuapp.com; Path=/',
+        'https://mine.herokuapp.com/',
+      );
+      scoped.parseSetCookieHeader('c=3; Path=/', 'https://example.com/');
+
+      expect(scoped.clear('mine.herokuapp.com', 'domain')).toBe(3);
+      expect(scoped.getStoredDomains()).toEqual([
+        { domain: 'example.com', count: 1 },
+      ]);
+    });
+
+    test('clear(host, domain) with co.uk removed clears every co.uk site', () => {
+      const scoped = new CookieJar({ publicSuffixes: { remove: ['co.uk'] } });
+
+      scoped.parseSetCookieHeader('x=1; Path=/', 'https://www.x.co.uk/');
+      scoped.parseSetCookieHeader('y=2; Path=/', 'https://y.co.uk/');
+      scoped.parseSetCookieHeader(
+        'shared=couk; Domain=co.uk; Path=/',
+        'https://y.co.uk/',
+      );
+      scoped.parseSetCookieHeader('z=3; Path=/', 'https://z.org.uk/');
+
+      expect(scoped.clear('x.co.uk', 'domain')).toBe(3);
+      expect(scoped.getStoredDomains()).toEqual([
+        { domain: 'z.org.uk', count: 1 },
+      ]);
+    });
+
     test('clear(host, ...) no-ops when host has no cookies', () => {
       expect(() => jar.clear('example.com', 'hostname')).not.toThrow();
       expect(() => jar.clear('example.com', 'domain')).not.toThrow();

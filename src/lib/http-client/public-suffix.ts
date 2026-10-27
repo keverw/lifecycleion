@@ -249,14 +249,16 @@ export class PublicSuffixResolver {
   }
 
   /**
-   * The registrable domain `hostname` belongs to - the bucket key cookies are filed under.
+   * The bucket key cookies for `hostname` are filed under: its registrable domain under
+   * the bundled list and the caller's additions, or the widest removed suffix above it.
+   * With `uk` removed, `x.co.uk` and `y.co.uk` share the `uk` bucket, so one bucket can
+   * hold several sites (see {@link registrableDomainFor}).
    *
    * Returns `hostname` itself when nothing sits under it: a public suffix with no
    * registrable part (`github.io`), or a bare name (`localhost`).
    */
   public apexFor(hostname: string): string {
     const labels = toLabels(hostname);
-    const normalized = labels.join('.');
 
     if (this.hasOverrides) {
       // A removed ancestor is the widest domain a cookie may claim, so it must also be
@@ -276,7 +278,57 @@ export class PublicSuffixResolver {
           return candidate;
         }
       }
+    }
 
+    return this.listedRegistrableDomainFor(hostname);
+  }
+
+  /**
+   * The registrable domain `hostname` belongs to under the jar's effective list - the
+   * bundled list with the caller's additions and removals - and so the site it is part
+   * of. A removed suffix directly above that domain is no longer a suffix, so the domain
+   * widens to it: with `herokuapp.com` removed, `mine.herokuapp.com` belongs to
+   * `herokuapp.com`, and with `com` removed, `x.example.com` to `com`. A suffix the
+   * effective list still has stops the widening: with `uk` removed, `a.x.co.uk` belongs to
+   * `x.co.uk`, since `co.uk` is still a suffix, though it is filed in the `uk` bucket.
+   *
+   * Returns `hostname` itself when nothing sits under it: a public suffix with no
+   * registrable part (`github.io`, or `co.uk` with `uk` removed), or a bare name
+   * (`localhost`).
+   */
+  public registrableDomainFor(hostname: string): string {
+    let domain = this.listedRegistrableDomainFor(hostname);
+
+    if (this.removed.size === 0) {
+      return domain;
+    }
+
+    // Widened one label at a time while the parent is a removed suffix, tested as
+    // `apexFor` tests it. Starting from the listed answer keeps bundled exception rules
+    // (`!city.kawasaki.jp`) in force. A name the effective list still treats as a suffix
+    // is a domain of its own and is not widened: with `uk` removed, `co.uk` is not `uk`.
+    while (domain.includes('.') && !this.isPublicSuffix(domain)) {
+      const parent = domain.slice(domain.indexOf('.') + 1);
+
+      if (!this.removed.has(parent) || !isBundledPublicSuffix(parent)) {
+        break;
+      }
+
+      domain = parent;
+    }
+
+    return domain;
+  }
+
+  /**
+   * The registrable domain `hostname` belongs to under the bundled list and the caller's
+   * additions, removals not applied. Returns `hostname` itself when nothing sits under it.
+   */
+  private listedRegistrableDomainFor(hostname: string): string {
+    const labels = toLabels(hostname);
+    const normalized = labels.join('.');
+
+    if (this.added.size > 0) {
       // Parse the whole hostname so bundled wildcard exceptions remain in force.
       // Only caller additions may narrow that result; probing bundled suffixes
       // individually loses the exception context (e.g. city.kawasaki.jp). Read

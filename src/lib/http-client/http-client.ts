@@ -3,6 +3,7 @@ import {
   asciiLowercase,
   asciiUppercase,
   isBlankText,
+  trimEndWhere,
 } from '../internal/ascii-text';
 import { isSignalAbortedQuietly } from './internal/request-fields';
 import { isAbortError } from './internal/adapter-error';
@@ -2968,11 +2969,14 @@ export class BaseHTTPClient {
         // A change of scheme or port alone keeps the host the server chose - an "upgrade
         // to https on retry" interceptor - so it does not hand that host the identity
         // either; only a different host is the caller choosing a destination.
+        // A URL that names no host chooses no destination, as `isHeldToHop` reads it, so
+        // it leaves the scope where it was.
+        const attemptHost = comparableHost(attemptRequest.requestURL);
         if (
           !hopContext ||
           (isRetry &&
-            comparableHost(baseRequest.requestURL) !==
-              comparableHost(attemptRequest.requestURL))
+            attemptHost !== '' &&
+            comparableHost(baseRequest.requestURL) !== attemptHost)
         ) {
           credentialScope.url = attemptRequest.requestURL;
         }
@@ -6370,17 +6374,18 @@ function getSignalCancelReason(signal: AbortSignal): string | undefined {
 /**
  * A request URL's host as the credential-scope rule compares it: lowercased, and with
  * every trailing dot dropped, so `evil.example.` and `evil.example..` are the same host
- * the server chose as `evil.example`, not the caller choosing a new one.
+ * as `evil.example` - in whichever of the hop's URL and the attempt's each spelling
+ * appears. Looser than the `hosts` matcher, which reads `..` as naming no host: a
+ * respelling must never read as the caller choosing a new host, and so taking the scope
+ * to the one the server chose. `''` for a URL that names no host.
  */
 function comparableHost(url: string): string {
-  const host = asciiLowercase(extractHostname(url));
-  let end = host.length;
+  return trimEndWhere(asciiLowercase(extractHostname(url)), isDot);
+}
 
-  while (end > 0 && host[end - 1] === '.') {
-    end--;
-  }
-
-  return host.slice(0, end);
+/** Whether `code` is `.`. */
+function isDot(code: number): boolean {
+  return code === 0x2e;
 }
 
 /** Whether a phase's copy of a body failed; see `copyChainResultBody`. */

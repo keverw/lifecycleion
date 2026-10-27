@@ -172,8 +172,8 @@ export interface FilterKind {
 
 /**
  * Every field name a filter answers to: its own, and those it inherits from a class or
- * prototype of the caller's, since the lists are read with `filter[field]`, which finds
- * a class instance's getters and a prototype's fields too.
+ * prototype of the caller's, since the lists are read from those too (see
+ * {@link readFilterField}): a class instance's getters and a prototype's fields.
  *
  * The walk stops at a realm's root prototype (see `isRealmRootPrototype`), so a plain
  * object from a `vm` context or an iframe stops at that realm's `Object.prototype` as one
@@ -197,6 +197,31 @@ function filterFieldNames(filter: object): Set<string> {
     }
   }
   return names;
+}
+
+/**
+ * `filter[field]`, unless it is a value polluted onto `Object.prototype`: one the walk
+ * {@link filterFieldNames} takes finds on no object of the caller's, and that is the very
+ * value a realm's root prototype holds. A `hosts` polluted onto it would otherwise
+ * restrict every callback added with a filter. A `Proxy` whose `get` trap answers a field
+ * it holds nowhere is read as it answers.
+ */
+function readFilterField(filter: object, field: string): unknown {
+  const value = (filter as Record<string, unknown>)[field];
+  let current: object | null = filter;
+
+  while (current !== null && !isRealmRootPrototype(current)) {
+    if (Object.hasOwn(current, field)) {
+      return value;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+
+  return current !== null &&
+    Object.hasOwn(current, field) &&
+    (current as Record<string, unknown>)[field] === value
+    ? undefined
+    : value;
 }
 
 /** Fixed names - phases, schemes - quoted for an error message: `'initial', 'retry'`. */
@@ -233,12 +258,14 @@ function copyFilterLists(
       );
     }
   }
-  const lists: Record<string, unknown[]> = {};
+  // No prototype, so a field the caller left out reads as absent here and in
+  // `matchesFilter`, never as one polluted onto `Object.prototype`.
+  const lists = Object.create(null) as Record<string, unknown[]>;
   for (const [field, rule] of Object.entries(FILTER_LISTS)) {
     if (!kind.fields.includes(field)) {
       continue;
     }
-    const value = filter[field];
+    const value = readFilterField(filter, field);
     if (isNullish(value)) {
       continue;
     }
@@ -338,7 +365,10 @@ export class CallbackRegistry<
     const source = (candidate ?? {}) as Record<string, unknown>;
     // Each field read once, into a filter of the client's own: only the fields
     // `matchesFilter` reads are kept.
-    const methods = normalizeFilterMethods(source.methods, this.label);
+    const methods = normalizeFilterMethods(
+      readFilterField(source, 'methods'),
+      this.label,
+    );
     const lists = copyFilterLists(
       source,
       this.label,
@@ -351,11 +381,12 @@ export class CallbackRegistry<
     }
     const entry: RegisteredCallback<Fn, Filter> = {
       fn,
-      filter: {
-        ...lists,
+      // Kept without a prototype, as `lists` is: `matchesFilter` reads every field on
+      // each request, and one the caller left out must not be found on `Object.prototype`.
+      filter: Object.assign(lists, {
         phases: lists.phases ?? this.defaultPhases,
         methods,
-      } as Filter,
+      }) as unknown as Filter,
     };
     // Replaced rather than changed in place, so a chain already holding the array keeps
     // the registrations it began with, and taking one needs no copy.

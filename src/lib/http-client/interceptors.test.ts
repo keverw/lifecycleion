@@ -699,3 +699,76 @@ test('prepareRequest runs once, after the filter and before the function of the 
   );
   expect(prepared).toBe(1);
 });
+
+describe('filter fields polluted onto Object.prototype', () => {
+  test('are not read as the caller filter fields, when added or on a request', async () => {
+    const polluted = Object.prototype as Record<string, unknown>;
+    const mgr = new RequestInterceptorManager();
+    const calls: string[] = [];
+
+    polluted.hosts = ['x.invalid'];
+    polluted.methods = ['DELETE'];
+    try {
+      mgr.add(
+        (request) => {
+          calls.push('filtered');
+          return request;
+        },
+        { methods: ['GET'] },
+      );
+      mgr.add((request) => {
+        calls.push('unfiltered');
+        return request;
+      });
+
+      await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
+    } finally {
+      delete polluted.hosts;
+      delete polluted.methods;
+    }
+
+    expect(calls).toEqual(['filtered', 'unfiltered']);
+  });
+
+  test('a field a Proxy answers only from its get trap is still read', async () => {
+    const mgr = new RequestInterceptorManager();
+    const calls: string[] = [];
+    mgr.add(
+      (request) => {
+        calls.push(request.method);
+        return request;
+      },
+      new Proxy(
+        {},
+        {
+          get: (_target, key) => (key === 'hosts' ? ['other.test'] : undefined),
+        },
+      ),
+    );
+
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
+
+    expect(calls).toEqual([]);
+  });
+
+  test('a field from a class of the caller is still read', async () => {
+    class HostFilter {
+      public get hosts(): string[] {
+        return ['other.test'];
+      }
+    }
+    const mgr = new RequestInterceptorManager();
+    const calls: string[] = [];
+    mgr.add(
+      (request) => {
+        calls.push(request.method);
+        return request;
+      },
+      new HostFilter(),
+    );
+
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
+
+    expect(calls).toEqual([]);
+  });
+});

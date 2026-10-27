@@ -1,5 +1,9 @@
 import { asciiUppercase, isBlankText } from '../../internal/ascii-text';
-import { readBinaryByteLength } from '../../internal/binary-view';
+import {
+  plainBytesView,
+  readBinaryByteLength,
+  readTypedArrayByteOffset,
+} from '../../internal/binary-view';
 import { describeValue } from '../../internal/describe-value';
 import {
   defineHiddenTags,
@@ -3554,10 +3558,11 @@ function normalizeCRL(
     // given, which holds the same bytes - rather than as the copy kept here. Only when it
     // starts at the start of its memory, as normalizing it would have required: one at
     // an offset (a `subarray`) is copied there, since Bun's `tls` reads a view from the
-    // start of its memory - and the copy kept here is that copy.
+    // start of its memory - and the copy kept here is that copy. The offset is the one
+    // its internal slot holds, which is where `tls` reads from, not the one it reports.
     return last.isPassedThrough &&
       Buffer.isBuffer(given) &&
-      given.byteOffset === 0
+      readTypedArrayByteOffset(given) === 0
       ? given
       : last.normalized;
   }
@@ -3634,6 +3639,23 @@ function copyToOwnMemory(bytes: Uint8Array): Buffer {
   return Buffer.from(copy.buffer, 0, copy.byteLength);
 }
 
+/**
+ * The bytes a `crl` view holds, as a plain Buffer over the same memory - a view, not a
+ * copy - read through its internal slots rather than its own `buffer`, `byteOffset` and
+ * `byteLength`, which a subclass or an own property can override. Read so, the bytes
+ * validated, copied and compared are the bytes `tls` reads from the view, not a prefix
+ * it reports. A Buffer over a detached buffer reads as empty, as its own `toString` reads
+ * it; any other view over one throws, as the `Buffer` constructor does.
+ */
+function crlBytesOf(view: ArrayBufferView): Buffer {
+  if (Buffer.isBuffer(view) && readBinaryByteLength(view) === 0) {
+    return Buffer.alloc(0);
+  }
+
+  const plain = plainBytesView(view);
+  return Buffer.from(plain.buffer, plain.byteOffset, plain.byteLength);
+}
+
 /** A `crl` value as given, copied: a string as is, a buffer's bytes into one of its own. */
 type CRLInputCopy = string | Buffer | Array<string | Buffer>;
 
@@ -3641,11 +3663,7 @@ function copyCRLInput(
   crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
 ): CRLInputCopy {
   const copyEntry = (entry: string | ArrayBufferView): string | Buffer =>
-    typeof entry === 'string'
-      ? entry
-      : copyToOwnMemory(
-          new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength),
-        );
+    typeof entry === 'string' ? entry : copyToOwnMemory(crlBytesOf(entry));
 
   return Array.isArray(crl) ? crl.map(copyEntry) : copyEntry(crl);
 }
@@ -3672,9 +3690,7 @@ function isSameCRLInput(
     }
 
     try {
-      return copied.equals(
-        new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength),
-      );
+      return copied.equals(crlBytesOf(entry));
     } catch {
       return false;
     }
@@ -3769,7 +3785,9 @@ function normalizeCRLEntry(
   // kind - a cache cleared to `null`, say - is terminal like bad framing rather than
   // retried as whatever its `toString` throws. Any binary view is read, as a Buffer over
   // the same bytes - a plain `Uint8Array` (Bun's `file().bytes()`) included - and that
-  // Buffer is what is passed on, since not every runtime's `tls` takes another view.
+  // Buffer is what is passed on, since not every runtime's `tls` takes another view. The
+  // bytes are read by the view's internal slots (see `crlBytesOf`), so what is checked
+  // here is everything `tls` will read, however the view reports its own size.
   const candidate: unknown = entry;
   if (!Buffer.isBuffer(candidate) && !ArrayBuffer.isView(candidate)) {
     throw crlValidationError(
@@ -3778,9 +3796,7 @@ function normalizeCRLEntry(
       ),
     );
   }
-  const bytes = Buffer.isBuffer(candidate)
-    ? candidate
-    : Buffer.from(candidate.buffer, candidate.byteOffset, candidate.byteLength);
+  const bytes = crlBytesOf(candidate);
 
   // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives exactly; the
   // bytes are only inspected here.
@@ -3809,6 +3825,16 @@ function normalizeCRLEntry(
       ? bytes.subarray(3)
       : bytes;
 
+  // The caller's own Buffer when it is one and needs nothing taken off, by the offset its
+  // internal slot holds: its bytes are the ones just read, from the start of its memory.
+  if (
+    withoutBOM === bytes &&
+    Buffer.isBuffer(candidate) &&
+    readTypedArrayByteOffset(candidate) === 0
+  ) {
+    return candidate;
+  }
+
   // Copied when it starts partway into its memory (a `subarray`, a view at an offset):
   // Bun's `tls` reads such a view from the start of the memory, and failed to parse it.
   return withoutBOM.byteOffset === 0 ? withoutBOM : copyToOwnMemory(withoutBOM);
@@ -3817,7 +3843,7 @@ function normalizeCRLEntry(
 /**
  * The errors {@link splitCRLString} itself raised for a malformed bundle, so `send()` can
  * tell its own validation refusal from a throw out of caller code that `normalizeCRL`
- * runs - an array element's getter, an entry's `toString` - which stays retryable.
+ * runs - an array element's getter, a `Proxy` trap - which stays retryable.
  */
 const crlValidationErrors = new WeakSet<Error>();
 

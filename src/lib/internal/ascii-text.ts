@@ -33,17 +33,26 @@ export function trimWhere(
   isTrimmed: (code: number) => boolean,
 ): string {
   let start = 0;
-  let end = text.length;
 
-  while (start < end && isTrimmed(text.charCodeAt(start))) {
+  while (start < text.length && isTrimmed(text.charCodeAt(start))) {
     start++;
   }
 
-  while (end > start && isTrimmed(text.charCodeAt(end - 1))) {
+  return trimEndWhere(text.slice(start), isTrimmed);
+}
+
+/** `text` without the characters `isTrimmed` picks at its end, as {@link trimWhere} trims. */
+export function trimEndWhere(
+  text: string,
+  isTrimmed: (code: number) => boolean,
+): string {
+  let end = text.length;
+
+  while (end > 0 && isTrimmed(text.charCodeAt(end - 1))) {
     end--;
   }
 
-  return text.slice(start, end);
+  return text.slice(0, end);
 }
 
 /** Whether `code` is HTTP whitespace (tab, LF, CR, space), what `fetch` trims from a header value. */

@@ -29,6 +29,40 @@ describe('PublicSuffixResolver', () => {
     expect(resolver.apexFor('tenant.blogspot.com')).toBe('com');
   });
 
+  test('a removed ancestor moves the bucket but not the registrable domain', () => {
+    const resolver = new PublicSuffixResolver({
+      add: ['corp.internal'],
+      remove: ['uk'],
+    });
+    expect(resolver.apexFor('a.x.co.uk')).toBe('uk');
+    expect(resolver.registrableDomainFor('a.x.co.uk')).toBe('x.co.uk');
+    expect(resolver.registrableDomainFor('co.uk')).toBe('co.uk');
+    expect(resolver.registrableDomainFor('uk')).toBe('uk');
+    expect(resolver.registrableDomainFor('a.tenant.corp.internal')).toBe(
+      'tenant.corp.internal',
+    );
+  });
+
+  test('the registrable domain widens to a removed suffix directly above it', () => {
+    const heroku = new PublicSuffixResolver({ remove: ['herokuapp.com'] });
+    expect(heroku.registrableDomainFor('a.mine.herokuapp.com')).toBe(
+      'herokuapp.com',
+    );
+
+    const com = new PublicSuffixResolver({ remove: ['com'] });
+    expect(com.registrableDomainFor('x.example.com')).toBe('com');
+    expect(com.registrableDomainFor('a.blogspot.com')).toBe('a.blogspot.com');
+
+    const coUK = new PublicSuffixResolver({ remove: ['co.uk'] });
+    expect(coUK.registrableDomainFor('a.x.co.uk')).toBe('co.uk');
+
+    // Exception rules hold: `!city.kawasaki.jp` under `*.kawasaki.jp`.
+    const jp = new PublicSuffixResolver({ remove: ['jp'] });
+    expect(jp.registrableDomainFor('a.city.kawasaki.jp')).toBe(
+      'city.kawasaki.jp',
+    );
+  });
+
   test('rejects normalized contradictory overrides and malformed suffixes', () => {
     expect(
       () => new PublicSuffixResolver({ add: ['COM'], remove: ['com'] }),

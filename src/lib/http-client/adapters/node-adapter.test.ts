@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import * as zlib from 'node:zlib';
 import { NodeAdapter } from './node-adapter';
+import { readTypedArrayByteOffset } from '../../internal/binary-view';
 import { isBuiltInNetworkSend } from '../internal/built-in-adapter';
 import type { NodeAdapterConfig } from './node-adapter';
 import { HTTPClient } from '../http-client';
@@ -7808,6 +7809,175 @@ describe('NodeAdapter — crl option (normalization)', () => {
     }
   });
 
+  // Every request's `crl` option, in order; each request then fails without a socket.
+  const spyOnCRLRequests = (captured: unknown[]) =>
+    spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured.push(options.crl);
+      const req = new EventEmitter();
+      const stub = req as unknown as Record<string, unknown>;
+      stub.setHeader = () => {};
+      stub.getHeaders = () => ({});
+      stub.destroy = () => {};
+      stub.end = () => {
+        queueMicrotask(() =>
+          req.emit(
+            'error',
+            Object.assign(new Error('captured'), { code: 'ECONNRESET' }),
+          ),
+        );
+      };
+      return req as unknown as http.ClientRequest;
+    }) as unknown as typeof https.request);
+
+  test('a CRL buffer is cached by every byte it holds, not the prefix its own size reports', async () => {
+    const captured: unknown[] = [];
+    const spy = spyOnCRLRequests(captured);
+
+    try {
+      // One CRL and a whitespace tail, in a Buffer whose own `byteLength` and `length`
+      // report only the CRL. `tls` reads the whole Buffer, tail included.
+      const prefixLength = fixtures.crlEmpty.length;
+      const tail = '\n'.repeat(16);
+      const buffer = Buffer.alloc(prefixLength + tail.length);
+      buffer.write(fixtures.crlEmpty + tail, 'latin1');
+      const memory = new Uint8Array(buffer.buffer, 0, buffer.byteLength);
+      Object.defineProperty(buffer, 'byteLength', { get: () => prefixLength });
+      Object.defineProperty(buffer, 'length', { get: () => prefixLength });
+
+      const config: NodeAdapterConfig = { crl: buffer };
+      const adapter = new NodeAdapter(config);
+      const request = {
+        requestURL: 'https://crl.test/api',
+        method: 'GET' as const,
+        headers: {},
+      };
+      await adapter.send(request);
+      expect(captured.at(-1)).toBe(buffer);
+
+      // Only the bytes past the reported size change: no longer a CRL and whitespace, so
+      // the value is validated afresh and refused, not answered from the cache.
+      memory.set(new TextEncoder().encode('not a crl'), prefixLength + 1);
+
+      const failure = await adapter
+        .send(request)
+        .catch((error: unknown) => error);
+
+      expect((failure as Error).message).toMatch(/outside any complete/);
+      expect(captured).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a CRL buffer partway into its memory is copied, whatever offset it reports', async () => {
+    const captured: unknown[] = [];
+    const spy = spyOnCRLRequests(captured);
+    // A copy this adapter made: not the caller's object, starting at the start of its
+    // memory by its internal slot, which is where Bun's `tls` reads from.
+    const isCopyFromStart = (value: unknown, given: Buffer): boolean =>
+      value !== given &&
+      Buffer.isBuffer(value) &&
+      readTypedArrayByteOffset(value) === 0 &&
+      value.toString('latin1') === fixtures.crlEmpty;
+
+    try {
+      // One CRL eight bytes into its memory, in a Buffer whose own `byteOffset` reports 0.
+      const memory = new ArrayBuffer(fixtures.crlEmpty.length + 8);
+      const atOffset = Buffer.from(memory, 8, fixtures.crlEmpty.length);
+      atOffset.write(fixtures.crlEmpty, 'latin1');
+      Object.defineProperty(atOffset, 'byteOffset', { get: () => 0 });
+
+      const config: NodeAdapterConfig = { crl: fixtures.crlRevoked };
+      const adapter = new NodeAdapter(config);
+      const request = {
+        requestURL: 'https://crl.test/api',
+        method: 'GET' as const,
+        headers: {},
+      };
+
+      // Normalized afresh, then answered from the cache.
+      config.crl = atOffset;
+      await adapter.send(request);
+      await adapter.send(request);
+
+      // Another value, then the same bytes passed through at the start of their memory,
+      // then the Buffer at an offset again: answered from the cache, with the copy kept of
+      // the one passed through.
+      config.crl = fixtures.crlRevoked;
+      await adapter.send(request);
+      const atStart = Buffer.alloc(fixtures.crlEmpty.length);
+      atStart.write(fixtures.crlEmpty, 'latin1');
+      config.crl = atStart;
+      await adapter.send(request);
+      config.crl = atOffset;
+      await adapter.send(request);
+
+      expect(captured).toHaveLength(5);
+      expect(isCopyFromStart(captured[0], atOffset)).toBe(true);
+      expect(isCopyFromStart(captured[1], atOffset)).toBe(true);
+      expect(captured[3]).toBe(atStart);
+      expect(isCopyFromStart(captured[4], atOffset)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a CRL DataView is read by the bytes it holds, not the window it reports', async () => {
+    const captured: unknown[] = [];
+    const spy = spyOnCRLRequests(captured);
+
+    try {
+      // Eight bytes of non-PEM, then one CRL and a whitespace tail. The DataView covers
+      // the CRL and the tail, and its own `byteOffset` and `byteLength` report the start
+      // of the memory and the CRL's length alone - a window that holds the non-PEM.
+      const lead = 'garbage!';
+      const tail = '\n'.repeat(16);
+      const text = lead + fixtures.crlEmpty + tail;
+      const memory = new Uint8Array(text.length);
+      memory.set(Buffer.from(text, 'latin1'));
+      const view = new DataView(
+        memory.buffer,
+        lead.length,
+        fixtures.crlEmpty.length + tail.length,
+      );
+      Object.defineProperty(view, 'byteOffset', { get: () => 0 });
+      Object.defineProperty(view, 'byteLength', {
+        get: () => fixtures.crlEmpty.length,
+      });
+
+      const config: NodeAdapterConfig = { crl: view };
+      const adapter = new NodeAdapter(config);
+      const request = {
+        requestURL: 'https://crl.test/api',
+        method: 'GET' as const,
+        headers: {},
+      };
+      await adapter.send(request);
+
+      expect(Buffer.isBuffer(captured.at(-1))).toBe(true);
+      expect((captured.at(-1) as Buffer).toString('latin1')).toBe(
+        fixtures.crlEmpty + tail,
+      );
+
+      // Only the bytes past the CRL change: validated afresh and refused, not answered
+      // from the cache.
+      memory.set(
+        new TextEncoder().encode('not a crl'),
+        lead.length + fixtures.crlEmpty.length + 1,
+      );
+      const failure = await adapter
+        .send(request)
+        .catch((error: unknown) => error);
+
+      expect((failure as Error).message).toMatch(/outside any complete/);
+      expect(captured).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   const countCRLs = (value: unknown): number => {
     const blocks = (text: unknown) =>
       typeof text === 'string'
@@ -8811,14 +8981,15 @@ test('a caller throw while a refreshed CRL is normalized stays retryable and unt
   const requestSpy = spyOn(https, 'request');
   let attempts = 0;
 
-  // A real Buffer, so it passes the type check, whose `toString` is caller code.
-  const throwingBuffer = Buffer.from('crl');
-  Object.defineProperty(throwingBuffer, 'toString', {
-    value: (): string => {
+  // An array whose element is read through a getter, which is caller code.
+  const throwingEntries: string[] = [];
+  Object.defineProperty(throwingEntries, 0, {
+    get: (): string => {
       throw failure;
     },
+    enumerable: true,
   });
-  config.crl = [throwingBuffer];
+  config.crl = throwingEntries;
 
   try {
     const builder = new HTTPClient({ adapter })

@@ -85,6 +85,11 @@ const DATA_VIEW_BUFFER = Object.getOwnPropertyDescriptor(
   'buffer',
 )?.get;
 
+const DATA_VIEW_BYTE_OFFSET = Object.getOwnPropertyDescriptor(
+  DataView.prototype,
+  'byteOffset',
+)?.get;
+
 const ARRAY_BUFFER_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   ArrayBuffer.prototype,
   'byteLength',
@@ -122,11 +127,24 @@ export function readTypedArrayByteOffset(view: ArrayBufferView): number {
 /**
  * `view` as a plain `Uint8Array` over the same bytes - a view, not a copy - built from the
  * intrinsic `buffer`, `byteOffset` and `byteLength` getters rather than the view's own,
- * which a subclass or an own property can override. Throws for a value that is not a
- * typed array, as those getters do, and for one over a detached buffer, as the
- * `Uint8Array` constructor does.
+ * which a subclass or an own property can override: a typed array's, or for a `DataView`,
+ * the ones `DataView` declares. Throws for a value that is neither, as those getters do,
+ * and for one over a detached buffer, as a `DataView`'s getters and the `Uint8Array`
+ * constructor do.
  */
 export function plainBytesView(view: ArrayBufferView): Uint8Array {
+  if (isDataViewBrand(view)) {
+    return new Uint8Array(
+      Reflect.apply(
+        DATA_VIEW_BUFFER as () => unknown,
+        view,
+        [],
+      ) as ArrayBufferLike,
+      Reflect.apply(DATA_VIEW_BYTE_OFFSET as () => unknown, view, []) as number,
+      Reflect.apply(DATA_VIEW_BYTE_LENGTH as () => unknown, view, []) as number,
+    );
+  }
+
   return new Uint8Array(
     readTypedArrayBuffer(view),
     readTypedArrayByteOffset(view),

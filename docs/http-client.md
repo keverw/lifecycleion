@@ -1050,8 +1050,9 @@ const cookieHeader = jar.getCookieHeaderString('https://api.example.com/users');
 jar.clearExpiredCookies(); // Returns count removed
 jar.clear(); // Remove all cookies - returns count removed
 jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only - returns count removed
-jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) - returns count removed. A site behind a nested private suffix (bucket.s3.amazonaws.com under amazonaws.com) is its own domain and stays
+jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (any host's registrable domain is cleared this way) - returns count removed. A site behind a nested private suffix (bucket.s3.amazonaws.com under amazonaws.com) is its own domain and stays
 jar.clear('github.io', 'domain'); // On a public suffix or bare name, every site beneath it
+// The registrable domain is read under the jar's publicSuffixes, removals included: with remove: ['herokuapp.com'], clear('mine.herokuapp.com', 'domain') clears every *.herokuapp.com cookie. With remove: ['uk'], co.uk is still a suffix, so clear('x.co.uk', 'domain') clears only x.co.uk's family - y.co.uk's cookies and a Domain=uk one stay - while clear('uk', 'domain') clears them all.
 // A host that is not a non-empty string, or a missing or unknown scope, throws: only clear() with no arguments clears everything.
 
 // Inspection
