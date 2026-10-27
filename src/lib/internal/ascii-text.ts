@@ -38,7 +38,13 @@ export function trimWhere(
     start++;
   }
 
-  return trimEndWhere(text.slice(start), isTrimmed);
+  let end = text.length;
+
+  while (end > start && isTrimmed(text.charCodeAt(end - 1))) {
+    end--;
+  }
+
+  return text.slice(start, end);
 }
 
 /** `text` without the characters `isTrimmed` picks at its end, as {@link trimWhere} trims. */

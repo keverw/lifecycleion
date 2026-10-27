@@ -320,9 +320,11 @@ export interface CookieJarOptions {
 export class CookieJar {
   // Outer key: apex domain from the Public Suffix List (e.g. 'example.co.uk'), or the
   //            hostname itself for IPs and bare names like localhost. Under a
-  //            `publicSuffixes.remove` entry, the removed suffix, holding every site
-  //            beneath it - so a bucket is not always one site.
-  // Inner key: composite 'name@domain/path' for deduplication
+  //            `publicSuffixes.remove` entry, the registrable domain the widest removed
+  //            suffix belongs to, holding every site beneath it - so a bucket is not
+  //            always one site (see `PublicSuffixResolver.apexFor`).
+  // Inner key: `cookieKey`'s JSON of [name, domain, path, hostOnly], for deduplication;
+  //            `storedDomainOf` reads the domain back from it.
   private buckets: Map<string, Map<string, Cookie>> = new Map();
 
   /**

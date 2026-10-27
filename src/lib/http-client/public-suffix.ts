@@ -269,7 +269,7 @@ export class PublicSuffixResolver {
     for (const removed of this.removed) {
       if (
         (removed === normalized || removed.endsWith(`.${normalized}`)) &&
-        isBundledPublicSuffix(removed)
+        this.isEffectiveRemoval(removed)
       ) {
         return true;
       }

@@ -387,8 +387,9 @@ async function readResponseBody(
     ? parseContentLength(response.headers.get('content-length'))
     : undefined;
 
-  // The body and its reading methods each read once and guarded, as a polyfill's or test
-  // double's response may carry any getter: one that throws reads as absent.
+  // `body`, and its `getReader` and `Symbol.asyncIterator`, each read once and guarded, as
+  // a polyfill's or test double's response may carry any getter: one that throws reads as
+  // absent. `arrayBuffer()` is the read of last resort; a failure there fails the send.
   const body = readUnknownMember(response, 'body');
 
   if (declaredLength !== undefined && declaredLength > maxResponseBytes) {
@@ -413,8 +414,8 @@ async function readResponseBody(
         [Symbol.asyncIterator]: () =>
           Reflect.apply(iterate, body, []) as AsyncIterator<unknown>,
       };
-      // Text taken as well: a `Readable` given an encoding yields strings, which the
-      // polyfill's own `arrayBuffer()` joins as it joins `Buffer`s.
+      // Text taken as well, as its UTF-8 bytes: a `Readable` given an encoding yields
+      // strings, which node-fetch 3's own `arrayBuffer()` joins and encodes as UTF-8.
       return await readBodyWithin(
         iterable,
         maxResponseBytes,
