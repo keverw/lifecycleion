@@ -548,7 +548,7 @@ describe('isInterceptorCancel', () => {
 });
 
 describe('interceptor results passed down the chain', () => {
-  test('PR review round 42: a host-filtered interceptor and its filter read the same URL', async () => {
+  test('a host-filtered interceptor and its filter read the same URL', async () => {
     // A `requestURL` getter that answers the trusted host to its first read and another
     // host after: read apart, the filter matched `trusted.test` and the interceptor it
     // guards attached its token to a request for `evil.test`.
@@ -591,7 +591,7 @@ describe('interceptor results passed down the chain', () => {
 });
 
 describe('the copy the next interceptor sees', () => {
-  test('PR review round 42: header names reach the next interceptor lowercase, values as strings', async () => {
+  test('header names reach the next interceptor lowercase, values as strings', async () => {
     const mgr = new RequestInterceptorManager();
     mgr.add((request) => ({
       ...request,
@@ -622,7 +622,7 @@ describe('the copy the next interceptor sees', () => {
   });
 });
 
-test('PR review round 58: prepareRequest runs once, after the filter and before the function of the first interceptor the phase calls, and only then', async () => {
+test('prepareRequest runs once, after the filter and before the function of the first interceptor the phase calls, and only then', async () => {
   const mgr = new RequestInterceptorManager();
   const seen: unknown[] = [];
   mgr.add(
@@ -632,8 +632,8 @@ test('PR review round 58: prepareRequest runs once, after the filter and before 
     },
     { phases: ['initial'] },
   );
-  // Filters read the request as handed over (PR review round 59): this one is not
-  // matched by the prepared body, and is not called.
+  // Filters read the request as handed over: this one is not matched by the prepared
+  // body, and is not called.
   mgr.add(
     (request) => {
       seen.push(['prepared-filter', request.body]);

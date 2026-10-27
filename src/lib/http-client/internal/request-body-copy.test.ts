@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { copyRequestBody, serializesToNothing } from './request-body-copy';
 
-test('PR review round 75: serializesToNothing answers as JSON.stringify does, reading only the top-level toJSON', () => {
+test('serializesToNothing answers as JSON.stringify does, reading only the top-level toJSON', () => {
   class Silent extends Array<number> {
     public toJSON(): undefined {
       return undefined;

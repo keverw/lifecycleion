@@ -765,7 +765,7 @@ test('headers() refuses a Headers, Map or array instead of dropping its entries'
   expect(builder.headers(record as Record<string, string>)).toBe(builder);
 });
 
-test('PR review round 71: params are copied when given, so a later change to the object is not sent', async () => {
+test('params are copied when given, so a later change to the object is not sent', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/search', () => ({ status: 200 }));
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
@@ -788,7 +788,7 @@ test('PR review round 71: params are copied when given, so a later change to the
   expect(optionResponse.requestURL).toBe('http://api.test/search?q=a');
 });
 
-test('PR review round 72a: an array in params or headers is copied when given, so an item added to it afterwards is not sent', async () => {
+test('an array in params or headers is copied when given, so an item added to it afterwards is not sent', async () => {
   const adapter = new MockAdapter();
   const seen: unknown[] = [];
   adapter.routes.get('/search', (request) => {
@@ -832,7 +832,7 @@ test('PR review round 72a: an array in params or headers is copied when given, s
   expect(seen).toEqual(['a', 'a']);
 });
 
-test('PR review round 72b: a body is copied when it is handed to a setter, so a later change to it is not sent', async () => {
+test('a body is copied when it is handed to a setter, so a later change to it is not sent', async () => {
   const json = { a: 1, nested: { b: 2 } };
   const bytes = new Uint8Array([1, 2, 3]);
   const form = new FormData();
@@ -886,7 +886,7 @@ test('PR review round 72b: a body is copied when it is handed to a setter, so a 
   expect(requireContext().options.body).toEqual({ a: 1 });
 });
 
-test('PR review round 72b: a body whose getter or toJSON throws throws from the setter, and the builder keeps its body', async () => {
+test('a body whose getter or toJSON throws throws from the setter, and the builder keeps its body', async () => {
   const getterBody = {
     get token(): string {
       throw new Error('getter failed');
@@ -914,7 +914,7 @@ test('PR review round 72b: a body whose getter or toJSON throws throws from the 
   expect(requireContext().options.body).toEqual({ kept: true });
 });
 
-test('PR review round 72b: a JSON body is kept as the data it serializes to', async () => {
+test('a JSON body is kept as the data it serializes to', async () => {
   class Point {
     public x = 1;
   }
@@ -934,7 +934,7 @@ test('PR review round 72b: a JSON body is kept as the data it serializes to', as
   expect(Object.hasOwn(body, 'dropped')).toBe(false);
 });
 
-test('PR review round 72b: a form body is copied from the entries it holds, not ones it reports', async () => {
+test('a form body is copied from the entries it holds, not ones it reports', async () => {
   const form = new FormData();
   form.append('a', '1');
   // Its own `entries` reports an entry the form does not hold.
@@ -962,7 +962,7 @@ test('PR review round 72b: a form body is copied from the entries it holds, not 
   ).toThrow();
 });
 
-test('PR review round 73: a params array keeps a named key set on it, as qs serializes the array', async () => {
+test('a params array keeps a named key set on it, as qs serializes the array', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/search', () => ({ status: 200 }));
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
@@ -977,7 +977,7 @@ test('PR review round 73: a params array keeps a named key set on it, as qs seri
   );
 });
 
-test('PR review round 76: a byte body whose prototype is a Proxy is copied without running its traps', () => {
+test('a byte body whose prototype is a Proxy is copied without running its traps', () => {
   const bytes = new Uint8Array([1, 2, 3]);
   let trapCalls = 0;
   Object.setPrototypeOf(

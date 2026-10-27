@@ -1289,7 +1289,7 @@ describe('NodeAdapter streamResponse factory failures', () => {
 });
 
 describe('NodeAdapter.send() — unit branches without server', () => {
-  test("PR review round 43: a header http.request would refuse is refused in the adapter's words, without Node's error", async () => {
+  test("a header http.request would refuse is refused in the adapter's words, without Node's error", async () => {
     const secret = 'secret-token';
     const requestSpy = spyOn(http, 'request');
     try {
@@ -1320,7 +1320,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
-  test("PR review round 43: a malformed URL is refused without the parser's error, which carries the whole URL", async () => {
+  test("a malformed URL is refused without the parser's error, which carries the whole URL", async () => {
     const secret = 'secret-token';
     const outcome = await new NodeAdapter()
       .send({
@@ -3365,7 +3365,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), ms)),
     ]);
 
-  test('PR review round 52: a response torn down while the writer waits on its source settles the upload', async () => {
+  test('a response torn down while the writer waits on its source settles the upload', async () => {
     // The adapter destroys the request itself here - a body over `maxResponseBytes` - and a
     // writer parked inside `Blob.stream()`'s `read()` has no pending `req.write` for that
     // destroy to reject. Nothing else would wake it, so were the watchdog to stand down
@@ -3416,7 +3416,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
-  test('PR review round 52: a peer that closes while the writer waits on its source settles the upload', async () => {
+  test('a peer that closes while the writer waits on its source settles the upload', async () => {
     // The same parked writer, with the request destroyed from the other side: the server
     // answered in full and then closed the connection, which raises no `'error'` at all.
     const req = new ClosingMockClientRequest();
@@ -3475,7 +3475,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
-  test('PR review round 52: the stall watchdog still bounds a destroyed upload whose writer never hears of it', async () => {
+  test('the stall watchdog still bounds a destroyed upload whose writer never hears of it', async () => {
     // A request destroyed with no `'close'` reaching the writer: were the watchdog to
     // stand down on `req.destroyed` with the outcome still open, the source grace it
     // documents would bound nothing. It settles once that grace runs out. The adapter
@@ -7458,7 +7458,7 @@ describe('NodeAdapter — crl option (enforcement)', () => {
       .get('/api/test')
       .send();
 
-  test('round 136: mtls.ca adds to ca rather than replacing it', async () => {
+  test('mtls.ca adds to ca rather than replacing it', async () => {
     // The server's CA only through `ca`, and an unrelated one through `mtls.ca`: replaced,
     // `ca` would be gone and the server's certificate untrusted. The server asks for no
     // client certificate, so the mTLS identity is never used.
@@ -7677,7 +7677,7 @@ describe('NodeAdapter — crl option (normalization)', () => {
     return captured;
   };
 
-  test('PR review round 27: a cached CRL is never answered with a buffer the caller has since reused', async () => {
+  test('a cached CRL is never answered with a buffer the caller has since reused', async () => {
     const captured: unknown[] = [];
     const spy = spyOn(https, 'request').mockImplementation(((
       options: https.RequestOptions,
@@ -7725,7 +7725,7 @@ describe('NodeAdapter — crl option (normalization)', () => {
     }
   });
 
-  test('PR review round 82: a CRL buffer it copies owns its memory from the start, never a slice of a shared pool', async () => {
+  test('a CRL buffer it copies owns its memory from the start, never a slice of a shared pool', async () => {
     const captured: unknown[] = [];
     const requestSpy = spyOn(https, 'request').mockImplementation(((
       options: https.RequestOptions,
@@ -8145,7 +8145,7 @@ describe('NodeAdapter — crl option (normalization)', () => {
     expect(captured).toBeUndefined();
   });
 
-  test('PR review round 64: each entry of a crl array is read once per request, so the value cached is the value validated', async () => {
+  test('each entry of a crl array is read once per request, so the value cached is the value validated', async () => {
     // Answers one CRL on its first read and another on every read after.
     let reads = 0;
     const crl = new Proxy([fixtures.crlEmpty], {
@@ -9035,7 +9035,7 @@ test('a response arriving after the signal aborted does not call the streamRespo
   }
 });
 
-test('PR review round 52: an aborted compressed download lets go of a sink whose destroy says nothing', async () => {
+test('an aborted compressed download lets go of a sink whose destroy says nothing', async () => {
   // The abort releases the decoded body, and a destroyed one delivers nothing more - not
   // even the `'close'` a destroyed raw response still emits - so left to those events,
   // the pipe into the sink would never settle or take its listeners off. A hand-written
@@ -9101,7 +9101,7 @@ test('PR review round 52: an aborted compressed download lets go of a sink whose
   }
 });
 
-test('PR review round 54: an early-ack upload of a large File part goes out in full while the server reads on', async () => {
+test('an early-ack upload of a large File part goes out in full while the server reads on', async () => {
   // Node and Bun stop emitting `'drain'` on a request whose response has ended while the
   // upload has not, though each write's callback still runs. A writer waiting for both -
   // and every `File` chunk is larger than the request's high-water mark - would wait for
@@ -9192,7 +9192,7 @@ test('PR review round 54: an early-ack upload of a large File part goes out in f
   }
 }, 20000);
 
-test('PR review round 54: a FormData part whose getter throws in the sizing pass is refused as non-retryable', async () => {
+test('a FormData part whose getter throws in the sizing pass is refused as non-retryable', async () => {
   // The sizing pass reads the caller's `name`, `type` and `size` before any byte is
   // written, and is guarded as the part's `stream()` reads are: unguarded, a throw there
   // would reach the adapter untagged and settle as `status: 0` with `isTransportError`, so an
@@ -9261,7 +9261,7 @@ test('PR review round 54: a FormData part whose getter throws in the sizing pass
   }
 });
 
-test('PR review round 54: the socket gets its full grace after a source read that ends just before a watchdog tick', async () => {
+test('the socket gets its full grace after a source read that ends just before a watchdog tick', async () => {
   // Were the watchdog's window to run from its last tick, not from when the writer turned
   // to the socket, a source read that ended a moment before the tick would leave the
   // chunk it produced only that moment to be accepted, and the upload would be destroyed
@@ -9361,7 +9361,7 @@ for (const [label, contentEncoding] of [
   ['a decode failure', 'gzip'],
   ['a coding chain refused as too long', 'gzip, gzip, gzip, gzip, gzip, gzip'],
 ] as const) {
-  test(`PR review round 55: ${label} during an early-ack upload is not reported as an upload failure`, async () => {
+  test(`${label} during an early-ack upload is not reported as an upload failure`, async () => {
     // The decoded body destroys its response when the body fails to decode, or when its
     // coding chain is refused, and with the response still arriving that takes the
     // socket - and the upload still running on it - down too. Not recognised as this
@@ -9423,7 +9423,7 @@ for (const [label, contentEncoding] of [
   }, 10000);
 }
 
-test('PR review round 55: a decode failure on a body that arrived whole while a stream factory sets up is not reported as an upload failure', async () => {
+test('a decode failure on a body that arrived whole while a stream factory sets up is not reported as an upload failure', async () => {
   // The body arrives in full and then fails to decode, with an async factory still
   // opening its sink. The setup failure that follows destroys the request - which cuts
   // the upload still running on a connection that was otherwise fine - so that upload
@@ -9486,7 +9486,7 @@ test('PR review round 55: a decode failure on a body that arrived whole while a 
   }
 }, 10000);
 
-test('PR review round 55: a reset while a stream factory sets up is reported as an upload failure, as it is for a buffered body', async () => {
+test('a reset while a stream factory sets up is reported as an upload failure, as it is for a buffered body', async () => {
   // A socket reset with the upload still running is the network's failure, and a reset
   // on a buffered body puts it on the host's `'error'` channel. The same reset while an
   // async factory is still opening its sink must not be handled as this adapter's own
@@ -9550,7 +9550,7 @@ test('PR review round 55: a reset while a stream factory sets up is reported as 
   }
 }, 10000);
 
-test('PR review round 55: an abort after the body arrived takes the pipe off a sink whose end never calls back', async () => {
+test('an abort after the body arrived takes the pipe off a sink whose end never calls back', async () => {
   // A hand-written sink whose `end` has not called back, and whose `destroy()` emits no
   // `'close'`: the abort destroys it and answers the request, but a pipe that waited for
   // that `'close'` to settle would leave its listeners on the sink and the response task
@@ -9628,7 +9628,7 @@ test('PR review round 55: an abort after the body arrived takes the pipe off a s
   }
 });
 
-test('PR review round 55: the stall watchdog timer is cleared once an early-ack upload finishes', async () => {
+test('the stall watchdog timer is cleared once an early-ack upload finishes', async () => {
   // Left pending once the writer finishes, the watchdog armed as the early response
   // closed would only return on its tick, but until then it would hold the request's
   // whole scope - the delivered response body among it - for up to five seconds.
@@ -9692,7 +9692,7 @@ test('PR review round 55: the stall watchdog timer is cleared once an early-ack 
   }
 }, 10000);
 
-describe('NodeAdapter - PR review round 64', () => {
+describe('NodeAdapter - unsupported bodies and per-request option reads', () => {
   /** A stand-in `ClientRequest` that fails as soon as it is ended. */
   const failingRequest = (): http.ClientRequest => {
     const req = new EventEmitter();
@@ -9712,7 +9712,7 @@ describe('NodeAdapter - PR review round 64', () => {
     return req as unknown as http.ClientRequest;
   };
 
-  test('PR review round 64: an unsupported body is refused before the upload starts and before the request is created', async () => {
+  test('an unsupported body is refused before the upload starts and before the request is created', async () => {
     const httpSpy = spyOn(http, 'request');
     const httpsSpy = spyOn(https, 'request');
     try {
@@ -9748,7 +9748,7 @@ describe('NodeAdapter - PR review round 64', () => {
     }
   });
 
-  test('PR review round 64: socketPath, servername and mtls are each read once per request', async () => {
+  test('socketPath, servername and mtls are each read once per request', async () => {
     const reads = { socketPath: 0, servername: 0, mtls: 0 };
     // Each answers one value on its first read and another on every read after.
     const config = {
@@ -9801,8 +9801,8 @@ describe('NodeAdapter - PR review round 64', () => {
   });
 });
 
-describe('NodeAdapter - PR review round 71', () => {
-  test('PR review round 71: a Uint8Array body from another realm is sent as its bytes, through the client and directly', async () => {
+describe('NodeAdapter - request body bytes from another realm', () => {
+  test('a Uint8Array body from another realm is sent as its bytes, through the client and directly', async () => {
     const received: number[][] = [];
     const server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
@@ -9844,8 +9844,8 @@ describe('NodeAdapter - PR review round 71', () => {
   });
 });
 
-describe('NodeAdapter - PR review round 72a', () => {
-  test('PR review round 72a: a streamResponse factory that writes into info.headers changes neither the response headers nor the cookie jar', async () => {
+describe('NodeAdapter - streamResponse header isolation and ca entry reads', () => {
+  test('a streamResponse factory that writes into info.headers changes neither the response headers nor the cookie jar', async () => {
     const server = http.createServer((_req, res) => {
       res.writeHead(200, { 'x-a': 'server' });
       res.end('hello');
@@ -9885,7 +9885,7 @@ describe('NodeAdapter - PR review round 72a', () => {
     }
   });
 
-  test('PR review round 72a: each ca entry is read once per request, and the entry checked is the one sent', async () => {
+  test('each ca entry is read once per request, and the entry checked is the one sent', async () => {
     const reads: number[] = [0, 0];
     const entries = ['first-ca', 'second-ca'];
     const ca = new Proxy(entries, {
@@ -9938,8 +9938,8 @@ describe('NodeAdapter - PR review round 72a', () => {
   });
 });
 
-describe('NodeAdapter - PR review round 73', () => {
-  test("PR review round 73: a ca list is read by index, not through the caller's own Symbol.iterator", async () => {
+describe('NodeAdapter - ca list iteration', () => {
+  test("a ca list is read by index, not through the caller's own Symbol.iterator", async () => {
     const withIterator = (entries: unknown[], yields: unknown[]): string[] => {
       Object.defineProperty(entries, Symbol.iterator, {
         value: function* () {
@@ -9999,8 +9999,8 @@ describe('NodeAdapter - PR review round 73', () => {
   });
 });
 
-describe('NodeAdapter - PR review round 74', () => {
-  test('PR review round 74: the bytes it is handed are copied before send() returns, so a change made after it reaches nothing sent', async () => {
+describe('NodeAdapter - request body copy', () => {
+  test('the bytes it is handed are copied before send() returns, so a change made after it reaches nothing sent', async () => {
     const received: number[][] = [];
     const server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
@@ -10034,8 +10034,8 @@ describe('NodeAdapter - PR review round 74', () => {
   });
 });
 
-describe('NodeAdapter - PR review round 81', () => {
-  test('PR review round 81: an empty ca view is refused however its own byteLength getter answers', () => {
+describe('NodeAdapter - empty ca views', () => {
+  test('an empty ca view is refused however its own byteLength getter answers', () => {
     class Claims extends Uint8Array {
       public override get byteLength(): number {
         return 1;

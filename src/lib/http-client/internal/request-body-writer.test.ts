@@ -396,7 +396,7 @@ describe('writeRequestBodyChunked', () => {
     await writePromise;
   });
 
-  test('PR review round 54: a backpressured chunk is accepted on its callback, with no drain', async () => {
+  test('a backpressured chunk is accepted on its callback, with no drain', async () => {
     // Node and Bun stop emitting `'drain'` on a request whose early response has ended
     // while the upload goes on, though the write callbacks keep coming. Waiting for the
     // drain as well parked the writer for good on the first chunk that asked for one, and
@@ -432,7 +432,7 @@ describe('writeRequestBodyChunked', () => {
 });
 
 describe('writeChunkWithBackpressure', () => {
-  test('PR review round 42: an onAccepted that throws rejects the write rather than leaving it pending', async () => {
+  test('an onAccepted that throws rejects the write rather than leaving it pending', async () => {
     // Settled and with its listeners off before `onAccepted` ran, a throw from it left the
     // promise pending for good - and, from the write callback, escaped as an uncaught
     // exception.

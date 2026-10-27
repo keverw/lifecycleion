@@ -76,7 +76,7 @@ test('rejects added tenant boundaries beneath removed shared-cookie ancestors', 
   ).not.toThrow();
 });
 
-test("PR review round 76: override lists are read by index, not through the array's own entries or iterator", () => {
+test("override lists are read by index, not through the array's own entries or iterator", () => {
   const listed = (suffixes: string[], reported: string[]): string[] =>
     Object.defineProperties(suffixes, {
       entries: { value: () => reported.entries() },
@@ -100,7 +100,7 @@ test("PR review round 76: override lists are read by index, not through the arra
   );
 });
 
-test('PR review round 80: a suffix is lowercased in ASCII only, so a Kelvin sign is refused rather than read as k', () => {
+test('a suffix is lowercased in ASCII only, so a Kelvin sign is refused rather than read as k', () => {
   for (const suffix of ['\u212Aorp.internal', 'corp.\u212A']) {
     expect(() => new PublicSuffixResolver({ add: [suffix] })).toThrow(
       TypeError,

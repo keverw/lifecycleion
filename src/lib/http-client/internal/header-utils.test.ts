@@ -85,7 +85,7 @@ describe('isBrowserRestrictedHeader', () => {
     );
   });
 
-  test('PR review round 78: a method-override value is lowercased and trimmed in ASCII only', () => {
+  test('a method-override value is lowercased and trimmed in ASCII only', () => {
     // KELVIN SIGN: `toLowerCase` folds it into `k`, a browser does not.
     expect(isBrowserRestrictedHeader('X-HTTP-Method-Override', 'TRACK')).toBe(
       false,
@@ -100,7 +100,7 @@ describe('isBrowserRestrictedHeader', () => {
     ).toBe(true);
   });
 
-  test('PR review round 79: a method-override value is split as a browser splits it, not inside a quoted string', () => {
+  test('a method-override value is split as a browser splits it, not inside a quoted string', () => {
     // One quoted value, not three methods.
     expect(
       isBrowserRestrictedHeader('X-HTTP-Method-Override', '"x,TRACE,y"'),
@@ -152,7 +152,7 @@ describe('assertNoBrowserRestrictedHeaders', () => {
     ).not.toThrow();
   });
 
-  test('PR review round 47: a restricted header pasted whole as its name is refused without the name', () => {
+  test('a restricted header pasted whole as its name is refused without the name', () => {
     // Lowercased, it matches the `proxy-` prefix: the name is the credential.
     let thrown: unknown;
     try {
@@ -195,7 +195,7 @@ describe('materializeRequestHeaders', () => {
 });
 
 describe('describeRefusedHeader', () => {
-  test('PR review round 43: names a token header and the part refused, and never a name that is not a token', () => {
+  test('names a token header and the part refused, and never a name that is not a token', () => {
     expect(describeRefusedHeader('Authorization', 'value')).toBe(
       "the value of header 'Authorization'",
     );
@@ -213,7 +213,7 @@ describe('describeRefusedHeader', () => {
     }
   });
 
-  test('PR review round 44: names a token header without a part when the part refused is unknown', () => {
+  test('names a token header without a part when the part refused is unknown', () => {
     expect(describeRefusedHeader('x-trace', 'header')).toBe("header 'x-trace'");
     expect(
       describeRefusedHeader('Authorization: Bearer secret-token', 'header'),
@@ -221,8 +221,8 @@ describe('describeRefusedHeader', () => {
   });
 });
 
-describe('Cookie joining - PR review round 56', () => {
-  test('PR review round 56: empty cookie values and items leave no stray separators', () => {
+describe('Cookie joining', () => {
+  test('empty cookie values and items leave no stray separators', () => {
     const headers = { cookie: '', Cookie: 'a=1', COOKIE: ['b=2', ''] };
 
     expect(requestHeaderPairs(headers)).toEqual([['Cookie', 'a=1; b=2']]);
@@ -232,13 +232,13 @@ describe('Cookie joining - PR review round 56', () => {
     ).toEqual({ cookie: 'a=1; b=2' });
   });
 
-  test('PR review round 56: a whitespace-only cookie value holds no cookie', () => {
+  test('a whitespace-only cookie value holds no cookie', () => {
     const headers = { cookie: [' ', 'a=1', '\t'], Cookie: '  ' };
 
     expect(requestHeaderPairs(headers)).toEqual([['cookie', 'a=1']]);
   });
 
-  test('PR review round 56: a cookie header with no cookie in it is not sent at all', () => {
+  test('a cookie header with no cookie in it is not sent at all', () => {
     const headers = { 'x-a': '1', cookie: '', Cookie: ['', ' '] };
 
     expect(requestHeaderPairs(headers)).toEqual([['x-a', '1']]);

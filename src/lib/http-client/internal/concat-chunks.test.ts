@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { concatChunks } from './concat-chunks';
 
 describe('concatChunks', () => {
-  test('PR review round 66: a lone chunk spanning a resizable buffer is copied into a fixed-length one', () => {
+  test('a lone chunk spanning a resizable buffer is copied into a fixed-length one', () => {
     const buffer = new ArrayBuffer(3, { maxByteLength: 8 });
     const chunk = new Uint8Array(buffer);
     chunk.set([1, 2, 3]);
@@ -14,7 +14,7 @@ describe('concatChunks', () => {
     expect([...result]).toEqual([1, 2, 3]);
   });
 
-  test('PR review round 66: a lone chunk spanning a shared buffer is copied into one of its own', () => {
+  test('a lone chunk spanning a shared buffer is copied into one of its own', () => {
     const chunk = new Uint8Array(new SharedArrayBuffer(3));
     chunk.set([1, 2, 3]);
 
@@ -27,7 +27,7 @@ describe('concatChunks', () => {
     expect([...result]).toEqual([1, 2, 3]);
   });
 
-  test('PR review round 66: chunks are placed by the bytes they hold, not the byteLength they report', () => {
+  test('chunks are placed by the bytes they hold, not the byteLength they report', () => {
     class Understated extends Uint8Array {
       public override get byteLength(): number {
         return 0;

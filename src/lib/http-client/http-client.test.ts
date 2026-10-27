@@ -9979,7 +9979,7 @@ describe('a cancel or timeout wins over a cookie jar that throws', () => {
   });
 });
 
-test('PR review round 83: a caller signal whose removeEventListener throws neither rejects a finished request nor keeps the other listeners', async () => {
+test('a caller signal whose removeEventListener throws neither rejects a finished request nor keeps the other listeners', async () => {
   const anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
   const originalAdd = Object.getOwnPropertyDescriptor(
     EventTarget.prototype,

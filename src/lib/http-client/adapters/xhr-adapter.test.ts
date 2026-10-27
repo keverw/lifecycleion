@@ -451,7 +451,7 @@ describe('XHRAdapter', () => {
     ]);
   });
 
-  test('round 129: joins a repeated cookie header with "; " as the other adapters do', async () => {
+  test('joins a repeated cookie header with "; " as the other adapters do', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({
       requestURL: 'https://api.test/data',
@@ -468,7 +468,7 @@ describe('XHRAdapter', () => {
     expect(lastXHR.requestHeaders['cookie']).toEqual(['a=1; b=2']);
   });
 
-  test('PR review round 2: a Cookie given under two spellings is set once, joined with "; "', async () => {
+  test('a Cookie given under two spellings is set once, joined with "; "', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
       method: 'GET',
@@ -482,7 +482,7 @@ describe('XHRAdapter', () => {
     await promise;
   });
 
-  test('PR review round 4: an empty Cookie part is left out', async () => {
+  test('an empty Cookie part is left out', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
       method: 'GET',
@@ -496,7 +496,7 @@ describe('XHRAdapter', () => {
     await promise;
   });
 
-  test('PR review round 5: the Cookie header is the one NodeAdapter sends', async () => {
+  test('the Cookie header is the one NodeAdapter sends', async () => {
     for (const headers of [
       { Cookie: [], cookie: 'b=2' },
       { cookie: ['a=1', ''] },
@@ -522,7 +522,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 10: a 205 is bodiless, as in the other adapters', async () => {
+  test('a 205 is bodiless, as in the other adapters', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/reset',
       method: 'POST',
@@ -539,7 +539,7 @@ describe('XHRAdapter', () => {
     expect(response.streamErrorCode).toBeUndefined();
   });
 
-  test('PR review round 10: the final upload event is sent before an oversized answer is refused', async () => {
+  test('the final upload event is sent before an oversized answer is refused', async () => {
     const uploads: number[] = [];
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/big',
@@ -560,7 +560,7 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toBe(1);
   });
 
-  test('PR review round 11: a body refused mid-download still ends with the final upload event', async () => {
+  test('a body refused mid-download still ends with the final upload event', async () => {
     const uploads: number[] = [];
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/big',
@@ -582,7 +582,7 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toBe(1);
   });
 
-  test('PR review round 12: a mid-download refusal keeps the answer an upload callback cancels over', async () => {
+  test('a mid-download refusal keeps the answer an upload callback cancels over', async () => {
     const controller = new AbortController();
     const uploads: Array<{ loaded: number; progress: number }> = [];
     const promise = new XHRAdapter().send({
@@ -619,7 +619,7 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toEqual({ loaded: 5, progress: 1 });
   });
 
-  test("PR review round 13: a browser-followed redirect reports the body's own upload size", async () => {
+  test("a browser-followed redirect reports the body's own upload size", async () => {
     const uploads: Array<{ loaded: number; progress: number }> = [];
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/start',
@@ -640,7 +640,7 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toEqual({ loaded: 5, progress: 1 });
   });
 
-  test('PR review round 15: the final upload event never reports more bytes than its total', async () => {
+  test('the final upload event never reports more bytes than its total', async () => {
     const uploads: Array<{ loaded: number; total: number; progress: number }> =
       [];
     const body = new FormData();
@@ -669,7 +669,7 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toEqual({ loaded: 500, total: 500, progress: 1 });
   });
 
-  test('PR review round 15: the final upload event reports a total the browser gave without bytes as sent', async () => {
+  test('the final upload event reports a total the browser gave without bytes as sent', async () => {
     const uploads: Array<{ loaded: number; total: number }> = [];
     const body = new FormData();
     body.append('field', 'value');
@@ -692,7 +692,7 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toEqual({ loaded: 1200, total: 1200 });
   });
 
-  test('PR review round 16: an upload whose last throttled progress event fell short ends at its total', async () => {
+  test('an upload whose last throttled progress event fell short ends at its total', async () => {
     const uploads: Array<{ loaded: number; total: number; progress: number }> =
       [];
     const promise = new XHRAdapter().send({
@@ -724,7 +724,7 @@ describe('XHRAdapter', () => {
     });
   });
 
-  test('PR review round 16: a browser-followed redirect of unknown length reports the bytes read as its total', async () => {
+  test('a browser-followed redirect of unknown length reports the bytes read as its total', async () => {
     const downloads: Array<{ loaded: number; total: number }> = [];
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/start',
@@ -764,7 +764,7 @@ describe('XHRAdapter', () => {
     expect(known.at(-1)).toEqual({ loaded: 5000, total: 5000 });
   });
 
-  test('PR review round 16: an unset header value is not sent as "null", and a Headers is refused', async () => {
+  test('an unset header value is not sent as "null", and a Headers is refused', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/x',
       method: 'GET',
@@ -794,7 +794,7 @@ describe('XHRAdapter', () => {
     expect(refused?.message).toContain('must be a plain object');
   });
 
-  test('PR review round 17: upload progress of unknown length reports the bytes sent as its total', async () => {
+  test('upload progress of unknown length reports the bytes sent as its total', async () => {
     const uploads: Array<{ loaded: number; total: number; progress: number }> =
       [];
     const body = new FormData();
@@ -822,7 +822,7 @@ describe('XHRAdapter', () => {
     await promise;
   });
 
-  test('PR review round 17: a polyfill reporting a computable length of 0 gets progress -1, not NaN', async () => {
+  test('a polyfill reporting a computable length of 0 gets progress -1, not NaN', async () => {
     const uploads: Array<{ loaded: number; total: number; progress: number }> =
       [];
     const promise = new XHRAdapter().send({
@@ -852,7 +852,7 @@ describe('XHRAdapter', () => {
     await promise;
   });
 
-  test('PR review round 18: a signal whose aborted or addEventListener throws is refused as non-retryable', async () => {
+  test('a signal whose aborted or addEventListener throws is refused as non-retryable', async () => {
     const signals = [
       {
         get aborted(): boolean {
@@ -887,7 +887,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 18: a send the XHR refuses is non-retryable and takes its abort listener off the signal', async () => {
+  test('a send the XHR refuses is non-retryable and takes its abort listener off the signal', async () => {
     let added = 0;
     let removed = 0;
     const signal = {
@@ -952,7 +952,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 27: a compressed body is not refused by its encoded bytes on the way in', async () => {
+  test('a compressed body is not refused by its encoded bytes on the way in', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/x',
       method: 'GET',
@@ -974,7 +974,7 @@ describe('XHRAdapter', () => {
     expect(response.status).toBe(200);
   });
 
-  test('PR review round 29: a body whose coding is hidden is not refused by its encoded bytes', async () => {
+  test('a body whose coding is hidden is not refused by its encoded bytes', async () => {
     const response = await withPageOrigin('https://app.test', async () => {
       const promise = new XHRAdapter().send({
         requestURL: 'https://other.test/x',
@@ -998,7 +998,7 @@ describe('XHRAdapter', () => {
     expect(response.status).toBe(200);
   });
 
-  test('PR review round 34: a 3xx the XHR hands over unfollowed is reported as a redirect, as FetchAdapter reports one', async () => {
+  test('a 3xx the XHR hands over unfollowed is reported as a redirect, as FetchAdapter reports one', async () => {
     const cases: Array<
       [
         string,
@@ -1040,7 +1040,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 36: a repeated Location keeps its first value, joined or on lines of its own', async () => {
+  test('a repeated Location keeps its first value, joined or on lines of its own', async () => {
     for (const rawHeaders of [
       'location: /a, /b\r\n',
       'location: /a\r\nLocation: /b\r\n',
@@ -1063,7 +1063,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 36: a header on lines of its own is joined, as a browser joins it', async () => {
+  test('a header on lines of its own is joined, as a browser joins it', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
       method: 'GET',
@@ -1079,7 +1079,7 @@ describe('XHRAdapter', () => {
     expect(response.headers['x-multi']).toBe('a, b');
   });
 
-  test('PR review round 36: an unfollowed redirect of a relative request URL reports its target', async () => {
+  test('an unfollowed redirect of a relative request URL reports its target', async () => {
     const originalDocument = (globalThis as Record<string, unknown>).document;
     (globalThis as Record<string, unknown>).document = {
       baseURI: 'https://app.test/dir/page',
@@ -1110,7 +1110,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 36: a path-relative request URL is not taken for a followed redirect', async () => {
+  test('a path-relative request URL is not taken for a followed redirect', async () => {
     const originalDocument = (globalThis as Record<string, unknown>).document;
     (globalThis as Record<string, unknown>).document = {
       baseURI: 'https://app.test/dir/page',
@@ -1141,7 +1141,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {
+  test('a missing method is refused rather than sent as "undefined"', async () => {
     const outcome = await new XHRAdapter()
       .send({
         requestURL: 'https://api.test/x',
@@ -1157,7 +1157,7 @@ describe('XHRAdapter', () => {
     expect(outcome?.message).toContain('method is required');
   });
 
-  test('round 136: an abort once the headers are in carries the real status', async () => {
+  test('an abort once the headers are in carries the real status', async () => {
     const controller = new AbortController();
     const adapter = new XHRAdapter();
     const promise = adapter.send({
@@ -1181,7 +1181,7 @@ describe('XHRAdapter', () => {
     expect(failure[STREAM_ABORT_STATUS_KEY]).toBe(200);
   });
 
-  test('round 137: an abort after a redirect the browser followed resolves the redirect', async () => {
+  test('an abort after a redirect the browser followed resolves the redirect', async () => {
     const controller = new AbortController();
     const adapter = new XHRAdapter();
     const promise = adapter.send({
@@ -1203,7 +1203,7 @@ describe('XHRAdapter', () => {
     expect(response.status).toBe(0);
   });
 
-  test('round 137: HTTPClient refuses a GET with a body through XHRAdapter in a browser', async () => {
+  test('HTTPClient refuses a GET with a body through XHRAdapter in a browser', async () => {
     const browserGlobals = globalThis as {
       window?: unknown;
       document?: unknown;
@@ -1224,7 +1224,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('round 138: outside a browser an XHR GET with a body is sent', async () => {
+  test('outside a browser an XHR GET with a body is sent', async () => {
     const client = new HTTPClient({
       adapter: new XHRAdapter(),
       baseURL: 'https://api.test',
@@ -1239,7 +1239,7 @@ describe('XHRAdapter', () => {
     expect(lastXHR.sentBody).not.toBeNull();
   });
 
-  test('round 137: a cancel after a browser-followed redirect still ends cancelled', async () => {
+  test('a cancel after a browser-followed redirect still ends cancelled', async () => {
     const client = new HTTPClient({
       adapter: new XHRAdapter(),
       baseURL: 'https://api.test',
@@ -1257,7 +1257,7 @@ describe('XHRAdapter', () => {
     expect(builder.error?.code).toBe('cancelled');
   });
 
-  test('round 140 review 2: response header names are lowercased in ASCII only', async () => {
+  test('response header names are lowercased in ASCII only', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({
       requestURL: 'https://api.test/data',
@@ -1539,7 +1539,7 @@ describe('XHRAdapter', () => {
     expect(response.errorCause).toBeInstanceOf(Error);
   });
 
-  test('round 133: an empty upload completes as 0 of 0 bytes, not a stand-in 1', async () => {
+  test('an empty upload completes as 0 of 0 bytes, not a stand-in 1', async () => {
     const adapter = new XHRAdapter();
     const events: unknown[] = [];
     const promise = adapter.send({
@@ -2183,7 +2183,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 40: a responseURL that does not parse is taken for a redirect, with no detectedRedirectURL', async () => {
+  test('a responseURL that does not parse is taken for a redirect, with no detectedRedirectURL', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({
       requestURL: 'https://api.test/data',
@@ -2226,7 +2226,7 @@ describe('XHRAdapter', () => {
     expect(response.headers).toEqual({});
   });
 
-  test('PR review round 39: an XHR with no upload sends without per-chunk upload progress', async () => {
+  test('an XHR with no upload sends without per-chunk upload progress', async () => {
     const uploads: number[] = [];
     (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
       FakeXHR
@@ -2261,7 +2261,7 @@ describe('XHRAdapter', () => {
     expect(uploads).toEqual([0, 1]);
   });
 
-  test('PR review round 39: an XHR whose upload throws is refused as non-retryable and takes its abort listener off the signal', async () => {
+  test('an XHR whose upload throws is refused as non-retryable and takes its abort listener off the signal', async () => {
     let added = 0;
     let removed = 0;
     const signal = {
@@ -2308,7 +2308,7 @@ describe('XHRAdapter', () => {
     expect(FakeXHR.instances[0]?.sentBody).toBeNull();
   });
 
-  test('PR review round 39: an XHR whose upload addEventListener throws is refused as non-retryable and takes its abort listener off the signal', async () => {
+  test('an XHR whose upload addEventListener throws is refused as non-retryable and takes its abort listener off the signal', async () => {
     let added = 0;
     let removed = 0;
     const signal = {
@@ -2359,7 +2359,7 @@ describe('XHRAdapter', () => {
     expect(FakeXHR.instances[0]?.sentBody).toBeNull();
   });
 
-  test('PR review round 40: a relative request URL with no base to resolve it against is refused as non-retryable', async () => {
+  test('a relative request URL with no base to resolve it against is refused as non-retryable', async () => {
     // No `document` or `location`: nothing to resolve the URL against.
     expect((globalThis as Record<string, unknown>).document).toBeUndefined();
     expect((globalThis as Record<string, unknown>).location).toBeUndefined();
@@ -2392,7 +2392,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 40: userinfo is withheld from a protocol-relative URL that resolves to another origin', async () => {
+  test('userinfo is withheld from a protocol-relative URL that resolves to another origin', async () => {
     const originalDocument = (globalThis as Record<string, unknown>).document;
     // An `http:` page: `//u:p@api.test/x` is `http://api.test/x`, not the `https:` origin
     // the request started on.
@@ -2424,7 +2424,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 40: same-origin userinfo is kept once resolved against the page', async () => {
+  test('same-origin userinfo is kept once resolved against the page', async () => {
     const originalDocument = (globalThis as Record<string, unknown>).document;
     (globalThis as Record<string, unknown>).document = {
       baseURI: 'https://api.test/page',
@@ -2454,7 +2454,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 40: a root-relative request URL redirected to another host is detected', async () => {
+  test('a root-relative request URL redirected to another host is detected', async () => {
     const originalDocument = (globalThis as Record<string, unknown>).document;
     (globalThis as Record<string, unknown>).document = {
       baseURI: 'https://app.test/dir/page',
@@ -2487,7 +2487,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 41: a URL that is not http(s) is refused as non-retryable before it is opened', async () => {
+  test('a URL that is not http(s) is refused as non-retryable before it is opened', async () => {
     for (const requestURL of [
       'file:///etc/hosts',
       'data:text/plain,hi',
@@ -2514,7 +2514,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 41: a relative initial URL is resolved against the page before credentials are judged', async () => {
+  test('a relative initial URL is resolved against the page before credentials are judged', async () => {
     const originalDocument = (globalThis as Record<string, unknown>).document;
     const openedURL = async (
       requestURL: string,
@@ -2560,7 +2560,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 42: an initial URL that names no origin fails closed rather than naming the page', async () => {
+  test('an initial URL that names no origin fails closed rather than naming the page', async () => {
     // Resolved against the page, `''`, `#top`, `?q` or `start` is the page itself: the
     // request URL's userinfo was kept with nothing to show it belonged to that origin. A
     // root- or protocol-relative one names an origin, and is resolved.
@@ -2602,7 +2602,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('PR review round 42: a request refused before it is sent reports no upload start', async () => {
+  test('a request refused before it is sent reports no upload start', async () => {
     (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
       FakeXHR
     ) {
@@ -2637,8 +2637,8 @@ describe('XHRAdapter', () => {
   });
 });
 
-describe('XHRAdapter - PR review round 43', () => {
-  test("PR review round 43: a header or method the runtime refuses is reported without the runtime's error, which quotes the value", async () => {
+describe('XHRAdapter - headers and methods the runtime refuses', () => {
+  test("a header or method the runtime refuses is reported without the runtime's error, which quotes the value", async () => {
     const secret = 'secret-token';
     // As Chrome refuses one, its message quoting what it refused.
     (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
@@ -2707,10 +2707,8 @@ describe('XHRAdapter - PR review round 43', () => {
     expect(method?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     expect(errorText(method)).not.toContain(secret);
   });
-});
 
-describe('XHRAdapter - PR review round 44', () => {
-  test('PR review round 44: a header the runtime refuses by a token name is not reported as a refused value', async () => {
+  test('a header the runtime refuses by a token name is not reported as a refused value', async () => {
     // An XHR outside a browser may refuse a name that is a token, which a browser never
     // does, so the refusal names the header without claiming which part of it failed.
     (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
@@ -2742,7 +2740,7 @@ describe('XHRAdapter - PR review round 44', () => {
   });
 });
 
-describe('XHRAdapter - round 58', () => {
+describe('XHRAdapter - progress callback cancels and cross-realm buffers', () => {
   test('a cancel from the 0% upload progress callback stops the request before it is sent', async () => {
     const controller = new AbortController();
     const promise = new XHRAdapter().send({
@@ -2930,8 +2928,8 @@ describe('XHRAdapter - maxResponseBytes', () => {
   });
 });
 
-describe('XHRAdapter - PR review round 53', () => {
-  test('PR review round 53: a compressed body many times its decoded size on the wire is delivered when it decodes within the limit', async () => {
+describe('XHRAdapter - maxResponseBytes with compressed bodies', () => {
+  test('a compressed body many times its decoded size on the wire is delivered when it decodes within the limit', async () => {
     const response = await withPageOrigin('https://api.test', async () => {
       const promise = new XHRAdapter().send({
         requestURL: 'https://api.test/stream',
@@ -2957,7 +2955,7 @@ describe('XHRAdapter - PR review round 53', () => {
     expect((response.body as Uint8Array).length).toBe(512);
   });
 
-  test('PR review round 53: a body known to carry no coding is refused as soon as its bytes pass the limit', async () => {
+  test('a body known to carry no coding is refused as soon as its bytes pass the limit', async () => {
     const cases: Array<[string, string, string]> = [
       // Same-origin, no `Content-Encoding`: none was applied.
       ['https://api.test', 'https://api.test/big', ''],
@@ -3006,7 +3004,7 @@ describe('XHRAdapter - PR review round 53', () => {
     }
   });
 
-  test('PR review round 53: a compressed body is not cut on its encoded bytes, and is refused at load when it decodes past the limit', async () => {
+  test('a compressed body is not cut on its encoded bytes, and is refused at load when it decodes past the limit', async () => {
     const progress: number[] = [];
     const response = await withPageOrigin('https://api.test', async () => {
       const promise = new XHRAdapter().send({
@@ -3035,7 +3033,7 @@ describe('XHRAdapter - PR review round 53', () => {
     expect(response.status).toBe(200);
   });
 
-  test('PR review round 53: a cross-origin body whose coding is hidden is not cut mid-download', async () => {
+  test('a cross-origin body whose coding is hidden is not cut mid-download', async () => {
     // A cross-origin page, and a sandboxed one (`'null'`, the same origin as none).
     for (const pageOrigin of ['https://app.test', 'null']) {
       const response = await withPageOrigin(pageOrigin, async () => {
@@ -3062,8 +3060,8 @@ describe('XHRAdapter - PR review round 53', () => {
   });
 });
 
-describe('XHRAdapter - PR review round 53 follow-up', () => {
-  test('PR review round 53: with no page origin, an absent Content-Encoding is not taken as none - the runtime may have decoded the body and dropped it', async () => {
+describe('XHRAdapter - maxResponseBytes and the page origin', () => {
+  test('with no page origin, an absent Content-Encoding is not taken as none - the runtime may have decoded the body and dropped it', async () => {
     // React Native's Android networking counts bytes off the wire, still gzip, and hands
     // over the body decoded with `Content-Encoding` removed.
     const result = await sendPastLimitWithoutCoding('https://api.test/x');
@@ -3072,7 +3070,7 @@ describe('XHRAdapter - PR review round 53 follow-up', () => {
     expect(result.streamErrorCode).toBeUndefined();
   });
 
-  test('PR review round 53: a cross-origin request redirected back to the page origin is not cut on its bytes', async () => {
+  test('a cross-origin request redirected back to the page origin is not cut on its bytes', async () => {
     const result = await withPageOrigin('https://app.test', async () => {
       return await sendPastLimitWithoutCoding(
         'https://api.test/x',
@@ -3084,7 +3082,7 @@ describe('XHRAdapter - PR review round 53 follow-up', () => {
     expect(result.abortCalled).toBe(false);
   });
 
-  test('PR review round 53: a same-origin request whose response URL is on another origin is not cut on its bytes', async () => {
+  test('a same-origin request whose response URL is on another origin is not cut on its bytes', async () => {
     const result = await withPageOrigin('https://api.test', async () => {
       return await sendPastLimitWithoutCoding(
         'https://api.test/x',
@@ -3095,7 +3093,7 @@ describe('XHRAdapter - PR review round 53 follow-up', () => {
     expect(result.abortCalled).toBe(false);
   });
 
-  test('PR review round 53: the page origin is read from location, and from window and self, as a worker or page has it', async () => {
+  test('the page origin is read from location, and from window and self, as a worker or page has it', async () => {
     const location = { href: 'https://api.test/', origin: 'https://api.test' };
     const shapes: Array<[string, unknown]> = [
       // A worker's shape: `location.origin`, no `origin`.
@@ -3223,8 +3221,8 @@ async function settlement(promise: Promise<unknown>): Promise<unknown> {
   ]);
 }
 
-describe('XHRAdapter - PR review round 56', () => {
-  test('PR review round 56: without DOMException, a cancel during the request settles as an AbortError', async () => {
+describe('XHRAdapter - aborts without DOMException and dropped request headers', () => {
+  test('without DOMException, a cancel during the request settles as an AbortError', async () => {
     await withoutDOMException(async () => {
       expect(typeof (globalThis as Record<string, unknown>).DOMException).toBe(
         'undefined',
@@ -3252,7 +3250,7 @@ describe('XHRAdapter - PR review round 56', () => {
     });
   });
 
-  test('PR review round 56: without DOMException, an already-aborted signal rejects as an AbortError', async () => {
+  test('without DOMException, an already-aborted signal rejects as an AbortError', async () => {
     const controller = new AbortController();
     controller.abort();
 
@@ -3275,7 +3273,7 @@ describe('XHRAdapter - PR review round 56', () => {
     });
   });
 
-  test('PR review round 56: without DOMException, a cancel from the 0% upload progress callback rejects as an AbortError', async () => {
+  test('without DOMException, a cancel from the 0% upload progress callback rejects as an AbortError', async () => {
     await withoutDOMException(async () => {
       const controller = new AbortController();
       const outcome = await settlement(
@@ -3301,7 +3299,7 @@ describe('XHRAdapter - PR review round 56', () => {
     });
   });
 
-  test('PR review round 56: without DOMException, a browser-fired timeout rejects as an AbortError carrying the timeout flag', async () => {
+  test('without DOMException, a browser-fired timeout rejects as an AbortError carrying the timeout flag', async () => {
     await withoutDOMException(async () => {
       const promise = new XHRAdapter().send({
         requestURL: 'https://api.test/data',
@@ -3323,7 +3321,7 @@ describe('XHRAdapter - PR review round 56', () => {
     });
   });
 
-  test('PR review round 56: through the client, a cancel without DOMException ends cancelled', async () => {
+  test('through the client, a cancel without DOMException ends cancelled', async () => {
     await withoutDOMException(async () => {
       const client = new HTTPClient({
         adapter: new XHRAdapter(),
@@ -3349,7 +3347,7 @@ describe('XHRAdapter - PR review round 56', () => {
     });
   });
 
-  test("PR review round 56: a caller's Content-Length is not sent", async () => {
+  test("a caller's Content-Length is not sent", async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
       method: 'POST',
@@ -3365,7 +3363,7 @@ describe('XHRAdapter - PR review round 56', () => {
     expect(lastXHR.requestHeaders['x-kept']).toEqual(['1']);
   });
 
-  test('PR review round 56: an empty Cookie value sends no Cookie header', async () => {
+  test('an empty Cookie value sends no Cookie header', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
       method: 'GET',
@@ -3380,7 +3378,7 @@ describe('XHRAdapter - PR review round 56', () => {
   });
 });
 
-describe('XHRAdapter - PR review round 64', () => {
+describe('XHRAdapter - upload listeners', () => {
   /** The listeners registered on the fake XHR's `upload`, by event type. */
   function uploadListenerCount(xhr: FakeXHR): number {
     const handlers = (
@@ -3393,7 +3391,7 @@ describe('XHRAdapter - PR review round 64', () => {
     );
   }
 
-  test('PR review round 64: a request with no body to send listens on no upload, and still ends with its final upload event', async () => {
+  test('a request with no body to send listens on no upload, and still ends with its final upload event', async () => {
     for (const body of [undefined, '', new Uint8Array(0)]) {
       const uploads: Array<{
         loaded: number;
@@ -3427,7 +3425,7 @@ describe('XHRAdapter - PR review round 64', () => {
     }
   });
 
-  test('PR review round 64: a request with a body to send listens on its upload', async () => {
+  test('a request with a body to send listens on its upload', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
       method: 'POST',
@@ -3443,7 +3441,7 @@ describe('XHRAdapter - PR review round 64', () => {
     await promise;
   });
 
-  test('PR review round 64: an abort after a redirect the browser followed ends with the final upload event', async () => {
+  test('an abort after a redirect the browser followed ends with the final upload event', async () => {
     const controller = new AbortController();
     const uploads: Array<{ loaded: number; progress: number }> = [];
     const promise = new XHRAdapter().send({
@@ -3471,7 +3469,7 @@ describe('XHRAdapter - PR review round 64', () => {
     ]);
   });
 
-  test("PR review round 65: a Blob body's size is read once, deciding the listeners and its final upload event", async () => {
+  test("a Blob body's size is read once, deciding the listeners and its final upload event", async () => {
     for (const size of [0, 7]) {
       let reads = 0;
       const body = new (class extends Blob {
@@ -3504,7 +3502,7 @@ describe('XHRAdapter - PR review round 64', () => {
   });
 });
 
-describe('XHRAdapter - PR review round 67', () => {
+describe('XHRAdapter - upload listeners without onUploadProgress', () => {
   /** The listeners registered on the fake XHR's `upload`, by event type. */
   function uploadListenerCount(xhr: FakeXHR): number {
     const handlers = (
@@ -3517,7 +3515,7 @@ describe('XHRAdapter - PR review round 67', () => {
     );
   }
 
-  test('PR review round 67: an adapter driven without onUploadProgress listens on no upload', async () => {
+  test('an adapter driven without onUploadProgress listens on no upload', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
       method: 'POST',
@@ -3532,7 +3530,7 @@ describe('XHRAdapter - PR review round 67', () => {
     await promise;
   });
 
-  test("PR review round 69: a request without onUploadProgress never reads its Blob body's size", async () => {
+  test("a request without onUploadProgress never reads its Blob body's size", async () => {
     let reads = 0;
     const body = new (class extends Blob {
       public override get size(): number {
@@ -3554,7 +3552,7 @@ describe('XHRAdapter - PR review round 67', () => {
     expect(reads).toBe(0);
   });
 
-  test('PR review round 67: a request without onUploadProgress never reads an upload that throws', async () => {
+  test('a request without onUploadProgress never reads an upload that throws', async () => {
     (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
       FakeXHR
     ) {
@@ -3584,7 +3582,7 @@ describe('XHRAdapter - PR review round 67', () => {
     expect((await promise).status).toBe(204);
   });
 
-  test('PR review round 67: through the client, a bodied request listens on its upload only when it asks for upload progress', async () => {
+  test('through the client, a bodied request listens on its upload only when it asks for upload progress', async () => {
     const client = new HTTPClient({
       adapter: new XHRAdapter(),
       baseURL: 'https://api.test',
@@ -3623,8 +3621,8 @@ describe('XHRAdapter - PR review round 67', () => {
   });
 });
 
-describe('XHRAdapter - PR review round 80', () => {
-  test('PR review round 80: a response header value keeps a trailing 0xA0 byte, trimmed of HTTP whitespace only', async () => {
+describe('XHRAdapter - response header value trimming', () => {
+  test('a response header value keeps a trailing 0xA0 byte, trimmed of HTTP whitespace only', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
       method: 'GET',
@@ -3644,8 +3642,8 @@ describe('XHRAdapter - PR review round 80', () => {
   });
 });
 
-describe('XHRAdapter - PR review round 74', () => {
-  test('PR review round 74: the bytes it is handed are given to xhr.send() before send() returns, which copies them there', async () => {
+describe('XHRAdapter - request body copy', () => {
+  test('the bytes it is handed are given to xhr.send() before send() returns, which copies them there', async () => {
     const body = new Uint8Array([1, 2, 3, 4]);
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/upload',
@@ -3664,8 +3662,8 @@ describe('XHRAdapter - PR review round 74', () => {
   });
 });
 
-describe('XHRAdapter - PR review round 82', () => {
-  test('PR review round 82: response header lines ended with a bare LF are read as CRLF ones are', async () => {
+describe('XHRAdapter - response header line endings', () => {
+  test('response header lines ended with a bare LF are read as CRLF ones are', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/start',
       method: 'GET',
@@ -3689,8 +3687,8 @@ describe('XHRAdapter - PR review round 82', () => {
   });
 });
 
-describe('XHRAdapter - PR review round 83', () => {
-  test('PR review round 83: a download counted past its declared length reports an unknown length, and the final event still fires at load', async () => {
+describe('XHRAdapter - progress past the declared length', () => {
+  test('a download counted past its declared length reports an unknown length, and the final event still fires at load', async () => {
     const downloadEvents: Array<{
       loaded: number;
       total: number;
@@ -3725,7 +3723,7 @@ describe('XHRAdapter - PR review round 83', () => {
     ]);
   });
 
-  test('PR review round 83: an upload counted past its reported total reports an unknown length', async () => {
+  test('an upload counted past its reported total reports an unknown length', async () => {
     const uploadEvents: Array<{
       loaded: number;
       total: number;

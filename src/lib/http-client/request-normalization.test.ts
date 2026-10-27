@@ -1100,7 +1100,7 @@ test("a JSON body's nested toJSON values are sent as JSON.stringify sends them",
   expect(adapter.requests[0]?.body).toBe(JSON.stringify(body));
 });
 
-test("PR review round 46: a JSON body's rawBody is the value sent, read from the caller's body once", async () => {
+test("a JSON body's rawBody is the value sent, read from the caller's body once", async () => {
   // A getter answering differently on each read: the observers' deep copy and the
   // serialization each read it, so `rawBody` said one thing and the bytes another.
   const adapter = new RecordingAdapter(200);
@@ -1128,7 +1128,7 @@ test("PR review round 46: a JSON body's rawBody is the value sent, read from the
   expect(observed).toEqual([{ token: 't1', when: '1970-01-01T00:00:00.000Z' }]);
 });
 
-test('PR review round 47: a JSON body that serializes to nothing is sent without a JSON content type', async () => {
+test('a JSON body that serializes to nothing is sent without a JSON content type', async () => {
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
   const observed: Array<Record<string, string | string[]>> = [];
@@ -1147,7 +1147,7 @@ test('PR review round 47: a JSON body that serializes to nothing is sent without
   expect(observed[0]?.['content-type']).toBeUndefined();
 });
 
-test('PR review round 48: a MockAdapter route body that serializes to nothing is answered without a JSON content type', async () => {
+test('a MockAdapter route body that serializes to nothing is answered without a JSON content type', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({
     status: 200,
@@ -1162,7 +1162,7 @@ test('PR review round 48: a MockAdapter route body that serializes to nothing is
   expect(response.body).toBeNull();
 });
 
-test("PR review round 47: an observer redacting a byte or form body's rawBody in place leaves the body sent alone", async () => {
+test("an observer redacting a byte or form body's rawBody in place leaves the body sent alone", async () => {
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
   client.addResponseObserver((_response, request) => {
@@ -1186,7 +1186,7 @@ test("PR review round 47: an observer redacting a byte or form body's rawBody in
   expect((adapter.requests[1]?.body as FormData).get('secret')).toBe('s3cret');
 });
 
-test('PR review round 48: with no observer registered no body is parsed back or copied, even where the adapter reports its headers', async () => {
+test('with no observer registered no body is parsed back or copied, even where the adapter reports its headers', async () => {
   let calls = 0;
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -1248,7 +1248,7 @@ test('PR review round 48: with no observer registered no body is parsed back or 
   }
 });
 
-test('PR review round 48: a request ended before dispatch builds no observer bodies when no observer is registered', async () => {
+test('a request ended before dispatch builds no observer bodies when no observer is registered', async () => {
   const client = new HTTPClient({
     adapter: new RecordingAdapter(200),
     baseURL: 'http://example.test',
@@ -1282,7 +1282,7 @@ test('PR review round 48: a request ended before dispatch builds no observer bod
   }
 });
 
-test("PR review round 48: an observer's body and rawBody are plain data fields, and a logger's spread copies nothing again", async () => {
+test("an observer's body and rawBody are plain data fields, and a logger's spread copies nothing again", async () => {
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
   const seen: unknown[] = [];
@@ -1327,7 +1327,7 @@ test("PR review round 48: an observer's body and rawBody are plain data fields, 
   }
 });
 
-test("PR review round 48: an observer's bytes or form are the ones sent, copied before the adapter changes or transfers them", async () => {
+test("an observer's bytes or form are the ones sent, copied before the adapter changes or transfers them", async () => {
   const adapter: HTTPAdapter = {
     getType: () => 'node',
     send: (request) => {
@@ -1362,7 +1362,7 @@ test("PR review round 48: an observer's bytes or form are the ones sent, copied 
   expect(seen).toEqual([new Uint8Array([1, 2, 3]), 's3cret']);
 });
 
-test("PR review round 48: a parent client's observer, or an error observer alone, is handed the request's bodies", async () => {
+test("a parent client's observer, or an error observer alone, is handed the request's bodies", async () => {
   const parent = new HTTPClient({
     adapter: new RecordingAdapter(200),
     baseURL: 'http://example.test',
@@ -1397,7 +1397,7 @@ test("PR review round 48: a parent client's observer, or an error observer alone
   expect(seen).toEqual([{ a: 1 }, 'text']);
 });
 
-test("PR review round 47: an observer's body and rawBody for bytes or form data are one copy, not the one sent", async () => {
+test("an observer's body and rawBody for bytes or form data are one copy, not the one sent", async () => {
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
   const seen: Array<{ isShared: boolean; isSent: boolean }> = [];
@@ -1422,7 +1422,7 @@ test("PR review round 47: an observer's body and rawBody for bytes or form data 
   ]);
 });
 
-test('PR review round 48: a redirect-phase observer redacting or replacing body and rawBody leaves the body being sent and its 307 replay alone', async () => {
+test('a redirect-phase observer redacting or replacing body and rawBody leaves the body being sent and its 307 replay alone', async () => {
   // Answered before the upload is written, as a server that answers early is: the
   // adapter reads what it was handed only once the observers have run.
   const handed: unknown[] = [];
@@ -1480,7 +1480,7 @@ test('PR review round 48: a redirect-phase observer redacting or replacing body 
   expect(handed[3]).toEqual(new Uint8Array([1, 2, 3]));
 });
 
-test("PR review round 46: a retry-phase observer changing rawBody changes neither the next attempt's bytes nor its rawBody", async () => {
+test("a retry-phase observer changing rawBody changes neither the next attempt's bytes nor its rawBody", async () => {
   const sent: unknown[] = [];
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -3945,7 +3945,7 @@ test('a held setup cancel answers consistently, and a first cancel keeps its own
   expect(first.error?.cancelReason).toBeUndefined();
 });
 
-test('round 56: numeric IPv4 host entries, label null, and a FormData changed mid-upload', async () => {
+test('numeric IPv4 host entries, label null, and a FormData changed mid-upload', async () => {
   const client = new HTTPClient();
   // Read as the URL parser reads them - `127.0.0.1` - by the matcher too, so accepted.
   for (const pattern of ['2130706433', '0x7f000001']) {
@@ -4075,7 +4075,7 @@ test('MockAdapter refuses a cookie maxAge that is not a number', async () => {
   expect(builder.error?.code).toBe('adapter_error');
 });
 
-test('round 63: transport refusals are not retried, Mock honours a 0% cancel, a bad set-cookie is the adapter', async () => {
+test('transport refusals are not retried, Mock honours a 0% cancel, a bad set-cookie is the adapter', async () => {
   // NodeAdapter: a header value Node refuses fails once.
   let hits = 0;
   const server = http.createServer((_req, res) => {
@@ -4137,7 +4137,7 @@ test('round 63: transport refusals are not retried, Mock honours a 0% cancel, a 
   expect(jarBuilder.error?.cause?.message).not.toMatch(/Cookie jar/);
 });
 
-test('round 64: a missing URL matches no host, methods are copied, bodyContainsKeys needs a plain object', async () => {
+test('a missing URL matches no host, methods are copied, bodyContainsKeys needs a plain object', async () => {
   // An interceptor result that lost its requestURL or method reaches no later filter: the
   // copy taken before the filter reads it refuses it.
   for (const dropped of ['requestURL', 'method'] as const) {
@@ -4195,7 +4195,7 @@ test('round 64: a missing URL matches no host, methods are copied, bodyContainsK
   ).toBe(true);
 });
 
-test('round 67: request builder validation, json(), the query kept as written, send() order', async () => {
+test('request builder validation, json(), the query kept as written, send() order', async () => {
   // A query already in the path is kept as written; params add to it, and override
   // only the keys they name.
   expect(
@@ -4242,7 +4242,7 @@ test('round 67: request builder validation, json(), the query kept as written, s
   expect(second?.message).toMatch(/only be called once/);
 });
 
-test('round 69: baseURL must be a string without a query or fragment', () => {
+test('baseURL must be a string without a query or fragment', () => {
   for (const baseURL of [
     new URL('https://api.example.com'),
     123,
@@ -4288,7 +4288,7 @@ test('MockAdapter route mistakes found after the route ran are not retried', asy
   }
 });
 
-test('round 71: a bracketed params key replaces its top-level key; single-value headers are strings', async () => {
+test('a bracketed params key replaces its top-level key; single-value headers are strings', async () => {
   expect(
     buildURL('https://a.test', '/x?page[size]=10&page[number]=1&q=z', {
       'page[number]': 2,
@@ -4312,7 +4312,7 @@ test('round 71: a bracketed params key replaces its top-level key; single-value 
   expect(response.status).toBe(200);
 });
 
-test('round 72: a retry interceptor changing only the scheme of a redirect target does not promote it to the credential scope', async () => {
+test('a retry interceptor changing only the scheme of a redirect target does not promote it to the credential scope', async () => {
   const scopes: string[] = [];
   let attemptsAtB = 0;
   const client = new HTTPClient({
@@ -4393,11 +4393,11 @@ test.each(['evil.example./', 'evil.example../'])(
   },
 );
 
-test('round 73: a leading-bracket key is overridden', () => {
+test('a leading-bracket key is overridden', () => {
   expect(buildURL(undefined, '/a?[x]=1&y=2', { x: 2 })).toBe('/a?y=2&x=2');
 });
 
-test('round 74: MockAdapter parity with a real server', async () => {
+test('MockAdapter parity with a real server', async () => {
   const adapter = new MockAdapter();
   let seen: MockRequest | undefined;
   adapter.routes.post('/p', (req) => {
@@ -4457,7 +4457,7 @@ test('round 74: MockAdapter parity with a real server', async () => {
   }
 });
 
-test('round 75: an undefined params value keeps the path pair; mock sameSite/maxAge are checked', async () => {
+test('an undefined params value keeps the path pair; mock sameSite/maxAge are checked', async () => {
   expect(buildURL('https://x', '/p?a=1&b=2', { a: undefined, b: 3 })).toBe(
     'https://x/p?a=1&b=3',
   );
@@ -4479,7 +4479,7 @@ test('round 75: an undefined params value keeps the path pair; mock sameSite/max
   }
 });
 
-test('round 76: null ca refused, nested undefined params and encoded keys', () => {
+test('null ca refused, nested undefined params and encoded keys', () => {
   for (const config of [
     { ca: null },
     { ca: [null] },
@@ -4497,7 +4497,7 @@ test('round 76: null ca refused, nested undefined params and encoded keys', () =
   );
 });
 
-test('round 78: an empty params array or object clears the path pairs for its key', () => {
+test('an empty params array or object clears the path pairs for its key', () => {
   expect(buildURL('http://x', '/s?tags=a&tags=b&page=2', { tags: [] })).toBe(
     'http://x/s?page=2',
   );
@@ -4509,7 +4509,7 @@ test('round 78: an empty params array or object clears the path pairs for its ke
   ).toBe('http://x/s?filter[a]=1');
 });
 
-test('round 80: undefined-only params arrays, repeated fetch Location, mock non-Latin-1 cookie, edge-hyphen public suffix', async () => {
+test('undefined-only params arrays, repeated fetch Location, mock non-Latin-1 cookie, edge-hyphen public suffix', async () => {
   expect(buildURL('https://x.test', '/p?ids=7&x=1', { ids: [undefined] })).toBe(
     'https://x.test/p?ids=7&x=1',
   );
@@ -4532,7 +4532,7 @@ test('round 80: undefined-only params arrays, repeated fetch Location, mock non-
   expect(jar.getCookieHeaderString('https://victim.x-.ck/')).toBe('');
 });
 
-test('round 81: a timed-out attempt is a timeout whatever the adapter rejects with; nextRetryAt is kept', async () => {
+test('a timed-out attempt is a timeout whatever the adapter rejects with; nextRetryAt is kept', async () => {
   let sends = 0;
   const hanging: HTTPAdapter = {
     getType: () => 'node',
@@ -4584,7 +4584,7 @@ test('round 81: a timed-out attempt is a timeout whatever the adapter rejects wi
   expect(secondStart - nextRetryAt).toBeLessThan(150);
 });
 
-test('round 82: override apex for edge-hyphen hosts, a resolved transport error after the timer, a clock step during retry observers', async () => {
+test('override apex for edge-hyphen hosts, a resolved transport error after the timer, a clock step during retry observers', async () => {
   const jar = new CookieJar({ publicSuffixes: { add: ['amazonaws.com'] } });
   jar.parseSetCookieHeader(
     'a=1; Domain=foo.s3.amazonaws.com',
@@ -4653,7 +4653,7 @@ test('round 82: override apex for edge-hyphen hosts, a resolved transport error 
   }
 });
 
-test('round 83: a stream factory that fails after headers keeps the cookie and status; progress hooks guarded by the client; callback-less sinks report their bytes', async () => {
+test('a stream factory that fails after headers keeps the cookie and status; progress hooks guarded by the client; callback-less sinks report their bytes', async () => {
   const server = http.createServer((req, res) => {
     res.writeHead(200, {
       'set-cookie': 'sid=abc; Path=/',
@@ -4766,7 +4766,7 @@ test('round 83: a stream factory that fails after headers keeps the cookie and s
   }
 });
 
-test('round 84: a cancel from the final download event of a chunked body keeps its cookie; a single Location with ", " is kept whole', async () => {
+test('a cancel from the final download event of a chunked body keeps its cookie; a single Location with ", " is kept whole', async () => {
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { 'set-cookie': 'sid=abc; Path=/' });
     res.write('he');
@@ -4806,7 +4806,7 @@ test('round 84: a cancel from the final download event of a chunked body keeps i
   }
 });
 
-test('round 85: undispatched redirects, cross-origin Range, 303 body, Location heuristic, redirect request shape, adapter without detectedRedirectURL', async () => {
+test('undispatched redirects, cross-origin Range, 303 body, Location heuristic, redirect request shape, adapter without detectedRedirectURL', async () => {
   /** Answers `/start` with a redirect to `location`, anything else with 200. */
   const redirecting = (
     status: number,
@@ -4902,7 +4902,7 @@ test('round 85: undispatched redirects, cross-origin Range, 303 body, Location h
   expect(disabled.error?.detectedRedirectURL).toBe('http://a.test/x');
 });
 
-test('round 86: multipart names as fetch sends them, an unreadable file is not retried, Transfer-Encoding refused', async () => {
+test('multipart names as fetch sends them, an unreadable file is not retried, Transfer-Encoding refused', async () => {
   const received: Array<{ field: string; filename: string }> = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -4963,7 +4963,7 @@ test('round 86: multipart names as fetch sends them, an unreadable file is not r
   }
 });
 
-test('round 87: a cancel before a detected redirect is followed names it; a 303 HEAD drops body headers', async () => {
+test('a cancel before a detected redirect is followed names it; a 303 HEAD drops body headers', async () => {
   for (const cancelFrom of ['observer', 'attemptEnd'] as const) {
     const adapter = new MockAdapter();
     adapter.routes.get('/p', () => ({
@@ -5022,7 +5022,7 @@ test('round 87: a cancel before a detected redirect is followed names it; a 303 
   expect(requests[1].headers['content-length']).toBeUndefined();
 });
 
-test('round 88: label and scope arguments are checked', async () => {
+test('label and scope arguments are checked', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/slow', async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -5046,7 +5046,7 @@ test('round 88: label and scope arguments are checked', async () => {
   expect(response.isCancelled).toBe(false);
 });
 
-test('round 89: a followed hop that redirects to its own URL still counts as followed when cancelled', async () => {
+test('a followed hop that redirects to its own URL still counts as followed when cancelled', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/a', () => ({
     status: 302,
@@ -5073,7 +5073,7 @@ test('round 89: a followed hop that redirects to its own URL still counts as fol
   expect(response.detectedRedirectURL).toBe('http://api.test/b');
 });
 
-test('round 90: IP literals with a port or path are no host, removals below a domain widen nothing, domain clears reach suffix tenants', () => {
+test('IP literals with a port or path are no host, removals below a domain widen nothing, domain clears reach suffix tenants', () => {
   for (const entry of [
     '127.0.0.1:8080',
     'x@127.0.0.1',
@@ -5112,7 +5112,7 @@ test('round 90: IP literals with a port or path are no host, removals below a do
   expect(() => jar.clear('example.com', 'Domain' as never)).toThrow(TypeError);
 });
 
-test('round 91: clear arguments checked, nested private suffixes kept, IP entry info, dropped-body headers', async () => {
+test('clear arguments checked, nested private suffixes kept, IP entry info, dropped-body headers', async () => {
   const jar = new CookieJar();
   jar.parseSetCookieHeader('a=1', 'https://a.example.com/');
   jar.parseSetCookieHeader('b=1', 'https://bucket1.s3.amazonaws.com/');
@@ -5158,7 +5158,7 @@ test('round 91: clear arguments checked, nested private suffixes kept, IP entry 
   expect(requests[1].headers['content-location']).toBeUndefined();
 });
 
-test('round 92: IPv4 entries read by the URL parser in origins and shorthand; uppercase mapped IPv6', () => {
+test('IPv4 entries read by the URL parser in origins and shorthand; uppercase mapped IPv6', () => {
   expect(validateConfigEntry('http://192.168.1.08', 'origin').valid).toBe(
     false,
   );
@@ -5173,7 +5173,7 @@ test('round 92: IPv4 entries read by the URL parser in origins and shorthand; up
   expect(validateConfigEntry('::FFFF:127.0.0.1', 'domain').valid).toBe(true);
 });
 
-test('round 93: IPv4-looking entries with userinfo or a path are refused; a padded default port matches', () => {
+test('IPv4-looking entries with userinfo or a path are refused; a padded default port matches', () => {
   for (const entry of [
     'user@10.0.0.1',
     '10.0.0.1/x.5',
@@ -5192,7 +5192,7 @@ test('round 93: IPv4-looking entries with userinfo or a path are refused; a padd
   );
 });
 
-test('round 94: single-number and fullwidth IPv4 entries are read as the URL parser reads them', () => {
+test('single-number and fullwidth IPv4 entries are read as the URL parser reads them', () => {
   for (const entry of ['2130706433', '0x7f000001', '017700000001']) {
     expect(validateConfigEntry(entry, 'domain').info).toContain('127.0.0.1');
     expect(normalizeDomain(entry)).toBe('127.0.0.1');
@@ -5208,7 +5208,7 @@ test('round 94: single-number and fullwidth IPv4 entries are read as the URL par
   expect(normalizeDomain('example.com')).toBe('example.com');
 });
 
-test('round 95: only fullwidth ASCII is mapped before reading an IP; fullwidth-only differences noted; numeric wildcard tails refused', () => {
+test('only fullwidth ASCII is mapped before reading an IP; fullwidth-only differences noted; numeric wildcard tails refused', () => {
   for (const host of ['127․0․0․1', '1﹒2.3.4', '⒈2.3.4']) {
     expect(normalizeDomain(host)).not.toBe('127.0.0.1');
     expect(validateConfigEntry(host, 'domain').valid).toBe(false);
@@ -5224,7 +5224,7 @@ test('round 95: only fullwidth ASCII is mapped before reading an IP; fullwidth-o
   expect(validateConfigEntry('*.example.com', 'domain').valid).toBe(true);
 });
 
-test('round 96: IPv4 read by the URL parser itself - percent and IDNA spellings, refused hosts match nothing', () => {
+test('IPv4 read by the URL parser itself - percent and IDNA spellings, refused hosts match nothing', () => {
   for (const entry of ['127.0.0.%31', '127.0.0.①', '127.0.0.𝟏']) {
     expect(validateConfigEntry(entry, 'domain').info).toContain('127.0.0.1');
     expect(normalizeDomain(entry)).toBe('127.0.0.1');
@@ -5240,7 +5240,7 @@ test('round 96: IPv4 read by the URL parser itself - percent and IDNA spellings,
   expect(matchesDomainList('api.example.com', ['*.example.com'])).toBe(true);
 });
 
-test('round 97: non-special schemes keep opaque hosts; every special scheme drops its default port', () => {
+test('non-special schemes keep opaque hosts; every special scheme drops its default port', () => {
   expect(matchesOriginList('foo://a.2.3.4', ['foo://a.2.3.4'])).toBe(true);
   expect(matchesOriginList('foo://127.0.0.1', ['foo://2130706433'])).toBe(
     false,
@@ -5258,7 +5258,7 @@ test('round 97: non-special schemes keep opaque hosts; every special scheme drop
   expect(normalizeOrigin('wss://x.com:8443')).toBe('wss://x.com:8443');
 });
 
-test('round 98: non-special-scheme IPv6 origins match; non-ASCII opaque hosts are refused', () => {
+test('non-special-scheme IPv6 origins match; non-ASCII opaque hosts are refused', () => {
   expect(normalizeOrigin('foo://[::1]')).toBe('foo://[::1]');
   expect(
     matchesOriginList('capacitor://[2001:db8::1]', [
@@ -5272,7 +5272,7 @@ test('round 98: non-special-scheme IPv6 origins match; non-ASCII opaque hosts ar
   expect(matchesOriginList('foo://a.2.3.4', ['foo://a.2.3.4'])).toBe(true);
 });
 
-test('round 99: extension and other single-label opaque origins can be allowlisted; opaque hosts keep their dots', () => {
+test('extension and other single-label opaque origins can be allowlisted; opaque hosts keep their dots', () => {
   for (const origin of [
     'chrome-extension://abcdefghijklmnopabcdefghijklmnop',
     'chrome-extension://123',
@@ -5289,7 +5289,7 @@ test('round 99: extension and other single-label opaque origins can be allowlist
   expect(normalizeOrigin('https://127。0。0。1')).toBe('https://127.0.0.1');
 });
 
-test('round 100: an opaque origin with Unicode dots is refused before the IP branch', () => {
+test('an opaque origin with Unicode dots is refused before the IP branch', () => {
   for (const entry of ['foo://1。2。3。4', 'chrome-extension://1。2。3。4']) {
     expect(validateConfigEntry(entry, 'origin').valid).toBe(false);
     expect(matchesOriginList(entry, [entry])).toBe(false);
@@ -5298,7 +5298,7 @@ test('round 100: an opaque origin with Unicode dots is refused before the IP bra
   expect(matchesOriginList('foo://1.2.3.4', ['foo://1.2.3.4'])).toBe(true);
 });
 
-test('round 101: a decoded trailing dot after an IPv4 address, file: origins, percent-encoded origin hosts', () => {
+test('a decoded trailing dot after an IPv4 address, file: origins, percent-encoded origin hosts', () => {
   expect(normalizeDomain('127.0.0.1%2e')).toBe('127.0.0.1');
   expect(matchesDomainList('127.0.0.1', ['127.0.0.1%2e'])).toBe(true);
   expect(validateConfigEntry('1.2.3.%34%2e', 'domain').valid).toBe(true);
@@ -5318,7 +5318,7 @@ test('round 101: a decoded trailing dot after an IPv4 address, file: origins, pe
   ).toBe(true);
 });
 
-test('round 102: one trailing empty label in all, the scheme after leading whitespace, percent hosts in the wildcard matcher', () => {
+test('one trailing empty label in all, the scheme after leading whitespace, percent hosts in the wildcard matcher', () => {
   expect(validateConfigEntry('1.2.3.4..', 'domain').valid).toBe(false);
   expect(validateConfigEntry('1.2.3.4..', 'origin').valid).toBe(false);
   expect(matchesDomainList('1.2.3.4', ['1.2.3.4%2e.'])).toBe(false);
@@ -5337,7 +5337,7 @@ test('round 102: one trailing empty label in all, the scheme after leading white
   ).toBe(true);
 });
 
-test('round 103: origins read as the parser reads their text, in the scheme:// form only', () => {
+test('origins read as the parser reads their text, in the scheme:// form only', () => {
   for (const origin of [
     'https:ex%61mple.com',
     'https:/\t/ex%61mple.com',
@@ -5363,7 +5363,7 @@ test('round 103: origins read as the parser reads their text, in the scheme:// f
   expect(normalizeOrigin('https://exa\nmple.com')).toBe('https://example.com');
 });
 
-test('round 104: extra slashes or a backslash after scheme:// are refused', () => {
+test('extra slashes or a backslash after scheme:// are refused', () => {
   for (const origin of [
     'https:///ex%61mple.com',
     'https:///example.com:',
@@ -5381,7 +5381,7 @@ test('round 104: extra slashes or a backslash after scheme:// are refused', () =
   expect(normalizeOrigin('https://[::1]:8443')).toBe('https://[::1]:8443');
 });
 
-test('round 105: Unicode dots are folded in the authority only', () => {
+test('Unicode dots are folded in the authority only', () => {
   for (const origin of [
     'https://example.com/。',
     'https://example.com/．',
@@ -5436,7 +5436,7 @@ test('underscore host labels are accepted as the URL standard allows; an empty b
   expect(response.isFailed).toBe(false);
 });
 
-test('round 106: NodeAdapter drops a bodiless Content-Length, refuses Upgrade/CONNECT and unsendable bodies, sends no progress after a cancel', async () => {
+test('NodeAdapter drops a bodiless Content-Length, refuses Upgrade/CONNECT and unsendable bodies, sends no progress after a cancel', async () => {
   const seen: string[] = [];
   const server = http.createServer((req, res) => {
     seen.push(
@@ -5514,7 +5514,7 @@ test('round 106: NodeAdapter drops a bodiless Content-Length, refuses Upgrade/CO
   }
 });
 
-test('round 107: an adapter answer without a body field is delivered; a dropped Content-Length is not reported as sent', async () => {
+test('an adapter answer without a body field is delivered; a dropped Content-Length is not reported as sent', async () => {
   const bodiless: HTTPAdapter = {
     getType: () => 'node',
     send: () =>
@@ -5561,7 +5561,7 @@ test('round 107: an adapter answer without a body field is delivered; a dropped 
   }
 });
 
-test('round 108: a shared factory error does not mix requests; cancel and timeout are exclusive; detectedRedirectURL as written', async () => {
+test('a shared factory error does not mix requests; cancel and timeout are exclusive; detectedRedirectURL as written', async () => {
   const server = http.createServer((req, res) => {
     const who = req.url === '/a' ? 'a' : 'b';
     res.writeHead(200, {
@@ -5642,11 +5642,11 @@ test('round 108: a shared factory error does not mix requests; cancel and timeou
   const refused = redirectClient.get('/start');
   await refused.send();
   expect(refused.error?.code).toBe('interceptor_error');
-  // Cross-origin from the request, so not the server's userinfo either: see round 37.
+  // On another origin than the request, so the userinfo the server wrote is dropped too.
   expect(refused.error?.detectedRedirectURL).toBe('https://other.test/y');
 });
 
-test("round 109: an adapter never flags the caller's own error in place", async () => {
+test("an adapter never flags the caller's own error in place", async () => {
   const shared = new Error('cannot serialize');
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({
@@ -5670,7 +5670,7 @@ test("round 109: an adapter never flags the caller's own error in place", async 
   );
 });
 
-test('round 110: underscore suffix overrides; a sub-second mock maxAge keeps the cookie', async () => {
+test('underscore suffix overrides; a sub-second mock maxAge keeps the cookie', async () => {
   const jar = new CookieJar({ publicSuffixes: { add: ['svc.my_net'] } });
   jar.parseSetCookieHeader('t=1; Domain=svc.my_net', 'http://a.svc.my_net/');
   expect(jar.getCookieHeaderString('http://b.svc.my_net/')).toBe('');
@@ -5711,7 +5711,7 @@ test('round 110: underscore suffix overrides; a sub-second mock maxAge keeps the
   ]);
 });
 
-test('round 111: FetchAdapter refusals at dispatch are not retried; terminal upload events count bytes; browser adapters never flag the caller error', async () => {
+test('FetchAdapter refusals at dispatch are not retried; terminal upload events count bytes; browser adapters never flag the caller error', async () => {
   const mine = new Error('header value failed');
   const hostile = {
     toString() {
@@ -5853,7 +5853,7 @@ test('NodeAdapter asks for and decodes gzip, deflate and br bodies, as fetch doe
   }
 });
 
-test('round 112: decoded bodies hold their end/error for a streamed reader; a Range request asks for identity', async () => {
+test('decoded bodies hold their end/error for a streamed reader; a Range request asks for identity', async () => {
   let lastAcceptEncoding: string | undefined;
   const server = http.createServer((req, res) => {
     lastAcceptEncoding = req.headers['accept-encoding'];
@@ -5912,7 +5912,7 @@ test('round 112: decoded bodies hold their end/error for a streamed reader; a Ra
   }
 });
 
-test('round 113: decoding stops on a timeout, a truncated body is a stream error, stacked codings decode', async () => {
+test('decoding stops on a timeout, a truncated body is a stream error, stacked codings decode', async () => {
   const bomb = zlib.gzipSync(Buffer.alloc(200 * 1024 * 1024), { level: 1 });
   const full = zlib.gzipSync(Buffer.alloc(100000, 'a'));
   const truncated = full.subarray(0, full.length - 4);
@@ -5971,7 +5971,7 @@ test('round 113: decoding stops on a timeout, a truncated body is a stream error
   }
 }, 30_000);
 
-test('round 114: host-only and domain cookies are two cookies; header order, trimming, attribute size, nameless cookies', () => {
+test('host-only and domain cookies are two cookies; header order, trimming, attribute size, nameless cookies', () => {
   const jar = new CookieJar();
   jar.parseSetCookieHeader(
     'sid=real; Secure; HttpOnly; Path=/',
@@ -6016,7 +6016,7 @@ test('round 114: host-only and domain cookies are two cookies; header order, tri
   expect(nameless.getCookieHeaderString('https://n.example/')).toBe('flag');
 });
 
-test('round 115: a long content-coding chain is refused; the adapter Accept-Encoding is not carried to a redirect hop', async () => {
+test('a long content-coding chain is refused; the adapter Accept-Encoding is not carried to a redirect hop', async () => {
   let hopAcceptEncoding: string | undefined;
   const server = http.createServer((req, res) => {
     if (req.url === '/chain') {
@@ -6371,7 +6371,7 @@ test('NodeAdapter decompress: false hands the body over as it arrived and asks f
   }
 });
 
-test('round 117: redirect_disabled carries no cause from the hop body', async () => {
+test('redirect_disabled carries no cause from the hop body', async () => {
   const server = http.createServer((_req, res) => {
     res.writeHead(302, { location: '/small' });
     res.end('x'.repeat(500));
@@ -6392,7 +6392,7 @@ test('round 117: redirect_disabled carries no cause from the hop body', async ()
   }
 });
 
-test("round 118: a custom adapter's stream code is held to the stream codes; attribute size counts wire octets", async () => {
+test("a custom adapter's stream code is held to the stream codes; attribute size counts wire octets", async () => {
   for (const code of ['cancelled', 'bogus', 42]) {
     const builder = new HTTPClient({
       adapter: {
@@ -6418,7 +6418,7 @@ test("round 118: a custom adapter's stream code is held to the stream codes; att
   expect(jar.getAllCookies()[0]?.path).toBe(path);
 });
 
-test('round 119: polyfilled fetch bodies, custom adapter bodies over the limit, caller Accept-Encoding across origins', async () => {
+test('polyfilled fetch bodies, custom adapter bodies over the limit, caller Accept-Encoding across origins', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (() =>
     Promise.resolve({
@@ -6487,7 +6487,7 @@ test('round 119: polyfilled fetch bodies, custom adapter bodies over the limit, 
   }
 });
 
-test('round 120: polyfilled fetch bodies are read incrementally and released; an inner raw deflate decodes', async () => {
+test('polyfilled fetch bodies are read incrementally and released; an inner raw deflate decodes', async () => {
   const { Readable } = await import('node:stream');
   let produced = 0;
   let isDestroyed = false;
@@ -6548,7 +6548,7 @@ test('round 120: polyfilled fetch bodies are read incrementally and released; an
   }
 });
 
-test('round 121: bytes after a compressed stream are a stream error for every coding, and a stacked deflate does not hang', async () => {
+test('bytes after a compressed stream are a stream error for every coding, and a stacked deflate does not hang', async () => {
   const junk = Buffer.alloc(1000, 'j');
   const bodies: Record<string, [string, Buffer]> = {
     br: ['br', Buffer.concat([zlib.brotliCompressSync('hello'), junk])],
@@ -6595,7 +6595,7 @@ test('round 121: bytes after a compressed stream are a stream error for every co
   }
 });
 
-test('round 122: trailing bytes in the last chunk of an ended response are a stream error too', async () => {
+test('trailing bytes in the last chunk of an ended response are a stream error too', async () => {
   const junk = Buffer.alloc(1000, 'j');
   const bodies: Record<string, [string, Buffer]> = {
     br: ['br', Buffer.concat([zlib.brotliCompressSync('hello'), junk])],
@@ -6634,7 +6634,7 @@ test('round 122: trailing bytes in the last chunk of an ended response are a str
   }
 });
 
-test('round 123: a large stacked deflate with trailing bytes fails; gzip zero padding is accepted', async () => {
+test('a large stacked deflate with trailing bytes fails; gzip zero padding is accepted', async () => {
   const payload = Buffer.alloc(300_000, 'p');
   const bodies: Record<string, [string, Buffer]> = {
     stacked: [
@@ -6671,7 +6671,7 @@ test('round 123: a large stacked deflate with trailing bytes fails; gzip zero pa
   }
 });
 
-test('round 126: a redirect whose body only fails to decode is followed; a cut-off 3xx is not', async () => {
+test('a redirect whose body only fails to decode is followed; a cut-off 3xx is not', async () => {
   const server = http.createServer((req, res) => {
     if (req.url === '/start') {
       res.writeHead(302, {
@@ -6711,7 +6711,7 @@ test('round 126: a redirect whose body only fails to decode is followed; a cut-o
   }
 });
 
-test('round 127: a followed decode-failed redirect leaves no error behind; a 503 that only fails to decode is retried', async () => {
+test('a followed decode-failed redirect leaves no error behind; a 503 that only fails to decode is retried', async () => {
   let unavailableCount = 0;
   const server = http.createServer((req, res) => {
     if (req.url === '/start' || req.url === '/to-ok') {
@@ -6777,7 +6777,7 @@ test('round 127: a followed decode-failed redirect leaves no error behind; a 503
   }
 });
 
-test('round 128: a plain ArrayBuffer body is held to maxResponseBytes', async () => {
+test('a plain ArrayBuffer body is held to maxResponseBytes', async () => {
   // A plain ArrayBuffer body from a custom adapter is held to maxResponseBytes.
   const bufferClient = new HTTPClient({
     adapter: {
@@ -6799,7 +6799,7 @@ test('round 128: a plain ArrayBuffer body is held to maxResponseBytes', async ()
   expect(tooLarge.error?.code).toBe('response_too_large');
 });
 
-test("round 128: an earlier hop's cause is not the next hop's", async () => {
+test("an earlier hop's cause is not the next hop's", async () => {
   // An earlier hop's cause is not the next hop's.
   let hop = 0;
   const causeClient = new HTTPClient({
@@ -6826,7 +6826,7 @@ test("round 128: an earlier hop's cause is not the next hop's", async () => {
   expect(stale.error?.cause).toBeUndefined();
 });
 
-test('round 128: a jar that throws for the redirect target still names the redirect', async () => {
+test('a jar that throws for the redirect target still names the redirect', async () => {
   // A jar that throws for the redirect target still names the redirect.
   const throwingJar = new CookieJar();
   const original = throwingJar.getCookieHeaderString.bind(throwingJar);
@@ -6857,7 +6857,7 @@ test('round 128: a jar that throws for the redirect target still names the redir
   expect(jarResponse.detectedRedirectURL).toBe('http://api.test/next');
 });
 
-test('round 128: a tab inside a cookie value is kept', () => {
+test('a tab inside a cookie value is kept', () => {
   // A tab inside a cookie value is kept.
   const jar = new CookieJar();
   jar.processResponseHeaders(
@@ -6867,14 +6867,14 @@ test('round 128: a tab inside a cookie value is kept', () => {
   expect(jar.getCookieHeaderString('https://example.com/')).toContain('a=x\ty');
 });
 
-test('round 128: `*.` is no global wildcard', () => {
+test('`*.` is no global wildcard', () => {
   // `*.` is no global wildcard.
   expect(matchesWildcardDomain('evil.com', '*.')).toBe(false);
   expect(matchesDomainList('evil.com', ['*.'])).toBe(false);
   expect(matchesOriginList('https://evil.com', ['*.'])).toBe(false);
 });
 
-test('round 128: credentials go from every network-path spelling when the initial URL is relative', () => {
+test('credentials go from every network-path spelling when the initial URL is relative', () => {
   // Credentials go from every network-path spelling when the initial URL is relative.
   for (const target of [
     '\\\\user:pw@evil.com/x',
@@ -6888,14 +6888,14 @@ test('round 128: credentials go from every network-path spelling when the initia
   }
 });
 
-test('round 128: one bracket is no IPv6 literal', () => {
+test('one bracket is no IPv6 literal', () => {
   // One bracket is no IPv6 literal.
   expect(isIPv6('[::1')).toBe(false);
   expect(normalizeDomain('[::1')).toBe('');
   expect(matchesDomainList('::1', ['[::1'])).toBe(false);
 });
 
-test('round 128: FetchAdapter reads a lowercase head as bodiless; a caller refusal counts 0 attempts with an interceptor', async () => {
+test('FetchAdapter reads a lowercase head as bodiless; a caller refusal counts 0 attempts with an interceptor', async () => {
   const server = http.createServer((req, res) => {
     res.writeHead(200, {
       'content-type': 'text/plain',
@@ -6934,7 +6934,7 @@ const zstdCompressSync = (
 ).zstdCompressSync;
 
 test.skipIf(zstdCompressSync === undefined)(
-  'round 129: a zstd body cut short is a stream error, as gzip, br and deflate are',
+  'a zstd body cut short is a stream error, as gzip, br and deflate are',
   async () => {
     const big = Buffer.from(
       Array.from({ length: 50000 }, (_, i) => String(i)).join(','),
@@ -6967,7 +6967,7 @@ test.skipIf(zstdCompressSync === undefined)(
   },
 );
 
-test('round 129: a cancel between hops carries no cause from the 3xx it leaves', async () => {
+test('a cancel between hops carries no cause from the 3xx it leaves', async () => {
   const client = new HTTPClient({
     adapter: {
       getType: () => 'mock',
@@ -6991,7 +6991,7 @@ test('round 129: a cancel between hops carries no cause from the 3xx it leaves',
   expect(builder.error?.cause).toBeUndefined();
 });
 
-test('round 129: a jar that throws for the redirect target reports the target as requestURL', async () => {
+test('a jar that throws for the redirect target reports the target as requestURL', async () => {
   const throwingJar = new CookieJar();
   const original = throwingJar.getCookieHeaderString.bind(throwingJar);
   throwingJar.getCookieHeaderString = (url: string) => {
@@ -7020,7 +7020,7 @@ test('round 129: a jar that throws for the redirect target reports the target as
   expect(response.detectedRedirectURL).toBe('http://api.test/next');
 });
 
-test('round 129: a string body from a custom adapter is held to maxResponseBytes', async () => {
+test('a string body from a custom adapter is held to maxResponseBytes', async () => {
   const client = new HTTPClient({
     adapter: {
       getType: () => 'mock',
@@ -7057,7 +7057,7 @@ test('round 129: a string body from a custom adapter is held to maxResponseBytes
   expect(euro.error?.code).toBe('response_too_large');
 });
 
-test('round 129: cookie names refuse a tab; values keep one', () => {
+test('cookie names refuse a tab; values keep one', () => {
   const jar = new CookieJar();
   const base = { domain: 'example.com', path: '/', value: '1' };
   expect(jar.setCookie({ ...base, name: 'a\tb' })).toBe(false);
@@ -7068,7 +7068,7 @@ test('round 129: cookie names refuse a tab; values keep one', () => {
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('e=x\ty');
 });
 
-test('round 129: Domain=..example.com and SameSite=None without Secure are ignored', () => {
+test('Domain=..example.com and SameSite=None without Secure are ignored', () => {
   const jar = new CookieJar();
   jar.processResponseHeaders(
     {
@@ -7083,7 +7083,7 @@ test('round 129: Domain=..example.com and SameSite=None without Secure are ignor
   expect(jar.getCookieHeaderString('https://www.example.com/')).toBe('ok=1');
 });
 
-test('round 129: a cookie replacing an expired one takes its own place in the header', async () => {
+test('a cookie replacing an expired one takes its own place in the header', async () => {
   const jar = new CookieJar();
   // Stored already expired, and not yet purged; host-only, so `a=new` replaces it.
   expect(
@@ -7104,7 +7104,7 @@ test('round 129: a cookie replacing an expired one takes its own place in the he
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('b=1; a=new');
 });
 
-test('round 129: MockAdapter drops a path-only URL fragment and a 1xx body', async () => {
+test('MockAdapter drops a path-only URL fragment and a 1xx body', async () => {
   const adapter = new MockAdapter();
   const seen: unknown[] = [];
   adapter.routes.get('/x', (request) => {
@@ -7126,7 +7126,7 @@ test('round 129: MockAdapter drops a path-only URL fragment and a 1xx body', asy
   expect(informational.body).toBeNull();
 });
 
-test('round 129: credentials-list trailing-dot wildcards and whitespace in origin patterns', () => {
+test('credentials-list trailing-dot wildcards and whitespace in origin patterns', () => {
   expect(
     matchesCORSCredentialsList(
       'https://a.example.com',
@@ -7137,7 +7137,7 @@ test('round 129: credentials-list trailing-dot wildcards and whitespace in origi
   expect(matchesOriginList('https://evil.com', ['https:// *'])).toBe(false);
 });
 
-test('round 130: a status-0 answer carries its errorCause without isTransportError', async () => {
+test('a status-0 answer carries its errorCause without isTransportError', async () => {
   const client = new HTTPClient({
     adapter: {
       getType: () => 'mock',
@@ -7157,7 +7157,7 @@ test('round 130: a status-0 answer carries its errorCause without isTransportErr
   expect(builder.error?.cause?.message).toBe('connect ECONNREFUSED');
 });
 
-test('round 130: origin matchers agree with validateConfigEntry on whitespace and empty extras', () => {
+test('origin matchers agree with validateConfigEntry on whitespace and empty extras', () => {
   // Whitespace in a protocol wildcard's host: as the validator reads it.
   expect(validateConfigEntry('https:// *.example.com', 'origin').valid).toBe(
     true,
@@ -7185,7 +7185,7 @@ test('round 130: origin matchers agree with validateConfigEntry on whitespace an
   ).toBe(false);
 });
 
-test('round 130: MockAdapter never serializes a streamError route body', async () => {
+test('MockAdapter never serializes a streamError route body', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({
     status: 200,
@@ -7202,7 +7202,7 @@ test('round 130: MockAdapter never serializes a streamError route body', async (
   expect(response.body).toBeNull();
 });
 
-test('round 130: each callback is handed its own copy of the redirect hop', async () => {
+test('each callback is handed its own copy of the redirect hop', async () => {
   let hits = 0;
   const client = new HTTPClient({
     adapter: {
@@ -7247,7 +7247,7 @@ test('round 130: each callback is handed its own copy of the redirect hop', asyn
   expect(seen).toEqual(['http://api.test/2']);
 });
 
-test('round 131: each observer and interceptor in a chain gets its own phase', async () => {
+test('each observer and interceptor in a chain gets its own phase', async () => {
   let hits = 0;
   const client = new HTTPClient({
     adapter: {
@@ -7297,7 +7297,7 @@ test('round 131: each observer and interceptor in a chain gets its own phase', a
   expect(seen).toEqual(Array.from({ length: 4 }, () => 'http://api.test/b'));
 });
 
-test('round 131: a trailing space after a protocol wildcard still matches; a Unicode dot in a Set-Cookie Domain is non-ASCII', () => {
+test('a trailing space after a protocol wildcard still matches; a Unicode dot in a Set-Cookie Domain is non-ASCII', () => {
   expect(matchesWildcardOrigin('https://a.example.com', 'https://* ')).toBe(
     true,
   );
@@ -7310,11 +7310,11 @@ test('round 131: a trailing space after a protocol wildcard still matches; a Uni
     { 'set-cookie': 'a=1; Domain=。example.com' },
     'https://www.example.com/',
   );
-  // Ignored whole, as RFC 6265bis ignores a non-ASCII Domain (round 132).
+  // Ignored whole, as RFC 6265bis ignores a non-ASCII Domain.
   expect(jar.getAllCookies()).toEqual([]);
 });
 
-test('round 132: a coding chain refused as too long is a decode failure, so a 503 is retried', async () => {
+test('a coding chain refused as too long is a decode failure, so a 503 is retried', async () => {
   let hits = 0;
   const server = http.createServer((_req, res) => {
     if (hits++ === 0) {
@@ -7343,14 +7343,14 @@ test('round 132: a coding chain refused as too long is a decode failure, so a 50
   }
 });
 
-test('round 132: a nameless cookie posing as a prefix is ignored whole', () => {
+test('a nameless cookie posing as a prefix is ignored whole', () => {
   const jar = new CookieJar();
   jar.parseSetCookieHeader('flag', 'https://n.example/');
   jar.parseSetCookieHeader('__Host-x; Max-Age=0', 'https://n.example/');
   expect(jar.getCookieHeaderString('https://n.example/')).toBe('flag');
 });
 
-test('round 132: the last SameSite wins, an unrecognized one included', () => {
+test('the last SameSite wins, an unrecognized one included', () => {
   const sameSite = new CookieJar();
   sameSite.parseSetCookieHeader(
     'a=1; SameSite=None; SameSite=bogus',
@@ -7366,7 +7366,7 @@ test('round 132: the last SameSite wins, an unrecognized one included', () => {
   ]);
 });
 
-test('round 132: each interceptor gets its own context', async () => {
+test('each interceptor gets its own context', async () => {
   const client = new HTTPClient({
     adapter: {
       getType: () => 'mock',
@@ -7393,7 +7393,7 @@ test('round 132: each interceptor gets its own context', async () => {
   expect(seen).toEqual([[0, 1]]);
 });
 
-test('round 132: the credentials list and wildcard origins trim as the validator does', () => {
+test('the credentials list and wildcard origins trim as the validator does', () => {
   expect(
     matchesCORSCredentialsList(
       'https://a.example.com',
@@ -7406,14 +7406,14 @@ test('round 132: the credentials list and wildcard origins trim as the validator
   );
 });
 
-test('round 132: whitespace inside a wildcard pattern is refused, as in an exact entry', () => {
+test('whitespace inside a wildcard pattern is refused, as in an exact entry', () => {
   for (const pattern of ['*.example .com', '*. example.com']) {
     expect(validateConfigEntry(pattern, 'domain').valid).toBe(false);
     expect(matchesDomainList('a.example.com', [pattern])).toBe(false);
   }
 });
 
-test('round 132: a name is at most 253 characters', () => {
+test('a name is at most 253 characters', () => {
   const label = 'a'.repeat(63);
   const tooLong = [label, label, label, label].join('.'); // 255 characters
   const longest = [label, label, label, 'a'.repeat(61)].join('.'); // 253
@@ -7421,7 +7421,7 @@ test('round 132: a name is at most 253 characters', () => {
   expect(normalizeDomain(longest)).toBe(longest);
 });
 
-test('round 133: no wildcard over a tail a PSL wildcard rule makes every child of a suffix', () => {
+test('no wildcard over a tail a PSL wildcard rule makes every child of a suffix', () => {
   for (const pattern of ['*.kawasaki.jp', '*.*.sch.uk', '*.sch.uk']) {
     expect(validateConfigEntry(pattern, 'domain').valid).toBe(false);
   }
@@ -7440,14 +7440,14 @@ test('round 133: no wildcard over a tail a PSL wildcard rule makes every child o
   expect(matchesWildcardDomain('a.example.com', '*.example.com')).toBe(true);
 });
 
-test('round 133: a trailing dot is not a label toward the 127-label cap', () => {
+test('a trailing dot is not a label toward the 127-label cap', () => {
   expect(checkDNSLength('x.'.repeat(127))).toBe(true);
   expect(checkDNSLength(`${'x.'.repeat(126)}x`)).toBe(true);
   // 128 labels, refused - by the 253-character limit, which no 128-label name meets.
   expect(checkDNSLength(`${'x.'.repeat(127)}x`)).toBe(false);
 });
 
-test('round 134: every IPv6 form the URL parser reads is an IPv6 literal, brackets kept', () => {
+test('every IPv6 form the URL parser reads is an IPv6 literal, brackets kept', () => {
   for (const address of ['1:2:3:4:5:6:1.2.3.4', '1:2:3:4:5::1.2.3.4']) {
     expect(isIPv6(address)).toBe(true);
   }
@@ -7462,7 +7462,7 @@ test('round 134: every IPv6 form the URL parser reads is an IPv6 literal, bracke
   ).toBe(true);
 });
 
-test('round 134: a bare cookie attribute reads as one with an empty value', () => {
+test('a bare cookie attribute reads as one with an empty value', () => {
   const jar = new CookieJar();
   jar.parseSetCookieHeader(
     '__Host-id=1; Secure; Path=/; Path',
@@ -7488,7 +7488,7 @@ test('round 134: a bare cookie attribute reads as one with an empty value', () =
   expect(domain.getAllCookies()[0]?.hostOnly).toBe(true);
 });
 
-test('round 134: a publicSuffixes entry ending in a number is refused', () => {
+test('a publicSuffixes entry ending in a number is refused', () => {
   for (const entry of ['10.0.0.1', 'corp.123']) {
     expect(() => new CookieJar({ publicSuffixes: { add: [entry] } })).toThrow(
       TypeError,
@@ -7499,7 +7499,7 @@ test('round 134: a publicSuffixes entry ending in a number is refused', () => {
   ).not.toThrow();
 });
 
-test('round 134: MockAdapter echoes req.params; NodeAdapter joins case-variant header names', async () => {
+test('MockAdapter echoes req.params; NodeAdapter joins case-variant header names', async () => {
   const mock = new MockAdapter();
   mock.routes.get('/u/:id', (request) => ({
     status: 200,
@@ -7530,7 +7530,7 @@ test('round 134: MockAdapter echoes req.params; NodeAdapter joins case-variant h
   }
 });
 
-test('round 134: a redirect hop cancelled before it went out is detected, not followed', async () => {
+test('a redirect hop cancelled before it went out is detected, not followed', async () => {
   const adapter = new MockAdapter();
   const hits: string[] = [];
   adapter.routes.get('/g', () => {
@@ -7559,7 +7559,7 @@ test('round 134: a redirect hop cancelled before it went out is detected, not fo
   expect(response.detectedRedirectURL).toBe('http://api.test/h');
 });
 
-test('round 134: an observer rawBody keeps an own __proto__ key; builder.response is set for final observers', async () => {
+test('an observer rawBody keeps an own __proto__ key; builder.response is set for final observers', async () => {
   const adapter = new MockAdapter();
   adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
@@ -7580,7 +7580,7 @@ test('round 134: an observer rawBody keeps an own __proto__ key; builder.respons
   expect(seen.at(-1)).toBe(200);
 });
 
-test('round 135: FetchAdapter keeps a __proto__ header beside a Content-Length and joins case-variant cookies', async () => {
+test('FetchAdapter keeps a __proto__ header beside a Content-Length and joins case-variant cookies', async () => {
   // The raw list: a parsed header record cannot hold a `__proto__` key.
   const received: string[][] = [];
   const server = http.createServer((req, res) => {
@@ -7612,7 +7612,7 @@ test('round 135: FetchAdapter keeps a __proto__ header beside a Content-Length a
   }
 });
 
-test('round 135: setCookie refuses a non-boolean flag; fromJSON reads a null one as absent', () => {
+test('setCookie refuses a non-boolean flag; fromJSON reads a null one as absent', () => {
   const jar = new CookieJar();
   const base = { name: 'a', value: '1', domain: 'example.com' };
   expect(jar.setCookie({ ...base, secure: 'true' as unknown as boolean })).toBe(
@@ -7631,7 +7631,7 @@ test('round 135: setCookie refuses a non-boolean flag; fromJSON reads a null one
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
 });
 
-test('round 135: setCookie accepts a Date from another realm', () => {
+test('setCookie accepts a Date from another realm', () => {
   const jar = new CookieJar();
   const expires = vm.runInNewContext('new Date(Date.now() + 3600000)') as Date;
   expect(
@@ -7641,7 +7641,7 @@ test('round 135: setCookie accepts a Date from another realm', () => {
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
 });
 
-test('round 135: a malformed publicSuffixes config throws', () => {
+test('a malformed publicSuffixes config throws', () => {
   for (const publicSuffixes of [
     ['corp.internal'],
     'corp.internal',
@@ -7657,25 +7657,25 @@ test('round 135: a malformed publicSuffixes config throws', () => {
   }
 });
 
-test('round 135: a trailing dot IDNA mapping exposes is one trailing dot', () => {
+test('a trailing dot IDNA mapping exposes is one trailing dot', () => {
   expect(normalizeDomain('example.com.\u00AD')).toBe('example.com');
   expect(normalizeDomain('example.com.\u00AD.')).toBe('');
   expect(validateConfigEntry('com.\u00AD', 'domain').valid).toBe(false);
   expect(matchesDomainList('example.com', ['example.com.\u00AD'])).toBe(true);
 });
 
-test('round 135: a same-scheme URL without slashes is read on its own for credentials', () => {
+test('a same-scheme URL without slashes is read on its own for credentials', () => {
   expect(
     stripCrossOriginURLCredentials('https:u:p@b.com/x', 'https://a.com/'),
   ).toBe('https://b.com/x');
 });
 
-test('round 135: header names are lowercased in ASCII only', () => {
+test('header names are lowercased in ASCII only', () => {
   const kelvin = 'X-Key';
   expect(mergeHeaders({ [kelvin]: 'v' })).toEqual({ [`x-Key`]: 'v' });
 });
 
-test('round 135: deepClone copies a Buffer, a DataView and an ArrayBuffer', () => {
+test('deepClone copies a Buffer, a DataView and an ArrayBuffer', () => {
   const buffer = Buffer.from('abc');
   const copy = deepClone(buffer);
   copy[0] = 0x7a;
@@ -7692,7 +7692,7 @@ test('round 135: deepClone copies a Buffer, a DataView and an ArrayBuffer', () =
   expect(deepClone(arrayBuffer)).not.toBe(arrayBuffer);
 });
 
-test('round 135: NodeAdapter refuses a non-http scheme and does not retry a malformed userinfo escape', async () => {
+test('NodeAdapter refuses a non-http scheme and does not retry a malformed userinfo escape', async () => {
   let hits = 0;
   const server = http.createServer((_req, res) => {
     hits++;
@@ -7727,7 +7727,7 @@ test('round 135: NodeAdapter refuses a non-http scheme and does not retry a malf
   }
 });
 
-test('round 135: a late cancel keeps a redirect detected with no target to name', async () => {
+test('a late cancel keeps a redirect detected with no target to name', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({ status: 302 }));
   const client = new HTTPClient({
@@ -7745,7 +7745,7 @@ test('round 135: a late cancel keeps a redirect detected with no target to name'
   expect(builder.error?.wasRedirectDetected).toBe(true);
 });
 
-test('round 136: a word-final Σ is read as the URL parser reads it; "null" is never a domain match; hex suffix tails refused', () => {
+test('a word-final Σ is read as the URL parser reads it; "null" is never a domain match; hex suffix tails refused', () => {
   expect(normalizeDomain('ΑΣ-b.com')).toBe(
     new URL('https://ΑΣ-b.com').hostname,
   );
@@ -7768,14 +7768,14 @@ test('round 136: a word-final Σ is read as the URL parser reads it; "null" is n
   }
 });
 
-test('round 136: a Kelvin-sign header name is not grouped with a real one on the way out', () => {
+test('a Kelvin-sign header name is not grouped with a real one on the way out', () => {
   expect(materializeRequestHeaders({ 'x-key': 'a', 'X-Key': 'b' })).toEqual({
     'x-key': 'a',
     'X-Key': 'b',
   });
 });
 
-test('round 136: a CRL with a leading byte-order mark, or in a view at an offset, is read', () => {
+test('a CRL with a leading byte-order mark, or in a view at an offset, is read', () => {
   const crl = getRevocationFixtures().crlEmpty;
   // Bun's `tls` read a view from the start of its memory.
   expect(
@@ -7790,7 +7790,7 @@ test('round 136: a CRL with a leading byte-order mark, or in a view at an offset
   ).not.toThrow();
 });
 
-test('round 136: a cross-origin Location password never reaches redirect-phase observers or interceptors', async () => {
+test('a cross-origin Location password never reaches redirect-phase observers or interceptors', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/a', () => ({
     status: 302,
@@ -7824,7 +7824,7 @@ test('round 136: a cross-origin Location password never reaches redirect-phase o
   expect(seen.every((url) => !url.includes('secret'))).toBe(true);
 });
 
-test('round 136: a thrown failure on a POST names the method as why it was not retried', async () => {
+test('a thrown failure on a POST names the method as why it was not retried', async () => {
   const client = new HTTPClient({
     adapter: {
       getType: () => 'mock',
@@ -7844,7 +7844,7 @@ test('round 136: a thrown failure on a POST names the method as why it was not r
   expect(ends).toEqual(['non_idempotent_method']);
 });
 
-test('round 137: a combining mark that maps to a letter is read in the URL parser order', () => {
+test('a combining mark that maps to a letter is read in the URL parser order', () => {
   const host = 'x́ͅ.example.com';
   const browserHost = new URL(`https://${host}`).hostname;
   expect(normalizeDomain(host)).toBe(browserHost);
@@ -7861,7 +7861,7 @@ test('round 137: a combining mark that maps to a letter is read in the URL parse
   );
 });
 
-test('round 137: MockAdapter groups request header names in ASCII case only', async () => {
+test('MockAdapter groups request header names in ASCII case only', async () => {
   const adapter = new MockAdapter();
   const seen: unknown[] = [];
   adapter.routes.get('/h', (request) => {
@@ -7876,11 +7876,11 @@ test('round 137: MockAdapter groups request header names in ASCII case only', as
   expect(seen).toEqual(['a']);
 });
 
-test('round 137: a cookie domain whose trailing dot only IDNA mapping exposes is stored as the URL parser reads it', () => {
+test('a cookie domain whose trailing dot only IDNA mapping exposes is stored as the URL parser reads it', () => {
   const jar = new CookieJar();
   jar.setCookie({ name: 'sid', value: 'a', domain: 'example.com' });
   // The URL parser reads `example.com.` and a soft hyphen as `example.com.`, a host of
-  // its own (PR review round 51), so the jar files it there.
+  // its own, so the jar files it there.
   jar.setCookie({ name: 'sid', value: 'b', domain: 'example.com.\u00AD' });
   expect(jar.getStoredDomains()).toEqual([
     { domain: 'example.com', count: 1 },
@@ -7896,7 +7896,7 @@ test('round 137: a cookie domain whose trailing dot only IDNA mapping exposes is
   ).toBe(false);
 });
 
-test('round 137: NodeAdapter refuses an Expect header; a decode failure during stream setup keeps its cause', async () => {
+test('NodeAdapter refuses an Expect header; a decode failure during stream setup keeps its cause', async () => {
   let hits = 0;
   const server = http.createServer((req, res) => {
     hits++;
@@ -7944,7 +7944,7 @@ test('round 137: NodeAdapter refuses an Expect header; a decode failure during s
   }
 });
 
-test('round 137: maxRedirects must be a whole number; a request path must be a string', () => {
+test('maxRedirects must be a whole number; a request path must be a string', () => {
   expect(
     () =>
       new HTTPClient({
@@ -7962,14 +7962,14 @@ test('round 137: maxRedirects must be a whole number; a request path must be a s
   }
 });
 
-test('round 138: a decomposed Unicode label is measured composed; an Expect header is refused even without a body; a hostile path value is described', async () => {
+test('a decomposed Unicode label is measured composed; an Expect header is refused even without a body; a hostile path value is described', async () => {
   const label = 'é'.repeat(35); // 70 code units, 35 once composed
   expect(normalizeDomain(`${label}.example.com`)).not.toBe('');
   expect(validateConfigEntry(`*.${label}.example.com`, 'domain').valid).toBe(
     true,
   );
 
-  // Refused bodiless too (round 139): Node sent it chunked rather than with no length.
+  // Refused bodiless too: Node would otherwise send it chunked rather than with no length.
   let refusal: unknown;
   try {
     await new NodeAdapter().send({
@@ -8001,7 +8001,7 @@ test('round 138: a decomposed Unicode label is measured composed; an Expect head
   expect(() => client.get(hostile as unknown as string)).toThrow(TypeError);
 });
 
-test('round 140: a decode failure after the raw body ended reaches a pending stream setup', async () => {
+test('a decode failure after the raw body ended reaches a pending stream setup', async () => {
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-encoding': 'gzip' });
     res.end('not gzip at all, and the body ends here');
@@ -8033,7 +8033,7 @@ test('round 140: a decode failure after the raw body ended reaches a pending str
   }
 }, 10_000);
 
-test('round 140: a hostile body is of unknown size, not a throw; header names are matched in ASCII case on the way out', () => {
+test('a hostile body is of unknown size, not a throw; header names are matched in ASCII case on the way out', () => {
   const hostile = new Proxy(
     {},
     {
@@ -8054,7 +8054,7 @@ function stubResponse(): http.IncomingMessage {
   return res;
 }
 
-test('round 140 review: a throwing failure listener stays contained; a body torn down by one holds nothing', async () => {
+test('a throwing failure listener stays contained; a body torn down by one holds nothing', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   let didTearDown = false;
@@ -8079,7 +8079,7 @@ test('round 140 review: a throwing failure listener stays contained; a body torn
   expect(source.heldError?.()).toBeUndefined();
 });
 
-test('round 140 review: onFailure replays a failure held before it subscribed', async () => {
+test('onFailure replays a failure held before it subscribed', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(
     res,
@@ -8091,7 +8091,7 @@ test('round 140 review: onFailure replays a failure held before it subscribed', 
   expect(told).toHaveLength(1);
 });
 
-test('round 140 review 2: exact and wildcard entries agree on an over-long label; onFailure hears decoding failures only', async () => {
+test('exact and wildcard entries agree on an over-long label; onFailure hears decoding failures only', async () => {
   const label = `a${'\u00AD'.repeat(1100)}b`;
   expect(normalizeDomain(`${label}.example.com`)).toBe('');
   expect(validateConfigEntry(`*.${label}.example.com`, 'domain').valid).toBe(
@@ -8109,7 +8109,7 @@ test('round 140 review 2: exact and wildcard entries agree on an over-long label
   expect(told).toEqual([]);
 });
 
-test('round 140 review 3: a raw error held before onFailure subscribes is not replayed to it', async () => {
+test('a raw error held before onFailure subscribes is not replayed to it', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   // No reader: the raw error is held.
@@ -8120,7 +8120,7 @@ test('round 140 review 3: a raw error held before onFailure subscribes is not re
   expect(told).toEqual([]);
 });
 
-test('round 140 review 3: a decoding failure after the raw end reaches the reader before close', async () => {
+test('a decoding failure after the raw end reaches the reader before close', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
@@ -8135,7 +8135,7 @@ test('round 140 review 3: a decoding failure after the raw end reaches the reade
   expect(events).toContain('close');
 });
 
-test('round 140 review 4: a held decoding failure is told once per subscription, and setup reads the same one', async () => {
+test('a held decoding failure is told once per subscription, and setup reads the same one', async () => {
   // A refused coding chain: the one failure held when NodeAdapter subscribes.
   const res = stubResponse();
   const { source } = createResponseBodySource(
@@ -8156,7 +8156,7 @@ test('round 140 review 4: a held decoding failure is told once per subscription,
   expect(told).toHaveLength(2);
 });
 
-test('round 140 review 6: a throwing failure listener is reported on the live and replay paths; subscriptions are separate records', async () => {
+test('a throwing failure listener is reported on the live and replay paths; subscriptions are separate records', async () => {
   const reports: unknown[] = [];
   const onReport = (event: Event) => {
     reports.push((event as ErrorEvent).error);
@@ -8204,14 +8204,14 @@ test('round 140 review 6: a throwing failure listener is reported on the live an
   expect(told).toHaveLength(1);
 });
 
-test('round 140 review 6: a long run of dots is refused in linear time', () => {
+test('a long run of dots is refused in linear time', () => {
   const started = performance.now();
   expect(normalizeDomain(`${'.'.repeat(40_000)}x`)).toBe('');
   expect(normalizeDomain(`${'a'.repeat(1000)}.`.repeat(5000))).toBe('');
   expect(performance.now() - started).toBeLessThan(200);
 });
 
-test('round 140 review 7: an oversized wildcard pattern or bracketed host is refused', () => {
+test('an oversized wildcard pattern or bracketed host is refused', () => {
   const huge = `*.${Array.from({ length: 5000 }, () => 'a'.repeat(1000)).join('.')}`;
   expect(validateConfigEntry(huge, 'domain').valid).toBe(false);
   expect(matchesDomainList('x.example.com', [huge])).toBe(false);
@@ -8223,7 +8223,7 @@ test('round 140 review 7: an oversized wildcard pattern or bracketed host is ref
   expect(normalizeDomain(`[${'1:'.repeat(5000)}1]`)).toBe('');
 });
 
-test('round 140 review 8: a pause asked before the first byte holds the decoded body', async () => {
+test('a pause asked before the first byte holds the decoded body', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   const chunks: Buffer[] = [];
@@ -8250,7 +8250,7 @@ test('round 140 review 8: a pause asked before the first byte holds the decoded 
   expect(Buffer.concat(chunks).toString()).toBe('hello world');
 });
 
-test('round 140 review 9: an empty body paused before it ends holds its end until resumed', async () => {
+test('an empty body paused before it ends holds its end until resumed', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
@@ -8270,7 +8270,7 @@ test('round 140 review 9: an empty body paused before it ends holds its end unti
   expect(events).toEqual(['end', 'close']);
 });
 
-test('round 140 review 9: an error after a held end does not overtake it', async () => {
+test('an error after a held end does not overtake it', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
@@ -8286,7 +8286,7 @@ test('round 140 review 9: an error after a held end does not overtake it', async
   expect(events).toEqual(['end', 'error']);
 });
 
-test('round 140 review 9: a hosts list changed in place is matched as it now reads', () => {
+test('a hosts list changed in place is matched as it now reads', () => {
   const filter = { hosts: ['a.com'] };
   expect(
     matchesFilter(filter, { requestURL: 'https://a.com/' }, 'response'),
@@ -8297,7 +8297,7 @@ test('round 140 review 9: a hosts list changed in place is matched as it now rea
   ).toBe(true);
 });
 
-test('round 140 review 9: the length guard reads Unicode dots as dots on every path', () => {
+test('the length guard reads Unicode dots as dots on every path', () => {
   // Two 601-character labels that normalize to `a` (soft hyphens map to nothing), joined
   // by an ideographic full stop: one 1,203-character run if that dot is not read as one.
   const label = `a${'\u00AD'.repeat(600)}`;
@@ -8308,7 +8308,7 @@ test('round 140 review 9: the length guard reads Unicode dots as dots on every p
   ).toBe(true);
 });
 
-test('round 140 review 10: a paused body cut short delivers its close without a resume', async () => {
+test('a paused body cut short delivers its close without a resume', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
@@ -8320,7 +8320,7 @@ test('round 140 review 10: a paused body cut short delivers its close without a 
   expect(events).toEqual(['close']);
 });
 
-test('round 140 review 10: an error held behind a paused end is read by heldError, and let go on destroy', async () => {
+test('an error held behind a paused end is read by heldError, and let go on destroy', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   source.pause();
@@ -8335,7 +8335,7 @@ test('round 140 review 10: an error held behind a paused end is read by heldErro
   expect(source.heldError?.()).toBeUndefined();
 });
 
-test('round 140 review 10: a registered host filter matches by its normalized pattern', async () => {
+test('a registered host filter matches by its normalized pattern', async () => {
   const seen: string[] = [];
   const adapter = new MockAdapter();
   adapter.routes.get('/', () => ({ status: 200 }));
@@ -8355,7 +8355,7 @@ test('round 140 review 10: a registered host filter matches by its normalized pa
   ]);
 });
 
-test('round 140 review 10: an error held before a reader attaches is not overtaken by a paused end', async () => {
+test('an error held before a reader attaches is not overtaken by a paused end', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
@@ -8373,7 +8373,7 @@ test('round 140 review 10: an error held before a reader attaches is not overtak
   expect(events).toEqual(['error', 'end']);
 });
 
-test('round 140 review 10: a body paused again before the release holds its end again', async () => {
+test('a body paused again before the release holds its end again', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
@@ -8391,7 +8391,7 @@ test('round 140 review 10: a body paused again before the release holds its end 
   expect(events).toEqual(['end']);
 });
 
-test('round 140 review 11: a paused gzip body cut short mid-body delivers its close without a resume', async () => {
+test('a paused gzip body cut short mid-body delivers its close without a resume', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
@@ -8518,7 +8518,7 @@ test('a host filter registered on a client matches what the unregistered matcher
   }
 });
 
-test('PR review round 2: binary bodies from a custom adapter are measured by their slot for maxResponseBytes', async () => {
+test('binary bodies from a custom adapter are measured by their slot for maxResponseBytes', async () => {
   class Understated extends Uint8Array {
     public override get byteLength(): number {
       return 5;
@@ -8549,7 +8549,7 @@ test('PR review round 2: binary bodies from a custom adapter are measured by the
   }
 });
 
-test('PR review round 4: `*.`, however its dot is written, matches nothing and is refused', () => {
+test('`*.`, however its dot is written, matches nothing and is refused', () => {
   for (const pattern of ['*.', '*\uFF0E', '*\u3002']) {
     expect(readHostPattern(pattern).kind).toBe('never');
     expect(matchesHostPattern('evil.attacker.net', pattern)).toBe(false);
@@ -8562,7 +8562,7 @@ test('PR review round 4: `*.`, however its dot is written, matches nothing and i
   }
 });
 
-test('PR review round 2: .params(undefined) clears the params, as before', async () => {
+test('.params(undefined) clears the params, as before', async () => {
   const adapter = new MockAdapter();
   const queries: unknown[] = [];
   adapter.routes.get('/x', (request) => {
@@ -8574,7 +8574,7 @@ test('PR review round 2: .params(undefined) clears the params, as before', async
   expect(queries).toEqual([{}]);
 });
 
-test('PR review round 2: a string body is measured as UTF-8 without being encoded', () => {
+test('a string body is measured as UTF-8 without being encoded', () => {
   for (const text of [
     '',
     'ascii',
@@ -8591,7 +8591,7 @@ test('PR review round 2: a string body is measured as UTF-8 without being encode
   }
 });
 
-test('PR review round 3: a binary request body is measured by its slot for upload progress', () => {
+test('a binary request body is measured by its slot for upload progress', () => {
   class Understated extends Uint8Array {
     public override get byteLength(): number {
       return 1;
@@ -8603,7 +8603,7 @@ test('PR review round 3: a binary request body is measured by its slot for uploa
   expect(knownBodyByteLength(vm.runInNewContext('new Uint8Array(5)'))).toBe(5);
 });
 
-test('PR review round 3: MockAdapter holds a route body to maxResponseBytes by its real size', async () => {
+test('MockAdapter holds a route body to maxResponseBytes by its real size', async () => {
   class Understated extends Uint8Array {
     public override get length(): number {
       return 0;
@@ -8625,7 +8625,7 @@ test('PR review round 3: MockAdapter holds a route body to maxResponseBytes by i
   expect(response.streamErrorCode).toBe('response_too_large');
 });
 
-test('PR review round 4: a params value is read once, so the override check and the query agree', async () => {
+test('a params value is read once, so the override check and the query agree', async () => {
   let reads = 0;
   const params = {
     get page(): string | undefined {
@@ -8642,7 +8642,7 @@ test('PR review round 4: a params value is read once, so the override check and 
   expect(reads).toBe(1);
 });
 
-test('PR review round 6: a body no getter can measure fails closed; one reporting 0 bytes is still delivered', async () => {
+test('a body no getter can measure fails closed; one reporting 0 bytes is still delivered', async () => {
   const proxied = new Proxy(new Uint8Array(1000), {});
   const adapter = new MockAdapter();
   adapter.routes.get('/proxied', () => ({ status: 200, body: proxied }));
@@ -8683,7 +8683,7 @@ test('PR review round 6: a body no getter can measure fails closed; one reportin
   expect(delivered.body).not.toBeNull();
 });
 
-test('PR review round 7: a non-binary body is not held to the limit; an unmeasurable binary one only under a finite limit', async () => {
+test('a non-binary body is not held to the limit; an unmeasurable binary one only under a finite limit', async () => {
   const custom = (
     body: unknown,
     maxResponseBytes: number,
@@ -8723,7 +8723,7 @@ test('PR review round 7: a non-binary body is not held to the limit; an unmeasur
   expect(mocked.streamErrorCode).toBeUndefined();
 });
 
-test("PR review round 7: a custom adapter's string body with a JSON type is parsed as text", async () => {
+test("a custom adapter's string body with a JSON type is parsed as text", async () => {
   const client = new HTTPClient({
     adapter: {
       getType: () => 'mock',
@@ -8742,7 +8742,7 @@ test("PR review round 7: a custom adapter's string body with a JSON type is pars
   expect(response.body).toEqual({ a: 1 });
 });
 
-test("PR review round 7: a cookie seeded hostOnly is replaced by the server's host-only Set-Cookie", () => {
+test("a cookie seeded hostOnly is replaced by the server's host-only Set-Cookie", () => {
   const jar = new CookieJar();
   jar.setCookie({
     name: 's',
@@ -8755,7 +8755,7 @@ test("PR review round 7: a cookie seeded hostOnly is replaced by the server's ho
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('s=2');
 });
 
-test('PR review round 8: an unmeasurable body presenting as bytes from any realm is refused; an empty string is no body', async () => {
+test('an unmeasurable body presenting as bytes from any realm is refused; an empty string is no body', async () => {
   const custom = (body: unknown, contentType = 'application/octet-stream') =>
     new HTTPClient({
       adapter: {
@@ -8785,7 +8785,7 @@ test('PR review round 8: an unmeasurable body presenting as bytes from any realm
   expect(empty.isParseError).toBe(false);
 });
 
-test('PR review round 11: a redirect whose page is past maxResponseBytes is followed, not failed', async () => {
+test('a redirect whose page is past maxResponseBytes is followed, not failed', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/start', () => ({
     status: 302,
@@ -8806,7 +8806,7 @@ test('PR review round 11: a redirect whose page is past maxResponseBytes is foll
   expect(response.body).toBe('ok');
 });
 
-test('PR review round 11: a DataView over a detached buffer measures 0, as a typed array over one does', () => {
+test('a DataView over a detached buffer measures 0, as a typed array over one does', () => {
   const buffer = new ArrayBuffer(8);
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
@@ -8816,7 +8816,7 @@ test('PR review round 11: a DataView over a detached buffer measures 0, as a typ
   expect(readBinaryByteLength(bytes)).toBe(0);
 });
 
-test('PR review round 12: a bodiless answer is not held to maxResponseBytes by the client', async () => {
+test('a bodiless answer is not held to maxResponseBytes by the client', async () => {
   const client = new HTTPClient({
     adapter: {
       getType: () => 'mock',
@@ -8835,7 +8835,7 @@ test('PR review round 12: a bodiless answer is not held to maxResponseBytes by t
   expect(response.isFailed).toBe(false);
 });
 
-test('PR review round 12: a cookie domain whose leading dot only mapping exposes is refused', () => {
+test('a cookie domain whose leading dot only mapping exposes is refused', () => {
   const jar = new CookieJar();
   expect(
     jar.setCookie({
@@ -8846,7 +8846,7 @@ test('PR review round 12: a cookie domain whose leading dot only mapping exposes
   ).toBe(false);
 });
 
-test("PR review round 13: a bodiless answer's stray body is dropped, not delivered past the limit", async () => {
+test("a bodiless answer's stray body is dropped, not delivered past the limit", async () => {
   const client = new HTTPClient({
     adapter: {
       getType: () => 'mock',
@@ -8866,7 +8866,7 @@ test("PR review round 13: a bodiless answer's stray body is dropped, not deliver
   expect(response.body).toBeNull();
 });
 
-test('PR review round 14: FetchAdapter and MockAdapter read a non-string method as the string it is', async () => {
+test('FetchAdapter and MockAdapter read a non-string method as the string it is', async () => {
   const method = { toString: () => 'POST' } as unknown as 'POST';
   let sentMethod: string | undefined;
   const originalFetch = globalThis.fetch;
@@ -8899,7 +8899,7 @@ test('PR review round 14: FetchAdapter and MockAdapter read a non-string method 
   expect(mocked.status).toBe(201);
 });
 
-test('PR review round 14: an adapter driven directly refuses an unusable maxResponseBytes', async () => {
+test('an adapter driven directly refuses an unusable maxResponseBytes', async () => {
   const adapter = new MockAdapter();
   let ran = 0;
   adapter.routes.get('/x', () => {
@@ -8931,7 +8931,7 @@ test('PR review round 14: an adapter driven directly refuses an unusable maxResp
   expect(unlimited.status).toBe(200);
 });
 
-test('PR review round 14: a domain list longer than the pattern cache still matches', () => {
+test('a domain list longer than the pattern cache still matches', () => {
   const list = Array.from(
     { length: 600 },
     (_, i) => `*.tenant${i}.example.com`,
@@ -8943,7 +8943,7 @@ test('PR review round 14: a domain list longer than the pattern cache still matc
   expect(matchesDomainList('nope.example.net', list)).toBe(false);
 });
 
-test('PR review round 15: an adapter answering with a Headers object, or an object header value, fails as adapter_error', async () => {
+test('an adapter answering with a Headers object, or an object header value, fails as adapter_error', async () => {
   for (const headers of [
     new Headers({ 'content-type': 'application/json' }),
     new Map([['content-type', 'application/json']]),
@@ -8993,7 +8993,7 @@ test('PR review round 15: an adapter answering with a Headers object, or an obje
   expect(numeric.headers['content-length']).toBe('2');
 });
 
-test('PR review round 15: adapters refuse a missing method, and a throwing field getter, as non-retryable', async () => {
+test('adapters refuse a missing method, and a throwing field getter, as non-retryable', async () => {
   const originalFetch = globalThis.fetch;
   let fetched = 0;
   (globalThis as { fetch: unknown }).fetch = () => {
@@ -9047,7 +9047,7 @@ test('PR review round 15: adapters refuse a missing method, and a throwing field
   expect(ran).toBe(0);
 });
 
-test('PR review round 15: NodeAdapter refuses a bad method, and a throwing field getter, as non-retryable', async () => {
+test('NodeAdapter refuses a bad method, and a throwing field getter, as non-retryable', async () => {
   const throwing = (field: string) =>
     Object.defineProperty(
       { requestURL: 'http://127.0.0.1:1/x', method: 'GET', headers: {} },
@@ -9088,7 +9088,7 @@ test('PR review round 15: NodeAdapter refuses a bad method, and a throwing field
   }
 });
 
-test('PR review round 15: CookieJar.processResponseHeaders reads only set-cookie, and refuses a Headers', () => {
+test('CookieJar.processResponseHeaders reads only set-cookie, and refuses a Headers', () => {
   const jar = new CookieJar();
   jar.processResponseHeaders(
     {
@@ -9107,7 +9107,7 @@ test('PR review round 15: CookieJar.processResponseHeaders reads only set-cookie
   ).toThrow('CookieJar processResponseHeaders headers must be a plain object');
 });
 
-test('PR review round 15: a stream abort tagged with a Headers is left untagged, and a boolean header value is refused', async () => {
+test('a stream abort tagged with a Headers is left untagged, and a boolean header value is refused', async () => {
   for (const headers of [
     new Headers({ 'set-cookie': 'sid=1' }),
     { 'x-flag': true },
@@ -9151,7 +9151,7 @@ test('PR review round 15: a stream abort tagged with a Headers is left untagged,
   expect(builder.error?.code).toBe('adapter_error');
 });
 
-test('PR review round 16: every adapter driven directly refuses a Headers for its request headers', async () => {
+test('every adapter driven directly refuses a Headers for its request headers', async () => {
   const headers = new Headers({
     authorization: 'Bearer x',
   }) as unknown as Record<string, string>;
@@ -9184,7 +9184,7 @@ test('PR review round 16: every adapter driven directly refuses a Headers for it
   expect(fetched).toBe(0);
 });
 
-test('PR review round 16: FetchAdapter does not send an unset header value as "null"', async () => {
+test('FetchAdapter does not send an unset header value as "null"', async () => {
   const originalFetch = globalThis.fetch;
   let sent: Headers | undefined;
   (globalThis as { fetch: unknown }).fetch = (
@@ -9209,7 +9209,7 @@ test('PR review round 16: FetchAdapter does not send an unset header value as "n
   expect(sent?.has('x-unset')).toBe(false);
 });
 
-test("PR review round 17: a caller's own AbortError under a non-retryable carrier is an adapter_error, not a cancel", async () => {
+test("a caller's own AbortError under a non-retryable carrier is an adapter_error, not a cancel", async () => {
   const adapter = new MockAdapter();
   let ran = 0;
   adapter.routes.get('/x', () => {
@@ -9235,7 +9235,7 @@ test("PR review round 17: a caller's own AbortError under a non-retryable carrie
   expect(ran).toBe(1);
 });
 
-test('PR review round 17: CookieJar.processResponseHeaders stores nothing when a line is refused', () => {
+test('CookieJar.processResponseHeaders stores nothing when a line is refused', () => {
   const jar = new CookieJar();
   expect(() =>
     jar.processResponseHeaders(
@@ -9249,7 +9249,7 @@ test('PR review round 17: CookieJar.processResponseHeaders stores nothing when a
   expect(jar.getAllCookies()).toHaveLength(0);
 });
 
-test("PR review round 17: a header value's toString throwing an AbortError fails every adapter as non-retryable, not as a cancel", async () => {
+test("a header value's toString throwing an AbortError fails every adapter as non-retryable, not as a cancel", async () => {
   const originalFetch = globalThis.fetch;
   (globalThis as { fetch: unknown }).fetch = () =>
     Promise.resolve(new Response('ok', { status: 200 }));
@@ -9281,7 +9281,7 @@ test("PR review round 17: a header value's toString throwing an AbortError fails
   }
 });
 
-test("PR review round 18: an adapter's flagged non-retryable AbortError is its failure, not a cancel or a retried timeout", async () => {
+test("an adapter's flagged non-retryable AbortError is its failure, not a cancel or a retried timeout", async () => {
   for (const timeout of [undefined, 20]) {
     let sends = 0;
     const builder = new HTTPClient({
@@ -9311,7 +9311,7 @@ test("PR review round 18: an adapter's flagged non-retryable AbortError is its f
   }
 });
 
-test('PR review round 18: CookieJar refuses publicSuffixes given as a Map', () => {
+test('CookieJar refuses publicSuffixes given as a Map', () => {
   expect(
     () =>
       new CookieJar({
@@ -9322,7 +9322,7 @@ test('PR review round 18: CookieJar refuses publicSuffixes given as a Map', () =
   ).toThrow('publicSuffixes must be a plain object');
 });
 
-test('PR review round 18: a flagged AbortError while the caller did cancel is still the cancel', async () => {
+test('a flagged AbortError while the caller did cancel is still the cancel', async () => {
   const builder = new HTTPClient({
     baseURL: 'http://api.test',
     adapter: {
@@ -9351,7 +9351,7 @@ test('PR review round 18: a flagged AbortError while the caller did cancel is st
   expect(response.isCancelled).toBe(true);
 });
 
-test('PR review round 18: FetchAdapter and MockAdapter refuse a signal whose aborted getter throws as non-retryable', async () => {
+test('FetchAdapter and MockAdapter refuse a signal whose aborted getter throws as non-retryable', async () => {
   const signal = {
     get aborted(): boolean {
       throw new Error('aborted getter failed');
@@ -9379,7 +9379,7 @@ test('PR review round 18: FetchAdapter and MockAdapter refuse a signal whose abo
   }
 });
 
-test('PR review round 18: publicSuffixes given as a list names the array', () => {
+test('publicSuffixes given as a list names the array', () => {
   expect(
     () =>
       new CookieJar({
@@ -9388,7 +9388,7 @@ test('PR review round 18: publicSuffixes given as a list names the array', () =>
   ).toThrow('(got an array)');
 });
 
-test('PR review round 19: an unreadable effectiveRequestHeaders record is absent, not an adapter_error', async () => {
+test('an unreadable effectiveRequestHeaders record is absent, not an adapter_error', async () => {
   const { proxy, revoke } = Proxy.revocable({}, {});
   revoke();
   const builder = new HTTPClient({
@@ -9411,7 +9411,7 @@ test('PR review round 19: an unreadable effectiveRequestHeaders record is absent
   expect(builder.error).toBeNull();
 });
 
-test('PR review round 19: MockAdapter refuses a signal whose aborted throws on a later read as non-retryable', async () => {
+test('MockAdapter refuses a signal whose aborted throws on a later read as non-retryable', async () => {
   let reads = 0;
   const signal = {
     get aborted(): boolean {
@@ -9443,7 +9443,7 @@ test('PR review round 19: MockAdapter refuses a signal whose aborted throws on a
   expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });
 
-test('PR review round 19: a domain list kept by the caller stops matching an entry they removed', () => {
+test('a domain list kept by the caller stops matching an entry they removed', () => {
   const list = ['*.a.example', 'exact.example'];
   expect(matchesDomainList('x.a.example', list)).toBe(true);
   expect(matchesDomainList('exact.example', list)).toBe(true);
@@ -9460,7 +9460,7 @@ test('PR review round 19: a domain list kept by the caller stops matching an ent
   );
 });
 
-test('PR review round 19: MockAdapter refuses a signal whose aborted throws while the route runs, not as a route error', async () => {
+test('MockAdapter refuses a signal whose aborted throws while the route runs, not as a route error', async () => {
   let reads = 0;
   const signal = {
     get aborted(): boolean {
@@ -9503,7 +9503,7 @@ test('PR review round 19: MockAdapter refuses a signal whose aborted throws whil
   expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });
 
-test("PR review round 19: a caller's error carrying the carrier key is still wrapped and flagged", async () => {
+test("a caller's error carrying the carrier key is still wrapped and flagged", async () => {
   const mock = new MockAdapter();
   mock.routes.get('/x', () => ({ status: 200 }));
   const spoofed = Object.assign(new DOMException('x', 'AbortError'), {
@@ -9529,7 +9529,7 @@ test("PR review round 19: a caller's error carrying the carrier key is still wra
   expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });
 
-test('PR review round 19: FetchAdapter refuses a signal whose aborted throws before anything is dispatched', async () => {
+test('FetchAdapter refuses a signal whose aborted throws before anything is dispatched', async () => {
   const originalFetch = globalThis.fetch;
   let fetched = 0;
   (globalThis as { fetch: unknown }).fetch = () => {
@@ -9565,7 +9565,7 @@ test('PR review round 19: FetchAdapter refuses a signal whose aborted throws bef
   }
 });
 
-test("PR review round 22: a signal's aborted counts only when it is exactly true", async () => {
+test("a signal's aborted counts only when it is exactly true", async () => {
   const mock = new MockAdapter();
   let ran = 0;
   mock.routes.get('/x', () => {
@@ -9606,7 +9606,7 @@ test("PR review round 22: a signal's aborted counts only when it is exactly true
   expect(ran).toBe(4);
 });
 
-test('PR review round 19: a sparse domain list skips its holes', () => {
+test('a sparse domain list skips its holes', () => {
   const list: string[] = ['a.example'];
   list[2] = 'b.example';
   expect(matchesDomainList('b.example', list)).toBe(true);
@@ -9628,7 +9628,7 @@ function signalReadableOnce(): AbortSignal {
   } as unknown as AbortSignal;
 }
 
-test("PR review round 20: FetchAdapter keeps a broken body's real status when the signal turns unreadable", async () => {
+test("FetchAdapter keeps a broken body's real status when the signal turns unreadable", async () => {
   const originalFetch = globalThis.fetch;
   (globalThis as { fetch: unknown }).fetch = () =>
     Promise.resolve(
@@ -9657,7 +9657,7 @@ test("PR review round 20: FetchAdapter keeps a broken body's real status when th
   }
 });
 
-test('PR review round 20: FetchAdapter keeps a transport failure when the signal turns unreadable', async () => {
+test('FetchAdapter keeps a transport failure when the signal turns unreadable', async () => {
   const originalFetch = globalThis.fetch;
   (globalThis as { fetch: unknown }).fetch = () =>
     Promise.reject(new TypeError('fetch failed'));
@@ -9684,7 +9684,7 @@ test('PR review round 20: FetchAdapter keeps a transport failure when the signal
   }
 });
 
-test('PR review round 20: filling a hole in a kept domain list is seen', () => {
+test('filling a hole in a kept domain list is seen', () => {
   // eslint-disable-next-line no-sparse-arrays -- the hole is the point
   const list: string[] = ['a.example', , 'b.example'] as string[];
   expect(matchesDomainList('c.example', list)).toBe(false);
@@ -9693,7 +9693,7 @@ test('PR review round 20: filling a hole in a kept domain list is seen', () => {
   expect(matchesDomainList('c.example', list)).toBe(true);
 });
 
-test("PR review round 20: a refusal from another adapter a mock route calls is the route's failure", async () => {
+test("a refusal from another adapter a mock route calls is the route's failure", async () => {
   let handled = 0;
   const mock = new MockAdapter({
     onHandlerError: () => {
@@ -9729,7 +9729,7 @@ test("PR review round 20: a refusal from another adapter a mock route calls is t
   expect(response.status).toBe(502);
 });
 
-test("PR review round 21: a mock route's Headers, Map headers or Map cookies are refused, not dropped", async () => {
+test("a mock route's Headers, Map headers or Map cookies are refused, not dropped", async () => {
   const answers = [
     { status: 200, headers: new Headers({ 'set-cookie': 'a=1' }) },
     { status: 200, headers: new Map([['x-a', '1']]) },
@@ -9751,7 +9751,7 @@ test("PR review round 21: a mock route's Headers, Map headers or Map cookies are
   }
 });
 
-test("PR review round 21: MockAdapter refuses a signal whose addEventListener throws as non-retryable, in a route's wait and in a delay", async () => {
+test("MockAdapter refuses a signal whose addEventListener throws as non-retryable, in a route's wait and in a delay", async () => {
   const signal = {
     aborted: false,
     addEventListener() {
@@ -9810,7 +9810,7 @@ test("PR review round 21: MockAdapter refuses a signal whose addEventListener th
   expect(slept?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });
 
-test('PR review round 21: FetchAdapter checks a relative request against the page location before sending', async () => {
+test('FetchAdapter checks a relative request against the page location before sending', async () => {
   const originalFetch = globalThis.fetch;
   const didHaveLocation = Object.hasOwn(globalThis, 'location');
   const originalLocation: unknown = (globalThis as { location?: unknown })
@@ -9854,7 +9854,7 @@ test('PR review round 21: FetchAdapter checks a relative request against the pag
   }
 });
 
-test("PR review round 21: a mock route's cookies and headers are checked as read, once", async () => {
+test("a mock route's cookies and headers are checked as read, once", async () => {
   let cookieReads = 0;
   let headerReads = 0;
   const answers = [
@@ -9890,7 +9890,7 @@ test("PR review round 21: a mock route's cookies and headers are checked as read
   expect(headerReads).toBe(1);
 });
 
-test("PR review round 21: FetchAdapter resolves a relative request against the document's base URL", async () => {
+test("FetchAdapter resolves a relative request against the document's base URL", async () => {
   const originalFetch = globalThis.fetch;
   const OriginalRequest = globalThis.Request;
   const saved = {
@@ -9939,7 +9939,7 @@ test("PR review round 21: FetchAdapter resolves a relative request against the d
   }
 });
 
-test("PR review round 23: NodeAdapter's pre-dispatch check counts a signal as aborted only when exactly true", async () => {
+test("NodeAdapter's pre-dispatch check counts a signal as aborted only when exactly true", async () => {
   const signal = {
     aborted: 'false',
     addEventListener() {},
@@ -9957,7 +9957,7 @@ test("PR review round 23: NodeAdapter's pre-dispatch check counts a signal as ab
   expect(response.isTransportError).toBe(true);
 });
 
-test('PR review round 23: the AbortSignal.any fallback reads a caller signal by the shared rule', async () => {
+test('the AbortSignal.any fallback reads a caller signal by the shared rule', async () => {
   // eslint-disable-next-line @typescript-eslint/unbound-method -- put back as it was, below
   const originalAny = AbortSignal.any;
   (AbortSignal as { any?: unknown }).any = undefined;
@@ -9991,7 +9991,7 @@ test('PR review round 23: the AbortSignal.any fallback reads a caller signal by 
   }
 });
 
-test("PR review round 23: MockAdapter reads a route's status once", async () => {
+test("MockAdapter reads a route's status once", async () => {
   let reads = 0;
   const mock = new MockAdapter();
   mock.routes.get('/x', () => ({
@@ -10011,7 +10011,7 @@ test("PR review round 23: MockAdapter reads a route's status once", async () => 
   expect(reads).toBe(1);
 });
 
-test('PR review round 23: NodeAdapter refuses a malformed URL as non-retryable', async () => {
+test('NodeAdapter refuses a malformed URL as non-retryable', async () => {
   const outcome = await new NodeAdapter()
     .send({ requestURL: 'not a url', method: 'GET', headers: {} })
     .then(
@@ -10022,7 +10022,7 @@ test('PR review round 23: NodeAdapter refuses a malformed URL as non-retryable',
   expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });
 
-test('PR review round 24: a raw deflate body opening on a stored block with padding bits set is read as raw', async () => {
+test('a raw deflate body opening on a stored block with padding bits set is read as raw', async () => {
   // A non-final stored block whose padding bits make its first byte 0x08 - a zlib
   // method nibble - but whose first two bytes fail the zlib header check, then an empty
   // final block.
@@ -10064,7 +10064,7 @@ test('PR review round 24: a raw deflate body opening on a stored block with padd
   }
 });
 
-test("PR review round 24: a mock route's transportError status is checked as the route's mistake", async () => {
+test("a mock route's transportError status is checked as the route's mistake", async () => {
   for (const status of ['x', 1.5, -1, 1000]) {
     const mock = new MockAdapter();
     mock.routes.get('/x', () => ({
@@ -10083,7 +10083,7 @@ test("PR review round 24: a mock route's transportError status is checked as the
   }
 });
 
-test("PR review round 25: a decode failure after the body reached the caller's stream is not retried", async () => {
+test("a decode failure after the body reached the caller's stream is not retried", async () => {
   let sends = 0;
   const builder = new HTTPClient({
     baseURL: 'http://api.test',
@@ -10120,7 +10120,7 @@ test("PR review round 25: a decode failure after the body reached the caller's s
   expect(sends).toBe(1);
 });
 
-test('PR review round 25: MockAdapter uppercases a method ASCII only', async () => {
+test('MockAdapter uppercases a method ASCII only', async () => {
   const mock = new MockAdapter();
   let calls = 0;
   mock.routes.post('/x', () => {
@@ -10147,7 +10147,7 @@ test('PR review round 25: MockAdapter uppercases a method ASCII only', async () 
   expect(calls).toBe(0);
 });
 
-test('PR review round 25: a CRL buffer changed in place is read again, not reused', async () => {
+test('a CRL buffer changed in place is read again, not reused', async () => {
   const crl = Buffer.from(getRevocationFixtures().crlEmpty);
   const adapter = new NodeAdapter({ crl });
 
@@ -10188,7 +10188,7 @@ async function withRawServer(
   }
 }
 
-test('PR review round 26: a zstd body with a trailing skippable frame is whole', async () => {
+test('a zstd body with a trailing skippable frame is whole', async () => {
   const data = (
     zlib as unknown as { zstdCompressSync: (input: Buffer) => Buffer }
   ).zstdCompressSync(Buffer.from('hello world'));
@@ -10220,7 +10220,7 @@ test('PR review round 26: a zstd body with a trailing skippable frame is whole',
   );
 });
 
-test('PR review round 26: a raw deflate body whose first chunk is one byte is still read as raw', async () => {
+test('a raw deflate body whose first chunk is one byte is still read as raw', async () => {
   const raw = Buffer.from([
     0x08,
     5,
@@ -10260,7 +10260,7 @@ test('PR review round 26: a raw deflate body whose first chunk is one byte is st
   );
 });
 
-test('PR review round 26: FetchAdapter sends a standard method uppercase, as every adapter does', async () => {
+test('FetchAdapter sends a standard method uppercase, as every adapter does', async () => {
   const originalFetch = globalThis.fetch;
   const sent: Array<string | undefined> = [];
   (globalThis as { fetch: unknown }).fetch = (
@@ -10298,7 +10298,7 @@ test('PR review round 26: FetchAdapter sends a standard method uppercase, as eve
   expect(sent).toEqual(['PATCH', 'purge']);
 });
 
-test('PR review round 27: a zstd body of two frames in one write decodes whole', async () => {
+test('a zstd body of two frames in one write decodes whole', async () => {
   const compress = (
     zlib as unknown as { zstdCompressSync: (input: Buffer) => Buffer }
   ).zstdCompressSync;
@@ -10329,7 +10329,7 @@ test('PR review round 27: a zstd body of two frames in one write decodes whole',
   );
 });
 
-test("PR review round 28: setCookie caps a lifetime at 400 days from the cookie's creation", () => {
+test("setCookie caps a lifetime at 400 days from the cookie's creation", () => {
   const jar = new CookieJar();
   const createdAt = Date.now();
   const tenYears = 10 * 365 * 24 * 60 * 60;
@@ -10348,7 +10348,7 @@ test("PR review round 28: setCookie caps a lifetime at 400 days from the cookie'
   expect(stored.expires?.getTime()).toBe(createdAt + cap * 1000);
 });
 
-test("PR review round 29: a cookie's creation is never taken from the future", () => {
+test("a cookie's creation is never taken from the future", () => {
   const jar = new CookieJar();
   const now = Date.now();
   const fiveYears = 5 * 365 * 24 * 60 * 60 * 1000;
@@ -10366,7 +10366,7 @@ test("PR review round 29: a cookie's creation is never taken from the future", (
   expect(stored.expires?.getTime()).toBeLessThanOrEqual(Date.now() + capMS);
 });
 
-test('PR review round 29: a kept origin list the caller changes is read afresh', () => {
+test('a kept origin list the caller changes is read afresh', () => {
   const list = ['https://*.a.example'];
   expect(matchesOriginList('https://x.a.example', list)).toBe(true);
 
@@ -10375,7 +10375,7 @@ test('PR review round 29: a kept origin list the caller changes is read afresh',
   expect(matchesOriginList('https://x.b.example', list)).toBe(true);
 });
 
-test('PR review round 30: a raw deflate body whose first byte has a window nibble over 7 is read as raw', async () => {
+test('a raw deflate body whose first byte has a window nibble over 7 is read as raw', async () => {
   // A stored block whose padding bits make its first byte 0x88 - method 8, window 8 -
   // and whose first two bytes are a multiple of 31: no zlib header, since a zlib window
   // is at most 7.
@@ -10415,7 +10415,7 @@ test('PR review round 30: a raw deflate body whose first byte has a window nibbl
   );
 });
 
-test('PR review round 30: NodeAdapter hands over an empty body as empty bytes, as the other adapters do', async () => {
+test('NodeAdapter hands over an empty body as empty bytes, as the other adapters do', async () => {
   await withRawServer(
     (res) => {
       res.writeHead(200, {
@@ -10437,7 +10437,7 @@ test('PR review round 30: NodeAdapter hands over an empty body as empty bytes, a
   );
 });
 
-test('PR review round 31: a decoded body resumed with no reader drains, as a raw response does', async () => {
+test('a decoded body resumed with no reader drains, as a raw response does', async () => {
   const res = new PassThrough() as unknown as http.IncomingMessage;
   const { source } = createResponseBodySource(res, 'gzip');
   let didEnd = false;
@@ -10453,7 +10453,7 @@ test('PR review round 31: a decoded body resumed with no reader drains, as a raw
   expect(didEnd).toBe(true);
 });
 
-test('PR review round 31: NodeAdapter hands over no body for an answer that has none', async () => {
+test('NodeAdapter hands over no body for an answer that has none', async () => {
   await withRawServer(
     (res) => {
       res.writeHead(204);
@@ -10473,7 +10473,7 @@ test('PR review round 31: NodeAdapter hands over no body for an answer that has 
   );
 });
 
-test('PR review round 32: junk or a bad gzip trailer in a later chunk is a stream error', async () => {
+test('junk or a bad gzip trailer in a later chunk is a stream error', async () => {
   const junk = Buffer.alloc(1000, 'j');
   const stackedBody = zlib.gzipSync(zlib.brotliCompressSync('hello'));
   // The gzip CRC corrupted, in a chunk sent after the inner brotli stream has ended.
@@ -10519,7 +10519,7 @@ test('PR review round 32: junk or a bad gzip trailer in a later chunk is a strea
   }
 });
 
-test('PR review round 33: a HEAD answered 200 does not call the streamResponse factory', async () => {
+test('a HEAD answered 200 does not call the streamResponse factory', async () => {
   await withRawServer(
     (res) => {
       res.writeHead(200, { 'content-length': '5' });
@@ -10547,7 +10547,7 @@ test('PR review round 33: a HEAD answered 200 does not call the streamResponse f
   );
 });
 
-test('PR review round 34: a stacked deflate is read whole where the inflater reports no byte count', async () => {
+test('a stacked deflate is read whole where the inflater reports no byte count', async () => {
   // An inflater with no `bytesWritten`, as a runtime may have: its count is not read.
   const prototypes = [zlib.Inflate.prototype, zlib.InflateRaw.prototype];
   for (const prototype of prototypes) {
@@ -10584,7 +10584,7 @@ test('PR review round 34: a stacked deflate is read whole where the inflater rep
   }
 });
 
-test("PR review round 34: getCookiesFor reads a stored cookie's live fields only when its scope matches", () => {
+test("getCookiesFor reads a stored cookie's live fields only when its scope matches", () => {
   const jar = new CookieJar();
   jar.setCookie({ name: 'a', value: '1', domain: 'example.com', path: '/a' });
   jar.setCookie({ name: 'b', value: '2', domain: 'example.com', path: '/b' });
@@ -10604,7 +10604,7 @@ test("PR review round 34: getCookiesFor reads a stored cookie's live fields only
   expect(reads).toEqual(['a']);
 });
 
-test('PR review round 35: a zstd body of many empty skippable frames before its data decodes whole', async () => {
+test('a zstd body of many empty skippable frames before its data decodes whole', async () => {
   const data = (
     zlib as unknown as { zstdCompressSync: (input: Buffer) => Buffer }
   ).zstdCompressSync(Buffer.from('hello'));
@@ -10628,7 +10628,7 @@ test('PR review round 35: a zstd body of many empty skippable frames before its 
   expect(Buffer.concat(chunks).toString()).toBe('hello');
 });
 
-test('PR review round 35: an opaque origin is cross-origin, even to the same URL', () => {
+test('an opaque origin is cross-origin, even to the same URL', () => {
   expect(isCrossOrigin('foo://a/x', 'foo://b/y')).toBe(true);
   expect(isCrossOrigin('foo://a/x', 'foo://a/x')).toBe(true);
   expect(isCrossOrigin('file:///a', new URL('file:///a'))).toBe(true);
@@ -10636,7 +10636,7 @@ test('PR review round 35: an opaque origin is cross-origin, even to the same URL
   expect(isCrossOrigin('https://a.test/x', 'https://a.test/y')).toBe(false);
 });
 
-test("PR review round 35: detectedRedirectURL does not copy the request's userinfo onto a relative Location", async () => {
+test("detectedRedirectURL does not copy the request's userinfo onto a relative Location", async () => {
   await withRawServer(
     (res) => {
       // Each answers a redirect to itself, so a followed one ends as `redirect_loop`.
@@ -10702,7 +10702,7 @@ test("PR review round 35: detectedRedirectURL does not copy the request's userin
   );
 });
 
-test('PR review round 35: a Location that does not resolve reports no detectedRedirectURL', async () => {
+test('a Location that does not resolve reports no detectedRedirectURL', async () => {
   await withRawServer(
     (res) => {
       res.writeHead(302, { location: 'http://[bad' });
@@ -10738,7 +10738,7 @@ test('PR review round 35: a Location that does not resolve reports no detectedRe
   );
 });
 
-test('PR review round 35: a late cancel at a Location that does not resolve counts no followed hop', async () => {
+test('a late cancel at a Location that does not resolve counts no followed hop', async () => {
   for (const location of ['http://[bad', '/ok']) {
     const adapter = new MockAdapter();
     adapter.routes.get('/x', () => ({ status: 302, headers: { location } }));
@@ -10777,7 +10777,7 @@ test('PR review round 35: a late cancel at a Location that does not resolve coun
   }
 });
 
-test('PR review round 36: in a browser, a path still relative after baseURL resolves against the page as fetch does', async () => {
+test('in a browser, a path still relative after baseURL resolves against the page as fetch does', async () => {
   const originalFetch = globalThis.fetch;
   const saved = {
     window: Object.getOwnPropertyDescriptor(globalThis, 'window'),
@@ -10823,7 +10823,7 @@ test('PR review round 36: in a browser, a path still relative after baseURL reso
   }
 });
 
-test('PR review round 37: an opaque-origin hop does not keep URL userinfo', () => {
+test('an opaque-origin hop does not keep URL userinfo', () => {
   // Every non-special URL's origin reads `'null'`; two of them are not the same origin.
   expect(
     stripCrossOriginURLCredentials('foo://u:p@b.test/x', 'foo://a.test/'),
@@ -10837,7 +10837,7 @@ test('PR review round 37: an opaque-origin hop does not keep URL userinfo', () =
   ).toBe('https://u:p@a.test/x');
 });
 
-test('PR review round 37: detectedRedirectURL drops server-written userinfo on another origin', async () => {
+test('detectedRedirectURL drops server-written userinfo on another origin', async () => {
   // The shared helper, as an adapter reports it: cross-origin userinfo dropped, the
   // request's own origin's kept, and a request URL that does not parse counts as
   // cross-origin.
@@ -10900,7 +10900,7 @@ test('PR review round 37: detectedRedirectURL drops server-written userinfo on a
   expect(disabled.error?.detectedRedirectURL).toBe('https://other.test/y');
 });
 
-test("PR review round 37: an adapter's own detectedRedirectURL drops userinfo on another origin", async () => {
+test("an adapter's own detectedRedirectURL drops userinfo on another origin", async () => {
   const answering = (detectedRedirectURL: unknown): HTTPAdapter => ({
     getType: () => 'node',
     send: () =>
@@ -10939,7 +10939,7 @@ test("PR review round 37: an adapter's own detectedRedirectURL drops userinfo on
   ]);
 });
 
-test("PR review round 38: an adapter's answer flags are read only as booleans", async () => {
+test("an adapter's answer flags are read only as booleans", async () => {
   const answering = (answer: Record<string, unknown>): HTTPAdapter => ({
     getType: () => 'node',
     send: () =>
@@ -10979,7 +10979,7 @@ test("PR review round 38: an adapter's answer flags are read only as booleans", 
   expect(healthyResponse.isStreamError).toBe(false);
 });
 
-test('PR review round 38: an adapter driven with a requestURL that is not a string refuses it as non-retryable', async () => {
+test('an adapter driven with a requestURL that is not a string refuses it as non-retryable', async () => {
   const refusalOf = (adapter: HTTPAdapter, requestURL: unknown) =>
     adapter
       .send({
@@ -11005,7 +11005,7 @@ test('PR review round 38: an adapter driven with a requestURL that is not a stri
   }
 });
 
-test("PR review round 38: detectedRedirectURL does not report the request URL's own userinfo", async () => {
+test("detectedRedirectURL does not report the request URL's own userinfo", async () => {
   // The shared rule: the request's own userinfo is dropped, wherever it came from; other
   // userinfo on the request's origin is the server's, and kept.
   expect(
@@ -11048,7 +11048,7 @@ test("PR review round 38: detectedRedirectURL does not report the request URL's 
   expect(builder.error?.detectedRedirectURL).toBe('https://a.test/next');
 });
 
-test('PR review round 41: the adapter type is read once, as the config was checked against it', async () => {
+test('the adapter type is read once, as the config was checked against it', async () => {
   // A custom adapter whose `getType` answers `node` once, then `xhr`: a client that read
   // it again per request ran a request as two adapter types at once.
   let typeReads = 0;
@@ -11067,7 +11067,7 @@ test('PR review round 41: the adapter type is read once, as the config was check
   expect(second.adapterType).toBe('node');
 });
 
-test("PR review round 44: a sub-client sharing its parent's adapter takes the parent's adapter type", async () => {
+test("a sub-client sharing its parent's adapter takes the parent's adapter type", async () => {
   // A custom adapter whose `getType` answers `node` once, then `fetch`: a sub-client that
   // read it again treated the parent's one adapter as another type, and checked its
   // config and ran its requests as that type.
@@ -11092,7 +11092,7 @@ test("PR review round 44: a sub-client sharing its parent's adapter takes the pa
   expect(own.adapterType).toBe('mock');
 });
 
-test('PR review round 42: an initialURL that is not a string is refused as non-retryable by every adapter', async () => {
+test('an initialURL that is not a string is refused as non-retryable by every adapter', async () => {
   // `null` resolved against the page as a relative reference, and was taken for the
   // page's own origin by the browser adapters.
   for (const adapter of [
@@ -11122,7 +11122,7 @@ test('PR review round 42: an initialURL that is not a string is refused as non-r
   }
 });
 
-test('PR review round 46: a method that is not an HTTP token is refused by every adapter, without the method', async () => {
+test('a method that is not an HTTP token is refused by every adapter, without the method', async () => {
   // NodeAdapter passed on Node's refusal, which quotes the method; MockAdapter answered
   // it with the 404 of a route not found.
   const secret = 'secret-token';
@@ -11161,7 +11161,7 @@ test('PR review round 46: a method that is not an HTTP token is refused by every
   }
 });
 
-test('PR review round 42: an adapter whose getType() is not an adapter type is refused when the client is built', () => {
+test('an adapter whose getType() is not an adapter type is refused when the client is built', () => {
   for (const [type, got] of [
     ['custom', 'string'],
     [undefined, 'undefined'],
@@ -11181,7 +11181,7 @@ test('PR review round 42: an adapter whose getType() is not an adapter type is r
   }
 });
 
-test("PR review round 42: a sub-client's host-filtered interceptor reads its parent's result as one copy", async () => {
+test("a sub-client's host-filtered interceptor reads its parent's result as one copy", async () => {
   // The parent's last result reaches the sub-client's chain as returned: a `requestURL`
   // getter that answered the trusted host to the filter and another to the interceptor
   // sent the sub-client's token to the other host.
@@ -11223,7 +11223,7 @@ test("PR review round 42: a sub-client's host-filtered interceptor reads its par
   ]);
 });
 
-test('PR review round 42: an interceptor result that cannot be copied is reported the same whatever is registered after it', async () => {
+test('an interceptor result that cannot be copied is reported the same whatever is registered after it', async () => {
   // A result the next interceptor's copy failed on was reported from the request the
   // phase built, not from the result - so a later interceptor, even one this phase never
   // runs, changed what `requestURL` the failure carried.
@@ -11282,7 +11282,7 @@ test('PR review round 42: an interceptor result that cannot be copied is reporte
   ).toEqual(alone);
 });
 
-test('PR review round 42: a malformed interceptor result fails even when a later interceptor would replace it', async () => {
+test('a malformed interceptor result fails even when a later interceptor would replace it', async () => {
   // Each result is copied before the next interceptor reads it, so a result that is not
   // a request is refused there: the later interceptor never runs.
   let laterCalls = 0;
@@ -11312,7 +11312,7 @@ test('PR review round 42: a malformed interceptor result fails even when a later
   expect(laterCalls).toBe(0);
 });
 
-test("PR review round 42: a parent interceptor that redefines the request it was handed and returns it is copied before a sub-client's interceptor reads it", async () => {
+test("a parent interceptor that redefines the request it was handed and returns it is copied before a sub-client's interceptor reads it", async () => {
   // Returned as the very object the parent's chain was handed, it could not be told
   // from a request no interceptor touched: the sub-client's `hosts` filter read the
   // trusted host and its token interceptor the other one.
@@ -11357,7 +11357,7 @@ test("PR review round 42: a parent interceptor that redefines the request it was
 });
 
 for (const phaseName of ['retry', 'redirect'] as const) {
-  test(`PR review round 42: an interceptor result that cannot be copied is reported the same in the ${phaseName} phase whatever is registered after it`, async () => {
+  test(`an interceptor result that cannot be copied is reported the same in the ${phaseName} phase whatever is registered after it`, async () => {
     // As in the initial phase: the copy the next interceptor - or a sub-client's chain -
     // takes hands the failed result to the phase, which reports from it as it does when
     // its own copy fails.
@@ -11443,7 +11443,7 @@ for (const phaseName of ['retry', 'redirect'] as const) {
   });
 }
 
-test('PR review round 43: a header string passed where a header object belongs is not written into the error', () => {
+test('a header string passed where a header object belongs is not written into the error', () => {
   const headers = 'Authorization: Bearer secret-token' as unknown as Record<
     string,
     string
@@ -11471,7 +11471,7 @@ test('PR review round 43: a header string passed where a header object belongs i
   }
 });
 
-test("PR review round 43: a parent whose interceptors are not called in a phase leaves the sub-client's chain the request uncopied", async () => {
+test("a parent whose interceptors are not called in a phase leaves the sub-client's chain the request uncopied", async () => {
   // A copy is taken through `snapshotInterceptedRequest`, which checks the method with
   // `describeInvalidHTTPMethod`: counted from the moment the request is sent, nothing
   // else calls it before the sub-client's interceptor runs.
@@ -11525,7 +11525,7 @@ test("PR review round 43: a parent whose interceptors are not called in a phase 
   ).toBe(1);
 });
 
-test('PR review round 43: a refused method, strategy, URL, redirect Location, suffix, filter entry or cookie value is not written into the error', async () => {
+test('a refused method, strategy, URL, redirect Location, suffix, filter entry or cookie value is not written into the error', async () => {
   const secret = 'secret-token';
   const messages: string[] = [];
   const caught = (run: () => unknown): void => {
@@ -11619,7 +11619,7 @@ test('PR review round 43: a refused method, strategy, URL, redirect Location, su
   }
 });
 
-test('PR review round 44: CookieJar.clear() tells a blank host from an empty one', () => {
+test('CookieJar.clear() tells a blank host from an empty one', () => {
   const jar = new CookieJar();
 
   expect(() => jar.clear('', 'hostname')).toThrow(
@@ -11636,7 +11636,7 @@ test('PR review round 44: CookieJar.clear() tells a blank host from an empty one
   }
 });
 
-test('PR review round 43: a refusal names the entry or the kind of value it refused', () => {
+test('a refusal names the entry or the kind of value it refused', () => {
   const thrown = (run: () => unknown): string => {
     try {
       run();
@@ -11701,7 +11701,7 @@ test('PR review round 43: a refusal names the entry or the kind of value it refu
   );
 });
 
-test('PR review round 43: a MockAdapter route cookie name that cannot be written is named by its position', async () => {
+test('a MockAdapter route cookie name that cannot be written is named by its position', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/login', () => ({
     status: 200,
@@ -11717,7 +11717,7 @@ test('PR review round 43: a MockAdapter route cookie name that cannot be written
   );
 });
 
-test('PR review round 45: a MockAdapter route that returns nothing is named by its registered pattern, not the request path', async () => {
+test('a MockAdapter route that returns nothing is named by its registered pattern, not the request path', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get(
     '/password-reset/:token',
@@ -11736,7 +11736,7 @@ test('PR review round 45: a MockAdapter route that returns nothing is named by i
   expect(message).not.toContain('abc123secret');
 });
 
-test('PR review round 45: a MockAdapter cookie option whose value is not a string is refused by position, not written', async () => {
+test('a MockAdapter cookie option whose value is not a string is refused by position, not written', async () => {
   const cases: Array<[unknown, string]> = [
     [undefined, 'undefined'],
     [{ nested: true }, 'object'],
@@ -11771,7 +11771,7 @@ test('PR review round 45: a MockAdapter cookie option whose value is not a strin
   }
 });
 
-test('PR review round 45: a MockAdapter cookie value with a tab is set, as a raw set-cookie with one is', async () => {
+test('a MockAdapter cookie value with a tab is set, as a raw set-cookie with one is', async () => {
   const jar = new CookieJar();
   const adapter = new MockAdapter();
   adapter.routes.get('/shorthand', () => ({
@@ -11798,7 +11798,7 @@ test('PR review round 45: a MockAdapter cookie value with a tab is set, as a raw
   );
 });
 
-test('PR review round 45: an onHandlerError that returns nothing is named by the route pattern, not the request path', async () => {
+test('an onHandlerError that returns nothing is named by the route pattern, not the request path', async () => {
   const adapter = new MockAdapter({
     onHandlerError: () => undefined as unknown as MockResponse,
   });
@@ -11818,7 +11818,7 @@ test('PR review round 45: an onHandlerError that returns nothing is named by the
   expect(message).not.toContain('s3cr3t-code');
 });
 
-test('PR review round 46: a MockAdapter cookie given as an array is refused as an array, not by a missing value', async () => {
+test('a MockAdapter cookie given as an array is refused as an array, not by a missing value', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/login', () => ({
     status: 200,
@@ -11838,7 +11838,7 @@ test('PR review round 46: a MockAdapter cookie given as an array is refused as a
   );
 });
 
-test('PR review round 45: a MockAdapter cookie field of the wrong type is refused by position and type, not coerced', async () => {
+test('a MockAdapter cookie field of the wrong type is refused by position and type, not coerced', async () => {
   const cases: Array<[unknown, string]> = [
     [
       42,
@@ -11914,7 +11914,7 @@ test('PR review round 45: a MockAdapter cookie field of the wrong type is refuse
   expect(ok.headers['set-cookie']).toEqual(['s=v; Path=/; HttpOnly']);
 });
 
-test('PR review round 45: each MockAdapter cookie option field is read once', async () => {
+test('each MockAdapter cookie option field is read once', async () => {
   const reads = new Map<string, number>();
   const options = {} as MockCookieOptions;
   const answers: Record<string, unknown> = {
@@ -12002,7 +12002,7 @@ const crossOriginRetryPolicy = {
   delayMS: 0,
 } as const;
 
-test('PR review round 57: a retry interceptor does not send its credentials to a cross-origin redirect target', async () => {
+test('a retry interceptor does not send its credentials to a cross-origin redirect target', async () => {
   const { adapter, sentToTarget, sentToAPI } = crossOriginRetryAdapter(
     'https://evil.example/next',
   );
@@ -12059,7 +12059,7 @@ test('PR review round 57: a retry interceptor does not send its credentials to a
   expect(sentToTarget[1]?.headers.accept).toBe('application/json');
 });
 
-test("PR review round 57: a parent client's retry interceptor does not send its credentials to a cross-origin redirect target", async () => {
+test("a parent client's retry interceptor does not send its credentials to a cross-origin redirect target", async () => {
   const { adapter, sentToTarget, sentToAPI } = crossOriginRetryAdapter(
     'https://evil.example/next',
   );
@@ -12095,7 +12095,7 @@ test("PR review round 57: a parent client's retry interceptor does not send its 
   }
 });
 
-test('PR review round 57: a credential a redirect interceptor gave a trusted target survives a retry there, and can be refreshed', async () => {
+test('a credential a redirect interceptor gave a trusted target survives a retry there, and can be refreshed', async () => {
   const { adapter, sentToTarget } = crossOriginRetryAdapter(
     'https://trusted.example/next',
   );
@@ -12135,7 +12135,7 @@ test('PR review round 57: a credential a redirect interceptor gave a trusted tar
   expect(sentToTarget[1]?.headers).not.toHaveProperty('x-new');
 });
 
-test("PR review round 57: a retry interceptor's headers are sent on a same-origin redirect hop", async () => {
+test("a retry interceptor's headers are sent on a same-origin redirect hop", async () => {
   const { adapter, sentToAPI } = crossOriginRetryAdapter(
     'https://api.example/next',
   );
@@ -12165,7 +12165,7 @@ test("PR review round 57: a retry interceptor's headers are sent on a same-origi
   expect(sentToAPI[2]?.headers['x-api-key']).toBe('KEY');
 });
 
-test('PR review round 57: a retry interceptor that names the host itself on a redirect hop sends its headers there', async () => {
+test('a retry interceptor that names the host itself on a redirect hop sends its headers there', async () => {
   const { adapter, sentToTarget } = crossOriginRetryAdapter(
     'https://evil.example/next',
   );
@@ -12217,7 +12217,7 @@ function unresponsiveAdapter(): {
   };
 }
 
-test('PR review round 57: an adapter that never settles is ended by the per-attempt timeout', async () => {
+test('an adapter that never settles is ended by the per-attempt timeout', async () => {
   const { adapter, pending } = unresponsiveAdapter();
   const ends: Array<{ status: number; willRetry: boolean }> = [];
   const builder = new HTTPClient({ adapter, baseURL: 'http://x.test' })
@@ -12251,7 +12251,7 @@ test('PR review round 57: an adapter that never settles is ended by the per-atte
   expect(response.isTimeout).toBe(true);
 });
 
-test('PR review round 57: a timeout of an adapter that never settles is retried as a timeout', async () => {
+test('a timeout of an adapter that never settles is retried as a timeout', async () => {
   let sends = 0;
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -12275,7 +12275,7 @@ test('PR review round 57: a timeout of an adapter that never settles is retried 
   expect(response.status).toBe(200);
 });
 
-test('PR review round 57: cancel() ends a request whose adapter never settles', async () => {
+test('cancel() ends a request whose adapter never settles', async () => {
   const { adapter, pending } = unresponsiveAdapter();
   const builder = new HTTPClient({
     adapter,
@@ -12299,7 +12299,7 @@ test('PR review round 57: cancel() ends a request whose adapter never settles', 
   expect(builder.state).toBe('cancelled');
 });
 
-test('PR review round 57: a bare status 0 answered after the timer fired is a timeout, as an isTransportError one is', async () => {
+test('a bare status 0 answered after the timer fired is a timeout, as an isTransportError one is', async () => {
   for (const isTransportError of [undefined, true]) {
     let sends = 0;
     const adapter: HTTPAdapter = {
@@ -12333,7 +12333,7 @@ test('PR review round 57: a bare status 0 answered after the timer fired is a ti
   }
 });
 
-test('PR review round 57: the hooks handed to an adapter the attempt gave up on do nothing, and its late upload outcome is observed', async () => {
+test('the hooks handed to an adapter the attempt gave up on do nothing, and its late upload outcome is observed', async () => {
   const handed: AdapterRequest[] = [];
   let resolveLate: ((response: AdapterResponse) => void) | undefined;
   const adapter: HTTPAdapter = {
@@ -12397,7 +12397,7 @@ test('PR review round 57: the hooks handed to an adapter the attempt gave up on 
   expect(unhandled).toEqual([]);
 });
 
-test("PR review round 57: an abandoned adapter's upload progress does not hold the next attempt's settle wait open", async () => {
+test("an abandoned adapter's upload progress does not hold the next attempt's settle wait open", async () => {
   let sends = 0;
   let ticker: ReturnType<typeof setInterval> | undefined;
   const adapter: HTTPAdapter = {
@@ -12454,7 +12454,7 @@ test("PR review round 57: an abandoned adapter's upload progress does not hold t
   }
 });
 
-test('PR review round 57: a status-0 stream error answered after the timer fired is not turned into a timeout', async () => {
+test('a status-0 stream error answered after the timer fired is not turned into a timeout', async () => {
   let sends = 0;
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -12487,7 +12487,7 @@ test('PR review round 57: a status-0 stream error answered after the timer fired
   expect(builder.error?.code).toBe('stream_response_error');
 });
 
-test('PR review round 57: a status-0 detected redirect answered after the timer fired is a timeout only where redirects are followed', async () => {
+test('a status-0 detected redirect answered after the timer fired is a timeout only where redirects are followed', async () => {
   for (const isFollowing of [true, false]) {
     let sends = 0;
     const adapter: HTTPAdapter = {
@@ -12527,7 +12527,7 @@ test('PR review round 57: a status-0 detected redirect answered after the timer 
   }
 });
 
-test('PR review round 57: a retry interceptor rewriting only the path or scheme of a cross-origin hop selects nothing', async () => {
+test('a retry interceptor rewriting only the path or scheme of a cross-origin hop selects nothing', async () => {
   for (const rewrite of [
     (url: string) => url.replace('/next', '/other'),
     (url: string) => url.replace('https://', 'http://'),
@@ -12558,7 +12558,7 @@ test('PR review round 57: a retry interceptor rewriting only the path or scheme 
   }
 });
 
-test("PR review round 57: a retry interceptor's token reaches the caller's origin again after a hop away and back", async () => {
+test("a retry interceptor's token reaches the caller's origin again after a hop away and back", async () => {
   const sent: AdapterRequest[] = [];
   let backAttempts = 0;
   const adapter: HTTPAdapter = {
@@ -12615,7 +12615,7 @@ test("PR review round 57: a retry interceptor's token reaches the caller's origi
   expect(sent[3]?.headers.authorization).toBe('Bearer SECRET');
 });
 
-test('PR review round 57: a host a retry interceptor chose does not carry its headers to a later redirect elsewhere', async () => {
+test('a host a retry interceptor chose does not carry its headers to a later redirect elsewhere', async () => {
   const sent: AdapterRequest[] = [];
   let failoverAttempts = 0;
   let thirdAttempts = 0;
@@ -12681,7 +12681,7 @@ test('PR review round 57: a host a retry interceptor chose does not carry its he
   expect(sent[4]?.headers).not.toHaveProperty('authorization');
 });
 
-test('PR review round 57: an adapter that honors its signal is not held by the abort grace', async () => {
+test('an adapter that honors its signal is not held by the abort grace', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/slow', async () => {
     await sleep(5_000);
@@ -12738,7 +12738,7 @@ function crossOriginReplayAdapter(target: string): {
   return { adapter, sentToTarget };
 }
 
-test('PR review round 58: a retry interceptor does not send a query-string credential to a cross-origin redirect target', async () => {
+test('a retry interceptor does not send a query-string credential to a cross-origin redirect target', async () => {
   const { adapter: replay, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next?hop=1',
   );
@@ -12780,7 +12780,7 @@ test('PR review round 58: a retry interceptor does not send a query-string crede
   ]);
 });
 
-test('PR review round 58: a retry interceptor does not add a body field to a 307 replay on a cross-origin redirect target', async () => {
+test('a retry interceptor does not add a body field to a 307 replay on a cross-origin redirect target', async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -12813,7 +12813,7 @@ test('PR review round 58: a retry interceptor does not add a body field to a 307
   );
 });
 
-test('PR review round 58: a retry interceptor may still drop the body of a cross-origin 307 replay', async () => {
+test('a retry interceptor may still drop the body of a cross-origin 307 replay', async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -12833,7 +12833,7 @@ test('PR review round 58: a retry interceptor may still drop the body of a cross
   expect(sentToTarget[1]?.body).toBeNull();
 });
 
-test('PR review round 58: a retry interceptor that names the host itself on a redirect hop controls its URL and body there', async () => {
+test('a retry interceptor that names the host itself on a redirect hop controls its URL and body there', async () => {
   const sentToFailover: AdapterRequest[] = [];
   const { adapter: replay, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
@@ -12878,7 +12878,7 @@ test('PR review round 58: a retry interceptor that names the host itself on a re
   );
 });
 
-test("PR review round 58: a retry interceptor's URL and body changes are sent on a same-origin redirect hop", async () => {
+test("a retry interceptor's URL and body changes are sent on a same-origin redirect hop", async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://api.example/next',
   );
@@ -12913,7 +12913,7 @@ test("PR review round 58: a retry interceptor's URL and body changes are sent on
   expect(sentToTarget[1]?.body).toBe(JSON.stringify({ a: 1, token: 'SECRET' }));
 });
 
-test('PR review round 58: an attempt abandoned after its stream factory was called is a stream error, not a retried timeout', async () => {
+test('an attempt abandoned after its stream factory was called is a stream error, not a retried timeout', async () => {
   for (const isAsyncFactory of [false, true]) {
     let sends = 0;
     const adapter: HTTPAdapter = {
@@ -12967,7 +12967,7 @@ test('PR review round 58: an attempt abandoned after its stream factory was call
   }
 });
 
-test("PR review round 58: a 307 hop whose bodied attempt is abandoned reports its upload's outcome unknown, not the previous hop one", async () => {
+test("a 307 hop whose bodied attempt is abandoned reports its upload's outcome unknown, not the previous hop one", async () => {
   let sends = 0;
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -13000,7 +13000,7 @@ test("PR review round 58: a 307 hop whose bodied attempt is abandoned reports it
   expect(outcome?.message).toContain('unknown');
 });
 
-test("PR review round 58: a retry whose bodied attempt is abandoned reports its upload's outcome unknown, not the previous attempt one", async () => {
+test("a retry whose bodied attempt is abandoned reports its upload's outcome unknown, not the previous attempt one", async () => {
   let sends = 0;
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -13033,7 +13033,7 @@ test("PR review round 58: a retry whose bodied attempt is abandoned reports its 
   expect(outcome?.message).toContain('unknown');
 });
 
-test('PR review round 58: a retry interceptor that drops the body leaves the upload outcome of the attempt that had one', async () => {
+test('a retry interceptor that drops the body leaves the upload outcome of the attempt that had one', async () => {
   const sent: AdapterRequest[] = [];
   const cut = new Error('cut');
   const adapter: HTTPAdapter = {
@@ -13070,7 +13070,7 @@ test('PR review round 58: a retry interceptor that drops the body leaves the upl
   expect(outcome?.message).toBe('cut');
 });
 
-test("PR review round 58: a transport failure answered after the timer fired stores its Set-Cookie; an abandoned attempt's late answer does not", async () => {
+test("a transport failure answered after the timer fired stores its Set-Cookie; an abandoned attempt's late answer does not", async () => {
   // Answered late, within the abort grace.
   const lateJar = new CookieJar();
   const late = await new HTTPClient({
@@ -13118,7 +13118,7 @@ test("PR review round 58: a transport failure answered after the timer fired sto
   expect(abandonedJar.getCookieHeaderString('http://x.test/a')).toBe('');
 });
 
-test('PR review round 58: a retry interceptor that edits the body in place on a cross-origin hop changes neither what is sent there nor the caller body', async () => {
+test('a retry interceptor that edits the body in place on a cross-origin hop changes neither what is sent there nor the caller body', async () => {
   const json = { a: 1 };
   const form = new FormData();
   form.append('a', '1');
@@ -13192,7 +13192,7 @@ test('PR review round 58: a retry interceptor that edits the body in place on a 
   expect([...bytes]).toEqual([1, 2, 3]);
 });
 
-test('PR review round 58: a retry interceptor that edits the body in place and names the host itself sends its edit there, not to the caller body', async () => {
+test('a retry interceptor that edits the body in place and names the host itself sends its edit there, not to the caller body', async () => {
   const sentToFailover: AdapterRequest[] = [];
   const { adapter: replay } = crossOriginReplayAdapter(
     'https://evil.example/next',
@@ -13228,7 +13228,7 @@ test('PR review round 58: a retry interceptor that edits the body in place and n
   expect(json).toEqual({ a: 1 });
 });
 
-test('PR review round 58: a body a retry interceptor replaces on a cross-origin hop is restored with all the headers that describe it', async () => {
+test('a body a retry interceptor replaces on a cross-origin hop is restored with all the headers that describe it', async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -13262,7 +13262,7 @@ test('PR review round 58: a body a retry interceptor replaces on a cross-origin 
   expect(sentToTarget[1]?.headers).not.toHaveProperty('content-language');
 });
 
-test('PR review round 58: an empty body a retry interceptor sets on a cross-origin hop drops the body rather than replacing it', async () => {
+test('an empty body a retry interceptor sets on a cross-origin hop drops the body rather than replacing it', async () => {
   for (const empty of ['', new Uint8Array(0)]) {
     const { adapter, sentToTarget } = crossOriginReplayAdapter(
       'https://evil.example/next',
@@ -13286,7 +13286,7 @@ test('PR review round 58: an empty body a retry interceptor sets on a cross-orig
   }
 });
 
-test('PR review round 58: a safelisted header a retry interceptor adds on a cross-origin hop is kept', async () => {
+test('a safelisted header a retry interceptor adds on a cross-origin hop is kept', async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -13345,7 +13345,7 @@ function factoryThenHangAdapter(): {
   };
 }
 
-test('PR review round 58: a sink an async factory hands over after its attempt was abandoned is destroyed when it arrives', async () => {
+test('a sink an async factory hands over after its attempt was abandoned is destroyed when it arrives', async () => {
   const { adapter, sends } = factoryThenHangAdapter();
   let sink: PassThrough | undefined;
   let release: (() => void) | undefined;
@@ -13375,7 +13375,7 @@ test('PR review round 58: a sink an async factory hands over after its attempt w
   expect(sink?.destroyed).toBe(true);
 });
 
-test('PR review round 58: a cancel during the abort grace destroys the sink the adapter that ignored it was writing to', async () => {
+test('a cancel during the abort grace destroys the sink the adapter that ignored it was writing to', async () => {
   const { adapter } = factoryThenHangAdapter();
   const sink = new PassThrough();
   const builder = new HTTPClient({ adapter, baseURL: 'http://x.test' })
@@ -13392,7 +13392,7 @@ test('PR review round 58: a cancel during the abort grace destroys the sink the 
   expect(sink.destroyed).toBe(true);
 });
 
-test('PR review round 58: a factory that answered null or a thenable the client does not follow decides whether an abandoned attempt is retried', async () => {
+test('a factory that answered null or a thenable the client does not follow decides whether an abandoned attempt is retried', async () => {
   // None started: the abandoned attempt is the timeout it is, and retried.
   const declined = factoryThenHangAdapter();
   const declinedBuilder = new HTTPClient({
@@ -13431,7 +13431,7 @@ test('PR review round 58: a factory that answered null or a thenable the client 
   expect(sink.destroyed).toBe(false);
 });
 
-test('PR review round 58: a cookie jar that throws on a transport failure answered after the timer fired leaves it the retried timeout', async () => {
+test('a cookie jar that throws on a transport failure answered after the timer fired leaves it the retried timeout', async () => {
   const jar = new CookieJar();
   jar.processResponseHeaders = () => {
     throw new Error('jar failed');
@@ -13464,7 +13464,7 @@ test('PR review round 58: a cookie jar that throws on a transport failure answer
   expect(builder.error?.code).toBe('timeout');
 });
 
-test("PR review round 58: a JSON body whose top-level toJSON answers a non-object is sent unchanged on a cross-origin hop's retry", async () => {
+test("a JSON body whose top-level toJSON answers a non-object is sent unchanged on a cross-origin hop's retry", async () => {
   for (const answer of [null, '', 42, 'hello']) {
     for (const isChoosingHost of [false, true]) {
       const sent: AdapterRequest[] = [];
@@ -13510,7 +13510,7 @@ test("PR review round 58: a JSON body whose top-level toJSON answers a non-objec
   }
 });
 
-test('PR review round 58: a rejection from an async destroy of an abandoned sink is contained', async () => {
+test('a rejection from an async destroy of an abandoned sink is contained', async () => {
   const { adapter } = factoryThenHangAdapter();
   const unhandled: unknown[] = [];
   const onUnhandled = (reason: unknown) => {
@@ -13545,7 +13545,7 @@ test('PR review round 58: a rejection from an async destroy of an abandoned sink
   expect(unhandled).toEqual([]);
 });
 
-test("PR review round 58: a cross-origin hop's own body goes out with its own body headers, whatever a retry interceptor did to them", async () => {
+test("a cross-origin hop's own body goes out with its own body headers, whatever a retry interceptor did to them", async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -13579,7 +13579,7 @@ test("PR review round 58: a cross-origin hop's own body goes out with its own bo
   expect(sentToTarget[1]?.headers).not.toHaveProperty('content-language');
 });
 
-test("PR review round 58: a retry interceptor's body that cannot be copied, on a cross-origin hop held to its own body, sends the hop's own", async () => {
+test("a retry interceptor's body that cannot be copied, on a cross-origin hop held to its own body, sends the hop's own", async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -13621,7 +13621,7 @@ test("PR review round 58: a retry interceptor's body that cannot be copied, on a
   ]);
 });
 
-test("PR review round 72b: a retry interceptor's BigInt body on a cross-origin hop held to its own body sends the hop's own", async () => {
+test("a retry interceptor's BigInt body on a cross-origin hop held to its own body sends the hop's own", async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -13646,7 +13646,7 @@ test("PR review round 72b: a retry interceptor's BigInt body on a cross-origin h
   ]);
 });
 
-test("PR review round 58: a parent client's and a sub-client's retry interceptors share one copy of a cross-origin hop's body", async () => {
+test("a parent client's and a sub-client's retry interceptors share one copy of a cross-origin hop's body", async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -13685,7 +13685,7 @@ test("PR review round 58: a parent client's and a sub-client's retry interceptor
   expect(json).toEqual({ a: 1 });
 });
 
-test('PR review round 58: a factory that answered a cancel leaves an abandoned attempt the timeout it is, retried', async () => {
+test('a factory that answered a cancel leaves an abandoned attempt the timeout it is, retried', async () => {
   const { adapter, sends } = factoryThenHangAdapter();
   const builder = new HTTPClient({
     adapter,
@@ -13702,7 +13702,7 @@ test('PR review round 58: a factory that answered a cancel leaves an abandoned a
   expect(builder.error?.code).toBe('timeout');
 });
 
-test('PR review round 59: a retry interceptor may upgrade a cross-origin http hop to https, and nothing else of its URL', async () => {
+test('a retry interceptor may upgrade a cross-origin http hop to https, and nothing else of its URL', async () => {
   const cases: Array<{
     target: string;
     rewrite: (url: URL) => void;
@@ -13813,7 +13813,7 @@ test('PR review round 59: a retry interceptor may upgrade a cross-origin http ho
   }
 });
 
-test('PR review round 59: bodyContainsKeys matches a cross-origin hop body as it does a same-origin one', async () => {
+test('bodyContainsKeys matches a cross-origin hop body as it does a same-origin one', async () => {
   class Inner {
     public x = 1;
   }
@@ -13856,7 +13856,7 @@ test('PR review round 59: bodyContainsKeys matches a cross-origin hop body as it
   expect(crossOrigin).toEqual(sameOrigin);
 });
 
-test('PR review round 59: an abandoned attempt that had a body is not retried; a bodiless one is', async () => {
+test('an abandoned attempt that had a body is not retried; a bodiless one is', async () => {
   const run = async (
     send: (client: HTTPClient) => ReturnType<HTTPClient['get']>,
   ) => {
@@ -13900,7 +13900,7 @@ test('PR review round 59: an abandoned attempt that had a body is not retried; a
   expect(bodiless.response.isTimeout).toBe(true);
 }, 15_000);
 
-test('PR review round 59: an abandoned POST with a body reports non_idempotent_method, the rule that would have stopped it anyway', async () => {
+test('an abandoned POST with a body reports non_idempotent_method, the rule that would have stopped it anyway', async () => {
   let sends = 0;
   const ends: unknown[] = [];
   const builder = new HTTPClient({
@@ -13928,7 +13928,7 @@ test('PR review round 59: an abandoned POST with a body reports non_idempotent_m
   expect(builder.error?.isRetriesExhausted).toBe(false);
 });
 
-test("PR review round 59: retry interceptors' filters on a cross-origin hop read the hop's body, and the sub-client's first matching interceptor edits a copy of it, not what the hop sends", async () => {
+test("retry interceptors' filters on a cross-origin hop read the hop's body, and the sub-client's first matching interceptor edits a copy of it, not what the hop sends", async () => {
   class Inner {
     public x = 1;
   }
@@ -13970,7 +13970,7 @@ test("PR review round 59: retry interceptors' filters on a cross-origin hop read
   expect(body).not.toHaveProperty('token');
 });
 
-test('PR review round 59: an abandoned attempt whose retry interceptor removed the body is retried', async () => {
+test('an abandoned attempt whose retry interceptor removed the body is retried', async () => {
   let sends = 0;
   const sentBodies: unknown[] = [];
   const client = new HTTPClient({
@@ -14009,7 +14009,7 @@ test('PR review round 59: an abandoned attempt whose retry interceptor removed t
   expect(response.status).toBe(200);
 });
 
-test('PR review round 60: a retry body that cannot be read fails a cross-origin redirect hop as a same-origin one, its attempt ended', async () => {
+test('a retry body that cannot be read fails a cross-origin redirect hop as a same-origin one, its attempt ended', async () => {
   for (const target of [
     'https://api.example/next',
     'https://evil.example/next',
@@ -14045,7 +14045,7 @@ test('PR review round 60: a retry body that cannot be read fails a cross-origin 
   }
 });
 
-test('PR review round 60: a cross-origin retry whose body cannot be read reports the hop request, not what the interceptor added', async () => {
+test('a cross-origin retry whose body cannot be read reports the hop request, not what the interceptor added', async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -14099,7 +14099,7 @@ test('PR review round 60: a cross-origin retry whose body cannot be read reports
   expect(observed[0]?.rawBody).toEqual({ a: 1 });
 });
 
-test('PR review round 60: a retry interceptor that empties a cross-origin 307 replay into an empty form sends that, not the hop body', async () => {
+test('a retry interceptor that empties a cross-origin 307 replay into an empty form sends that, not the hop body', async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -14128,7 +14128,7 @@ test('PR review round 60: a retry interceptor that empties a cross-origin 307 re
   expect(sentToTarget[1]?.headers).not.toHaveProperty('content-type');
 });
 
-test('PR review round 60: retry bytes that claim to be empty do not reach a cross-origin redirect target', async () => {
+test('retry bytes that claim to be empty do not reach a cross-origin redirect target', async () => {
   // A `byteLength` of `0` over bytes that are there.
   class LyingBytes extends Uint8Array {
     public override get byteLength(): number {
@@ -14165,7 +14165,7 @@ test('PR review round 60: retry bytes that claim to be empty do not reach a cros
   );
 });
 
-test("PR review round 61: an abandoned attempt with a body reports its upload's outcome unknown, not none", async () => {
+test("an abandoned attempt with a body reports its upload's outcome unknown, not none", async () => {
   const run = async (
     send: (client: HTTPClient) => ReturnType<HTTPClient['get']>,
   ) => {
@@ -14191,7 +14191,7 @@ test("PR review round 61: an abandoned attempt with a body reports its upload's 
   expect(bodiless).not.toHaveProperty('requestBodySettled');
 }, 15_000);
 
-test('PR review round 61: a custom adapter throw that carries no upload outcome still reports none', async () => {
+test('a custom adapter throw that carries no upload outcome still reports none', async () => {
   const adapter: HTTPAdapter = {
     getType: () => 'node',
     send: () => Promise.reject(new Error('boom')),
@@ -14205,7 +14205,7 @@ test('PR review round 61: a custom adapter throw that carries no upload outcome 
   expect(response).not.toHaveProperty('requestBodySettled');
 });
 
-test("PR review round 61: a cross-origin retry the client refuses reports the hop's request, not what the interceptor added", async () => {
+test("a cross-origin retry the client refuses reports the hop's request, not what the interceptor added", async () => {
   for (const requestURL of [
     // An unsupported body, on the hop's own URL with a token added.
     (hopURL: string) => {
@@ -14260,7 +14260,7 @@ test("PR review round 61: a cross-origin retry the client refuses reports the ho
   }
 });
 
-test('PR review round 61: an abandoned attempt whose body sends nothing is retried, and reports no upload outcome', async () => {
+test('an abandoned attempt whose body sends nothing is retried, and reports no upload outcome', async () => {
   for (const body of ['', new Uint8Array(0), new FormData()]) {
     let sends = 0;
     // Ignores its abort and never settles.
@@ -14295,7 +14295,7 @@ test('PR review round 61: an abandoned attempt whose body sends nothing is retri
   }
 }, 30_000);
 
-test('PR review round 61: a retry interceptor that empties the body leaves the upload outcome of the attempt that had one', async () => {
+test('a retry interceptor that empties the body leaves the upload outcome of the attempt that had one', async () => {
   for (const emptyBody of ['', new Uint8Array(0), new FormData()]) {
     const sent: AdapterRequest[] = [];
     const cut = new Error('cut');
@@ -14334,7 +14334,7 @@ test('PR review round 61: a retry interceptor that empties the body leaves the u
   }
 });
 
-test('PR review round 63: a retry interceptor that drops a cross-origin 307 replay sends none of the headers that describe a body', async () => {
+test('a retry interceptor that drops a cross-origin 307 replay sends none of the headers that describe a body', async () => {
   for (const variant of [
     { body: undefined, addedHeaders: {}, contentType: undefined },
     // An empty string goes out with the client's own type for a string, as anywhere else.
@@ -14388,7 +14388,7 @@ test('PR review round 63: a retry interceptor that drops a cross-origin 307 repl
   }
 });
 
-test('PR review round 63: a retry interceptor on a cross-origin hop with no body to send keeps the headers that describe it', async () => {
+test('a retry interceptor on a cross-origin hop with no body to send keeps the headers that describe it', async () => {
   for (const body of [undefined, '', new Uint8Array(0)]) {
     const { adapter, sentToTarget } = crossOriginReplayAdapter(
       'https://evil.example/next',
@@ -14417,7 +14417,7 @@ test('PR review round 63: a retry interceptor on a cross-origin hop with no body
   }
 });
 
-test("PR review round 63: an internal throw after a later hop's bodied attempt reports that attempt's upload outcome, not an earlier hop's", async () => {
+test("an internal throw after a later hop's bodied attempt reports that attempt's upload outcome, not an earlier hop's", async () => {
   const cut = new Error('cut');
   const sent: AdapterRequest[] = [];
   const adapter: HTTPAdapter = {
@@ -14467,7 +14467,7 @@ test("PR review round 63: an internal throw after a later hop's bodied attempt r
   expect(response).not.toHaveProperty('requestBodySettled');
 });
 
-test('PR review round 63b: listRequests reads its filter label once', async () => {
+test('listRequests reads its filter label once', async () => {
   const releases: Array<() => void> = [];
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -14501,7 +14501,7 @@ test('PR review round 63b: listRequests reads its filter label once', async () =
   await Promise.all(pending);
 });
 
-test('PR review round 65: a retry interceptor on a cross-origin hop keeps a __proto__ header the hop carried', async () => {
+test('a retry interceptor on a cross-origin hop keeps a __proto__ header the hop carried', async () => {
   for (const value of ['v', ['a', 'b']]) {
     const { adapter, sentToTarget } = crossOriginReplayAdapter(
       'https://evil.example/next',
@@ -14540,7 +14540,7 @@ test('PR review round 65: a retry interceptor on a cross-origin hop keeps a __pr
   }
 });
 
-test('PR review round 71: a Uint8Array body from another realm is sent as its bytes; a Proxy over one is refused', async () => {
+test('a Uint8Array body from another realm is sent as its bytes; a Proxy over one is refused', async () => {
   const adapter = new MockAdapter();
   const received: unknown[] = [];
   adapter.routes.post('/upload', (request) => {
@@ -14582,7 +14582,7 @@ const roundSeventyTwoARetryPolicy = {
   delayMS: 0,
 } as const;
 
-test('PR review round 72a: a retry-phase error observer that redacts an array header in place does not change the retry', async () => {
+test('a retry-phase error observer that redacts an array header in place does not change the retry', async () => {
   const sent: string[] = [];
   let attempts = 0;
   const adapter: HTTPAdapter = {
@@ -14622,7 +14622,7 @@ test('PR review round 72a: a retry-phase error observer that redacts an array he
   expect(reported).toEqual([['[REDACTED]', '[REDACTED]']]);
 });
 
-test('PR review round 72a: a retry interceptor that pushes onto an array header does not accumulate across retries', async () => {
+test('a retry interceptor that pushes onto an array header does not accumulate across retries', async () => {
   const adapter = new MockAdapter();
   const seen: unknown[] = [];
   adapter.routes.get('/x', (request) => {
@@ -14653,7 +14653,7 @@ test('PR review round 72a: a retry interceptor that pushes onto an array header 
   expect(seen).toEqual(['a, b', 'a, b, retry', 'a, b, retry']);
 });
 
-test('PR review round 72a: the request an earlier attempt was reported as keeps its array headers after a later attempt changes its own', async () => {
+test('the request an earlier attempt was reported as keeps its array headers after a later attempt changes its own', async () => {
   const adapter = new MockAdapter();
   let attempts = 0;
   adapter.routes.get('/x', () => {
@@ -14690,7 +14690,7 @@ test('PR review round 72a: the request an earlier attempt was reported as keeps 
   expect(kept[1].headers['x-multi']).toEqual(['a', 'b', 'r']);
 });
 
-test('PR review round 72a: a custom adapter that pushes onto an array header reaches neither the observers nor the retry', async () => {
+test('a custom adapter that pushes onto an array header reaches neither the observers nor the retry', async () => {
   const inner = new MockAdapter();
   const seen: unknown[] = [];
   inner.routes.get('/x', (request) => {
@@ -14735,7 +14735,7 @@ test('PR review round 72a: a custom adapter that pushes onto an array header rea
   ]);
 });
 
-test('PR review round 72a: a redirect-phase response observer that pushes onto an array header does not change the next hop', async () => {
+test('a redirect-phase response observer that pushes onto an array header does not change the next hop', async () => {
   const adapter = new MockAdapter();
   const seen: unknown[] = [];
   adapter.routes.get('/a', (request) => {
@@ -14809,7 +14809,7 @@ const roundSeventyTwoBRetryPolicy = {
   delayMS: 0,
 } as const;
 
-test('PR review round 72b: a body changed after it is handed to the builder and before send() is not sent', async () => {
+test('a body changed after it is handed to the builder and before send() is not sent', async () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([]);
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
 
@@ -14846,7 +14846,7 @@ test('PR review round 72b: a body changed after it is handed to the builder and 
   ]);
 });
 
-test('PR review round 72b: a body changed from onAttemptEnd between attempts is not sent on the retry, nor reported', async () => {
+test('a body changed from onAttemptEnd between attempts is not sent on the retry, nor reported', async () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([
     { status: 503 },
     { status: 200 },
@@ -14882,7 +14882,7 @@ test('PR review round 72b: a body changed from onAttemptEnd between attempts is 
   expect(reported[0]).toEqual({ a: 1 });
 });
 
-test('PR review round 72b: a 307 replay sends the body as it was handed over, whatever the caller changed since', async () => {
+test('a 307 replay sends the body as it was handed over, whatever the caller changed since', async () => {
   for (const status of [307, 308]) {
     const { adapter, sent, urls } = roundSeventyTwoBAdapter([
       { status, location: '/next' },
@@ -14908,7 +14908,7 @@ test('PR review round 72b: a 307 replay sends the body as it was handed over, wh
   }
 });
 
-test('PR review round 72b: a retry interceptor that edits the body in place does not add to it again on each retry', async () => {
+test('a retry interceptor that edits the body in place does not add to it again on each retry', async () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([
     { status: 503 },
     { status: 503 },
@@ -14939,7 +14939,7 @@ test('PR review round 72b: a retry interceptor that edits the body in place does
   expect(json).toEqual({ a: 1 });
 });
 
-test('PR review round 72b: a body an interceptor returns and changes later does not reach a later attempt or a replay', async () => {
+test('a body an interceptor returns and changes later does not reach a later attempt or a replay', async () => {
   // An initial-phase interceptor's body, changed before the retry.
   const initial = roundSeventyTwoBAdapter([{ status: 503 }, { status: 200 }]);
   const initialClient = new HTTPClient({
@@ -15042,7 +15042,7 @@ test('PR review round 72b: a body an interceptor returns and changes later does 
   ]);
 });
 
-test('PR review round 72b: a body whose getter or toJSON throws throws from the setter, and nothing is sent', () => {
+test('a body whose getter or toJSON throws throws from the setter, and nothing is sent', () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([]);
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
 
@@ -15065,7 +15065,7 @@ test('PR review round 72b: a body whose getter or toJSON throws throws from the 
   expect(sent).toEqual([]);
 });
 
-test('PR review round 72b: a Date in a JSON body reaches interceptors as its ISO string and is sent as before', async () => {
+test('a Date in a JSON body reaches interceptors as its ISO string and is sent as before', async () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([]);
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
   const seen: unknown[] = [];
@@ -15081,7 +15081,7 @@ test('PR review round 72b: a Date in a JSON body reaches interceptors as its ISO
   expect(sent).toEqual([JSON.stringify({ when })]);
 });
 
-test('PR review round 72b: an interceptor that edits the body it is handed in place sends its edit, in the initial and redirect phases', async () => {
+test('an interceptor that edits the body it is handed in place sends its edit, in the initial and redirect phases', async () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([
     { status: 307, location: '/next' },
     { status: 200 },
@@ -15107,7 +15107,7 @@ test('PR review round 72b: an interceptor that edits the body it is handed in pl
   ]);
 });
 
-test('PR review round 72b: a request an interceptor edits in place and then ends is reported with its edit', async () => {
+test('a request an interceptor edits in place and then ends is reported with its edit', async () => {
   // The initial phase hands its interceptors the builder's own body, so an edit made in
   // place is in the request it reports.
   for (const end of ['throw', 'cancel'] as const) {
@@ -15155,7 +15155,7 @@ test('PR review round 72b: a request an interceptor edits in place and then ends
   ]);
 });
 
-test('PR review round 72b: a JSON body is serialized once, when it is handed over, however many attempts send or replay it', async () => {
+test('a JSON body is serialized once, when it is handed over, however many attempts send or replay it', async () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([
     { status: 503 },
     { status: 307, location: '/next' },
@@ -15185,7 +15185,7 @@ test('PR review round 72b: a JSON body is serialized once, when it is handed ove
   expect(sent).toEqual(['{"marker":1}', '{"marker":1}', '{"marker":1}']);
 });
 
-test("PR review round 72b: a parent client's interceptor body changed later does not reach a later attempt", async () => {
+test("a parent client's interceptor body changed later does not reach a later attempt", async () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([
     { status: 503 },
     { status: 200 },
@@ -15218,7 +15218,7 @@ test("PR review round 72b: a parent client's interceptor body changed later does
   expect(sent).toEqual(['{"token":"parent"}', '{"token":"parent"}']);
 });
 
-test("PR review round 73: a built-in adapter is handed the request's bytes uncopied, and a retry and a 307 replay still send the same bytes and form", async () => {
+test("a built-in adapter is handed the request's bytes uncopied, and a retry and a 307 replay still send the same bytes and form", async () => {
   const received: Array<{ url: string | undefined; body: Buffer }> = [];
   let startCalls = 0;
   const server = http.createServer((req, res) => {
@@ -15276,7 +15276,7 @@ test("PR review round 73: a built-in adapter is handed the request's bytes uncop
   }
 });
 
-test('PR review round 73: an adapter that is not a built-in one, or a built-in one whose send a subclass overrides or the instance replaces, cannot change what a retry or a replay sends', async () => {
+test('an adapter that is not a built-in one, or a built-in one whose send a subclass overrides or the instance replaces, cannot change what a retry or a replay sends', async () => {
   const makeSend = (seen: unknown[]): HTTPAdapter['send'] => {
     const answers = [503, 307, 200];
     return (request) => {
@@ -15346,7 +15346,7 @@ test('PR review round 73: an adapter that is not a built-in one, or a built-in o
   }
 });
 
-test('PR review round 73: a nested param read once decides both whether it overrides the path query and what is sent', async () => {
+test('a nested param read once decides both whether it overrides the path query and what is sent', async () => {
   const { adapter, urls } = roundSeventyTwoBAdapter([]);
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
   const answering = (first: unknown, then: unknown) => {
@@ -15375,7 +15375,7 @@ test('PR review round 73: a nested param read once decides both whether it overr
   ]);
 });
 
-test('PR review round 73: on a cross-origin hop, a JSON body that serializes to nothing is read as no body, as the attempt sends it', async () => {
+test('on a cross-origin hop, a JSON body that serializes to nothing is read as no body, as the attempt sends it', async () => {
   const sendHop = async (
     hopBody: object | undefined,
     retryBody: unknown,
@@ -15425,7 +15425,7 @@ test('PR review round 73: on a cross-origin hop, a JSON body that serializes to 
   ]);
 });
 
-test('PR review round 73: a redirect-phase interceptor that edits the body in place changes the next hop, not an upload of the hop that answered still under way', async () => {
+test('a redirect-phase interceptor that edits the body in place changes the next hop, not an upload of the hop that answered still under way', async () => {
   // Answers `/start` with a 307 as soon as its head arrives, then reads nothing for a
   // while, so NodeAdapter is still writing that hop's body when the redirect phase runs.
   // The 307 keeps the connection open (a `Connection: close` there would end that upload),
@@ -15525,7 +15525,7 @@ test('PR review round 73: a redirect-phase interceptor that edits the body in pl
   }
 });
 
-test("PR review round 73: a redirect-phase interceptor is handed a copy of the hop's body, never the bytes a built-in adapter was handed", async () => {
+test("a redirect-phase interceptor is handed a copy of the hop's body, never the bytes a built-in adapter was handed", async () => {
   const handed: Uint8Array[] = [];
   // In place of the built-in `send` before the adapter is built, so the adapter records it
   // as its own and the client hands it the request's bytes uncopied.
@@ -15570,7 +15570,7 @@ test("PR review round 73: a redirect-phase interceptor is handed a copy of the h
   ]);
 });
 
-test('PR review round 73: a nested array param is serialized by the keys qs reads, with or without a query in the path', () => {
+test('a nested array param is serialized by the keys qs reads, with or without a query in the path', () => {
   const sparse: string[] = [];
   sparse[2] = 'z';
   const params = (): Record<string, unknown> => ({
@@ -15584,7 +15584,7 @@ test('PR review round 73: a nested array param is serialized by the keys qs read
   );
 });
 
-test('PR review round 73: FetchAdapter sends a GET whose JSON body serializes to nothing bodiless, and still refuses a GET with an empty body', async () => {
+test('FetchAdapter sends a GET whose JSON body serializes to nothing bodiless, and still refuses a GET with an empty body', async () => {
   const sentBodies: unknown[] = [];
   const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((
     _url: string | URL | Request,
@@ -15621,7 +15621,7 @@ test('PR review round 73: FetchAdapter sends a GET whose JSON body serializes to
   }
 });
 
-test('PR review round 73: a GET body an interceptor returns is refused on FetchAdapter, though its toJSON answers nothing when asked again', async () => {
+test('a GET body an interceptor returns is refused on FetchAdapter, though its toJSON answers nothing when asked again', async () => {
   const sentBodies: unknown[] = [];
   const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(((
     _url: string | URL | Request,
@@ -15655,7 +15655,7 @@ test('PR review round 73: a GET body an interceptor returns is refused on FetchA
   }
 });
 
-test('PR review round 73: a 307 replay of a GET whose JSON body serializes to nothing drops the headers that describe a body', async () => {
+test('a 307 replay of a GET whose JSON body serializes to nothing drops the headers that describe a body', async () => {
   const sentHeaders: Array<Record<string, unknown>> = [];
   const client = new HTTPClient({
     adapter: {
@@ -15716,7 +15716,7 @@ function spyOnScriptedFetch(answer: (url: URL, call: number) => Response): {
   return { sent, restore: () => fetchSpy.mockRestore() };
 }
 
-test('PR review round 74: a GET whose JSON body serializes to nothing is sent bodiless on FetchAdapter after an interceptor passes it on, in every phase', async () => {
+test('a GET whose JSON body serializes to nothing is sent bodiless on FetchAdapter after an interceptor passes it on, in every phase', async () => {
   const sendGET = async (
     path: string,
     phase: 'initial' | 'retry' | 'redirect',
@@ -15772,7 +15772,7 @@ test('PR review round 74: a GET whose JSON body serializes to nothing is sent bo
   });
 });
 
-test("PR review round 74: an interceptor's GET body on FetchAdapter is judged by the copy that is sent, its type and its serialization failing as before", async () => {
+test("an interceptor's GET body on FetchAdapter is judged by the copy that is sent, its type and its serialization failing as before", async () => {
   const { sent, restore } = spyOnScriptedFetch(() => new Response('ok'));
   try {
     const sendGET = async (body: unknown) => {
@@ -15824,7 +15824,7 @@ test("PR review round 74: an interceptor's GET body on FetchAdapter is judged by
   }
 });
 
-test('PR review round 74: a 307 replay of a GET on FetchAdapter drops the headers that describe a body for an interceptor-passed JSON body that serializes to nothing', async () => {
+test('a 307 replay of a GET on FetchAdapter drops the headers that describe a body for an interceptor-passed JSON body that serializes to nothing', async () => {
   const { sent, restore } = spyOnScriptedFetch((url) =>
     url.pathname === '/start'
       ? new Response(null, { status: 307, headers: { location: '/next' } })
@@ -15855,7 +15855,7 @@ test('PR review round 74: a 307 replay of a GET on FetchAdapter drops the header
   }
 });
 
-test("PR review round 74: a retry held to a cross-origin hop's own body is checked on FetchAdapter as it is sent", async () => {
+test("a retry held to a cross-origin hop's own body is checked on FetchAdapter as it is sent", async () => {
   const sendHop = async (
     method: 'GET' | 'PUT',
     hopBody: object,
@@ -15920,7 +15920,7 @@ test("PR review round 74: a retry held to a cross-origin hop's own body is check
   });
 });
 
-test("PR review round 74: an interceptor's method on FetchAdapter is refused before its body is copied, in every phase", async () => {
+test("an interceptor's method on FetchAdapter is refused before its body is copied, in every phase", async () => {
   const sendTRACE = async (
     path: string,
     phase: 'initial' | 'retry' | 'redirect',
@@ -16002,7 +16002,7 @@ test("PR review round 74: an interceptor's method on FetchAdapter is refused bef
   expect(calls).toBe(0);
 });
 
-test('PR review round 74: in a browser, a header an interceptor adds that FetchAdapter refuses is its failure, though its body cannot be copied', async () => {
+test('in a browser, a header an interceptor adds that FetchAdapter refuses is its failure, though its body cannot be copied', async () => {
   const saved = {
     window: Object.getOwnPropertyDescriptor(globalThis, 'window'),
     document: Object.getOwnPropertyDescriptor(globalThis, 'document'),
@@ -16047,7 +16047,7 @@ test('PR review round 74: in a browser, a header an interceptor adds that FetchA
   }
 });
 
-test("PR review round 74: an interceptor's URL that cannot be sent is its failure on FetchAdapter, though the caller's GET carries a body", async () => {
+test("an interceptor's URL that cannot be sent is its failure on FetchAdapter, though the caller's GET carries a body", async () => {
   const { sent, restore } = spyOnScriptedFetch(() => new Response('ok'));
   try {
     const client = new HTTPClient({
@@ -16072,7 +16072,7 @@ test("PR review round 74: an interceptor's URL that cannot be sent is its failur
   }
 });
 
-test("PR review round 74: an interceptor's GET or HEAD on FetchAdapter is refused, not the body's failure, though its body cannot be copied, in every phase", async () => {
+test("an interceptor's GET or HEAD on FetchAdapter is refused, not the body's failure, though its body cannot be copied, in every phase", async () => {
   const send = async (
     path: string,
     phase: 'initial' | 'retry' | 'redirect',
@@ -16163,7 +16163,7 @@ test("PR review round 74: an interceptor's GET or HEAD on FetchAdapter is refuse
   ).toMatchObject({ code: 'request_setup_error', attemptCount: 1, sent: 1 });
 });
 
-test("PR review round 74: a caller's own TRACE on FetchAdapter whose body serializes to nothing is its setup error through a pass-through interceptor, as without one", async () => {
+test("a caller's own TRACE on FetchAdapter whose body serializes to nothing is its setup error through a pass-through interceptor, as without one", async () => {
   const { sent, restore } = spyOnScriptedFetch(() => new Response('ok'));
   try {
     const sendTRACE = async (hasInterceptor: boolean) => {
@@ -16190,7 +16190,7 @@ test("PR review round 74: a caller's own TRACE on FetchAdapter whose body serial
   }
 });
 
-test('PR review round 75: a filter list is read by index, not through its own iterator', async () => {
+test('a filter list is read by index, not through its own iterator', async () => {
   // An array whose own iterator yields entries other than those it holds.
   const withIterator = <T>(entries: T[], yields: unknown[]): T[] => {
     Object.defineProperty(entries, Symbol.iterator, {
@@ -16260,7 +16260,7 @@ test('PR review round 75: a filter list is read by index, not through its own it
   expect(seen).toEqual(['GET http://mock.test/x']);
 });
 
-test('PR review round 75: every refusal XHRAdapter makes in a browser names it as XHRAdapter', async () => {
+test('every refusal XHRAdapter makes in a browser names it as XHRAdapter', async () => {
   const names = ['window', 'document', 'XMLHttpRequest'] as const;
   const saved = names.map(
     (name) =>
@@ -16318,7 +16318,7 @@ test('PR review round 75: every refusal XHRAdapter makes in a browser names it a
   }
 });
 
-test("PR review round 75: a retry interceptor's body on a cross-origin hop held to its own is not serialized to learn whether it sends nothing", async () => {
+test("a retry interceptor's body on a cross-origin hop held to its own is not serialized to learn whether it sends nothing", async () => {
   const sendHop = async (retryBody: unknown) => {
     const { adapter, sentToTarget } = crossOriginReplayAdapter(
       'https://evil.example/next',
@@ -16392,7 +16392,7 @@ test("PR review round 75: a retry interceptor's body on a cross-origin hop held 
   expect(await sendHop(Silent.from([1, 2]))).toEqual(dropped);
 });
 
-test('PR review round 76: a Buffer body reaches every request interceptor and observer as a Buffer, and other bytes as a plain Uint8Array', async () => {
+test('a Buffer body reaches every request interceptor and observer as a Buffer, and other bytes as a plain Uint8Array', async () => {
   const contentTypes: unknown[] = [];
   const { adapter, sent } = roundSeventyTwoBAdapter([
     { status: 307, location: '/next' },
@@ -16476,7 +16476,7 @@ test('PR review round 76: a Buffer body reaches every request interceptor and ob
   }
 });
 
-test('PR review round 79: a content coding is read in ASCII case and trimmed of HTTP whitespace only', () => {
+test('a content coding is read in ASCII case and trimmed of HTTP whitespace only', () => {
   expect(isIdentityContentEncoding('IDENTITY,\t ')).toBe(true);
   // NO-BREAK SPACE is not HTTP whitespace: `\u00A0identity` is not a coding `fetch` knows.
   expect(isIdentityContentEncoding('\u00A0identity')).toBe(false);
@@ -16490,7 +16490,7 @@ test('PR review round 79: a content coding is read in ASCII case and trimmed of 
   expect(unknown.isDecoded).toBe(false);
 });
 
-test('PR review round 79: a contentTypeHeaders entry trimmed of a no-break space is refused, since no header could match it', () => {
+test('a contentTypeHeaders entry trimmed of a no-break space is refused, since no header could match it', () => {
   const client = new HTTPClient();
   expect(() =>
     client.addResponseObserver(() => {}, {
@@ -16504,7 +16504,7 @@ test('PR review round 79: a contentTypeHeaders entry trimmed of a no-break space
   ).not.toThrow();
 });
 
-test('PR review round 80: a hosts entry with a no-break space beside * is refused, not read as the global *', async () => {
+test('a hosts entry with a no-break space beside * is refused, not read as the global *', async () => {
   const client = new HTTPClient();
   for (const entry of [' *', '* ', '  api.example.com']) {
     expect(() =>
@@ -16542,7 +16542,7 @@ test('PR review round 80: a hosts entry with a no-break space beside * is refuse
   expect(seen).toEqual(['*', 'spaced']);
 });
 
-test('PR review round 80: a Content-Length is trimmed of HTTP whitespace only', () => {
+test('a Content-Length is trimmed of HTTP whitespace only', () => {
   expect(parseContentLength(' 10\t')).toBe(10);
   expect(parseContentLength(['10 ', '\t10'])).toBe(10);
   // NO-BREAK SPACE is not HTTP whitespace: Fetch and Node read no length from these.

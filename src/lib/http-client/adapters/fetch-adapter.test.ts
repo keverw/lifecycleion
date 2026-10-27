@@ -155,7 +155,7 @@ describe('FetchAdapter', () => {
     expect(sent).toEqual(['a=1; b=2', 'a=1; b=2']);
   });
 
-  test('PR review round 4: an empty Cookie part is left out', async () => {
+  test('an empty Cookie part is left out', async () => {
     let cookie = null as string | null;
     (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
       cookie = new Headers(init?.headers).get('cookie');
@@ -171,7 +171,7 @@ describe('FetchAdapter', () => {
     expect(cookie).toBe('b=2');
   });
 
-  test('PR review round 5: the Cookie header is the one NodeAdapter sends', async () => {
+  test('the Cookie header is the one NodeAdapter sends', async () => {
     for (const headers of [
       { Cookie: [], cookie: 'b=2' },
       { cookie: ['a=1', ''] },
@@ -203,7 +203,7 @@ describe('FetchAdapter', () => {
     }
   });
 
-  test('PR review round 6: an unset cookie is not sent as the text "undefined"', async () => {
+  test('an unset cookie is not sent as the text "undefined"', async () => {
     let init: RequestInit | undefined;
     (globalThis as any).fetch = (_url: unknown, given?: RequestInit) => {
       init = given;
@@ -219,7 +219,7 @@ describe('FetchAdapter', () => {
     expect(new Headers(init?.headers).get('cookie')).toBeNull();
   });
 
-  test('PR review round 9: a 205 has no body, so no size refusal is read off it', async () => {
+  test('a 205 has no body, so no size refusal is read off it', async () => {
     (globalThis as any).fetch = () =>
       Promise.resolve(
         new Response(null, {
@@ -263,7 +263,7 @@ describe('FetchAdapter', () => {
     expect(response.detectedRedirectURL).toBe('https://evil.test/next');
   });
 
-  test('PR review round 36: a redirect of a relative request URL reports its target', async () => {
+  test('a redirect of a relative request URL reports its target', async () => {
     (globalThis as any).document = { baseURI: 'https://app.test/dir/page' };
     (globalThis as any).fetch = () =>
       Promise.resolve(
@@ -320,7 +320,7 @@ describe('FetchAdapter', () => {
     expect(capturedURL).toBe('https://evil.test/collect');
   });
 
-  test('PR review round 40: userinfo is withheld from a protocol-relative URL that resolves to another origin', async () => {
+  test('userinfo is withheld from a protocol-relative URL that resolves to another origin', async () => {
     let capturedURL = '';
     // An `http:` page: `//u:p@api.test/x` is `http://api.test/x`, not the `https:` origin
     // the request started on.
@@ -356,7 +356,7 @@ describe('FetchAdapter', () => {
     }
   });
 
-  test('PR review round 40: same-origin userinfo is kept once resolved against the page', async () => {
+  test('same-origin userinfo is kept once resolved against the page', async () => {
     let capturedURL = '';
     (globalThis as any).document = { baseURI: 'https://api.test/page' };
     (globalThis as any).fetch = (url: string) => {
@@ -384,7 +384,7 @@ describe('FetchAdapter', () => {
     }
   });
 
-  test('PR review round 40: a network-path URL with no base is refused, not stripped into an absolute one and sent', async () => {
+  test('a network-path URL with no base is refused, not stripped into an absolute one and sent', async () => {
     // No `document` or `location`: nothing resolves the URL against a page, so it is
     // refused as a relative URL with no base, not sent as one stripped against the initial
     // URL into an absolute `https://evil.test/x`.
@@ -417,7 +417,7 @@ describe('FetchAdapter', () => {
     expect(calls).toBe(0);
   });
 
-  test('PR review round 41: a URL that is not http(s) is refused as non-retryable before it is fetched', async () => {
+  test('a URL that is not http(s) is refused as non-retryable before it is fetched', async () => {
     let calls = 0;
     (globalThis as any).fetch = () => {
       calls++;
@@ -447,7 +447,7 @@ describe('FetchAdapter', () => {
     expect(calls).toBe(0);
   });
 
-  test('PR review round 41: a relative URL with no base to resolve it against is refused as non-retryable', async () => {
+  test('a relative URL with no base to resolve it against is refused as non-retryable', async () => {
     // No `document` or `location`: nothing to resolve the URL against.
     expect((globalThis as any).document).toBeUndefined();
     expect((globalThis as any).location).toBeUndefined();
@@ -481,7 +481,7 @@ describe('FetchAdapter', () => {
     expect(calls).toBe(0);
   });
 
-  test('PR review round 41: a relative initial URL is resolved against the page before credentials are judged', async () => {
+  test('a relative initial URL is resolved against the page before credentials are judged', async () => {
     let capturedURL = '';
     (globalThis as any).fetch = (url: string) => {
       capturedURL = url;
@@ -524,7 +524,7 @@ describe('FetchAdapter', () => {
     }
   });
 
-  test('PR review round 42: an initial URL that names no origin fails closed rather than naming the page', async () => {
+  test('an initial URL that names no origin fails closed rather than naming the page', async () => {
     // Resolved against the page, `''`, `#top`, `?q` or `start` is the page itself: the
     // request URL's userinfo was kept with nothing to show it belonged to that origin. A
     // root- or protocol-relative one names an origin, and is resolved.
@@ -570,7 +570,7 @@ describe('FetchAdapter', () => {
     }
   });
 
-  test('PR review round 42: a request refused before it is sent reports no upload start', async () => {
+  test('a request refused before it is sent reports no upload start', async () => {
     let calls = 0;
     (globalThis as any).fetch = () => {
       calls++;
@@ -613,7 +613,7 @@ describe('FetchAdapter', () => {
     expect(calls).toBe(0);
   });
 
-  test("PR review round 43: a request the runtime refuses to build is reported without the runtime's error, which quotes the value", async () => {
+  test("a request the runtime refuses to build is reported without the runtime's error, which quotes the value", async () => {
     const secret = 'secret-token';
     let calls = 0;
     (globalThis as any).fetch = () => {
@@ -679,7 +679,7 @@ describe('FetchAdapter', () => {
     expect(calls).toBe(0);
   });
 
-  test("PR review round 43: without a global Request, a header Headers refuses is refused before fetch, without the runtime's error", async () => {
+  test("without a global Request, a header Headers refuses is refused before fetch, without the runtime's error", async () => {
     const secret = 'secret-token';
     let calls = 0;
     (globalThis as any).fetch = () => {
@@ -1880,7 +1880,7 @@ describe('FetchAdapter aborts while reading the body', () => {
   }, 15_000);
 });
 
-describe('FetchAdapter - round 58', () => {
+describe('FetchAdapter - cut-off responses and unbuildable requests', () => {
   test("a cut-off response's Set-Cookie is not written by serializeError", async () => {
     (globalThis as any).fetch = (_url: string, init?: RequestInit) =>
       Promise.resolve(
@@ -1980,7 +1980,7 @@ test('FetchAdapter refuses a method the runtime fetch would rewrite, rather than
   expect(builder.error?.code).toBe('adapter_error');
 });
 
-test('PR review round 47: FetchAdapter refuses a fetch that uppercases a custom method, which is case-sensitive', async () => {
+test('FetchAdapter refuses a fetch that uppercases a custom method, which is case-sensitive', async () => {
   let calls = 0;
   (globalThis as any).fetch = () => {
     calls++;
@@ -2017,7 +2017,7 @@ test('PR review round 47: FetchAdapter refuses a fetch that uppercases a custom 
   }
 });
 
-test('PR review round 37: an empty document.baseURI falls back to location, as the client resolves', async () => {
+test('an empty document.baseURI falls back to location, as the client resolves', async () => {
   const locationDescriptor = Object.getOwnPropertyDescriptor(
     globalThis,
     'location',
@@ -2050,7 +2050,7 @@ test('PR review round 37: an empty document.baseURI falls back to location, as t
   }
 });
 
-describe('FetchAdapter - PR review round 65', () => {
+describe('FetchAdapter - joining body chunks', () => {
   /** A `fetch` answering with a stream of `chunks`, read under a response limit. */
   async function readChunks(chunks: Uint8Array[]): Promise<Uint8Array> {
     (globalThis as any).fetch = () =>
@@ -2078,14 +2078,14 @@ describe('FetchAdapter - PR review round 65', () => {
     return response.body as Uint8Array;
   }
 
-  test('PR review round 65: a lone chunk that owns its buffer is the body as it is, not copied', async () => {
+  test('a lone chunk that owns its buffer is the body as it is, not copied', async () => {
     const chunk = new Uint8Array([1, 2, 3]);
     const body = await readChunks([chunk]);
 
     expect(body).toBe(chunk);
   });
 
-  test('PR review round 65: a lone chunk that shares its buffer, or is a Buffer, is copied into a plain array of its own', async () => {
+  test('a lone chunk that shares its buffer, or is a Buffer, is copied into a plain array of its own', async () => {
     const shared = new Uint8Array([9, 1, 2, 3, 9]);
     for (const chunk of [shared.subarray(1, 4), Buffer.from([1, 2, 3])]) {
       const body = await readChunks([chunk]);
@@ -2097,7 +2097,7 @@ describe('FetchAdapter - PR review round 65', () => {
     }
   });
 
-  test('PR review round 65: several chunks are joined in order', async () => {
+  test('several chunks are joined in order', async () => {
     const body = await readChunks([
       new Uint8Array([1, 2]),
       new Uint8Array([3]),
@@ -2108,7 +2108,7 @@ describe('FetchAdapter - PR review round 65', () => {
   });
 });
 
-describe('FetchAdapter - PR review round 66', () => {
+describe('FetchAdapter - body chunk types and sizes', () => {
   /** A `fetch` answering with a web stream of `chunks`, read under `maxResponseBytes`. */
   async function sendStreamed(chunks: unknown[], maxResponseBytes: number) {
     let isCancelled = false;
@@ -2140,7 +2140,7 @@ describe('FetchAdapter - PR review round 66', () => {
     return { response, isCancelled };
   }
 
-  test('PR review round 66: a chunk that is not a Uint8Array fails the body read as arrayBuffer() does, not as zeros', async () => {
+  test('a chunk that is not a Uint8Array fails the body read as arrayBuffer() does, not as zeros', async () => {
     // How the unlimited path fails for the same stream where `arrayBuffer()` follows the
     // Fetch standard (Node's undici, browsers): it rejects with a `TypeError`.
     (globalThis as any).fetch = () => {
@@ -2183,7 +2183,7 @@ describe('FetchAdapter - PR review round 66', () => {
     }
   });
 
-  test('PR review round 66: a chunk is counted by the bytes it holds, not the byteLength it reports', async () => {
+  test('a chunk is counted by the bytes it holds, not the byteLength it reports', async () => {
     class Understated extends Uint8Array {
       public override get byteLength(): number {
         return 0;
@@ -2202,7 +2202,7 @@ describe('FetchAdapter - PR review round 66', () => {
     expect([...(joined.response.body as Uint8Array)]).toEqual([1, 2, 3]);
   });
 
-  test('PR review round 66: a Uint8Array chunk from another realm is read as one', async () => {
+  test('a Uint8Array chunk from another realm is read as one', async () => {
     const { runInNewContext } = await import('node:vm');
     const foreign = runInNewContext('new Uint8Array([4, 5, 6])') as Uint8Array;
     const { response } = await sendStreamed([foreign], 100);
@@ -2210,7 +2210,7 @@ describe('FetchAdapter - PR review round 66', () => {
     expect([...(response.body as Uint8Array)]).toEqual([4, 5, 6]);
   });
 
-  test("PR review round 66: a polyfilled fetch's Readable that yields text is still read as its UTF-8 bytes", async () => {
+  test("a polyfilled fetch's Readable that yields text is still read as its UTF-8 bytes", async () => {
     const { Readable } = await import('node:stream');
     (globalThis as any).fetch = () =>
       Promise.resolve({
@@ -2232,8 +2232,8 @@ describe('FetchAdapter - PR review round 66', () => {
   });
 });
 
-describe('FetchAdapter - PR review round 74', () => {
-  test("PR review round 74: the bytes it is handed are copied by the runtime's fetch before send() returns, so a change made after it reaches nothing sent", async () => {
+describe('FetchAdapter - request body copy', () => {
+  test("the bytes it is handed are copied by the runtime's fetch before send() returns, so a change made after it reaches nothing sent", async () => {
     const received: number[][] = [];
     const server = Bun.serve({
       port: 0,
@@ -2263,8 +2263,8 @@ describe('FetchAdapter - PR review round 74', () => {
   });
 });
 
-describe('FetchAdapter - PR review round 78', () => {
-  test("PR review round 78: a body whose cancel() answers with another realm's rejecting promise leaves no unhandled rejection", async () => {
+describe('FetchAdapter - body cancel() rejecting from another realm', () => {
+  test("a body whose cancel() answers with another realm's rejecting promise leaves no unhandled rejection", async () => {
     const { runInNewContext } = await import('node:vm');
     let cancels = 0;
     (globalThis as any).fetch = () => {
@@ -2313,7 +2313,7 @@ describe('FetchAdapter - PR review round 78', () => {
   });
 });
 
-describe('FetchAdapter - PR review round 79', () => {
+describe('FetchAdapter - reader cancel() that throws or returns nothing', () => {
   /** A `fetch` answering with a body whose reader yields `chunks` and cancels with `cancel`. */
   async function sendWithReader(chunks: unknown[], cancel: () => unknown) {
     let cancels = 0;
@@ -2352,7 +2352,7 @@ describe('FetchAdapter - PR review round 79', () => {
     return { response, cancels };
   }
 
-  test("PR review round 79: a body over the limit is refused as too large when its reader's cancel() answers with nothing or throws", async () => {
+  test("a body over the limit is refused as too large when its reader's cancel() answers with nothing or throws", async () => {
     for (const cancel of [
       () => undefined,
       () => {
@@ -2370,7 +2370,7 @@ describe('FetchAdapter - PR review round 79', () => {
     }
   });
 
-  test("PR review round 79: a chunk that is not a Uint8Array keeps its TypeError when the reader's cancel() throws", async () => {
+  test("a chunk that is not a Uint8Array keeps its TypeError when the reader's cancel() throws", async () => {
     const { response, cancels } = await sendWithReader(['abc'], () => {
       throw new Error('cancel failed');
     });
@@ -2385,8 +2385,8 @@ describe('FetchAdapter - PR review round 79', () => {
   });
 });
 
-describe('FetchAdapter - PR review round 83', () => {
-  test('PR review round 83: a GET or HEAD with any body, an empty string included, is refused as non-retryable before fetch or upload progress', async () => {
+describe('FetchAdapter - GET and HEAD bodies', () => {
+  test('a GET or HEAD with any body, an empty string included, is refused as non-retryable before fetch or upload progress', async () => {
     let fetches = 0;
     (globalThis as any).fetch = () => {
       fetches++;

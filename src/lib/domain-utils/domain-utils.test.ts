@@ -3751,10 +3751,10 @@ describe('hyphens in IDN labels', () => {
   });
 });
 
-describe('PR review round 81', () => {
+describe('config entry whitespace and scheme case', () => {
   const NBSP = '\u00A0';
 
-  it('PR review round 81: an entry edged with a no-break space is invalid and never matches, as normalizeOrigin refuses it', () => {
+  it('an entry edged with a no-break space is invalid and never matches, as normalizeOrigin refuses it', () => {
     expect(normalizeOrigin(`https://example.com${NBSP}`)).toBe('');
 
     for (const entry of [
@@ -3821,7 +3821,7 @@ describe('PR review round 81', () => {
     });
   });
 
-  it('PR review round 81: an entry edged with spaces, tabs, CRs and LFs is trimmed as before', () => {
+  it('an entry edged with spaces, tabs, CRs and LFs is trimmed', () => {
     expect(validateConfigEntry(' https://example.com\t', 'origin')).toEqual({
       valid: true,
       wildcardKind: 'none',
@@ -3850,7 +3850,7 @@ describe('PR review round 81', () => {
     });
   });
 
-  it('PR review round 81: an origin entry scheme is lowercased in ASCII only', () => {
+  it('an origin entry scheme is lowercased in ASCII only', () => {
     // `toLowerCase` read the Kelvin sign as `k`, a scheme the URL parser never reads.
     expect(validateConfigEntry('\u212Aa://x.example', 'origin')).toEqual({
       valid: false,

@@ -294,7 +294,7 @@ test('a stream factory that throws its own AbortError fails as stream_setup_erro
   }
 });
 
-test('round 72: an empty ca is refused, more certificate failures are 495', () => {
+test('an empty ca is refused, more certificate failures are 495', () => {
   for (const config of [
     { ca: '' },
     { ca: [] },

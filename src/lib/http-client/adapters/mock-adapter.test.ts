@@ -390,7 +390,7 @@ describe('MockAdapter via HTTPClient', () => {
     ).toBe('c');
   });
 
-  test('PR review round 75: a FormData body is read through the intrinsic entries, not one the form declares', async () => {
+  test('a FormData body is read through the intrinsic entries, not one the form declares', async () => {
     let captured: MockFormData | undefined;
 
     adapter.routes.post('/upload', (req) => {
@@ -1243,7 +1243,7 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(res.detectedRedirectURL).toBeUndefined();
   });
 
-  test('PR review round 40: a path-only request URL resolves a relative Location against the mock default base', async () => {
+  test('a path-only request URL resolves a relative Location against the mock default base', async () => {
     adapter.routes.get('/start', () => ({
       status: 302,
       headers: { Location: '/next' },
@@ -1986,7 +1986,7 @@ describe('MockAdapter transportError', () => {
     expect(res.status).toBe(495);
   });
 
-  test('PR review round 41: each transportError field is read once', async () => {
+  test('each transportError field is read once', async () => {
     const adapter = new MockAdapter();
     const reads = { status: 0, isRetryable: 0, wasDefinitelyNotSent: 0 };
 
@@ -2022,7 +2022,7 @@ describe('MockAdapter transportError', () => {
     });
   });
 
-  test('PR review round 42: a transportError field whose getter throws is refused as the route mistake', async () => {
+  test('a transportError field whose getter throws is refused as the route mistake', async () => {
     // Only `status` was read as the route's mistake: a throwing `isRetryable`,
     // `wasDefinitelyNotSent` or `message` escaped as a retryable adapter failure.
     for (const field of [
@@ -2364,8 +2364,8 @@ for (const source of ['handler', 'error handler'] as const) {
   }
 }
 
-describe('MockAdapter - PR review round 56', () => {
-  test("PR review round 56: a route body of bytes from another realm is sent as this realm's Uint8Array", async () => {
+describe('MockAdapter - route body bytes from another realm', () => {
+  test("a route body of bytes from another realm is sent as this realm's Uint8Array", async () => {
     const adapter = new MockAdapter();
     const foreignBytes = vm.runInNewContext(
       'new Uint8Array([1, 2, 3, 255])',
@@ -2396,7 +2396,7 @@ describe('MockAdapter - PR review round 56', () => {
     expect(bufferResponse.headers['content-type']).toBeUndefined();
   });
 
-  test("PR review round 56: a HEAD route's bytes from another realm are not typed as JSON", async () => {
+  test("a HEAD route's bytes from another realm are not typed as JSON", async () => {
     const adapter = new MockAdapter();
     const foreignBytes = vm.runInNewContext(
       'new Uint8Array([1])',
@@ -2411,7 +2411,7 @@ describe('MockAdapter - PR review round 56', () => {
     expect(response.headers['content-type']).toBeUndefined();
   });
 
-  test('PR review round 56: a typed array other than a Uint8Array is still refused, from any realm', async () => {
+  test('a typed array other than a Uint8Array is still refused, from any realm', async () => {
     const adapter = new MockAdapter();
     adapter.routes.get('/int16', () => ({
       status: 200,
@@ -2431,7 +2431,7 @@ describe('MockAdapter - PR review round 56', () => {
   });
 });
 
-test('PR review round 59: a route body that is a Proxy over an ArrayBuffer is refused, not sent as no bytes; one over a Uint8Array is still delivered', async () => {
+test('a route body that is a Proxy over an ArrayBuffer is refused, not sent as no bytes; one over a Uint8Array is still delivered', async () => {
   const proxiedView = new Proxy(new Uint8Array([4, 5, 6]), {});
   const adapter = new MockAdapter();
   adapter.routes.get('/buffer', () => ({
@@ -2465,7 +2465,7 @@ test('PR review round 59: a route body that is a Proxy over an ArrayBuffer is re
   expect(view.body).toBe(proxiedView);
 });
 
-test('PR review round 59: a body the mock refuses is not labelled JSON on a HEAD route or under a simulated stream error', async () => {
+test('a body the mock refuses is not labelled JSON on a HEAD route or under a simulated stream error', async () => {
   const adapter = new MockAdapter();
   const proxiedBuffer = () => new Proxy(new Uint8Array([1, 2]).buffer, {});
   adapter.routes.head('/buffer', () => ({
@@ -2495,8 +2495,8 @@ test('PR review round 59: a body the mock refuses is not labelled JSON on a HEAD
   expect(json.headers['content-type']).toBe('application/json');
 });
 
-describe('MockAdapter - PR review round 64', () => {
-  test('PR review round 64: a route status that is not a number is described by its type, not echoed', async () => {
+describe('MockAdapter - invalid route status and delayed abort', () => {
+  test('a route status that is not a number is described by its type, not echoed', async () => {
     const adapter = new MockAdapter();
     let didCallToString = false;
     adapter.routes.get('/string', () => ({
@@ -2537,7 +2537,7 @@ describe('MockAdapter - PR review round 64', () => {
     expect(rejection?.message).toContain('returned status 1000;');
   });
 
-  test('PR review round 64: an abort during the response delay rejects as every other abort does', async () => {
+  test('an abort during the response delay rejects as every other abort does', async () => {
     const adapter = new MockAdapter();
     adapter.routes.get('/slow', () => ({ status: 200, delay: 1000 }));
     adapter.routes.get('/fast', () => ({ status: 200 }));
@@ -2580,8 +2580,8 @@ describe('MockAdapter - PR review round 64', () => {
   });
 });
 
-describe('MockAdapter - PR review round 71', () => {
-  test('PR review round 71: a request body of bytes from another realm reaches the route as bytes, decoded by its content type', async () => {
+describe('MockAdapter - request body bytes from another realm', () => {
+  test('a request body of bytes from another realm reaches the route as bytes, decoded by its content type', async () => {
     const adapter = new MockAdapter();
     const received: unknown[] = [];
     adapter.routes.post('/upload', (request) => {
@@ -2616,8 +2616,8 @@ describe('MockAdapter - PR review round 71', () => {
   });
 });
 
-describe('MockAdapter - PR review round 72a', () => {
-  test('PR review round 72a: a route body of bytes is delivered as a copy, so changing it leaves the fixture as it was', async () => {
+describe('MockAdapter - route body bytes are copied', () => {
+  test('a route body of bytes is delivered as a copy, so changing it leaves the fixture as it was', async () => {
     const bytes = new Uint8Array([1, 2, 3]);
     const buffer = new Uint8Array([4, 5, 6]).buffer;
     const adapter = new MockAdapter();
@@ -2644,7 +2644,7 @@ describe('MockAdapter - PR review round 72a', () => {
     }
   });
 
-  test('PR review round 72a: a route body changed while the response is delayed is delivered as the route answered it', async () => {
+  test('a route body changed while the response is delayed is delivered as the route answered it', async () => {
     const shared = { v: 1 };
     const adapter = new MockAdapter();
     adapter.routes.get('/delayed', () => {
@@ -2665,8 +2665,8 @@ describe('MockAdapter - PR review round 72a', () => {
   });
 });
 
-describe('MockAdapter - PR review round 81', () => {
-  test('PR review round 81: a cookie is trimmed of spaces and tabs only, as the jar trims it, so a jar value ending in 0xA0 arrives whole', async () => {
+describe('MockAdapter - Cookie header trimming', () => {
+  test('a cookie is trimmed of spaces and tabs only, as the jar trims it, so a jar value ending in 0xA0 arrives whole', async () => {
     // A UTF-8 `à` read as latin1: `Ã` and a 0xA0 byte, which `trim()` took as a no-break space.
     const value = 'caf\u00C3\u00A0';
     const jar = new CookieJar();

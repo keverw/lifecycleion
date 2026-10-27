@@ -1161,7 +1161,7 @@ describe('serializeMultipartFormData', () => {
     expect(writeOrder.length).toBeGreaterThan(1);
   });
 
-  test('PR review round 54: a backpressured File chunk is accepted on its callback, with no drain', async () => {
+  test('a backpressured File chunk is accepted on its callback, with no drain', async () => {
     // Every `Blob.stream()` chunk Node yields is larger than a request's high-water mark,
     // so every one asks for a drain - and Node and Bun stop emitting `'drain'` once an
     // early response has ended. Waiting for it as well parked the writer on the first
@@ -1265,7 +1265,7 @@ test('uses the original part size even when size changes after the sizing pass',
   expect(capture.getBody().toString()).not.toContain('AAA');
 });
 
-test('round 129: a File named "" is sent as filename="", one with no name as blob', async () => {
+test('a File named "" is sent as filename="", one with no name as blob', async () => {
   // Built by hand: Bun's FormData hands back an empty-named File with no `name` at all,
   // where Node's keeps `''`.
   const emptyNamed = Object.assign(new Blob(['x']), { name: '' });
@@ -1286,7 +1286,7 @@ test('round 129: a File named "" is sent as filename="", one with no name as blo
   expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
 });
 
-test('PR review round 36: a field appended mid-upload is refused before any of its bytes go out', async () => {
+test('a field appended mid-upload is refused before any of its bytes go out', async () => {
   const fd = new FormData();
   fd.append('first', 'one');
   const { req, getBody } = makeCapture();
@@ -1315,7 +1315,7 @@ test('PR review round 36: a field appended mid-upload is refused before any of i
   expect(getBody().toString().split(`--${boundary}\r\n`).length - 1).toBe(1);
 });
 
-test('PR review round 37: a File that outgrows its measured size is refused naming that part', async () => {
+test('a File that outgrows its measured size is refused naming that part', async () => {
   // Claims two bytes; its stream yields six. Nothing else outgrew the body, so the message
   // names the part's size, not the body's `Content-Length`.
   const longFile = {
@@ -1353,7 +1353,7 @@ test('PR review round 37: a File that outgrows its measured size is refused nami
   expect(getBody().includes(Buffer.from([1, 2, 3]))).toBe(false);
 });
 
-test('PR review round 37: a chunk within its part but past the body total is refused before it is written', async () => {
+test('a chunk within its part but past the body total is refused before it is written', async () => {
   let wasGrownPartCancelled = false;
   // The grown part's stream stays open after its chunk, so only a cancel ends it.
   const blobPart = (name: string, bytes: number[], isLeftOpen = false) => ({
@@ -1409,7 +1409,7 @@ test('PR review round 37: a chunk within its part but past the body total is ref
   expect(wasGrownPartCancelled).toBe(true);
 });
 
-describe('PR review round 54: caller values the writer cannot use are refused as non-retryable', () => {
+describe('caller values the writer cannot use are refused as non-retryable', () => {
   // A `FormData` yielding the part as it is: Bun's `append` copies a `File` subclass into a
   // plain `File`, which would leave nothing to misbehave.
   const formWith = (part: unknown): FormData => {
@@ -1523,7 +1523,7 @@ describe('PR review round 54: caller values the writer cannot use are refused as
   });
 });
 
-describe('PR review round 54: source chunks the writing pass reads', () => {
+describe('source chunks the writing pass reads', () => {
   test('a stream() that yields the whole part as one chunk is written in REQUEST_BODY_CHUNK_SIZE slices', async () => {
     // Node's `Blob.stream()` yields an in-memory `Blob` as a single chunk. Written as one
     // `req.write`, a 64 MiB `File` reported no progress between 0 and 100%, and the
@@ -1603,7 +1603,7 @@ describe('PR review round 54: source chunks the writing pass reads', () => {
   });
 });
 
-describe('PR review round 54: source chunks are counted and sliced as the bytes they hold', () => {
+describe('source chunks are counted and sliced as the bytes they hold', () => {
   // A `File` whose `stream()` yields exactly `chunks`, with a `size` of `size`, in a
   // `FormData` that yields it as it is (Bun's `append` copies a `File` subclass).
   const formWithChunks = (
@@ -1800,7 +1800,7 @@ describe('PR review round 54: source chunks are counted and sliced as the bytes 
   });
 });
 
-test('PR review round 75: a form is read through the intrinsic entries, not one it declares', async () => {
+test('a form is read through the intrinsic entries, not one it declares', async () => {
   const reported = (): Iterator<[string, string]> =>
     [['reported', 'not held'] as [string, string]][Symbol.iterator]();
   // A subclass's `entries`, and a form's own.

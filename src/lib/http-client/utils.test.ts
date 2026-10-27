@@ -220,7 +220,7 @@ describe('resolveAbsoluteURLForRuntime', () => {
     );
   });
 
-  test('PR review round 36: resolves a path-relative URL against the page as a document, as fetch does', () => {
+  test('resolves a path-relative URL against the page as a document, as fetch does', () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).document = {
       baseURI: 'https://app.test/dir/page',
@@ -295,8 +295,8 @@ describe('stripCrossOriginURLCredentials', () => {
   });
 });
 
-describe('URL userinfo removal - PR review round 78', () => {
-  test('PR review round 78: every userinfo remover keeps an absolute URL absolute and a network-path reference in its network-path form', () => {
+describe('URL userinfo removal', () => {
+  test('every userinfo remover keeps an absolute URL absolute and a network-path reference in its network-path form', () => {
     const cases: Array<[string, string]> = [
       [stripURLCredentials('https://u:p@a.test/x?q#h'), 'https://a.test/x?q#h'],
       [stripURLCredentials('https://u@a.test/x'), 'https://a.test/x'],
@@ -530,8 +530,8 @@ describe('parseContentType', () => {
   });
 });
 
-describe('content-type matching - PR review round 79', () => {
-  test('PR review round 79: a media type is trimmed of HTTP whitespace and lowercased in ASCII only', () => {
+describe('content-type matching', () => {
+  test('a media type is trimmed of HTTP whitespace and lowercased in ASCII only', () => {
     expect(parseContentType(' Application/JSON\t; charset=utf-8')).toBe('json');
     // NO-BREAK SPACE is not HTTP whitespace, so the media type is not `application/json`.
     expect(parseContentType('\u00A0application/json')).toBe('binary');
@@ -1234,7 +1234,7 @@ describe('matchesHostPattern', () => {
     });
   });
 
-  test('PR review round 72: a wildcard matches a host with a hyphen at a label edge, as the URL parser reads it', async () => {
+  test('a wildcard matches a host with a hyphen at a label edge, as the URL parser reads it', async () => {
     // DNS refuses the edge hyphen, the URL parser does not, and a request goes there.
     expect(matchesHostPattern('-edge.example.com', '*.example.com')).toBe(true);
     expect(matchesHostPattern('a.edge-.example.com', '**.example.com')).toBe(
@@ -1619,7 +1619,7 @@ test.each([NaN, Infinity, -Infinity])(
   },
 );
 
-test('PR review round 82: serializeBody refuses a body whose prototype answers differently once it has passed the check', () => {
+test('serializeBody refuses a body whose prototype answers differently once it has passed the check', () => {
   let looks = 0;
   // A plain object to `assertSupportedRequestBody`'s two looks, then not one.
   const body = new Proxy(

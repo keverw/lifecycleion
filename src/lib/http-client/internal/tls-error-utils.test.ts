@@ -336,7 +336,7 @@ describe('isTLSCertificateError cause handling', () => {
   });
 });
 
-test('round 130: an unknown_ca alert is a certificate error; a socket path naming certificates is not', () => {
+test('an unknown_ca alert is a certificate error; a socket path naming certificates is not', () => {
   const unknownCA = Object.assign(new Error('tlsv1 alert unknown ca'), {
     code: 'ERR_SSL_TLSV1_ALERT_UNKNOWN_CA',
   });
@@ -355,7 +355,7 @@ test('round 130: an unknown_ca alert is a certificate error; a socket path namin
   expect(isTLSCertificateError(socketPath)).toBe(false);
 });
 
-test('round 137: a getaddrinfo EAI_FAIL is a transport failure whatever the host name says', () => {
+test('a getaddrinfo EAI_FAIL is a transport failure whatever the host name says', () => {
   const dns = Object.assign(
     new Error('getaddrinfo EAI_FAIL certificates.internal.corp'),
     { code: 'EAI_FAIL' },

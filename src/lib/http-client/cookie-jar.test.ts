@@ -3172,7 +3172,7 @@ test.each(['maxAge', 'createdAt', 'expires', 'getTime'])(
   },
 );
 
-describe('round 62', () => {
+describe('CookieJar - accepting and expiring cookies', () => {
   test('a cookie a header cannot carry is refused, so the host keeps its other cookies', () => {
     const jar = new CookieJar();
     expect(
@@ -3287,8 +3287,8 @@ test('an edge-hyphen host whose stand-in would read as a public suffix still get
 // RFC 6265bis §5.1.2 canonicalizes a request host without removing a trailing dot (the
 // URL parser keeps it), and §5.1.3 domain-matches strings as they are: `example.com.` is
 // a different host from `example.com`, as browsers treat it.
-describe('PR review round 51: a trailing dot is part of the host', () => {
-  test('PR review round 51: a host-only cookie is not sent to the other form of its host', () => {
+describe('a trailing dot is part of the host', () => {
+  test('a host-only cookie is not sent to the other form of its host', () => {
     const jar = new CookieJar();
 
     jar.parseSetCookieHeader('b=2', 'https://www.example.com/');
@@ -3298,7 +3298,7 @@ describe('PR review round 51: a trailing dot is part of the host', () => {
     expect(jar.getCookieHeaderString('https://WWW.EXAMPLE.COM./')).toBe('c=3');
   });
 
-  test('PR review round 51: a domain cookie is not sent to trailing-dot hosts under it, nor the reverse', () => {
+  test('a domain cookie is not sent to trailing-dot hosts under it, nor the reverse', () => {
     const jar = new CookieJar();
 
     jar.parseSetCookieHeader(
@@ -3322,7 +3322,7 @@ describe('PR review round 51: a trailing dot is part of the host', () => {
     ]);
   });
 
-  test('PR review round 51: a Domain attribute must be a suffix of the request host as written', () => {
+  test('a Domain attribute must be a suffix of the request host as written', () => {
     const jar = new CookieJar();
 
     // `www.example.com.` does not end in `.example.com`, and `www.example.com` does not
@@ -3345,7 +3345,7 @@ describe('PR review round 51: a trailing dot is part of the host', () => {
     expect(jar.getCookieHeaderString('https://example.com/')).toBe('sid=1');
   });
 
-  test('PR review round 51: a trailing-dot public suffix is still refused, and kept host-only for itself', () => {
+  test('a trailing-dot public suffix is still refused, and kept host-only for itself', () => {
     const jar = new CookieJar({ publicSuffixes: { add: ['corp.internal'] } });
 
     for (const [header, url] of [
@@ -3380,7 +3380,7 @@ describe('PR review round 51: a trailing dot is part of the host', () => {
     expect(jar.getCookieHeaderString('https://a.corp.internal./')).toBe('');
   });
 
-  test('PR review round 51: an IPv4 address with a trailing dot is no stored domain', () => {
+  test('an IPv4 address with a trailing dot is no stored domain', () => {
     const jar = new CookieJar();
 
     // The URL parser reads `127.0.0.1.` as the address, so its cookies are the address's.
@@ -3395,7 +3395,7 @@ describe('PR review round 51: a trailing dot is part of the host', () => {
     expect(jar.getStoredDomains()).toEqual([{ domain: '127.0.0.1', count: 1 }]);
   });
 
-  test('PR review round 51: setCookie, fromJSON and clear keep the two forms apart', () => {
+  test('setCookie, fromJSON and clear keep the two forms apart', () => {
     const jar = new CookieJar();
 
     expect(
@@ -3441,7 +3441,7 @@ describe('PR review round 51: a trailing dot is part of the host', () => {
     ]);
   });
 
-  test('PR review round 51: a Secure cookie is left alone by its own host only', () => {
+  test('a Secure cookie is left alone by its own host only', () => {
     const jar = new CookieJar();
 
     jar.parseSetCookieHeader('sid=secure; Secure', 'https://www.example.com./');
@@ -3459,7 +3459,7 @@ describe('PR review round 51: a trailing dot is part of the host', () => {
   });
 });
 
-test('PR review round 67: setCookie decides whether the cookie it replaces has expired at the time it stores', () => {
+test('setCookie decides whether the cookie it replaces has expired at the time it stores', () => {
   const jar = new CookieJar();
   let clock = 1_000_000;
   const nowSpy = spyOn(Date, 'now').mockImplementation(() => clock);
@@ -3507,7 +3507,7 @@ test('PR review round 67: setCookie decides whether the cookie it replaces has e
   }
 });
 
-test('PR review round 68: a stored cookie whose maxAge was changed to a non-number counts as expired', () => {
+test('a stored cookie whose maxAge was changed to a non-number counts as expired', () => {
   const jar = new CookieJar();
   let clock = 1_000_000;
   const nowSpy = spyOn(Date, 'now').mockImplementation(() => clock);
@@ -3556,7 +3556,7 @@ test('PR review round 68: a stored cookie whose maxAge was changed to a non-numb
   }
 });
 
-test('PR review round 68: a stored cookie whose createdAt or expires was changed to something unreadable is cleared', () => {
+test('a stored cookie whose createdAt or expires was changed to something unreadable is cleared', () => {
   for (const tamper of [
     (cookie: Record<string, unknown>) => {
       cookie.createdAt = Number.NaN;
@@ -3586,7 +3586,7 @@ test('PR review round 68: a stored cookie whose createdAt or expires was changed
   }
 });
 
-test('PR review round 68: the 400-day cap reads a Date by its time, not a getTime it carries', () => {
+test('the 400-day cap reads a Date by its time, not a getTime it carries', () => {
   const jar = new CookieJar();
   const farFuture = new Date(Date.now() + 10 * 365 * 24 * 3600 * 1000);
   Object.defineProperty(farFuture, 'getTime', { value: () => 0 });
@@ -3606,7 +3606,7 @@ test('PR review round 68: the 400-day cap reads a Date by its time, not a getTim
   expect(storedTime).toBeLessThanOrEqual(Date.now() + 400 * 24 * 3600 * 1000);
 });
 
-test("PR review round 69: a stored cookie's expiry is the jar's own Date, not the caller's", () => {
+test("a stored cookie's expiry is the jar's own Date, not the caller's", () => {
   const capMS = 400 * 24 * 3600 * 1000;
 
   // Through `setCookie`, and through `fromJSON`, which stores through it.
@@ -3652,7 +3652,7 @@ test("PR review round 69: a stored cookie's expiry is the jar's own Date, not th
   }
 });
 
-test('PR review round 69: setCookie stores a replacement whose replaced cookie empties the jar while it is read', () => {
+test('setCookie stores a replacement whose replaced cookie empties the jar while it is read', () => {
   const jar = new CookieJar();
   const url = 'https://example.com/';
   const cookie = {
@@ -3681,7 +3681,7 @@ test('PR review round 69: setCookie stores a replacement whose replaced cookie e
   expect(jar.getAllCookies().map((c) => c.value)).toEqual(['2']);
 });
 
-test('PR review round 69: clearExpiredCookies leaves a cookie stored while it read the one it judged expired', () => {
+test('clearExpiredCookies leaves a cookie stored while it read the one it judged expired', () => {
   const jar = new CookieJar();
   const url = 'https://example.com/';
   const cookie = {
@@ -3711,7 +3711,7 @@ test('PR review round 69: clearExpiredCookies leaves a cookie stored while it re
   expect(jar.getCookieHeaderString(url)).toBe('a=2');
 });
 
-test('PR review round 72: a stored cookie edited past the lifetime cap expires at the cap', () => {
+test('a stored cookie edited past the lifetime cap expires at the cap', () => {
   const capMS = 400 * 24 * 3600 * 1000;
   let clock = 1_000_000;
   const nowSpy = spyOn(Date, 'now').mockImplementation(() => clock);
@@ -3757,7 +3757,7 @@ test('PR review round 72: a stored cookie edited past the lifetime cap expires a
   }
 });
 
-test('PR review round 72: fromJSON refuses an entry it cannot read and reads a Date by its time', () => {
+test('fromJSON refuses an entry it cannot read and reads a Date by its time', () => {
   const jar = new CookieJar();
   jar.setCookie({ name: 'old', value: '1', domain: 'example.com', path: '/' });
   const cookie = {
@@ -3802,7 +3802,7 @@ test('PR review round 72: fromJSON refuses an entry it cannot read and reads a D
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
 });
 
-test('PR review round 72: the lifetime cap is measured from when the jar stored the cookie', () => {
+test('the lifetime cap is measured from when the jar stored the cookie', () => {
   const capMS = 400 * 24 * 3600 * 1000;
   const start = 1_000_000;
   let clock = start;
@@ -3867,7 +3867,7 @@ test('PR review round 72: the lifetime cap is measured from when the jar stored 
   }
 });
 
-test('PR review round 72: fromJSON refuses a cookies array whose length cannot be read', () => {
+test('fromJSON refuses a cookies array whose length cannot be read', () => {
   const jar = new CookieJar();
   jar.setCookie({ name: 'old', value: '1', domain: 'example.com', path: '/' });
   const cookies = new Proxy([], {
@@ -3884,7 +3884,7 @@ test('PR review round 72: fromJSON refuses a cookies array whose length cannot b
   expect(jar.getAllCookies().map((c) => c.name)).toEqual(['old']);
 });
 
-test('PR review round 72: a stored cookie whose createdAt was moved far forward is still sent and still guards its Secure name', () => {
+test('a stored cookie whose createdAt was moved far forward is still sent and still guards its Secure name', () => {
   const jar = new CookieJar();
   jar.setCookie({
     name: 's',
@@ -3913,7 +3913,7 @@ test('PR review round 72: a stored cookie whose createdAt was moved far forward 
   expect(restored.getCookieHeaderString('https://example.com/')).toBe('s=1');
 });
 
-test('PR review round 73: a stored cookie edited through getAllCookies() is purged exactly when it stops being sent', () => {
+test('a stored cookie edited through getAllCookies() is purged exactly when it stops being sent', () => {
   const capMS = 400 * 24 * 3600 * 1000;
   const hourMS = 3600 * 1000;
   const start = 1_000_000;
