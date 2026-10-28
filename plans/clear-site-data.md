@@ -19,7 +19,7 @@ Read the current W3C Clear Site Data draft and check each of these against it, a
 ## Design
 
 - **Where it lives.** `CookieJar.processResponseHeaders(headers, url)` is the single place `HTTPClient` stores `Set-Cookie`. It is called from the answered path and from the stream-failure path in `http-client.ts`. Reading `clear-site-data` there covers both call sites, retries and redirect hops, and a caller who drives the jar by hand.
-- **Which site.** Use the jar's `registrableDomainFor`, so `publicSuffixes` overrides apply. Under a removed suffix a response from `x.example.com` with `com` removed clears the `com` site, but not `app.blogspot.com`, which sits behind a listed suffix. A response never clears a whole removed TLD, which only a caller's explicit `clear('com', 'domain')` does. The jar's `clearDomainWithinBucket` already implements exactly this rule.
+- **Which site.** The jar files cookies in one bucket per site, keyed by `apexFor(host)`: the registrable domain under the jar's `publicSuffixes`, so overrides apply. A `Domain=` cannot reach above the setting host's site, so the response host's bucket holds exactly that site's cookies, and clearing the site is deleting that one bucket (then pruning). Delete the bucket directly rather than calling `clear(host, 'domain')`: for a host that is a public suffix (a response from `github.io` itself) or a removed suffix, `clear` reaches every site under it, and a response must clear only its own. Under a removed suffix the site can be the removed name: with `com` removed, a response from `x.example.com` clears the `com` site - every host under `.com` not behind a listed suffix, and `Domain=com` cookies - and leaves `app.blogspot.com`'s own cookies, a site of its own behind `blogspot.com`. Only a caller's explicit `clear('com', 'domain')` reaches into those sites.
 - **Opt-in or default-on.** Browsers always honor the header. The library prefers explicit APIs, so decide between:
   - a `CookieJar` option (`new CookieJar({ clearSiteData: true })`), off by default;
   - on by default, with an option to turn it off.
@@ -39,6 +39,7 @@ Read the current W3C Clear Site Data draft and check each of these against it, a
    - unknown types, unquoted values and other malformed headers are ignored without throwing;
    - the `Set-Cookie` ordering on a single response;
    - a redirect hop's header, through `HTTPClient` with `MockAdapter`;
-   - under `publicSuffixes` removals, the site is cleared and the removed TLD is not;
+   - under `publicSuffixes` removals, the response host's site is cleared and the sites behind a suffix still listed are not;
+   - a response from a public suffix host (`github.io`) clears only that host's own cookies, not its tenants';
    - trailing-dot and IP-literal hosts.
 5. Docs: a section in `docs/http-client.md` next to the cookie jar's `clear()`, and a changelog bullet.
