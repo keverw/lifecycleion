@@ -1063,6 +1063,27 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('a Location on lines of its own keeps its first line whole, as no XHR joined it', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 302;
+    lastXHR.responseURL = 'https://api.test/start';
+    lastXHR.getAllResponseHeadersResult =
+      'location: /login?next=/a, /b\r\nlocation: /other\r\n';
+    lastXHR.response = textBody('');
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.headers.location).toBe('/login?next=/a, /b');
+    expect(response.detectedRedirectURL).toBe(
+      'https://api.test/login?next=/a,%20/b',
+    );
+  });
+
   test('a header on lines of its own is joined, as a browser joins it', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',

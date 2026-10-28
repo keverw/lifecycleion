@@ -794,10 +794,11 @@ function readResponseBody(
  * into a single comma-joined line for most headers, but emits each `Set-Cookie`
  * value as its own line (per spec) to avoid ambiguity with the comma in cookie
  * values. Those are collected here as `string[]` to match the
- * `AdapterResponse.headers` contract. Any other header given on more than one
- * line - by an XHR outside a browser - is joined with `, ` as a browser joins
- * it, so both forms read the same, and a repeated `Location` keeps its first
- * value, as FetchAdapter keeps the first of one fetch joined.
+ * `AdapterResponse.headers` contract. Any other header but `Location` given on
+ * more than one line - by an XHR outside a browser - is joined with `, ` as a
+ * browser joins it, so both forms read the same. A repeated `Location` keeps its
+ * first value: the first line's, whole, when the XHR gives each on a line of its
+ * own, and otherwise the first of one the XHR joined, as FetchAdapter keeps it.
  *
  * Note: browsers unconditionally block `Set-Cookie` and `Set-Cookie2` from
  * `getAllResponseHeaders()` per the XHR spec, so the `set-cookie` array
@@ -808,6 +809,7 @@ function parseXHRResponseHeaders(
   raw: string,
 ): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
+  let locationLines = 0;
 
   if (!raw) {
     return result;
@@ -852,6 +854,13 @@ function parseXHRResponseHeaders(
       } else {
         result['set-cookie'] = [existing, value];
       }
+    } else if (key === 'location') {
+      // The first line's value: the others are repeats, and the value is not joined.
+      locationLines++;
+
+      if (locationLines === 1) {
+        result['location'] = value;
+      }
     } else {
       const existing = Object.hasOwn(result, key) ? result[key] : undefined;
 
@@ -865,10 +874,13 @@ function parseXHRResponseHeaders(
     }
   }
 
-  // A repeated `Location` keeps its first value, rather than standing as the one mangled
-  // URL `a,%20b` that an XHR outside a browser would follow and `detectedRedirectURL`
-  // would report.
-  keepFirstJoinedLocation(result);
+  // A `Location` on one line may be one the XHR joined from repeats (a browser joins
+  // them): its first value is kept, rather than standing as the one mangled URL
+  // `a,%20b` that an XHR outside a browser would follow and `detectedRedirectURL` would
+  // report. One given on lines of its own already is its first value, whole.
+  if (locationLines === 1) {
+    keepFirstJoinedLocation(result);
+  }
 
   return result;
 }
