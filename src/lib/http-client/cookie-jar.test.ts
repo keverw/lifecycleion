@@ -2912,6 +2912,14 @@ describe('CookieJar', () => {
             createdAt: 'yesterday',
           },
           { ...base, name: 'object-created-at', maxAge: 60, createdAt: {} },
+          // Refused before it is held to now: `Math.min` would read the string as its
+          // number and the infinity as now.
+          { ...base, name: 'numeric-string-created-at', createdAt: '5' },
+          {
+            ...base,
+            name: 'infinite-created-at',
+            createdAt: Number.POSITIVE_INFINITY,
+          },
           {
             ...base,
             name: 'masked-expires',
@@ -2930,6 +2938,8 @@ describe('CookieJar', () => {
         'infinite-max-age',
         'string-created-at',
         'object-created-at',
+        'numeric-string-created-at',
+        'infinite-created-at',
         'masked-expires',
       ]) {
         expect(jar.getCookieFor(name, 'https://example.com')).toBeUndefined();
@@ -2966,6 +2976,16 @@ describe('CookieJar', () => {
       );
       expect(nullCreatedAt?.createdAt).toBeGreaterThanOrEqual(before);
       expect(jar.clearExpiredCookies()).toBe(0);
+    });
+
+    test('setCookie refuses a null createdAt, which only fromJSON reads as absent', () => {
+      const base = { value: 'x', domain: 'example.com', path: '/' };
+      jar.setCookie({ ...base, name: 'id', value: 'kept' });
+
+      expect(
+        jar.setCookie({ ...base, name: 'id', createdAt: null } as never),
+      ).toBe(false);
+      expect(jar.getCookieFor('id', 'https://example.com')?.value).toBe('kept');
     });
 
     test('reads a null or absent expires as no expiry and a number as epoch milliseconds', () => {

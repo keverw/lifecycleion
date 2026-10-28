@@ -45,16 +45,23 @@ interface CookieLifetime {
  * cookie is sent exactly while it is not purged. Capped before any sum is taken: a
  * `maxAge` large enough to overflow `createdAt + maxAge * 1000` expires at the cap rather
  * than reading as unreadable. `null` when a field cannot take part - a `createdAt` or
- * `maxAge` that is not a finite number, an `expires` time that is `NaN`.
+ * `maxAge` that is not a finite number, an `expires` time that is `NaN` - so the jar
+ * never holds a cookie whose expiry is `NaN` and therefore never past.
+ *
+ * The returned `createdAt` is never later than `now`: the cap (and `maxAge`) count from it, so a
+ * persisted jar claiming a creation five years on would hold a cookie past the cap.
  */
 function cookieLifetime(
-  createdAt: unknown,
+  rawCreatedAt: unknown,
   maxAge: unknown,
   expires: number | undefined,
+  now: number,
 ): CookieLifetime | null {
-  if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) {
+  if (typeof rawCreatedAt !== 'number' || !Number.isFinite(rawCreatedAt)) {
     return null;
   }
+
+  const createdAt = Math.min(rawCreatedAt, now);
 
   if (
     maxAge !== undefined &&
@@ -426,9 +433,22 @@ export class CookieJar {
       }
     }
 
-    if (!this.hasReadableExpiry(input)) {
+    // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
+    // creation: a cookie restored through `fromJSON` with a 10-year lifetime would
+    // otherwise keep it. Only an absent `createdAt` is now; a `null` is refused.
+    const now = Date.now();
+    const lifetime = cookieLifetime(
+      input.createdAt === undefined ? now : input.createdAt,
+      input.maxAge,
+      input.expires?.getTime(),
+      now,
+    );
+
+    if (lifetime === null) {
       return false;
     }
+
+    const { createdAt } = lifetime;
 
     // Booleans or absent: the send path reads `secure` and `hostOnly` as `true` or not,
     // so a `secure: 'yes'` would be reported as set and still be sent over `http:`.
@@ -483,10 +503,6 @@ export class CookieJar {
     ) {
       return false;
     }
-    // Never in the future: the lifetime cap (and `Max-Age`) count from it, so a persisted
-    // jar claiming a creation five years on would hold a cookie past the cap.
-    const now = Date.now();
-    const createdAt = Math.min(input.createdAt ?? now, now);
     const site = this.siteFor(domain);
 
     // The cookie's own fields only, so what is stored, listed by `getAllCookies()` and
@@ -516,20 +532,6 @@ export class CookieJar {
     // deletes it. A jar saved under another suffix list can hold one.
     if (stored.hostOnly !== true && this.isPublicSuffix(domain)) {
       stored.hostOnly = true;
-    }
-
-    // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
-    // creation: a cookie restored through `fromJSON` with a 10-year lifetime would
-    // otherwise keep it. Readable, as `hasReadableExpiry` passed it, and its `expires`
-    // the jar's own.
-    const lifetime = cookieLifetime(
-      createdAt,
-      stored.maxAge,
-      stored.expires?.getTime(),
-    );
-
-    if (lifetime === null) {
-      return false;
     }
 
     applyLifetime(stored, lifetime);
@@ -1859,40 +1861,6 @@ export class CookieJar {
     }
 
     return this.publicSuffixes.isPublicSuffix(domain);
-  }
-
-  /**
-   * Whether every expiry field the cookie carries can take part in the expiry check.
-   * `setCookie` refuses a cookie this rejects, so the jar never holds a cookie whose
-   * expiry is `NaN` and therefore never past.
-   */
-  private hasReadableExpiry(cookie: CookieInput): boolean {
-    const { expires, maxAge, createdAt } = cookie;
-
-    // A `Date` read by its time, not `instanceof`, so one from another realm counts.
-    if (expires !== undefined) {
-      let time: number;
-
-      try {
-        time = Date.prototype.getTime.call(expires);
-      } catch {
-        return false;
-      }
-
-      if (Number.isNaN(time)) {
-        return false;
-      }
-    }
-
-    if (maxAge !== undefined && !Number.isFinite(maxAge)) {
-      return false;
-    }
-
-    if (createdAt !== undefined && !Number.isFinite(createdAt)) {
-      return false;
-    }
-
-    return true;
   }
 
   /**
