@@ -1,4 +1,12 @@
-import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  setSystemTime,
+  spyOn,
+  test,
+} from 'bun:test';
 import vm from 'node:vm';
 import * as http from 'node:http';
 import * as zlib from 'node:zlib';
@@ -7170,32 +7178,36 @@ test('Domain=..example.com and SameSite=None without Secure are ignored', () => 
   expect(jar.getCookieHeaderString('https://www.example.com/')).toBe('ok=1');
 });
 
-test('a cookie replacing an expired one takes its own place in the header', async () => {
+test('a cookie replacing an expired one takes its own place in the header', () => {
   const jar = new CookieJar();
-  // Expired once stored, and not yet purged; host-only, so `a=new` replaces it.
-  expect(
-    jar.setCookie({
-      name: 'a',
-      value: 'old',
-      domain: 'example.com',
-      hostOnly: true,
-      path: '/',
-      maxAge: 60,
-      createdAt: Date.now() - 10_000,
-    }),
-  ).toBe(true);
-  const [old] = jar.getAllCookies();
+  const start = Date.now();
 
-  if (old === undefined) {
-    throw new Error('expected the cookie to be stored');
+  try {
+    // Expired once stored, and not yet purged; host-only, so `a=new` replaces it.
+    setSystemTime(new Date(start));
+    expect(
+      jar.setCookie({
+        name: 'a',
+        value: 'old',
+        domain: 'example.com',
+        hostOnly: true,
+        path: '/',
+        maxAge: 1,
+      }),
+    ).toBe(true);
+    setSystemTime(new Date(start + 2000));
+    jar.processResponseHeaders({ 'set-cookie': 'b=1' }, 'https://example.com/');
+    setSystemTime(new Date(start + 2002));
+    jar.processResponseHeaders(
+      { 'set-cookie': 'a=new' },
+      'https://example.com/',
+    );
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe(
+      'b=1; a=new',
+    );
+  } finally {
+    setSystemTime();
   }
-
-  old.maxAge = 0;
-  await sleep(2);
-  jar.processResponseHeaders({ 'set-cookie': 'b=1' }, 'https://example.com/');
-  await sleep(2);
-  jar.processResponseHeaders({ 'set-cookie': 'a=new' }, 'https://example.com/');
-  expect(jar.getCookieHeaderString('https://example.com/')).toBe('b=1; a=new');
 });
 
 test('MockAdapter drops a path-only URL fragment and a 1xx body', async () => {
@@ -10676,26 +10688,6 @@ test('a stacked deflate is read whole where the inflater reports no byte count',
       delete (prototype as { bytesWritten?: unknown }).bytesWritten;
     }
   }
-});
-
-test("getCookiesFor reads a stored cookie's live fields only when its scope matches", () => {
-  const jar = new CookieJar();
-  jar.setCookie({ name: 'a', value: '1', domain: 'example.com', path: '/a' });
-  jar.setCookie({ name: 'b', value: '2', domain: 'example.com', path: '/b' });
-
-  const reads: string[] = [];
-  for (const stored of jar.getAllCookies()) {
-    const { name, value } = stored;
-    Object.defineProperty(stored, 'value', {
-      get: () => {
-        reads.push(name);
-        return value;
-      },
-    });
-  }
-
-  expect(jar.getCookieHeaderString('https://example.com/a')).toBe('a=1');
-  expect(reads).toEqual(['a']);
 });
 
 test('a zstd body of many empty skippable frames before its data decodes whole', async () => {

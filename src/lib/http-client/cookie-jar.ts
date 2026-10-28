@@ -37,24 +37,20 @@ interface CookieLifetime {
 }
 
 /**
- * A cookie's lifetime as the jar holds it, from its expiry fields as read once: measured
- * from `createdAt`, or from `deadline` less the cap when that is earlier, so a
- * `createdAt` moved later through `getAllCookies()` counts from the one the jar stored,
- * and with `maxAge` and `expires` held to {@link MAX_COOKIE_LIFETIME_SECONDS} from there.
- * One within the cap, or absent, is left as given.
+ * A cookie's lifetime as the jar holds it: measured from `createdAt`, with `maxAge` and
+ * `expires` held to {@link MAX_COOKIE_LIFETIME_SECONDS} from there. One within the cap,
+ * or absent, is left as given.
  *
- * `setCookie` stores these fields, the send path reports them, and `isExpired` judges
- * `expiresAt`, so a cookie is sent exactly while it is not purged. Capped before any sum
- * is taken: a `maxAge` large enough to overflow `createdAt + maxAge * 1000` expires at
- * the cap rather than reading as unreadable. `null` when a field cannot take part - a
- * `createdAt` or `maxAge` that is not a finite number, an `expires` time that is `NaN` -
- * which fails the cookie closed.
+ * `setCookie` stores these fields and the `expiresAt` the jar judges expiry by, so a
+ * cookie is sent exactly while it is not purged. Capped before any sum is taken: a
+ * `maxAge` large enough to overflow `createdAt + maxAge * 1000` expires at the cap rather
+ * than reading as unreadable. `null` when a field cannot take part - a `createdAt` or
+ * `maxAge` that is not a finite number, an `expires` time that is `NaN`.
  */
 function cookieLifetime(
   createdAt: unknown,
   maxAge: unknown,
   expires: number | undefined,
-  deadline: number,
 ): CookieLifetime | null {
   if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) {
     return null;
@@ -71,9 +67,8 @@ function cookieLifetime(
     return null;
   }
 
-  const from = Math.min(createdAt, deadline - MAX_COOKIE_LIFETIME_MS);
-  const latest = from + MAX_COOKIE_LIFETIME_MS;
-  const lifetime: CookieLifetime = { createdAt: from, expiresAt: Infinity };
+  const latest = createdAt + MAX_COOKIE_LIFETIME_MS;
+  const lifetime: CookieLifetime = { createdAt, expiresAt: Infinity };
 
   if (expires !== undefined) {
     lifetime.expires = Math.min(expires, latest);
@@ -82,7 +77,7 @@ function cookieLifetime(
 
   if (maxAge !== undefined) {
     lifetime.maxAge = Math.min(maxAge, MAX_COOKIE_LIFETIME_SECONDS);
-    lifetime.expiresAt = from + lifetime.maxAge * 1000;
+    lifetime.expiresAt = createdAt + lifetime.maxAge * 1000;
   }
 
   return lifetime;
@@ -90,7 +85,7 @@ function cookieLifetime(
 
 /**
  * `cookie`'s expiry fields set to `lifetime`'s: those it carries, each the jar's own
- * value, so a stored or reported cookie reads as `isExpired` judges it.
+ * value, so a stored cookie reads as the jar judges its expiry.
  */
 function applyLifetime(cookie: Cookie, lifetime: CookieLifetime): void {
   cookie.createdAt = lifetime.createdAt;
@@ -161,28 +156,31 @@ export interface CookieJarJSON {
 }
 
 /**
- * The scope a cookie was accepted with, kept beside the stored cookie rather than on it.
- *
- * `name`, `domain` and `path` are the components of the key the cookie is filed under,
- * and `hostOnly` / `secure` decide which host and which scheme it may go to. All five are
- * recorded exactly as `setCookie` vetted them so a later write through `getAllCookies()`
- * cannot widen them — see {@link CookieJar.snapshotForSend}. `hostOnly` and `secure` are
- * held as written, absent included, so a cookie handed back reads as it was stored.
+ * A cookie as the jar holds it. `cookie` is the jar's own object, as `setCookie` vetted
+ * it, and is never handed out: every read returns a copy (see {@link copyCookie}), so
+ * nothing a caller does to a returned cookie reaches the jar.
  */
-interface StoredCookieScope {
-  name: string;
+interface StoredCookie {
+  cookie: Cookie;
+  /** `cookie`'s domain, which every stored cookie has. */
   domain: string;
   /** `domain` prepared for matching, so a send does not read it again per cookie. */
   preparedDomain: PreparedHost;
-  path: string;
-  hostOnly?: boolean;
-  secure?: boolean;
-  /**
-   * The latest the cookie may live to: {@link MAX_COOKIE_LIFETIME_SECONDS} from the
-   * `createdAt` it was stored with. Held here, as the scope is, so a `createdAt` moved
-   * forward through `getAllCookies()` cannot move the cap with it.
-   */
-  deadline: number;
+  /** When the cookie's identity was first stored; orders the `Cookie` header. */
+  creationTime: number;
+  /** When the cookie expires, from its capped lifetime; `Infinity` for a session cookie. */
+  expiresAt: number;
+}
+
+/** A copy of a stored cookie, its `expires` a `Date` of its own. */
+function copyCookie(cookie: Cookie): Cookie {
+  const copy = { ...cookie };
+
+  if (cookie.expires !== undefined) {
+    copy.expires = new Date(cookie.expires);
+  }
+
+  return copy;
 }
 
 /** RFC 6265 §5.2.2 delta-seconds: an optional `-`, then digits only. */
@@ -341,7 +339,7 @@ export class CookieJar {
   //            localhost (see `PublicSuffixResolver.registrableDomainFor`). One bucket
   //            is one site.
   // Inner key: `cookieKey`'s JSON of [name, domain, path, hostOnly], for deduplication.
-  private buckets: Map<string, Map<string, Cookie>> = new Map();
+  private buckets: Map<string, Map<string, StoredCookie>> = new Map();
 
   /**
    * The list this jar scopes with. Held per-jar rather than reached for as a module
@@ -349,13 +347,6 @@ export class CookieJar {
    * override lists are validated once at construction instead of on every store.
    */
   private readonly publicSuffixes: PublicSuffixResolver;
-
-  // The scope each stored cookie was accepted with. Keyed by the stored object and held
-  // off it, because the object itself is handed out by `getAllCookies()` and is writable
-  // from there; dropped with the cookie when the bucket entry goes.
-  private storedScopes: WeakMap<Cookie, StoredCookieScope> = new WeakMap();
-  /** When each stored cookie's identity was first stored; orders the `Cookie` header. */
-  private creationTimes: WeakMap<Cookie, number> = new WeakMap();
 
   constructor(options?: CookieJarOptions) {
     this.publicSuffixes = new PublicSuffixResolver(options?.publicSuffixes);
@@ -371,9 +362,8 @@ export class CookieJar {
    * the life of the jar - see {@link fromJSON}.
    *
    * Also returns false for a name or value that cannot be written into a `Cookie`
-   * header as one cookie-pair (and `getCookiesFor` withholds a stored cookie that no
-   * longer passes, so a mutation through `getAllCookies()` cannot reach the header): a name that holds `=`, `;`, whitespace or a
-   * control character, or a value holding `;` or a control character other than a tab,
+   * header as one cookie-pair: a name that holds `=`, `;`, whitespace or a control
+   * character, or a value holding `;` or a control character other than a tab,
    * or a name and value together longer than 4096 characters, the limit a `Set-Cookie`
    * is held to. A name may be
    * empty - a nameless cookie, sent as its value alone - when the value is not empty,
@@ -395,14 +385,15 @@ export class CookieJar {
    * under the jar's list is stored host-only, as a `Set-Cookie` naming the suffix from
    * that host itself is, and replaces the cookie such a `Set-Cookie` stored.
    *
+   * The jar stores its own copy of the cookie. To change a stored cookie - its value,
+   * say - call `setCookie` again with the same name, domain, path and `hostOnly`.
+   *
    * For server responses use parseSetCookieHeader — it also enforces PSL
    * validation and domain-suffix checks on top of the syntax check here.
    */
   public setCookie(cookie: CookieInput): boolean {
     // Copied before any field is read, so every check below and the object that is stored
-    // see the same values. The argument is the caller's object and may carry accessors,
-    // and checking one read while storing another is the write-time half of what
-    // `snapshotForSend` closes on the way out.
+    // see the same values: the argument is the caller's object and may carry accessors.
     let input: CookieInput;
 
     try {
@@ -438,8 +429,8 @@ export class CookieJar {
       return false;
     }
 
-    // Booleans or absent: the send path withholds a cookie whose `secure`, `hostOnly` or
-    // `httpOnly` is anything else, so storing one reported a cookie that never goes out.
+    // Booleans or absent: the send path reads `secure` and `hostOnly` as `true` or not,
+    // so a `secure: 'yes'` would be reported as set and still be sent over `http:`.
     for (const flag of ['secure', 'hostOnly', 'httpOnly'] as const) {
       const value: unknown = input[flag];
       if (value !== undefined && typeof value !== 'boolean') {
@@ -527,7 +518,6 @@ export class CookieJar {
       createdAt,
       stored.maxAge,
       stored.expires?.getTime(),
-      Infinity,
     );
 
     if (lifetime === null) {
@@ -542,12 +532,11 @@ export class CookieJar {
       path,
       stored.hostOnly === true,
     );
-    const deadline = createdAt + MAX_COOKIE_LIFETIME_MS;
 
     // Already expired: not stored, and the stored cookie it names is deleted, as an
     // expired `Set-Cookie` deletes it (RFC 6265 §5.3 step 11). `false`, so `fromJSON`
     // counts it out of what it restored.
-    if (this.isExpired(stored, now, deadline)) {
+    if (now >= lifetime.expiresAt) {
       this.buckets.get(site)?.delete(key);
       this.pruneEmptyBucket(site);
       return false;
@@ -557,46 +546,36 @@ export class CookieJar {
     // own, the base of its `Max-Age`.
     // Not an expired one still waiting to be purged: it was already gone (§5.3 step 11
     // reads the store, from which an expired cookie has been evicted), so the new cookie
-    // takes its own place. Judged at `now`, the time the new cookie is stored at, and by
-    // its expiry alone, read once and failing closed as `isExpired` does.
-    // Read before the bucket is taken: the replaced cookie is a live object
-    // `getAllCookies()` handed out, and a getter on it that empties or restores the jar
-    // left the new cookie written into a bucket the jar no longer held.
+    // takes its own place. Judged at `now`, the time the new cookie is stored at.
     const replaced = this.buckets.get(site)?.get(key);
     const creationTime =
-      replaced === undefined ||
-      this.isExpired(replaced, now, this.storedScopes.get(replaced)?.deadline)
+      replaced === undefined || this.isExpired(replaced, now)
         ? createdAt
-        : (this.creationTimes.get(replaced) ?? replaced.createdAt);
-    // The scope is recorded before the cookie is filed, so every cookie in a bucket has
-    // one.
-    const scope: StoredCookieScope = {
-      name: stored.name,
+        : replaced.creationTime;
+
+    this.getOrCreateBucket(site).set(key, {
+      cookie: stored,
       domain,
       preparedDomain: this.prepareHost(domain),
-      path,
-      deadline,
-    };
-
-    this.copyIfPresent(stored, scope, 'hostOnly');
-    this.copyIfPresent(stored, scope, 'secure');
-
-    this.storedScopes.set(stored, scope);
-    this.creationTimes.set(stored, creationTime);
-    this.getOrCreateBucket(site).set(key, stored);
+      creationTime,
+      expiresAt: lifetime.expiresAt,
+    });
 
     return true;
   }
 
   /**
-   * Returns all stored cookies (including possibly expired ones — call
-   * clearExpiredCookies first if needed).
+   * Returns copies of all stored cookies (including possibly expired ones — call
+   * clearExpiredCookies first if needed). Writing to a returned cookie does not change
+   * the jar; use `setCookie` to update one.
    */
   public getAllCookies(): Cookie[] {
     const result: Cookie[] = [];
 
     for (const bucket of this.buckets.values()) {
-      result.push(...bucket.values());
+      for (const stored of bucket.values()) {
+        result.push(copyCookie(stored.cookie));
+      }
     }
 
     return result;
@@ -622,16 +601,8 @@ export class CookieJar {
     const counts = new Map<string, number>();
 
     for (const bucket of this.buckets.values()) {
-      for (const cookie of bucket.values()) {
-        // The scope the cookie was filed under, not the live object: `getAllCookies()`
-        // hands out the stored cookies themselves, and a `domain` written through one
-        // must not move the cookie in this listing while the send path, which reads the
-        // same stored scope, still sends it where it was filed.
-        const domain = this.storedDomainOf(cookie);
-
-        if (domain !== undefined) {
-          counts.set(domain, (counts.get(domain) ?? 0) + 1);
-        }
+      for (const { domain } of bucket.values()) {
+        counts.set(domain, (counts.get(domain) ?? 0) + 1);
       }
     }
 
@@ -707,17 +678,8 @@ export class CookieJar {
    * Scans the URL and ancestor-domain buckets, including parents above nested
    * private suffixes, instead of scanning all cookies.
    *
-   * Returns *copies*, not the stored objects. A cookie's `name`, `domain`, `path`,
-   * `hostOnly` and `secure` come from the scope `setCookie` accepted it with, and every
-   * other field is read exactly once, for a cookie whose stored scope matches; the scope
-   * checks run against that scope, the rest against the copy, and the header is built
-   * from it. So a stored cookie mutated through `getAllCookies()` — a cleared
-   * `secure`, a widened `domain` or `path`, a `value` getter that answers differently on
-   * the second read — cannot reach the wire with a scope or a framing it was never stored
-   * with. A cookie whose fields cannot be read at all (an accessor that throws) is
-   * withheld, as one whose expiry cannot be read already is. Writing to a returned cookie
-   * therefore does not change the jar; use `setCookie` to update a stored cookie, and
-   * `getAllCookies()` to reach the live objects.
+   * Returns copies, so writing to a returned cookie does not change the jar; use
+   * `setCookie` to update a stored cookie.
    */
   public getCookiesFor(url: string): Cookie[] {
     let hostname: string;
@@ -765,43 +727,30 @@ export class CookieJar {
         continue;
       }
       for (const stored of siteBucket.values()) {
-        // The scope checks first, on the stored scope - what the snapshot's `domain`,
-        // `path`, `hostOnly` and `secure` are copied from - so only a cookie bound for
-        // this request has its live fields read.
-        const scope = this.storedScopes.get(stored);
-
-        if (scope === undefined) {
-          continue;
-        }
-
-        const isDomainMatch = scope.hostOnly
-          ? this.hostOnlyDomainMatches(requestHost, scope.preparedDomain)
-          : this.domainMatches(requestHost, scope.preparedDomain);
+        const { cookie } = stored;
+        const isDomainMatch = cookie.hostOnly
+          ? this.hostOnlyDomainMatches(requestHost, stored.preparedDomain)
+          : this.domainMatches(requestHost, stored.preparedDomain);
 
         if (!isDomainMatch) {
           continue;
         }
 
-        if (!this.pathMatches(pathname, scope.path)) {
+        if (!this.pathMatches(pathname, cookie.path ?? '/')) {
           continue;
         }
 
-        if (scope.secure === true && !this.isSecureScheme(requestScheme)) {
+        if (cookie.secure === true && !this.isSecureScheme(requestScheme)) {
           continue;
         }
 
-        // The rest against the snapshot, never the stored object: the fields were read
-        // once each, so what is vetted is what goes out. A cookie whose snapshot cannot be
-        // trusted is withheld.
-        const cookie = this.snapshotForSend(stored);
-
-        if (cookie === null || this.isExpired(cookie, now, scope.deadline)) {
+        if (this.isExpired(stored, now)) {
           continue;
         }
 
         result.push({
-          cookie,
-          creationTime: this.creationTimes.get(stored) ?? cookie.createdAt,
+          cookie: copyCookie(cookie),
+          creationTime: stored.creationTime,
         });
       }
     }
@@ -823,9 +772,7 @@ export class CookieJar {
   /**
    * Returns a `Cookie: name=value; name2=value2` string for the given URL.
    * Uses `getCookiesFor`, so expired cookies are never included (same as RFC
-   * behavior on the wire), and the pairs are built from the copies it vetted rather than
-   * re-read off the stored objects — one pair per cookie, whatever a caller has since
-   * written onto them.
+   * behavior on the wire).
    */
   public getCookieHeaderString(url: string): string {
     // A nameless cookie goes out as its value alone, as browsers send it.
@@ -835,35 +782,21 @@ export class CookieJar {
   }
 
   /**
-   * Removes expired cookies, including those with unreadable expiry data.
-   * Returns the number of cookies removed.
+   * Removes expired cookies. Returns the number of cookies removed.
    */
   public clearExpiredCookies(): number {
     const now = Date.now();
     let count = 0;
 
-    for (const [site, bucket] of this.buckets.entries()) {
-      for (const [key, cookie] of bucket.entries()) {
-        // Removed only while the jar still files it there: the check reads a live
-        // cookie `getAllCookies()` handed out, and a getter on it may have replaced that
-        // cookie or emptied and refilled the jar, whose new cookies are not this one.
-        if (
-          this.isExpired(
-            cookie,
-            now,
-            this.storedScopes.get(cookie)?.deadline,
-          ) &&
-          this.buckets.get(site) === bucket &&
-          bucket.get(key) === cookie
-        ) {
+    for (const [site, bucket] of this.buckets) {
+      for (const [key, stored] of bucket) {
+        if (this.isExpired(stored, now)) {
           bucket.delete(key);
           count++;
-
-          if (bucket.size === 0) {
-            this.buckets.delete(site);
-          }
         }
       }
+
+      this.pruneEmptyBucket(site);
     }
 
     return count;
@@ -988,11 +921,8 @@ export class CookieJar {
 
       let count = 0;
 
-      for (const [key, cookie] of bucket.entries()) {
-        // Matched on the stored scope, as the send path matches. Comparing the live
-        // `domain` let a cookie mutated through `getAllCookies()` dodge the clear while
-        // `getCookieHeaderString()` went on sending it from the scope it was filed under.
-        if (this.storedDomainOf(cookie) === normalizedHost) {
+      for (const [key, stored] of bucket) {
+        if (stored.domain === normalizedHost) {
           bucket.delete(key);
           count++;
         }
@@ -1004,25 +934,13 @@ export class CookieJar {
   }
 
   /**
-   * Serializes detached cookie snapshots using their stored scope. Caller edits to
-   * live cookie objects cannot widen that scope after a save and restore. Cookies
-   * whose mutable fields cannot be safely read are omitted, as on the send path.
+   * Serializes copies of the stored cookies.
    *
    * A replaced cookie's place in the `Cookie` header - its first creation time - is not
    * saved: after a restore, cookies of equal path length are ordered by `createdAt`.
    */
   public toJSON(): CookieJarJSON {
-    const cookies: Cookie[] = [];
-
-    for (const stored of this.getAllCookies()) {
-      const cookie = this.snapshotForSend(stored);
-
-      if (cookie !== null) {
-        cookies.push(cookie);
-      }
-    }
-
-    return { cookies };
+    return { cookies: this.getAllCookies() };
   }
 
   /**
@@ -1055,14 +973,13 @@ export class CookieJar {
    * the header parser drops an unreadable `Expires` attribute for the same reason.
    * Here `null` - what `JSON.stringify` writes for an `Invalid Date` - and `undefined`
    * mean no expiry: `fromJSON` restores a `null` as absent. That is this method's own
-   * reading of persisted data; `setCookie` refuses a `null` expiry field, and a stored
-   * cookie mutated to one counts as expired.
+   * reading of persisted data; `setCookie` refuses a `null` expiry field.
    *
    * The same refusal covers the other half of the expiry model: a `maxAge` or a
    * `createdAt` that is not a finite number - a string, `NaN`, an object - would make
    * `createdAt + maxAge * 1000` come out `NaN` and the cookie just as immortal, and
-   * `isExpired` prefers `maxAge` over `expires`, so a sound `expires` beside a corrupt
-   * `maxAge` would not save it. `setCookie` refuses those the way it refuses a bad domain.
+   * `maxAge` wins over `expires`, so a sound `expires` beside a corrupt `maxAge` would
+   * not save it. `setCookie` refuses those the way it refuses a bad domain.
    * A `null` `maxAge` or `createdAt` reads as absent, as a `null` `expires` does.
    *
    * An entry with a field that cannot be read at all - a getter that throws - is refused
@@ -1408,13 +1325,8 @@ export class CookieJar {
 
     let count = 0;
 
-    for (const [key, cookie] of bucket.entries()) {
-      const storedDomain = this.storedDomainOf(cookie);
-
-      if (
-        storedDomain !== undefined &&
-        (storedDomain === domain || storedDomain.endsWith(`.${domain}`))
-      ) {
+    for (const [key, stored] of bucket) {
+      if (stored.domain === domain || stored.domain.endsWith(`.${domain}`)) {
         bucket.delete(key);
         count++;
       }
@@ -1422,15 +1334,6 @@ export class CookieJar {
 
     this.pruneEmptyBucket(site);
     return count;
-  }
-
-  /**
-   * The domain `cookie` was filed under, from its stored scope, which `setCookie` records
-   * before filing it; not the live object's `domain`, which `getAllCookies()` lets a
-   * caller rewrite.
-   */
-  private storedDomainOf(cookie: Cookie): string | undefined {
-    return this.storedScopes.get(cookie)?.domain;
   }
 
   private pruneEmptyBucket(site: string): void {
@@ -1529,7 +1432,7 @@ export class CookieJar {
       : domain;
   }
 
-  private getOrCreateBucket(site: string): Map<string, Cookie> {
+  private getOrCreateBucket(site: string): Map<string, StoredCookie> {
     let bucket = this.buckets.get(site);
 
     if (!bucket) {
@@ -1765,9 +1668,6 @@ export class CookieJar {
    * host-only Secure cookie on `app.example.com` is shadowed by a `Domain=example.com`
    * cookie planted from `http://example.com`, which the send path would deliver beside
    * it, so the wider plant must be refused as much as the narrower one.
-   *
-   * The scope is read from the stored record, not the live object, as the send path
-   * reads it, so a `secure` cleared through `getAllCookies()` does not open the door.
    */
   private wouldShadowSecureCookie(
     name: string,
@@ -1794,31 +1694,26 @@ export class CookieJar {
       }
 
       for (const stored of bucket.values()) {
-        const scope = this.storedScopes.get(stored);
+        const { cookie } = stored;
 
         if (
-          scope === undefined ||
-          scope.secure !== true ||
-          scope.name !== name
+          cookie.secure !== true ||
+          cookie.name !== name ||
+          this.isExpired(stored, now)
         ) {
           continue;
         }
 
+        const storedPath = cookie.path ?? '/';
         const isDomainMatch =
-          this.domainMatches(preparedDomain, scope.preparedDomain) ||
-          this.domainMatches(scope.preparedDomain, preparedDomain);
+          this.domainMatches(preparedDomain, stored.preparedDomain) ||
+          this.domainMatches(stored.preparedDomain, preparedDomain);
 
         if (
           isDomainMatch &&
-          (this.pathMatches(path, scope.path) ||
-            this.pathMatches(scope.path, path))
+          (this.pathMatches(path, storedPath) ||
+            this.pathMatches(storedPath, path))
         ) {
-          // Unreadable live cookie fields must not throw or authorize an insecure
-          // replacement. Only a trusted expired snapshot releases the secure scope.
-          const cookie = this.snapshotForSend(stored);
-          if (cookie !== null && this.isExpired(cookie, now, scope.deadline)) {
-            continue;
-          }
           return true;
         }
       }
@@ -1935,9 +1830,8 @@ export class CookieJar {
 
   /**
    * Whether every expiry field the cookie carries can take part in the expiry check.
-   * `setCookie` refuses a cookie this rejects, and `isExpired` fails one closed should
-   * it ever be reached another way, so the jar never holds a cookie whose expiry is
-   * `NaN` and therefore never past.
+   * `setCookie` refuses a cookie this rejects, so the jar never holds a cookie whose
+   * expiry is `NaN` and therefore never past.
    */
   private hasReadableExpiry(cookie: CookieInput): boolean {
     const { expires, maxAge, createdAt } = cookie;
@@ -2003,115 +1897,7 @@ export class CookieJar {
     );
   }
 
-  /**
-   * A plain copy of a stored cookie with every field read exactly once, or `null` when
-   * the cookie must be withheld from the request.
-   *
-   * `getAllCookies()` hands out the stored objects, so every field is caller-writable -
-   * and can be replaced by an accessor. Two things follow, and both were reachable:
-   *
-   * - Reading a field for the check and again for the header let the two reads disagree.
-   *   A `value` getter answering `'ok'` to {@link hasWritableNameAndValue} and
-   *   `'x; other=evil'` to the header put a second pair on the wire, which is exactly
-   *   the framing that check exists to refuse.
-   * - A snapshot alone would not help the fields that decide *where* a cookie goes,
-   *   because the write lands on the stored object itself: clearing `secure` on a session
-   *   cookie stored for `https:` sent it in the clear, and clearing `hostOnly` while
-   *   widening `domain` and `path` sent it to a sibling host and a path it was never
-   *   stored for. So those come from {@link StoredCookieScope}, recorded by `setCookie`
-   *   and held off the cookie, along with the `name` - the other half of the key the
-   *   cookie is filed under, and what the header calls it. Bucketing by site bounds the
-   *   widening to one site; this bounds it to what was stored.
-   *
-   * `value` is not anchored that way: it is the cookie's payload rather than its
-   * identity, and writing a new one through `getAllCookies()` is a supported update. It
-   * is read once and vetted, so what the header carries is what passed the check.
-   *
-   * A read that throws withholds the cookie, the way {@link isExpired} already fails
-   * closed on an expiry it cannot read. So does a cookie with no recorded scope, which
-   * is a cookie no `setCookie` filed.
-   */
-  private snapshotForSend(stored: Cookie): Cookie | null {
-    const scope = this.storedScopes.get(stored);
-
-    if (scope === undefined) {
-      return null;
-    }
-
-    let cookie: Cookie;
-
-    try {
-      // Each mutable field read once, and an absent one left absent rather than written
-      // as an own `undefined`: `toJSON` and callers test presence with `in`.
-      cookie = {
-        name: scope.name,
-        value: stored.value,
-        createdAt: stored.createdAt,
-        domain: scope.domain,
-        path: scope.path,
-      };
-
-      if (scope.hostOnly !== undefined) {
-        cookie.hostOnly = scope.hostOnly;
-      }
-
-      if (scope.secure !== undefined) {
-        cookie.secure = scope.secure;
-      }
-
-      this.copyIfPresent(stored, cookie, 'expires');
-      this.copyIfPresent(stored, cookie, 'maxAge');
-      this.copyIfPresent(stored, cookie, 'httpOnly');
-      this.copyIfPresent(stored, cookie, 'sameSite');
-    } catch {
-      return null;
-    }
-
-    if (!this.hasWritableNameAndValue(cookie)) {
-      return null;
-    }
-
-    // Reported as `setCookie` would store it, and as `isExpired` judges it: a live cookie
-    // edited past the lifetime cap expires at the cap, measured from when the jar stored
-    // it, so it says so. A `createdAt` moved later than the one the jar stored it with is
-    // reported as that one, so a `toJSON` round trip restores the same expiry. The date
-    // is the jar's own copy, so the returned cookie carries nothing the jar still holds a
-    // reference to.
-    const lifetime = this.lifetimeOf(cookie, scope.deadline);
-
-    if (lifetime === null) {
-      return null;
-    }
-
-    applyLifetime(cookie, lifetime);
-
-    return cookie;
-  }
-
-  /**
-   * `cookie`'s {@link cookieLifetime}, each expiry field read once - `expires` by its time,
-   * not a `getTime` the `Date` itself carries - or `null` when one cannot be read.
-   */
-  private lifetimeOf(cookie: Cookie, deadline: number): CookieLifetime | null {
-    try {
-      const createdAt: unknown = cookie.createdAt;
-      const maxAge: unknown = cookie.maxAge;
-      const expires: unknown = cookie.expires;
-
-      return cookieLifetime(
-        createdAt,
-        maxAge,
-        expires === undefined
-          ? undefined
-          : Date.prototype.getTime.call(expires),
-        deadline,
-      );
-    } catch {
-      return null;
-    }
-  }
-
-  /** Copies `key` from `from` to `to` only when it is present, reading it once. */
+  /** Copies `key` from `from` to `to` only when it is present. */
   private copyIfPresent<K extends keyof Cookie>(
     from: Partial<Pick<Cookie, K>>,
     to: Partial<Pick<Cookie, K>>,
@@ -2124,18 +1910,8 @@ export class CookieJar {
     }
   }
 
-  /**
-   * `deadline` is the stored cookie's {@link StoredCookieScope.deadline}, passed in since
-   * the cookie checked is often a {@link snapshotForSend} copy the jar holds no scope for.
-   */
-  private isExpired(cookie: Cookie, now: number, deadline = Infinity): boolean {
-    // Unknown expiry fails closed, including accessors installed on a live cookie, and
-    // is judged by the lifetime the send path reports: a live cookie from
-    // `getAllCookies()` edited to a later `expires`, a longer `maxAge` or a later
-    // `createdAt` still expires where the stored one would have, and is purged exactly
-    // when it stops being sent.
-    const lifetime = this.lifetimeOf(cookie, deadline);
-    return lifetime === null || now >= lifetime.expiresAt;
+  private isExpired(stored: StoredCookie, now: number): boolean {
+    return now >= stored.expiresAt;
   }
 
   /**
