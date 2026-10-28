@@ -439,7 +439,7 @@ describe('CookieJar', () => {
 
     test('a stored cookie mutated to widen its scope is withheld from the wider scope', () => {
       // Same live read, for the fields that decide *where* a cookie goes. Cookies are
-      // bucketed by apex, so the reachable widening is within one registrable domain:
+      // bucketed by site, so the reachable widening is within one site:
       // host-only for app.example.com, on /admin, mutated into a /-wide cookie for
       // every example.com host.
       jar.setCookie({
@@ -1435,9 +1435,9 @@ describe('CookieJar', () => {
       // Kept, but stripped of reach: the attribute cannot widen it past the host that
       // sent it. Asserted on the flag rather than on a request to `sub.localhost`,
       // because that request proves nothing here - hosts under a bare name are bucketed
-      // separately (`apexFor('sub.localhost')` is `'sub.localhost'`, not `'localhost'`),
-      // so it came back empty before this change too. The flag is what actually changed,
-      // and `hostOnlyDomainMatches` is what it drives on the send path.
+      // separately (`siteFor('sub.localhost')` is `'sub.localhost'`, not `'localhost'`),
+      // so it comes back empty with or without the flag. The flag is what the attribute
+      // decides, and `hostOnlyDomainMatches` is what it drives on the send path.
       expect(stored?.hostOnly).toBe(true);
     });
 
@@ -1485,7 +1485,7 @@ describe('CookieJar', () => {
 
       expect(stored?.value).toBe('mine');
       expect(stored?.hostOnly).toBe(false);
-      // The spanning is real, not just bucket co-residency: the apex itself receives it.
+      // The spanning is real, not just bucket co-residency: the site's own host receives it.
       expect(jar.getCookieFor('session', 'https://app.localhost/')?.value).toBe(
         'mine',
       );
@@ -2327,7 +2327,7 @@ describe('CookieJar', () => {
   });
 
   describe('bucket pruning', () => {
-    test('apex bucket removed when last cookie expires and clearExpiredCookies runs', () => {
+    test('site bucket removed when last cookie expires and clearExpiredCookies runs', () => {
       jar.setCookie({
         name: 'a',
         value: '1',
@@ -2341,7 +2341,7 @@ describe('CookieJar', () => {
       expect(jar.getStoredDomains()).toHaveLength(0);
     });
 
-    test('apex bucket removed when Max-Age=0 deletes last cookie', () => {
+    test('site bucket removed when Max-Age=0 deletes last cookie', () => {
       jar.parseSetCookieHeader('session=abc; Path=/', 'https://example.com');
       expect(jar.getStoredDomains()).toHaveLength(1);
       jar.parseSetCookieHeader(
@@ -2351,7 +2351,7 @@ describe('CookieJar', () => {
       expect(jar.getStoredDomains()).toHaveLength(0);
     });
 
-    test('apex bucket remains when other cookies still exist', () => {
+    test('site bucket remains when other cookies still exist', () => {
       jar.setCookie({
         name: 'a',
         value: '1',
@@ -2494,7 +2494,7 @@ describe('CookieJar', () => {
       expect(jar.getCookieFor('a', 'https://example.com')).toBeUndefined();
     });
 
-    test('clear(host, hostname) prunes apex bucket when last cookie removed', () => {
+    test('clear(host, hostname) prunes the site bucket when last cookie removed', () => {
       jar.setCookie({
         name: 'a',
         value: '1',
@@ -2506,7 +2506,7 @@ describe('CookieJar', () => {
       expect(jar.getStoredDomains()).toHaveLength(0);
     });
 
-    test('clear(host, domain) removes all cookies for the apex and its subdomains', () => {
+    test('clear(host, domain) removes all cookies for the site and its subdomains', () => {
       jar.setCookie({
         name: 'a',
         value: '1',
@@ -2536,7 +2536,7 @@ describe('CookieJar', () => {
       expect(jar.getCookieFor('c', 'https://other.com')?.value).toBe('3');
     });
 
-    test('clear(host, domain) accepts any hostname in the apex', () => {
+    test('clear(host, domain) accepts any hostname in the site', () => {
       jar.setCookie({
         name: 'a',
         value: '1',
@@ -3620,7 +3620,7 @@ test('an edge-hyphen host keeps its Domain cookies and is cleared with its domai
   expect(jar.getAllCookies()).toEqual([]);
 });
 
-test('an edge-hyphen host whose stand-in would read as a public suffix still gets its real apex', () => {
+test('an edge-hyphen host whose stand-in would read as a public suffix still gets its real site', () => {
   const jar = new CookieJar();
   jar.parseSetCookieHeader('t=1; Domain=prgmr.com', 'https://a.-en.prgmr.com/');
 

@@ -336,17 +336,18 @@ export class PublicSuffixResolver {
   private listedRegistrableDomainFor(hostname: string): string {
     const labels = toLabels(hostname);
     const normalized = labels.join('.');
+    // The whole hostname, so bundled wildcard exceptions remain in force: probing
+    // bundled suffixes one by one loses the exception context (e.g. city.kawasaki.jp).
+    // Read without tldts's hostname check (see the fall-through below).
+    const bundled = parse(normalized, {
+      allowPrivateDomains: true,
+      validateHostname: false,
+    });
 
     if (this.added.size > 0) {
-      // Parse the whole hostname so bundled wildcard exceptions remain in force.
-      // Only caller additions may narrow that result; probing bundled suffixes
-      // individually loses the exception context (e.g. city.kawasaki.jp). Read
-      // without tldts's hostname check, as below: it finds no suffix at all for an
-      // edge-hyphen host, and an added suffix above a longer bundled one then won.
-      const bundled = parse(normalized, {
-        allowPrivateDomains: true,
-        validateHostname: false,
-      });
+      // Only caller additions may narrow the bundled result. The hostname check would
+      // find no suffix at all for an edge-hyphen host, and an added suffix above a
+      // longer bundled one would then win.
       const bundledLength = bundled.publicSuffix?.split('.').length ?? 0;
       for (let i = 0; i < labels.length; i++) {
         const candidate = labels.slice(i).join('.');
@@ -365,15 +366,12 @@ export class PublicSuffixResolver {
     // have filed `host.notcorp.acme` under itself and `notcorp.acme` under a second
     // bucket, so a cookie stored from one was invisible to the other.
     //
-    // Read without tldts's hostname check, as above. The check only refuses a host - the
+    // The parse above skips tldts's hostname check. The check only refuses a host - the
     // suffix lookup is the same either way - and it refuses one with a hyphen at a
     // label's edge (`-edge.example.com`), which the URL parser accepts and the jar keeps.
-    // Such a host is under `example.com`, not its own apex: its `Domain=example.com`
+    // Such a host is under `example.com`, not a site of its own: its `Domain=example.com`
     // cookies are kept and a domain clear of `example.com` reaches it.
-    return (
-      parse(normalized, { allowPrivateDomains: true, validateHostname: false })
-        .domain ?? normalized
-    );
+    return bundled.domain ?? normalized;
   }
 }
 

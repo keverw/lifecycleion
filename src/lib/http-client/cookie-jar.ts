@@ -458,7 +458,7 @@ export class CookieJar {
     // jar claiming a creation five years on held a cookie past the cap.
     const now = Date.now();
     const createdAt = Math.min(input.createdAt ?? now, now);
-    const apex = this.apexFor(domain);
+    const site = this.siteFor(domain);
 
     const stored: Cookie = {
       ...input,
@@ -499,14 +499,14 @@ export class CookieJar {
     // Read before the bucket is taken: the replaced cookie is a live object
     // `getAllCookies()` handed out, and a getter on it that empties or restores the jar
     // left the new cookie written into a bucket the jar no longer held.
-    const replaced = this.buckets.get(apex)?.get(key);
+    const replaced = this.buckets.get(site)?.get(key);
     const creationTime =
       replaced === undefined ||
       this.isExpired(replaced, now, this.storedScopes.get(replaced)?.deadline)
         ? createdAt
         : (this.creationTimes.get(replaced) ?? replaced.createdAt);
     this.creationTimes.set(stored, creationTime);
-    this.getOrCreateBucket(apex).set(key, stored);
+    this.getOrCreateBucket(site).set(key, stored);
 
     const scope: StoredCookieScope = {
       name: stored.name,
@@ -687,15 +687,15 @@ export class CookieJar {
     const candidateBuckets = new Set<string>();
     const labels = hostname.split('.');
     for (let index = 0; index < labels.length; index++) {
-      candidateBuckets.add(this.apexFor(labels.slice(index).join('.')));
+      candidateBuckets.add(this.siteFor(labels.slice(index).join('.')));
     }
 
-    for (const apex of candidateBuckets) {
-      const apexBucket = this.buckets.get(apex);
-      if (!apexBucket) {
+    for (const site of candidateBuckets) {
+      const siteBucket = this.buckets.get(site);
+      if (!siteBucket) {
         continue;
       }
-      for (const stored of apexBucket.values()) {
+      for (const stored of siteBucket.values()) {
         // The scope checks first, on the stored scope - what the snapshot's `domain`,
         // `path`, `hostOnly` and `secure` are copied from - so only a cookie bound for
         // this request has its live fields read.
@@ -784,7 +784,7 @@ export class CookieJar {
     const now = Date.now();
     let count = 0;
 
-    for (const [apex, bucket] of this.buckets.entries()) {
+    for (const [site, bucket] of this.buckets.entries()) {
       for (const [key, cookie] of bucket.entries()) {
         // Removed only while the jar still files it there: the check reads a live
         // cookie `getAllCookies()` handed out, and a getter on it may have replaced that
@@ -795,14 +795,14 @@ export class CookieJar {
             now,
             this.storedScopes.get(cookie)?.deadline,
           ) &&
-          this.buckets.get(apex) === bucket &&
+          this.buckets.get(site) === bucket &&
           bucket.get(key) === cookie
         ) {
           bucket.delete(key);
           count++;
 
           if (bucket.size === 0) {
-            this.buckets.delete(apex);
+            this.buckets.delete(site);
           }
         }
       }
@@ -882,7 +882,7 @@ export class CookieJar {
       return 0;
     }
 
-    const apex = this.apexFor(normalizedHost);
+    const site = this.siteFor(normalizedHost);
 
     if (scope === 'domain') {
       // A removed suffix named itself is cleared as a listed one is, whole: the removal
@@ -894,19 +894,19 @@ export class CookieJar {
       // Otherwise the host's site, which is the one bucket: with `com` removed,
       // `clear('x.example.com', 'domain')` clears every cookie of the `com` site and
       // leaves `app.blogspot.com`, a site of its own behind `blogspot.com`.
-      if (!isRemovedSuffixClear && !this.isPublicSuffix(apex)) {
-        const count = this.buckets.get(apex)?.size ?? 0;
-        this.buckets.delete(apex);
+      if (!isRemovedSuffixClear && !this.isPublicSuffix(site)) {
+        const count = this.buckets.get(site)?.size ?? 0;
+        this.buckets.delete(site);
         return count;
       }
 
-      const domain = isRemovedSuffixClear ? normalizedHost : apex;
+      const domain = isRemovedSuffixClear ? normalizedHost : site;
       let count = 0;
 
       // A suffix or bare name has no registrable part, so each site under it is a bucket
       // of its own - `clear('github.io', 'domain')` or `clear('localhost', 'domain')`
       // clears them all.
-      for (const [key, bucket] of [...this.buckets.entries()]) {
+      for (const [key, bucket] of this.buckets) {
         if (key === domain || key.endsWith(`.${domain}`)) {
           count += bucket.size;
           this.buckets.delete(key);
@@ -916,13 +916,13 @@ export class CookieJar {
       // A removed suffix whose removal joined it to a site above - `co.uk` with `uk`
       // removed as well, filed in `uk` - shares that bucket with the site's other names,
       // and only the cookies stored at or under it are taken.
-      if (apex !== domain) {
-        count += this.clearStoredWithin(apex, domain);
+      if (site !== domain) {
+        count += this.clearStoredWithin(site, domain);
       }
 
       return count;
     } else {
-      const bucket = this.buckets.get(apex);
+      const bucket = this.buckets.get(site);
 
       if (!bucket) {
         return 0;
@@ -940,7 +940,7 @@ export class CookieJar {
         }
       }
 
-      this.pruneEmptyBucket(apex);
+      this.pruneEmptyBucket(site);
       return count;
     }
   }
@@ -1332,9 +1332,9 @@ export class CookieJar {
     return cookie;
   }
 
-  /** Removes the cookies in `apex`'s bucket stored for `domain` or a host under it. */
-  private clearStoredWithin(apex: string, domain: string): number {
-    const bucket = this.buckets.get(apex);
+  /** Removes the cookies in `site`'s bucket stored for `domain` or a host under it. */
+  private clearStoredWithin(site: string, domain: string): number {
+    const bucket = this.buckets.get(site);
 
     if (!bucket) {
       return 0;
@@ -1351,7 +1351,7 @@ export class CookieJar {
       }
     }
 
-    this.pruneEmptyBucket(apex);
+    this.pruneEmptyBucket(site);
     return count;
   }
 
@@ -1367,9 +1367,9 @@ export class CookieJar {
     );
   }
 
-  private pruneEmptyBucket(apex: string): void {
-    if (this.buckets.get(apex)?.size === 0) {
-      this.buckets.delete(apex);
+  private pruneEmptyBucket(site: string): void {
+    if (this.buckets.get(site)?.size === 0) {
+      this.buckets.delete(site);
     }
   }
 
@@ -1380,11 +1380,11 @@ export class CookieJar {
     isHostOnly: boolean,
   ): void {
     domain = this.normalizeStoredDomain(domain);
-    const apex = this.apexFor(domain);
+    const site = this.siteFor(domain);
     this.buckets
-      .get(apex)
+      .get(site)
       ?.delete(this.cookieKey(name, domain, path, isHostOnly));
-    this.pruneEmptyBucket(apex);
+    this.pruneEmptyBucket(site);
   }
 
   /**
@@ -1426,10 +1426,10 @@ export class CookieJar {
   /** The bucket key for `hostname`: its site, the registrable domain under this jar's
    *  suffix rules (see {@link PublicSuffixResolver.registrableDomainFor}).
    *  Falls back to hostname for IPs and local hostnames like localhost.
-   *  A trailing dot is kept on the apex (`www.example.com.` is under `example.com.`), so
+   *  A trailing dot is kept on the site (`www.example.com.` is under `example.com.`), so
    *  a trailing-dot host's cookies are a domain of their own, as they are on the send
    *  path, and `clear()` by `domain` reaches one form and not the other. */
-  private apexFor(hostname: string): string {
+  private siteFor(hostname: string): string {
     return this.inHostForm(hostname, (host) =>
       this.publicSuffixes.registrableDomainFor(host),
     );
@@ -1463,12 +1463,12 @@ export class CookieJar {
       : domain;
   }
 
-  private getOrCreateBucket(apex: string): Map<string, Cookie> {
-    let bucket = this.buckets.get(apex);
+  private getOrCreateBucket(site: string): Map<string, Cookie> {
+    let bucket = this.buckets.get(site);
 
     if (!bucket) {
       bucket = new Map();
-      this.buckets.set(apex, bucket);
+      this.buckets.set(site, bucket);
     }
 
     return bucket;
@@ -1561,7 +1561,7 @@ export class CookieJar {
       // suffix must not grant a tenant scope over its parent, and a suffix still listed
       // beneath a removed one keeps its tenants off the removed name (`Domain=uk` from
       // `x.co.uk`, with `uk` removed and `co.uk` listed).
-      if (this.apexFor(requestHostname) !== this.apexFor(normalizedDomain)) {
+      if (this.siteFor(requestHostname) !== this.siteFor(normalizedDomain)) {
         return;
       }
 
@@ -1958,8 +1958,8 @@ export class CookieJar {
    *   widening `domain` and `path` sent it to a sibling host and a path it was never
    *   stored for. So those come from {@link StoredCookieScope}, recorded by `setCookie`
    *   and held off the cookie, along with the `name` - the other half of the key the
-   *   cookie is filed under, and what the header calls it. Bucketing by apex already
-   *   bounded the widening to one registrable domain; this bounds it to what was stored.
+   *   cookie is filed under, and what the header calls it. Bucketing by site bounds the
+   *   widening to one site; this bounds it to what was stored.
    *
    * `value` is not anchored that way: it is the cookie's payload rather than its
    * identity, and writing a new one through `getAllCookies()` is a supported update. It
