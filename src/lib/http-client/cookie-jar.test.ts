@@ -3355,6 +3355,34 @@ describe('CookieJar - accepting and expiring cookies', () => {
     expect(jar.getAllCookies().map((c) => c.name)).toEqual(['kept']);
   });
 
+  test('setCookie() and fromJSON() refuse a path that is not a string, rather than widening it to /', () => {
+    const jar = new CookieJar();
+    const cookie = (path: unknown) =>
+      ({
+        name: 'admin',
+        value: '1',
+        domain: 'example.com',
+        path,
+        createdAt: Date.now(),
+      }) as Cookie;
+
+    for (const path of [42, true, {}, ['/']]) {
+      expect(jar.setCookie(cookie(path))).toBe(false);
+    }
+
+    expect(jar.getAllCookies()).toEqual([]);
+
+    // `fromJSON` reads a `null` one as absent, the default path.
+    expect(
+      jar.fromJSON({
+        cookies: [cookie(42), { ...cookie(null), name: 'kept' }],
+      }),
+    ).toBe(1);
+    expect(jar.getAllCookies().map((c) => [c.name, c.path])).toEqual([
+      ['kept', '/'],
+    ]);
+  });
+
   test('setCookie() and fromJSON() refuse a sameSite a Set-Cookie cannot store', () => {
     const jar = new CookieJar();
     const cookie = (sameSite: unknown) =>
