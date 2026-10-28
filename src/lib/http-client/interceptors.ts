@@ -138,12 +138,12 @@ async function runInterceptors(
 
     // An earlier interceptor's result, copied before this one's filter and function read
     // it, as the chain's own result is copied once it ends (see
-    // `snapshotInterceptedRequest`). Uncopied, the two read it apart: a `requestURL`
-    // getter that answered a trusted host to a filter and another to the interceptor it
-    // guards handed a token interceptor's credentials to the other host. Copied only once
-    // an interceptor is reached that will read it, so a result no later interceptor reads
-    // is left for the phase to copy. A copy that fails here hands the phase that result,
-    // so the failure is reported from it either way.
+    // `snapshotInterceptedRequest`). Uncopied, the two would read it apart: a
+    // `requestURL` getter that answers a trusted host to a filter and another to the
+    // interceptor it guards would hand a token interceptor's credentials to the other
+    // host. Copied only once an interceptor is reached that will read it, so a result no
+    // later interceptor reads is left for the phase to copy. A copy that fails here hands
+    // the phase that result, so the failure is reported from it either way.
     if (isCurrentUncopied) {
       try {
         current = snapshotInterceptedRequest(current);
@@ -189,8 +189,9 @@ async function runInterceptors(
       // a native promise with its own `constructor` and a no-op `then` would hang the
       // request. See `adoptPromise()`.
       ({ value: result } = await adoptPromise(
-        // The context too, its `redirectHistory` with it: one shared per chain let an
-        // interceptor that pushed to it or rewrote a field change what the next was told.
+        // The context too, its `redirectHistory` with it: one shared per chain would let
+        // an interceptor that pushes to it or rewrites a field change what the next is
+        // told.
         fn(current, copyCallbackPhase(phase), {
           ...context,
           redirectHistory: [...context.redirectHistory],
@@ -265,9 +266,10 @@ async function runInterceptors(
  * the chain is done, the URL is checked as http(s), then read again for the cookie jar
  * and again for the adapter; the headers are checked against the browser-restricted
  * list, then merged for dispatch - and each of those reads could answer differently. A
- * `requestURL` getter that answered `https://api.example/x` to the check and
- * `https://evil.example/` afterwards attached `api.example`'s cookies to a request sent
- * to `evil.example`. Taken here, once, every later check and use sees the same values.
+ * `requestURL` getter that answers `https://api.example/x` to the check and
+ * `https://evil.example/` afterwards would attach `api.example`'s cookies to a request
+ * sent to `evil.example`. Taken here, once, every later check and use sees the same
+ * values.
  *
  * Header values are normalized here as `mergeHeaders` normalizes them for dispatch - a
  * single value converted to a string, an array's elements each converted, and a

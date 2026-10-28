@@ -19,7 +19,7 @@ import { isHeaderSafeCookieText } from './internal/cookie-text';
 // won't assign a registered domain to but are still valid cookie domains.
 // `_` and a hyphen anywhere in a label are allowed as the URL parser allows them, and as
 // `normalizeStoredDomain` keeps them: docker-compose service names (`my_service`) and
-// hosts like `-edge.example.com` set cookies the jar otherwise discarded.
+// hosts like `-edge.example.com` set cookies the jar would otherwise discard.
 // One trailing dot is allowed, as `normalizeStoredDomain` keeps it (`localhost.`).
 const HOSTNAME_PATTERN = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*\.?$/;
 
@@ -225,8 +225,8 @@ const COOKIE_DATE_MONTHS = [
 
 /**
  * RFC 6265 §5.1.1's cookie-date algorithm: the time, day, month and year taken from the
- * first token of each shape, in UTC whatever zone is written. `new Date()` read a date
- * with no zone - the asctime form - as local time, and `Expires=0` as the year 2000.
+ * first token of each shape, in UTC whatever zone is written. `new Date()` would read a
+ * date with no zone - the asctime form - as local time, and `Expires=0` as the year 2000.
  * `undefined` when the value is not a cookie-date, so the attribute is ignored.
  */
 function parseCookieDate(value: string): Date | undefined {
@@ -484,7 +484,7 @@ export class CookieJar {
       return false;
     }
     // Never in the future: the lifetime cap (and `Max-Age`) count from it, so a persisted
-    // jar claiming a creation five years on held a cookie past the cap.
+    // jar claiming a creation five years on would hold a cookie past the cap.
     const now = Date.now();
     const createdAt = Math.min(input.createdAt ?? now, now);
     const site = this.siteFor(domain);
@@ -519,8 +519,9 @@ export class CookieJar {
     }
 
     // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
-    // creation: a jar restored through `fromJSON` from before the cap kept a 10-year
-    // lifetime. Readable, as `hasReadableExpiry` passed it, and its `expires` the jar's own.
+    // creation: a cookie restored through `fromJSON` with a 10-year lifetime would
+    // otherwise keep it. Readable, as `hasReadableExpiry` passed it, and its `expires`
+    // the jar's own.
     const lifetime = cookieLifetime(
       createdAt,
       stored.maxAge,
@@ -641,8 +642,8 @@ export class CookieJar {
    * headers are not this method's to check.
    *
    * @throws {TypeError} When `headers` is not a plain object - a `Headers` or `Map`
-   *         keeps its entries where this cannot read them, and every cookie in it was
-   *         silently dropped - or a `set-cookie` line is not a string.
+   *         keeps its entries where this cannot read them, and every cookie in it would
+   *         be silently dropped - or a `set-cookie` line is not a string.
    */
   public processResponseHeaders(
     headers: Record<string, string | string[]>,
@@ -1261,14 +1262,15 @@ export class CookieJar {
         cookie.httpOnly = true;
       } else {
         // A bare attribute (`; Path`) has an empty value, as RFC 6265bis §5.6 reads it -
-        // the same as `; Path=`. Skipped, it left an earlier `Path=/` in force, which let
-        // `__Host-id=1; Secure; Path=/; Path` past the prefix rule.
+        // the same as `; Path=`. Skipped, it would leave an earlier `Path=/` in force,
+        // which would let `__Host-id=1; Secure; Path=/; Path` past the prefix rule.
         const attrValue =
           eqIdx === -1 ? '' : trimSpacesAndTabs(part.slice(eqIdx + 1));
 
         // An attribute value over 1024 octets is ignored, as RFC 6265bis ignores it.
         // Counted in characters: the header arrives read as latin1, one character per
-        // octet on the wire, and encoding it as UTF-8 counted each byte above 0x7F twice.
+        // octet on the wire, and encoding it as UTF-8 would count each byte above 0x7F
+        // twice.
         if (attrValue.length > 1024) {
           continue;
         }
@@ -1520,8 +1522,8 @@ export class CookieJar {
     if (parsed.domain) {
       // A dot the parser left: `Domain=..example.com`, which no host domain-matches. And
       // a non-ASCII one, which RFC 6265bis §5.6.3 ignores: header bytes arrive read as
-      // latin1, so `Domain=m\xFCnchen.de` reads as `münchen.de` and IDNA made it the
-      // registrable `xn--mnchen-3ya.de`. A server sends the `xn--` form.
+      // latin1, so `Domain=m\xFCnchen.de` reads as `münchen.de` and IDNA would make it
+      // the registrable `xn--mnchen-3ya.de`. A server sends the `xn--` form.
       if (
         parsed.domain.startsWith('.') ||
         /[\u0080-\uffff]/.test(parsed.domain)
@@ -1580,8 +1582,8 @@ export class CookieJar {
     }
 
     // A nameless cookie posing as a prefixed one - `__Host-x; Max-Age=0` - is ignored
-    // whole (RFC 6265bis §5.7), before the deletions below: it deleted the jar's
-    // nameless cookie, which `setCookie` would never have let it replace.
+    // whole (RFC 6265bis §5.7), before the deletions below: otherwise it would delete the
+    // jar's nameless cookie, which `setCookie` would never let it replace.
     if (parsed.name === '' && cookieNamePrefix(parsed.value) !== null) {
       return;
     }

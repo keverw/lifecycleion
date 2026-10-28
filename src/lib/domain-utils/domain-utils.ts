@@ -92,7 +92,7 @@ function isSpecialScheme(protocol: string): boolean {
  * (`https:host`, `https:/host`, `https:\\host`). The textual guards here - a dangling
  * port, a percent-encoded host, the scheme that decides dot folding - read the text, so
  * they read it cleaned the same way, and only in the `scheme://` form every `Origin`
- * header takes: in any other, they never saw the host the parser then decoded.
+ * header takes: in any other, they would never see the host the parser then decodes.
  */
 function toOriginText(text: string): string | undefined {
   const cleaned = trimWhere(
@@ -102,8 +102,8 @@ function toOriginText(text: string): string | undefined {
 
   // `scheme://` followed directly by the authority: the parser skips any further `/` or
   // `\` after a special scheme and ends its authority at `\` too, so `https:///ex%61mple.com`
-  // and `https://example.com:\` had the guards read a host other than the parser's. No
-  // `Origin` takes either form, so they are refused rather than imitated.
+  // and `https://example.com:\` would have the guards read a host other than the
+  // parser's. No `Origin` takes either form, so they are refused rather than imitated.
   const match = /^[a-z][a-z\d+.-]*:\/\/(.*)$/is.exec(cleaned);
   if (match === null) {
     return undefined;
@@ -138,8 +138,8 @@ function hasPercentEncodedHost(origin: string): boolean {
  * `text` with Unicode dot variants folded to `.` in its authority, as the URL parser's
  * IDNA mapping folds them in a special scheme's host - but not for a non-special scheme,
  * whose host the parser keeps opaque and percent-encodes them in, and never past the
- * authority: a path of `/。` folded to `/.` was collapsed to `/` by the parser, and
- * `https://example.com/。` read as the bare origin, where its path is `/%E3%80%82`.
+ * authority: a path of `/。` folded to `/.` would be collapsed to `/` by the parser, and
+ * `https://example.com/。` would read as the bare origin, where its path is `/%E3%80%82`.
  */
 function foldOriginDots(text: string): string {
   // `text` is already cleaned by `toOriginText`, so its scheme is where the parser sees it.
@@ -168,9 +168,9 @@ function foldOriginDots(text: string): string {
 /**
  * A URL's hostname normalized as the URL parser read it. A special scheme's host may be
  * an IPv4 address (`2130706433` is `127.0.0.1`). A non-special scheme's is opaque - kept
- * as written, never an IPv4 address: reading it as one refused `foo://a.2.3.4` and merged
- * `foo://2130706433` with `foo://127.0.0.1` - except an IPv6 literal, which the parser
- * reads for every scheme, so `foo://[::1]` keeps its brackets and matches itself.
+ * as written, never an IPv4 address: reading it as one would refuse `foo://a.2.3.4` and
+ * merge `foo://2130706433` with `foo://127.0.0.1` - except an IPv6 literal, which the
+ * parser reads for every scheme, so `foo://[::1]` keeps its brackets and matches itself.
  */
 function normalizeOriginHostname(protocol: string, hostname: string): string {
   return isSpecialScheme(protocol) || hostname.startsWith('[')
@@ -271,8 +271,8 @@ export function normalizeOrigin(origin: string): string {
       host = normalizedHostname;
     }
 
-    // Normalize default ports - every special scheme's, as the URL parser drops them: a
-    // `wss://x.com:443` kept its port when only http and https were known.
+    // Normalize default ports - every special scheme's, as the URL parser drops them:
+    // with only http and https known, a `wss://x.com:443` would keep its port.
     let port = '';
     const defaultPort = SPECIAL_SCHEME_DEFAULT_PORTS[protocolLower] ?? '';
 
@@ -333,8 +333,8 @@ function matchesWildcardDomainIn(
     return false; // invalid domain cannot match
   }
 
-  // From the shared cache: a fixed allowlist checked on every request compiled each
-  // pattern - IDNA per label, a Public Suffix List lookup - every time.
+  // From the shared cache: uncached, a fixed allowlist checked on every request would
+  // compile each pattern - IDNA per label, a Public Suffix List lookup - every time.
   const compiled = compiledWildcardPattern(pattern, isCached);
 
   return (
@@ -458,8 +458,9 @@ function matchesWildcardPatternIn(
   isCached: PatternCache,
 ): boolean {
   const originURL = origin.url;
-  // Trimmed, as `validateConfigEntry` and `matchesOriginList` read it: ` https://*`
-  // matched nothing here alone. Of HTTP whitespace only - see `readTrimmedEntry`.
+  // Trimmed, as `validateConfigEntry` and `matchesOriginList` read it: untrimmed,
+  // ` https://*` would match nothing here alone. Of HTTP whitespace only - see
+  // `readTrimmedEntry`.
   const trimmedPattern = readTrimmedEntry(pattern);
   if (trimmedPattern === undefined) {
     return false;
@@ -508,8 +509,9 @@ function matchesWildcardPatternIn(
 
     // Fast reject: domain pattern must contain at least one wildcard and not be all-wildcards
     // - read without leading HTTP whitespace, as the domain matcher reads it: `https:// *`
-    // became the protocol wildcard `https://*`, which `validateConfigEntry` refuses. A
-    // trailing space is the validator's own trim, and `https://* ` still matches.
+    // would otherwise act as the protocol wildcard `https://*`, which
+    // `validateConfigEntry` refuses. A trailing space is the validator's own trim, and
+    // `https://* ` still matches.
     if (
       !domainPattern.includes('*') ||
       isAllWildcards(trimHTTPWhitespace(domainPattern))
@@ -629,7 +631,7 @@ type CompiledDomainEntry =
 
 /**
  * A list's entries, cleaned and validated, each compiled the first time a match reaches
- * it - so a scan that matches early compiles no further, as before the list was kept.
+ * it - so a scan that matches early compiles nothing past its match.
  */
 interface CompiledDomainList {
   /** The entries the list held, to check it against next time. */
@@ -759,8 +761,8 @@ function isSameList(
     return false;
   }
 
-  // Every index, holes included: `every` skips a hole, so a hole the caller filled in
-  // read as unchanged, and the new entry was never checked.
+  // Every index, holes included: `every` skips a hole, so with it a hole the caller
+  // filled in would read as unchanged, and the new entry would never be checked.
   // eslint-disable-next-line unicorn/no-for-loop -- an indexed loop is the point
   for (let index = 0; index < source.length; index++) {
     if (source[index] !== list[index]) {
@@ -789,7 +791,7 @@ export function matchesDomainList(
 
   // Early exit: invalid input cannot match any allowed domain. Nor can `"null"`, the
   // origin-only literal: as documented, it is never matched here - the global `*`
-  // matched it as it matches any single-label name.
+  // would otherwise match it as it matches any single-label name.
   if (normalizedDomain === '' || normalizedDomain === 'null') {
     return false;
   }
@@ -1498,7 +1500,7 @@ function parseExactOriginForMatching(entry: string): {
 
 /**
  * Whether an origin's text carries `@`, `?` or `#` after its scheme: userinfo, a query or
- * a fragment - even an empty one, which the URL parser reports as `''` and so slipped
+ * a fragment - even an empty one, which the URL parser reports as `''` and so would slip
  * past the field checks, where `validateConfigEntry` refuses the same text. No host
  * holds any of the three.
  */
@@ -1514,7 +1516,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
 
   function isValidCredentialWildcardHost(written: string): boolean {
     // One trailing dot dropped, as the other matchers drop it: its empty last label
-    // refused `https://*.example.com.`, which `validateConfigEntry` and
+    // would refuse `https://*.example.com.`, which `validateConfigEntry` and
     // `matchesOriginList` both accept.
     // Leading and trailing whitespace dropped, as the other matchers drop it: `https://
     // *.example.com` is valid to `validateConfigEntry` and matches in `matchesOriginList`.
@@ -1622,7 +1624,7 @@ export function matchesOriginList(
   }
 
   // The list's own compiled patterns: two lists that each fit the shared cache, used
-  // in turn, evicted each other there on every call (see `originListPatterns`).
+  // in turn, would evict each other there on every call (see `originListPatterns`).
   const matchesWildcard = wildcardOriginMatcher(
     origin,
     originListPatterns(allowedOrigins),
@@ -1655,7 +1657,7 @@ export function matchesOriginList(
     }
 
     // Not for an opaque host: the public suffix list is about DNS names, and it reads
-    // every unknown single label as a suffix, which refused every extension origin
+    // every unknown single label as a suffix, which would refuse every extension origin
     // (`chrome-extension://<id>`).
     if (
       !parsedAllowed.isOpaqueHost &&

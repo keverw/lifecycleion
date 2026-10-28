@@ -27,7 +27,7 @@ export const INTERNAL_PSEUDO_TLDS = Object.freeze(
  * (space, tab, CR and LF), or `undefined` when other whitespace - a no-break space
  * picked up from pasted config - is left at an end. Such text is invalid and matches
  * nothing, as `normalizeOrigin` refuses it, rather than being trimmed into another entry:
- * `trim()` took it, so `'\u00A0*'` was the global `*`.
+ * `trim()` would take it, so `'\u00A0*'` would be the global `*`.
  */
 export function readTrimmedEntry(text: string): string | undefined {
   return hasNonHTTPWhitespaceEdge(text) ? undefined : trimHTTPWhitespace(text);
@@ -112,8 +112,8 @@ export function isIPv6(str: string): boolean {
   }
 
   // Asked of the URL parser, as the hosts it compares come from it: a hand-written
-  // pattern missed valid embedded-IPv4 forms (`1:2:3:4:5:6:1.2.3.4`,
-  // `1:2:3:4:5::1.2.3.4`), and `normalizeOrigin` then dropped such a host's brackets,
+  // pattern would miss valid embedded-IPv4 forms (`1:2:3:4:5:6:1.2.3.4`,
+  // `1:2:3:4:5::1.2.3.4`), and `normalizeOrigin` would then drop such a host's brackets,
   // leaving its port indistinguishable from the address. Only hex digits, colons and
   // dots first, so nothing past the brackets can make the probe URL parse.
   if (!/^[0-9a-f:.]+$/i.test(cleaned) || !cleaned.includes(':')) {
@@ -153,7 +153,7 @@ export function endsInANumber(label: string): boolean {
  * The parser reads a host as IPv4 when, after percent-decoding and IDNA mapping, its last
  * label is a number (decimal, or `0x` hex): `2130706433` and `0x7f.1` are `127.0.0.1`,
  * and so are `127.0.0.%31`, `127.0.0.①` and `１２７.0.0.1`; `192.168.1.08` (an octal
- * label with an 8) and `a.2.3.4` are refused. Imitating that mapping here missed one
+ * label with an 8) and `a.2.3.4` are refused. Imitating that mapping here would miss one
  * spelling after another, so the mapping is the parser's: a host parsed with a label
  * appended (`<host>.a`) comes back mapped but never read as an address, which shows the
  * last label as the parser sees it, and the plain parse then gives the address or throws.
@@ -165,7 +165,7 @@ export function readURLParserIPv4(
   host: string,
 ): { address?: string } | undefined {
   // Not stripped of a trailing dot here: the empty last label is dropped once, below,
-  // after decoding - stripping one here as well read `1.2.3.4..` as `1.2.3.4`.
+  // after decoding - stripping one here as well would read `1.2.3.4..` as `1.2.3.4`.
   const text = host;
 
   if (text === '' || /[@/\\?#:[\]\s]/.test(text)) {
@@ -229,10 +229,11 @@ function canonicalizeIPAddressLiteral(host: string): string | null {
   }
 
   // Only a bare address is an IP literal. The URL parser reads a whole authority, so
-  // `127.0.0.1:8080`, `x@127.0.0.1`, `127.0.0.1/evil.com` and `[::1]:8080` came back as
-  // their address with the port, userinfo or path dropped - an allowlist entry written as
-  // `IP:port` then matched every port on that address, where `example.com:8080` is
-  // refused. A port, a path, a query, a fragment or userinfo makes it no host at all.
+  // `127.0.0.1:8080`, `x@127.0.0.1`, `127.0.0.1/evil.com` and `[::1]:8080` would come
+  // back as their address with the port, userinfo or path dropped - an allowlist entry
+  // written as `IP:port` would then match every port on that address, where
+  // `example.com:8080` is refused. A port, a path, a query, a fragment or userinfo makes
+  // it no host at all.
   if (/[@/\\?#]/.test(host) || (host.includes(':') && !isBracketed)) {
     return null;
   }
@@ -257,7 +258,7 @@ function canonicalizeIPAddressLiteral(host: string): string | null {
     return null;
   }
 
-  // Refused by the parser: `''`, not a name. Read as a name it was matched as one -
+  // Refused by the parser: `''`, not a name. Read as a name it would be matched as one -
   // `1.2.3.08` against itself - though no request can ever carry it.
   return ipv4.address ?? '';
 }
@@ -584,7 +585,7 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   // Neither lowercased nor NFC-normalized first: TR46 maps, then normalizes, as the URL
   // parser does. JavaScript's `toLowerCase` turns a word-final `Σ` into the final sigma
   // `ς` (`ΑΣ-b.com`), and NFC before mapping reorders a combining mark that maps to a
-  // letter (U+0345 is `ι`) - either way an entry matched a different domain from the
+  // letter (U+0345 is `ι`) - either way an entry would match a different domain from the
   // one a browser sends for it.
   const normalized = trimmed;
 
@@ -669,8 +670,9 @@ export function normalizeWildcardPattern(pattern: string): string {
     return ''; // sentinel for invalid pattern
   }
 
-  // Whitespace inside the pattern too: each label was trimmed on its own, so `*.example
-  // .com` matched `a.example.com`, where the exact entry `example .com` is refused.
+  // Whitespace inside the pattern too: each label is trimmed on its own, so `*.example
+  // .com` would otherwise match `a.example.com`, where the exact entry `example .com` is
+  // refused.
   if (/\s/.test(trimmed)) {
     return '';
   }
@@ -678,8 +680,8 @@ export function normalizeWildcardPattern(pattern: string): string {
   if (trimmed.endsWith('.')) {
     trimmed = trimmed.slice(0, -1);
 
-    // `*.` is a subdomain pattern with no domain - a `*.${base}` whose base was empty -
-    // not the global `*`, which it became, matching every host past the
+    // `*.` is a subdomain pattern with no domain - a `*.${base}` whose base is empty -
+    // not the global `*`, which it would otherwise become, matching every host past the
     // `allowGlobalWildcard` gate that only reads the pattern as written.
     if (trimmed === '*') {
       return '';
@@ -732,7 +734,8 @@ export function normalizeWildcardPattern(pattern: string): string {
  * Whether a wildcard pattern's fixed tail is one no wildcard may sit over: a pseudo-TLD,
  * a public suffix, or a tail under a Public Suffix List wildcard rule (`*.kawasaki.jp`,
  * `*.sch.uk`), where every label directly beneath it is itself a public suffix - so
- * `*.kawasaki.jp` matched the suffix `foo.kawasaki.jp` and the apex `city.kawasaki.jp`.
+ * `*.kawasaki.jp` would match the suffix `foo.kawasaki.jp` and the apex
+ * `city.kawasaki.jp`.
  * Told by asking for the suffix of a made-up label under the tail.
  */
 function isSuffixLikeTail(tail: string): boolean {

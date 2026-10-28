@@ -33,8 +33,8 @@ import { utf8ByteLength } from './utf8-length';
  * as no limit at all.
  */
 export function readMaxResponseBytes(request: AdapterRequest): number {
-  // Not `readUnknownMember`, which reads a throw as absent: a getter that throws turned
-  // the limit off. Refused, as an unusable value is.
+  // Not `readUnknownMember`, which reads a throw as absent: a getter that throws would
+  // turn the limit off. Refused, as an unusable value is.
   let value: unknown;
   try {
     value = (request as { maxResponseBytes?: unknown }).maxResponseBytes;

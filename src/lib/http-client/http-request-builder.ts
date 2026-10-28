@@ -140,14 +140,14 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public params(params: Record<string, unknown> | null | undefined): this {
     this._assertNotSent('params');
-    // A nullish argument clears them, as it always did - `.params(options.query)` with
-    // no query set.
+    // A nullish argument clears them - `.params(options.query)` with no query set.
     if (isNullish(params)) {
       this._params = undefined;
       return this;
     }
     // A plain object, as for headers: a `URLSearchParams` or `Map` keeps its entries off
-    // its own properties, so it was sent as no query at all, and a string as `0=a&1=b`.
+    // its own properties, so it would be sent as no query at all, and a string as
+    // `0=a&1=b`.
     if (!isPlainRecord(params)) {
       throw new TypeError(
         'HTTPRequestBuilder params must be a plain object of query names to values (not a URLSearchParams, Map or string)',

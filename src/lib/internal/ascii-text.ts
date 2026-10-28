@@ -99,7 +99,7 @@ export function hasWhitespaceEdge(text: string): boolean {
  * Whether `text`, trimmed of HTTP whitespace (tab, LF, CR, space), still has whitespace at
  * an end - a no-break space picked up from pasted config, a vertical tab, a form feed. Such
  * an entry matches nothing and is refused where it is validated, rather than trimmed into
- * another one: `trim()` took it, so `'\u00A0*'` was the global `*`.
+ * another one: `trim()` would take it, so `'\u00A0*'` would be the global `*`.
  */
 export function hasNonHTTPWhitespaceEdge(text: string): boolean {
   return hasWhitespaceEdge(trimHTTPWhitespace(text));

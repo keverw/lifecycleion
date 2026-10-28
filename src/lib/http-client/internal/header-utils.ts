@@ -34,10 +34,10 @@ export function presentHeaderValue(
   if (isNullish(value)) {
     return undefined;
   }
-  // Converted as a header value always was: what a caller passes is not trusted to be
+  // Converted as every header value is: what a caller passes is not trusted to be
   // a string, and a number (Node's `getHeaders()`) is one in all but type.
   if (!Array.isArray(value)) {
-    // eslint-disable-next-line @typescript-eslint/no-base-to-string -- a caller's value, converted as a header always was
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string -- a caller's value, converted as every header value is
     return String(value);
   }
   const items: string[] = [];
@@ -276,7 +276,7 @@ export function joinCookieHeader(
  * A request's headers as the `(name, value)` pairs a browser transport is handed one at a
  * time - `fetch`'s `Headers`, XHR's `setRequestHeader` - with every `Cookie` spelling and
  * item joined into one pair, last, by NodeAdapter's rule (see {@link joinCookieHeader}):
- * appended separately they were joined with `, `, which reads as one cookie. An array
+ * appended separately they would be joined with `, `, which reads as one cookie. An array
  * value's items are a pair each.
  */
 export function requestHeaderPairs(
@@ -315,7 +315,8 @@ export function materializeRequestHeaders(
 ): Record<string, string> {
   const result: Record<string, string> = {};
   // Names that differ only in case are one header, joined under the first spelling, as
-  // `fetch`'s `Headers` joins them: Node's `http` lowercases names and kept only the last.
+  // `fetch`'s `Headers` joins them: Node's `http` would lowercase the names and keep only
+  // the last.
   const spellings = new Map<string, string>();
   const isLowercasingNames = options.isLowercasingNames === true;
   const entries = Object.entries(headers);

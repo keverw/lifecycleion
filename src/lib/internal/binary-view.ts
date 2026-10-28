@@ -225,11 +225,11 @@ export function typedArrayNameOf(value: object): string | undefined {
  * Whether `value` is an `ArrayBuffer` or `SharedArrayBuffer` - the backing store itself
  * rather than a view over one.
  *
- * `ArrayBuffer.isView` is deliberately false for these, and without this they fell through
- * to the generic object naming and rendered as `[ArrayBuffer]`: correct, cheap, and silent
- * about the one thing worth knowing. There is no decode to avoid here - a buffer has no
- * useful string form at any size - so unlike a view this needs no budget test. It is purely
- * that forty megabytes and two bytes should not read the same.
+ * `ArrayBuffer.isView` is deliberately false for these, and without this they would fall
+ * through to the generic object naming and render as `[ArrayBuffer]`: correct, cheap, and
+ * silent about the one thing worth knowing. There is no decode to avoid here - a buffer
+ * has no useful string form at any size - so unlike a view this needs no budget test. It
+ * is purely that forty megabytes and two bytes should not read the same.
  */
 export function isArrayBufferLike(value: object): boolean {
   return arrayBufferKindOf(value) !== undefined;

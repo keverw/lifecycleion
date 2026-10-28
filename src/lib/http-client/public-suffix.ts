@@ -46,7 +46,8 @@ export interface PublicSuffixOverrides {
    * still listed beneath a removal keeps its tenants sites of their own: with `uk`
    * removed, `x.co.uk` may not set `Domain=uk` while `co.uk` stays listed. The escape
    * hatch for a private-section entry that breaks a deployment you control - removing
-   * `herokuapp.com` restores the pre-1.0 behaviour for that suffix alone.
+   * `herokuapp.com` scopes cookies under it as though the private section did not list
+   * it, for that suffix alone.
    */
   remove?: readonly string[];
 }
@@ -85,8 +86,8 @@ function normalizeSuffix(
   // A leading dot is how Set-Cookie writes a domain, and it is the likeliest thing a
   // caller copies in from one. Accepted and dropped, as `Domain=` itself is.
   const stripped = entry.startsWith('.') ? entry.slice(1) : entry;
-  // Lowercased in ASCII only, so a typo is refused below: `toLowerCase` turned the Kelvin
-  // sign in `\u212Aorp.internal` into the `k` of a valid `korp.internal`.
+  // Lowercased in ASCII only, so a typo is refused below: `toLowerCase` would turn the
+  // Kelvin sign in `\u212Aorp.internal` into the `k` of a valid `korp.internal`.
   const normalized = asciiLowercase(
     stripped.endsWith('.') ? stripped.slice(0, -1) : stripped,
   );
@@ -180,11 +181,12 @@ export class PublicSuffixResolver {
 
   constructor(overrides?: PublicSuffixOverrides) {
     // Shape-checked, as every entry is: `publicSuffixes: ['corp.internal']` (the list
-    // given where `{ add }` belongs) or a misspelled `{ ad: [...] }` built a jar with no
-    // overrides at all, leaving the tenants the caller meant to isolate sharing cookies.
+    // given where `{ add }` belongs) or a misspelled `{ ad: [...] }` would build a jar
+    // with no overrides at all, leaving the tenants the caller meant to isolate sharing
+    // cookies.
     if (overrides !== undefined) {
-      // A plain object: a `Map` keeps its entries off its own properties, so it passed
-      // the key check below with no keys and built a jar with no overrides.
+      // A plain object: a `Map` keeps its entries off its own properties, so it would
+      // pass the key check below with no keys and build a jar with no overrides.
       const candidate: unknown = overrides;
       if (!isPlainRecord(candidate)) {
         throw new TypeError(
@@ -226,14 +228,14 @@ export class PublicSuffixResolver {
    *
    * A bare single-label hostname is - `localhost`, `myapp`, an unqualified machine name.
    * The list carries none of them, so without this `Domain=localhost` from
-   * `https://evil.localhost/` was a suffix of the request host, passed every check, and
-   * was filed under `localhost` - where an ordinary `http://localhost/` request then sent
-   * it, and where a `Max-Age=0` from the same sibling deleted it. That is the same tossing
-   * the private section closes for `github.io`, one label shorter. A single label has no
-   * registrable name beneath it by definition, which is exactly what makes it a suffix
-   * rather than a domain. Local development is unaffected: a cookie with no `Domain=` is
-   * host-only already, and one naming the host it came from is accepted host-only by the
-   * rule above. `publicSuffixes.remove` opts a name back out.
+   * `https://evil.localhost/` would be a suffix of the request host, pass every check,
+   * and be filed under `localhost` - where an ordinary `http://localhost/` request would
+   * then send it, and where a `Max-Age=0` from the same sibling would delete it. That is
+   * the same tossing the private section closes for `github.io`, one label shorter. A
+   * single label has no registrable name beneath it by definition, which is exactly what
+   * makes it a suffix rather than a domain. Local development is unaffected: a cookie
+   * with no `Domain=` is host-only already, and one naming the host it came from is
+   * accepted host-only by the rule above. `publicSuffixes.remove` opts a name back out.
    */
   public isPublicSuffix(hostname: string): boolean {
     const labels = toLabels(hostname);
@@ -363,8 +365,8 @@ export class PublicSuffixResolver {
     // still reads the last two labels as its registrable domain. Falling through to it
     // rather than returning the whole hostname is what keeps an override on one suffix
     // from quietly re-bucketing every unrelated internal name in the jar: the walk would
-    // have filed `host.notcorp.acme` under itself and `notcorp.acme` under a second
-    // bucket, so a cookie stored from one was invisible to the other.
+    // file `host.notcorp.acme` under itself and `notcorp.acme` under a second bucket, so
+    // a cookie stored from one would be invisible to the other.
     //
     // The parse above skips tldts's hostname check. The check only refuses a host - the
     // suffix lookup is the same either way - and it refuses one with a hyphen at a
@@ -380,8 +382,9 @@ function isBundledPublicSuffix(normalized: string): boolean {
   const labels = normalized.split('.');
 
   // Without tldts's hostname check, as `listedRegistrableDomainFor` reads it: with the
-  // check, a label starting or ending with a hyphen (`x-.ck` under `*.ck`) was read as no suffix at all,
-  // so a `Domain=x-.ck` cookie was stored for every tenant under it.
+  // check, a label starting or ending with a hyphen (`x-.ck` under `*.ck`) would be read
+  // as no suffix at all, so a `Domain=x-.ck` cookie would be stored for every tenant
+  // under it.
   const result = parse(normalized, {
     allowPrivateDomains: true,
     validateHostname: false,

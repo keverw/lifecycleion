@@ -235,7 +235,7 @@ export interface AdapterResponse {
    * can come first: early-ack, unbuffered and duplex endpoints.
    *
    * An endpoint with request buffering disabled answers while the upload is still
-   * going, and what happens to the body afterwards was invisible to the caller.
+   * going, and what happens to the body afterwards is otherwise invisible to the caller.
    * It can fail - `serializeMultipartFormData` rejects when a `File` yields fewer
    * bytes than its `Blob.size`, putting a body on the wire short of its own
    * `Content-Length` with no transport failure anywhere - or be cut short by the
@@ -246,7 +246,7 @@ export interface AdapterResponse {
    * A promise rather than a plain error field because the answer usually does not
    * exist yet: the response is complete and is delivered immediately, and the
    * upload settles later. Waiting for it before resolving is what this must not
-   * do - it turned a `413` that stopped reading into a network error with the
+   * do - it would turn a `413` that stopped reading into a network error with the
    * server's explanation dropped, and let an abort during the wait discard a
    * response that had already arrived in full.
    *
@@ -715,7 +715,7 @@ export interface HTTPResponse<T = unknown> {
    *
    * Advisory only, and it never rejects: this response succeeded as far as the
    * client is concerned - `isFailed`, `isNetworkError` and the status are
-   * untouched - and a caller that ignores it sees exactly what it saw before. A
+   * untouched - and a caller that ignores it sees exactly what it would without it. A
    * caller that needs to know its upload actually arrived awaits this and checks
    * for an `Error`. Only `NodeAdapter` reports it today: `FetchAdapter` cannot,
    * since `fetch()` exposes neither upload progress nor the moment the body finished,

@@ -211,9 +211,9 @@ export function buildURL(
       // makes buildURL safer as a general-purpose URL composition helper.
       //
       // The existing query is kept as written, pair by pair, rather than parsed and
-      // re-serialized: that rewrote what `qs` reads differently from the server - a
+      // re-serialized: that would rewrite what `qs` reads differently from the server - a
       // repeated key into `tag[0]`, `%E9` into `%25E9`, `constructor=1` dropped - though
-      // nothing asked to change it. Only a pair whose top-level key `params` also names is
+      // nothing asks to change it. Only a pair whose top-level key `params` also names is
       // left out, so the `params` value wins.
       // Top-level keys on both sides, as the docs state the rule: `page[number]` in params
       // replaces the path's `page[...]` pairs as `{ page: { number } }` would.
@@ -375,8 +375,8 @@ export function stripCrossOriginURLCredentials(
     // The initial origin cannot be trusted. An absolute URL can be handled by the
     // ordinary helper; a network-path reference needs a base merely to expose its
     // authority to URL parsing - `//host` and every spelling the parser reads as one
-    // (`\\host`, `/\host`, a leading space or tab), which a `startsWith('//')` let
-    // through with their credentials.
+    // (`\\host`, `/\host`, a leading space or tab), which a `startsWith('//')` check
+    // would let through with their credentials.
     try {
       new URL(requestURL);
       return stripURLCredentials(requestURL);
@@ -491,9 +491,9 @@ export function resolveBrowserRequestURL(url: string): string | undefined {
  * {@link resolveBrowserRequestURL}): it names an origin of its own - the page's, or the one
  * written - so same-origin credentials are not withheld for want of a parse. Every other
  * relative one is handed back as written and the comparison fails closed: `''`, `#top`,
- * `?q`, `.` and `start` name no origin, only the page itself, and resolved they took the
- * page for the request's origin and kept the userinfo of a request to it with nothing to
- * show it belonged there. Other spellings a browser also reads as root- or
+ * `?q`, `.` and `start` name no origin, only the page itself, and resolved they would
+ * take the page for the request's origin and keep the userinfo of a request to it with
+ * nothing to show it belongs there. Other spellings a browser also reads as root- or
  * protocol-relative - `\\app.test/x`, a leading space or tab - fail closed too, withholding
  * same-origin credentials rather than guessing. So does a `/` one with no page to resolve
  * it against.
@@ -541,9 +541,9 @@ export function resolveBrowserInitialURL(
  * Refused as NodeAdapter refuses it, as the non-retryable `adapter_error` it is: the same
  * URL fails the same way on every attempt. A relative URL with no base to resolve it
  * against (an adapter driven directly outside a browser), or one that is not a URL, cannot
- * be sent, nor compared with where an answer came from; any other scheme than http(s) was
- * loaded where the runtime loads one - a `file:` URL read off the local disk. The client
- * always sends an absolute http(s) URL.
+ * be sent, nor compared with where an answer came from; any other scheme than http(s)
+ * would be loaded where the runtime loads one - a `file:` URL read off the local disk.
+ * The client always sends an absolute http(s) URL.
  */
 export function resolveBrowserDispatchURL(
   requestURL: string,
@@ -850,9 +850,9 @@ export function assertSupportedAdapterRuntimeAndConfig(
   }
 
   // A string, checked on every runtime, not only where it must be absolute: a `URL`
-  // object passed `new URL()` here and then failed every request at `endsWith`. And no
-  // query or fragment - a path is appended to it, so `/v1?key=abc` sent `/users` inside
-  // the query.
+  // object would pass `new URL()` here and then fail every request at `endsWith`. And no
+  // query or fragment - a path is appended to it, so `/v1?key=abc` would send `/users`
+  // inside the query.
   const baseURL: unknown = config.baseURL;
   if (baseURL !== undefined) {
     if (typeof baseURL !== 'string') {
@@ -881,7 +881,8 @@ export function assertSupportedAdapterRuntimeAndConfig(
   if (
     config.followRedirects === true &&
     config.maxRedirects !== undefined &&
-    // A whole number, as every other count option is: `1.5` was accepted and acted as 1.
+    // A whole number, as every other count option is: `1.5` would otherwise be accepted
+    // and act as 1.
     (!Number.isInteger(config.maxRedirects) || config.maxRedirects < 1)
   ) {
     throw new Error(
@@ -1082,7 +1083,7 @@ export function normalizeAdapterResponseHeaders(
   headers: Record<string, string | string[]>,
 ): Record<string, string | string[]> {
   // A `Headers` or `Map` keeps its entries off its own properties: read as one, every
-  // header - the content type, `Set-Cookie` - was silently dropped. Refused, as the
+  // header - the content type, `Set-Cookie` - would be silently dropped. Refused, as the
   // request side refuses one.
   assertHeaderRecord(headers, 'HTTPClient adapter response headers');
 
@@ -1103,10 +1104,11 @@ export function normalizeAdapterResponseHeaders(
       continue;
     }
 
-    // The adapter's malformed answer, said as one: an object value was read as
-    // `'[object Object]'` - a `content-type` of one read the body as binary - and a
-    // `set-cookie` line that is not a string, left for the cookie jar to trip over, as
-    // the jar failing. A finite number, as a mock's `content-length: 2`, is its text.
+    // The adapter's malformed answer, said as one: an object value would be read as
+    // `'[object Object]'` - a `content-type` of one would read the body as binary - and a
+    // `set-cookie` line that is not a string, left for the cookie jar to trip over, would
+    // surface as the jar failing. A finite number, as a mock's `content-length: 2`, is
+    // its text.
     if (
       value.some((item) =>
         lower === 'set-cookie'
@@ -1444,9 +1446,10 @@ const NO_HOST: HostPattern = { kind: 'never' };
 /**
  * Whether a `hosts` pattern is `*` alone, trimmed of HTTP whitespace (space, tab, CR and LF). Not `*.`: that is an
  * empty label after the wildcard - what `*.${domain}` gives with the domain unset - and
- * read as `*` it sent a host-scoped interceptor's token to every host. It matches nothing,
- * as in the domain matchers, and is refused when the filter is added. Nor `*` with a
- * no-break space beside it, which `trim()` would take: see {@link hasNonHTTPWhitespaceEdge}.
+ * read as `*`, it would send a host-scoped interceptor's token to every host. It matches
+ * nothing, as in the domain matchers, and is refused when the filter is added. Nor `*`
+ * with a no-break space beside it, which `trim()` would take: see
+ * {@link hasNonHTTPWhitespaceEdge}.
  */
 export function isGlobalHostPattern(pattern: string): boolean {
   return trimHTTPWhitespace(pattern) === '*';
@@ -1567,8 +1570,8 @@ function hasNestedKey(obj: Record<string, unknown>, path: string): boolean {
       return false;
     }
 
-    // Own keys only: `in` also finds inherited names, so `constructor` or `a.toString`
-    // matched every object body.
+    // Own keys only: `in` would also find inherited names, so `constructor` or
+    // `a.toString` would match every object body.
     if (!Object.hasOwn(current, part)) {
       return false;
     }
@@ -1731,7 +1734,7 @@ export function matchesFilter(
     filter.bodyContainsKeys.length > 0
   ) {
     // A plain object, as documented: a typed array or a boxed string has index keys,
-    // so `'0'` matched every binary body.
+    // so `'0'` would match every binary body.
     if (!isPlainRecord(context.body)) {
       return false;
     }

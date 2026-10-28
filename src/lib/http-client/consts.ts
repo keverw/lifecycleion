@@ -230,11 +230,11 @@ export const RESPONSE_STREAM_ABORT_FLAG = '_lifecycleion_response_stream_abort';
  * paths that resolve.
  *
  * `requestBodySettled` is documented as present on every bodied request, and an
- * adapter that throws - a cancel, a timeout, a transport failure - had nowhere to
- * put it: the promise lives in the adapter's closure and the response object it
- * would have ridden on is never built. `HTTPClient` then omitted the field, and
- * `await undefined` is `undefined`, which is the documented value for *an upload
- * that went out in full*. A cancelled bodied `POST` reported a clean upload.
+ * adapter that throws - a cancel, a timeout, a transport failure - has nowhere else
+ * to put it: the promise lives in the adapter's closure and the response object it
+ * would ride on is never built. Without this key `HTTPClient` would omit the field,
+ * and `await undefined` is `undefined`, which is the documented value for *an upload
+ * that went out in full*: a cancelled bodied `POST` would report a clean upload.
  *
  * The value is the promise itself, never an error. `NodeAdapter`'s own promise
  * resolves with the upload's failure or with `undefined` and never rejects, so an
@@ -245,8 +245,8 @@ export const RESPONSE_STREAM_ABORT_FLAG = '_lifecycleion_response_stream_abort';
  *
  * A symbol rather than a string, unlike the boolean markers above it. This value
  * rides on an error that may be serialized at an IPC boundary, and `serializeError`
- * walks `getOwnPropertyNames` deliberately - so a string key put an internal
- * `Promise` into the payload as an empty object, and spent a node of that walk's
+ * walks `getOwnPropertyNames` deliberately - so a string key would put an internal
+ * `Promise` into the payload as an empty object, and spend a node of that walk's
  * budget on it, enumerable or not. Symbol keys are skipped by both that walk and
  * `JSON.stringify`. `Symbol.for`, not `Symbol`, for the reason `reportToHost` uses
  * the global registry: the adapter and the client are separate entry points, so a
@@ -314,8 +314,8 @@ export const XHR_BROWSER_TIMEOUT_FLAG = '_lifecycleion_xhr_browser_timeout';
 
 /**
  * Every {@link AdapterType}. A client refuses an adapter whose `getType()` answers anything
- * else: each adapter and runtime check is keyed on the type, so an unknown one passed
- * every one of them.
+ * else: each adapter and runtime check is keyed on the type, so an unknown one would
+ * pass every one of them.
  */
 export const ADAPTER_TYPES: ReadonlySet<AdapterType> = new Set<AdapterType>([
   'fetch',

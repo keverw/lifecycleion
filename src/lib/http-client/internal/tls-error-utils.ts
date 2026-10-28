@@ -1,9 +1,9 @@
 // The shared brand check, for the reason the adapters use it: a local `instanceof` misses
 // an error built in another realm - a `vm` context, an iframe - and the value tested here
 // is exactly that case. Node wraps a TLS failure as `TypeError: fetch failed` and hangs
-// the real error off `cause`, so a cross-realm cause failed the check and its certificate
-// error was classified as a generic transport failure and retried, though a rejected
-// certificate fails identically every time.
+// the real error off `cause`, so a cross-realm cause would fail a local check and its
+// certificate error would be classified as a generic transport failure and retried,
+// though a rejected certificate fails identically every time.
 import { isErrorValue } from '../../to-error';
 // Every field is read through this, since the error is whatever a runtime, a library, or
 // a caller's mocked `fetch` rejected with. This classifier runs inside adapter error
@@ -61,7 +61,7 @@ const TRANSPORT_ERROR_CODES = new Set([
   'ENETDOWN',
   'EADDRNOTAVAIL',
   // A `socketPath` that is missing, not permitted or not a socket: the message names the
-  // path, and `sock/certificates/agent.sock` matched /certificate/ on it alone.
+  // path, and `sock/certificates/agent.sock` would match /certificate/ on it alone.
   'ENOENT',
   'EACCES',
   'EINVAL',
@@ -113,9 +113,9 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
   // Every CRL-related verification code, by property rather than by name.
   // OpenSSL exposes twelve of them (UNABLE_TO_GET_CRL,
   // UNABLE_TO_DECRYPT_CRL_SIGNATURE, CRL_HAS_EXPIRED, KEYUSAGE_NO_CRL_SIGN,
-  // ERROR_IN_CRL_NEXT_UPDATE_FIELD, DIFFERENT_CRL_SCOPE, …) and an earlier
-  // version of this listed six by hand and missed the other six. They are all
-  // revocation-check failures, and enumerating them means being wrong again
+  // ERROR_IN_CRL_NEXT_UPDATE_FIELD, DIFFERENT_CRL_SCOPE, …), and a list written
+  // by hand misses whichever of them it leaves out. They are all
+  // revocation-check failures, and enumerating them means being wrong
   // the next time OpenSSL adds one — so ask whether the code concerns a CRL
   // instead. The message fallback below does not catch them: 'CRL has expired'
   // and "format error in CRL's lastUpdate field" contain none of the words it
@@ -143,7 +143,7 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
   // never consulted for one. The message test below runs against a runtime-built
   // string with the hostname interpolated in, so `getaddrinfo EAI_AGAIN
   // certificates.internal.corp` matches /certificate/ on the host name alone —
-  // and any deployment calling a `certificates.*` host would have had every DNS
+  // and any deployment calling a `certificates.*` host would have every DNS
   // blip resolve as a permanent 495 with `isRetryable: false`.
   //
   // Only the fallback is suppressed; the code checks above still run first.
