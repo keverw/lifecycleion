@@ -83,8 +83,8 @@ export class FetchAdapter implements HTTPAdapter {
     // or the worker's `location`, with credentials withheld for another origin than the
     // initial URL's; one that does not resolve, or is not http(s), is refused as the
     // non-retryable `adapter_error` it is (see `resolveBrowserDispatchURL`). Unresolved,
-    // `fetch` threw an invalid URL error retried as a network failure to no end. The URL
-    // sent, and what a `Location` resolves against.
+    // `fetch` would throw an invalid URL error retried as a network failure to no end. The
+    // URL sent, and what a `Location` resolves against.
     const dispatchedURL = resolveBrowserDispatchURL(
       requestURL,
       initialURL,
@@ -97,15 +97,15 @@ export class FetchAdapter implements HTTPAdapter {
 
     // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
     // browsers refuse to send one, and Node's undici, given one that disagrees with the
-    // body, waited for bytes that never came until the attempt timed out - on every retry.
-    // Taken off the adapter's own copy, in place.
+    // body, would wait for bytes that never come until the attempt times out - on every
+    // retry. Taken off the adapter's own copy, in place.
     deleteHeader(headers, 'content-length');
 
     // `fetch` refuses a GET or HEAD with any body that is not `null`, an empty string
-    // included, on every attempt - a `TypeError` with no code, retried as a network
-    // failure to no end. The probe below is built without the body, so it is checked
-    // here. `HTTPClient` refuses one before this, and hands a JSON body that serializes
-    // to nothing over as `null`.
+    // included, on every attempt - a `TypeError` with no code, which would be retried as a
+    // network failure to no end. The probe below is built without the body, so it is
+    // checked here. `HTTPClient` refuses one before this, and hands a JSON body that
+    // serializes to nothing over as `null`.
     if (
       (method === 'GET' || method === 'HEAD') &&
       body !== null &&
@@ -122,8 +122,8 @@ export class FetchAdapter implements HTTPAdapter {
     // a URL carrying credentials, on every attempt - fails once as the non-retryable
     // `adapter_error` it is, rather than as a network error retried to no end. Built
     // without the body or signal, which `fetch` below takes, so nothing is consumed. A
-    // header value or method `fetch` refuses came back as its `TypeError`, retried the same
-    // way.
+    // header value or method `fetch` refuses is caught here too, rather than coming back
+    // from `fetch` as its `TypeError` and retried the same way.
     //
     // Only where it can be: a runtime with `Request` - a test setup that polyfills only
     // `fetch` has none. There the headers are still checked, by `Headers` where it exists,
@@ -173,8 +173,8 @@ export class FetchAdapter implements HTTPAdapter {
 
     // Read through the guarded accessor before anything is dispatched, as the other
     // adapters read it: `fetch` reads the signal's internal state, not the getter, so a
-    // signal whose `aborted` throws went out unrefused. An aborted one is `fetch`'s to
-    // reject, with its reason. The failure paths below read it quietly.
+    // signal whose `aborted` throws would otherwise go out unrefused. An aborted one is
+    // `fetch`'s to reject, with its reason. The failure paths below read it quietly.
     const wasAbortedAtDispatch = isSignalAborted(signal);
 
     // Fire 0% upload progress - once every refusal above has passed, so a request refused

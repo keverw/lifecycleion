@@ -20,7 +20,7 @@ export function isHeaderSafeCookieText(text: string, extra: string): boolean {
     const code = char.charCodeAt(0);
 
     // Above U+00FF is refused too: no header can carry it, so a stored cookie holding
-    // one failed every request to its host, and took the host's other cookies with it.
+    // one would fail every request to its host, and take the host's other cookies with it.
     if (
       (code <= 0x1f && code !== 0x09) ||
       code === 0x7f ||

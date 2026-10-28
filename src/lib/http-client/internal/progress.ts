@@ -9,8 +9,8 @@ import { isNullish } from '../../internal/is-nullish';
  * failure.
  *
  * `onUploadProgress` and `onDownloadProgress` are invoked from inside the adapters' stream
- * handlers, and were called bare. A throw there did not vanish - it propagated out and the
- * adapter classified it as an `adapter_error`, so the caller was told their request had a
+ * handlers. Called bare, a throw there would not vanish - it would propagate out and the
+ * adapter would classify it as an `adapter_error`, telling the caller their request had a
  * network problem when in fact their own progress callback had a bug. That is a worse
  * outcome than silence in one specific way: silence leaves you looking, and a
  * misclassification points you somewhere there is nothing to find.
@@ -20,12 +20,12 @@ import { isNullish } from '../../internal/is-nullish';
  * global `'error'` channel, where `safeHandleCallback` already sends every other
  * caller-callback failure, and the transfer carries on.
  *
- * The same rule applies to every other purely observational hook, and `onAttemptStart` /
- * `onAttemptEnd` were worse than these: a throw from one of those took the request down to
- * `status: 0` and reported nothing at all.
+ * The same rule applies to every other purely observational hook, `onAttemptStart` /
+ * `onAttemptEnd` included: unguarded, a throw from one of those would take the request down
+ * to `status: 0` and report nothing at all.
  *
  * @returns A guarded callback, or `undefined` when the caller supplied none, so the
- *          `?.()` call sites downstream stay exactly as they were.
+ *          call sites downstream stay plain `?.()` calls.
  */
 export function guardProgressCallback(
   callback: ((event: AdapterProgressEvent) => void) | undefined | null,
@@ -73,8 +73,8 @@ export function knownBodyByteLength(body: unknown): number | undefined {
     return byteLength;
   }
 
-  // Guarded: the body is the caller's, and a Proxy whose `getPrototypeOf` throws made
-  // this `instanceof` check throw from inside an XHR event listener - an uncaught
+  // Guarded: the body is the caller's, and a Proxy whose `getPrototypeOf` throws would
+  // make this `instanceof` check throw from inside an XHR event listener - an uncaught
   // exception on the global channel rather than a size that cannot be known.
   try {
     if (typeof Blob !== 'undefined' && body instanceof Blob) {

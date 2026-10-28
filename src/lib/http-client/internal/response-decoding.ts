@@ -3,9 +3,9 @@
  *
  * `fetch` (undici, Bun) and browsers decode a compressed response before handing over its
  * body, and so do axios and got on Node; Node's own `http.request` does not. NodeAdapter
- * decodes as they do, so the same request yields the same body on every adapter: a server
- * or CDN that sends `Content-Encoding: gzip` gave NodeAdapter callers the raw gzip bytes -
- * a JSON response that failed to parse - where FetchAdapter gave the JSON.
+ * decodes as they do, so the same request yields the same body on every adapter: otherwise
+ * a server or CDN that sends `Content-Encoding: gzip` would give NodeAdapter callers the
+ * raw gzip bytes - a JSON response that fails to parse - where FetchAdapter gives the JSON.
  *
  * The decoded body is offered through the same events the raw `IncomingMessage` emits -
  * `data`, `end`, `error`, `aborted`, `close` - and its `pause` / `resume`, so the buffered
@@ -26,7 +26,7 @@ export const ACCEPTED_CONTENT_ENCODINGS = 'gzip, deflate, br';
 /**
  * The most codings a response may stack, as undici bounds it. Each is a decoder built on
  * the first byte, and a header of a few thousand `br,` - well under Node's header limit -
- * cost tens of megabytes per response before its one-byte body failed to decode.
+ * would cost tens of megabytes per response before its one-byte body failed to decode.
  */
 const MAX_CONTENT_CODINGS = 5;
 
@@ -155,9 +155,9 @@ export function createResponseBodySource(
  *   tears the response down so its socket is not held.
  * - Until a reader attaches, `end`, `close`, `error` and `aborted` are held and delivered in
  *   order once it has: a streamed response's factory may still be opening its sink.
- * - `destroy` stops everything: a request cancelled or timed out after a small compressed
- *   body had arrived whole went on inflating it - a few kilobytes into gigabytes - with
- *   nobody reading.
+ * - `destroy` stops everything: otherwise a request cancelled or timed out after a small
+ *   compressed body had arrived whole would go on inflating it - a few kilobytes into
+ *   gigabytes - with nobody reading.
  */
 class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private decoders: Decoder[] = [];
@@ -238,7 +238,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
         // failure after the raw body ended - which a listener added now would never see.
         // Told by our own listener's flag, not by `closed` or `destroyed`: `destroy(error)`
         // sets both at once and emits the error and `'close'` a tick later, so either read
-        // delivered `close` before the tagged decoding error, as a plain closed stream.
+        // would deliver `close` before the tagged decoding error, as a plain closed stream.
         if (
           this.didDecodeEnd ||
           last === undefined ||
@@ -314,8 +314,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   public resume(): this {
     this.isPaused = false;
     // A resume with no reader drains the body, as it drains a raw `IncomingMessage`:
-    // the data goes to no one and `end` is heard. Held for a reader, it was dropped and
-    // `end` held for good.
+    // the data goes to no one and `end` is heard. Held for a reader instead, the resume
+    // would be dropped and `end` held for good.
     this.beginReading();
     this.decoders.at(-1)?.resume();
 
@@ -350,9 +350,9 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
 
     // Still `'close'`, a tick on, as a destroyed `IncomingMessage` still emits it: the
-    // raw response's own `'close'` is dropped above, so a reader waiting on it - a streamed
-    // download's pipe into a sink - was never told the body was over, and never took its
-    // listeners off that sink. Once, and nothing else is delivered.
+    // raw response's own `'close'` is dropped above, so without this a reader waiting on it
+    // - a streamed download's pipe into a sink - would never be told the body was over, and
+    // never take its listeners off that sink. Once, and nothing else is delivered.
     if (!this.didEmitClose) {
       process.nextTick(() => {
         if (!this.didEmitClose) {
@@ -390,15 +390,15 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
 
     // Trailing bytes: zlib and brotli end their output when their compressed stream ends
-    // and drop whatever input is left, so `br` or `deflate` followed by junk was delivered
-    // as a success; it is a stream error, as gunzip makes it one for gzip. Told by count,
-    // not by the order of events - decoding runs off the main thread, so the response's
-    // own `'end'` routinely comes first even when its last chunk carried the junk: a
-    // decoder that ends having consumed (`bytesWritten`) fewer bytes than it was fed
-    // stopped short of its input. `SniffingInflate` tells its own. Not for gzip: gunzip
-    // already fails on bytes after its stream unless they start with a zero byte, which it
-    // reads as padding (some servers pad) - a count would refuse what Node and browsers
-    // read.
+    // and drop whatever input is left, so `br` or `deflate` followed by junk would be
+    // delivered as a success; it is a stream error, as gunzip makes it one for gzip. Told
+    // by count, not by the order of events - decoding runs off the main thread, so the
+    // response's own `'end'` routinely comes first even when its last chunk carried the
+    // junk: a decoder that ends having consumed (`bytesWritten`) fewer bytes than it was
+    // fed stopped short of its input. `SniffingInflate` tells its own. Not for gzip:
+    // gunzip already fails on bytes after its stream unless they start with a zero byte,
+    // which it reads as padding (some servers pad) - a count would refuse what Node and
+    // browsers read.
     //
     // A cut-off zstd frame, followed the same way: Node's and Bun's zstd decoders end
     // cleanly on one, handing over what they decoded, where gunzip, brotli and inflate
@@ -617,7 +617,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       }
 
       // A listener may have torn the body down (a stream setup that failed releases it):
-      // nothing is held once destroyed, or `heldError()` answered a stale error.
+      // nothing is held once destroyed, or `heldError()` would answer a stale error.
       if (this.isDestroyed) {
         return;
       }
@@ -625,8 +625,9 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
 
     // Held behind what is already held, too: the held events are flushed a microtask
     // after the reader attaches, and a `close` arriving first (a `nextTick` after the
-    // refused response's `destroy()`) settled the reader before the tagged error that
-    // came before it - a coding chain refused as too long then read as a transport cut.
+    // refused response's `destroy()`) would settle the reader before the tagged error that
+    // came before it - a coding chain refused as too long would then read as a transport
+    // cut.
     if (!this.isReading || this.held.length > 0) {
       this.held.push({ event, args });
 
@@ -688,8 +689,9 @@ function createDecoder(
  * Whether a `deflate` body starts with a zlib header (RFC 1950) rather than raw deflate:
  * compression method 8 in the low nibble of the first byte, a window size of at most 7 in
  * its high nibble, and - where the second byte is in this chunk - a header check that
- * makes the first two bytes a multiple of 31, as browsers read it. The nibble alone took raw deflate opening on a stored block with set
- * padding bits (`0x08`, `0x18`) for zlib, and failed a valid body on its header check.
+ * makes the first two bytes a multiple of 31, as browsers read it. The nibble alone would
+ * take raw deflate opening on a stored block with set padding bits (`0x08`, `0x18`) for
+ * zlib, and fail a valid body on its header check.
  */
 function isZlibHeader(bytes: Buffer): boolean {
   const first = bytes[0];
@@ -877,8 +879,8 @@ class SniffingInflate extends InnerDecoderTransform<
 /**
  * A zstd decoder handed one frame per write. Node's decoder reads only the first frame of
  * a write that holds several and leaves the rest unread, where it reads each frame of its
- * own write - so a body of several frames (valid zstd, RFC 8878) decoded or failed by how
- * the network split it. Split at the frame boundaries `ZstdFrameWalker` follows, it
+ * own write - so a body of several frames (valid zstd, RFC 8878) would decode or fail by
+ * how the network split it. Split at the frame boundaries `ZstdFrameWalker` follows, it
  * decodes whole however it arrives, on Node and Bun alike.
  */
 class FramedZstdDecompress extends InnerDecoderTransform {

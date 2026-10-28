@@ -34,17 +34,17 @@ export function readAdapterRequestFields(request: AdapterRequest) {
     givenMethod = request.method;
     const requestURL: unknown = request.requestURL;
     // A string, as the type has it: an adapter driven directly with anything else - a
-    // number, a `URL` object - threw a raw `TypeError` from wherever it was first read
-    // as one (XHRAdapter's `startsWith`), or was sent as whatever it coerced to.
+    // number, a `URL` object - would throw a raw `TypeError` from wherever it was first
+    // read as one (XHRAdapter's `startsWith`), or send it as whatever it coerced to.
     if (typeof requestURL !== 'string') {
       throw new TypeError(
         `Adapter request requestURL must be a string (got ${describeValue(requestURL)})`,
       );
     }
     const initialURL: unknown = request.initialURL;
-    // Absent, or a string, as the type has it. Anything else - a `null`, a number - was
-    // resolved by the browser adapters as a relative reference against the page, and so
-    // taken for the page's own origin: a request URL there kept the userinfo a
+    // Absent, or a string, as the type has it. Anything else - a `null`, a number - would
+    // be resolved by the browser adapters as a relative reference against the page, and so
+    // taken for the page's own origin: a request URL there would keep the userinfo a
     // cross-origin hop withholds.
     if (initialURL !== undefined && typeof initialURL !== 'string') {
       throw new TypeError(
@@ -92,7 +92,7 @@ export function isSignalAborted(
 
   try {
     // Exactly `true`, as the standard types it: a boolean. A broken polyfill's `1` or
-    // `'false'` is not taken for an abort - a `'false'` read as truthy cancelled a
+    // `'false'` is not taken for an abort - a `'false'` read as truthy would cancel a
     // request that never was.
     return signal.aborted === true;
   } catch (error) {
@@ -128,7 +128,7 @@ export type AdapterRequestFields = ReturnType<typeof readAdapterRequestFields>;
  *
  * No headers (`undefined` or `null`) is none. A record that is not a plain object is
  * refused with a `TypeError`: a `Headers` or `Map` keeps its entries off its own
- * properties, and read as one it sent none of them.
+ * properties, and read as one it would send none of them.
  */
 export function copyRequestHeaders(
   headers: unknown,

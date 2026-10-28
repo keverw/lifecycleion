@@ -402,7 +402,7 @@ export class MockAdapter implements HTTPAdapter {
     const routeMethod = asciiUppercase(method);
     const match = this.router.find(routeMethod as RouterHTTPMethod, path);
     // Copied into a plain object: the router's own is a null-prototype `NullObject`,
-    // which a route echoing `req.params` as its body had refused as an unsupported type.
+    // which a route echoing `req.params` as its body would refuse as an unsupported type.
     const params = { ...(match?.params ?? {}) } as Record<string, string>;
 
     const mockRequest: MockRequest = {
@@ -481,9 +481,10 @@ export class MockAdapter implements HTTPAdapter {
 
             // Said, not swallowed. The 500 is the right recovery - it mirrors what a real
             // server does when its own error handler fails - but it is also exactly what a
-            // caller who configured no `onHandlerError` at all gets, so a broken `onHandlerError` was
-            // indistinguishable from an absent one. In a test suite, which is the only
-            // place this adapter runs, that is precisely the thing you want to be told.
+            // caller who configured no `onHandlerError` at all gets, so unreported, a
+            // broken `onHandlerError` would be indistinguishable from an absent one. In a
+            // test suite, which is the only place this adapter runs, that is precisely the
+            // thing you want to be told.
             reportCallbackError('MockAdapter onHandlerError', error);
 
             mockResponse = {
@@ -511,10 +512,10 @@ export class MockAdapter implements HTTPAdapter {
       throw error;
     }
 
-    // Every field read once, here, into the answer every check and use below reads: a
-    // getter that returned `200` to the status check and `0` to the response passed one
-    // and sent another. A getter that throws keeps the ordinary adapter-error behavior
-    // caller code read here always had, as the CRL's does.
+    // Every field read once, here, into the answer every check and use below reads:
+    // otherwise a getter that answers `200` to the status check and `0` to the response
+    // would pass one and send another. A getter that throws keeps the ordinary
+    // adapter-error behavior of caller code read here, as the CRL's does.
     mockResponse = snapshotMockResponse(mockResponse);
 
     // What the server would have put on the wire, fixed when the route answers: serialized
@@ -522,7 +523,7 @@ export class MockAdapter implements HTTPAdapter {
     // not delivered changed. HEAD / 204 / 205 / 304 never expose a body to consumers, even
     // if the handler returned one, keeping the mock transport aligned with real HTTP.
     // Not serialized at all under a simulated transport or stream error, which loses it:
-    // a body the mock could not serialize (a `Map`) failed the route as an
+    // otherwise a body the mock cannot serialize (a `Map`) would fail the route as an
     // `adapter_error` instead. A body that cannot be serialized is held, and refused
     // below, after the delay and the checks ahead of it.
     const simulatedStreamErrorCode = resolveMockStreamErrorCode(
@@ -607,13 +608,14 @@ export class MockAdapter implements HTTPAdapter {
       const options: MockTransportErrorOptions =
         mockResponse.transportError === true ? {} : mockResponse.transportError;
       // Held to the rule the client holds an adapter's status to - an integer from 0 to
-      // 999 - here, as the route's mistake: unchecked, it was refused later as the
+      // 999 - here, as the route's mistake: unchecked, it would be refused later as the
       // adapter's.
       //
-      // Each field read once, as the answer's own are (see `snapshotMockResponse`): a
-      // `status` getter that answered `495` to the check and `1000` to the response
-      // passed one and sent another. All read as the route's mistake: a getter that throws
-      // on any of them is refused once, not retried as the adapter's own failure.
+      // Each field read once, as the answer's own are (see `snapshotMockResponse`):
+      // otherwise a `status` getter that answers `495` to the check and `1000` to the
+      // response would pass one and send another. All read as the route's mistake: a
+      // getter that throws on any of them is refused once, not retried as the adapter's
+      // own failure.
       const { status, isRetryable, wasDefinitelyNotSent, message } =
         asRouteMistake(() => {
           const value: unknown = options.status;
@@ -688,8 +690,9 @@ export class MockAdapter implements HTTPAdapter {
     const responseBody = streamErrorCode !== undefined ? null : intendedBody;
 
     // --- 7. Build response headers ---
-    // A plain object, as every other header record: a `Headers` or `Map` spread to `{}`,
-    // and then passed every check downstream with every header - `set-cookie` too - lost.
+    // A plain object, as every other header record: a `Headers` or `Map` would spread to
+    // `{}`, and then pass every check downstream with every header - `set-cookie` too -
+    // lost.
     // Read once: the value copied is the value checked.
     const responseHeaders: AdapterResponse['headers'] = asRouteMistake(() => {
       const headers: unknown = mockResponse.headers;
@@ -706,8 +709,8 @@ export class MockAdapter implements HTTPAdapter {
     const routeCookies: unknown = mockResponse.cookies;
     if (routeCookies) {
       const setCookieEntries = asRouteMistake(() => {
-        // A plain object, as the headers are: a `Map` read through `Object.entries` set
-        // no cookies at all.
+        // A plain object, as the headers are: a `Map` read through `Object.entries` would
+        // set no cookies at all.
         if (!isPlainRecord(routeCookies)) {
           throw new TypeError(
             `MockAdapter route cookies must be a plain object of cookie names to values (got ${Array.isArray(routeCookies) ? 'an array' : describeValue(routeCookies)})`,
@@ -907,7 +910,7 @@ function parseCookieHeader(
       continue;
     }
 
-    // Trimmed of spaces and tabs only, as the cookie jar trims: `trim()` also took a
+    // Trimmed of spaces and tabs only, as the cookie jar trims: `trim()` would also take a
     // trailing U+00A0 - the last byte of a UTF-8 `à` read as latin1 - from a jar value.
     const name = trimSpacesAndTabs(part.slice(0, eqIdx));
     const value = decodeCookieValue(trimSpacesAndTabs(part.slice(eqIdx + 1)));
@@ -953,9 +956,10 @@ function cookiesToSetCookieHeaders(
 /**
  * A route's `MockCookieOptions`, every field read once and held to its type - the copy
  * checked is the copy written. A field of the wrong type is a route mistake, not a value
- * to coerce: a `value` of `undefined` was written as `undefined`, and `httpOnly: 'false'`
- * set HttpOnly. It is named by the cookie's position, as a refused name is; text of the
- * right type that cannot be written, by the cookie's (already vetted) name.
+ * to coerce: a `value` of `undefined` would be written as `undefined`, and
+ * `httpOnly: 'false'` would set HttpOnly. It is named by the cookie's position, as a
+ * refused name is; text of the right type that cannot be written, by the cookie's
+ * (already vetted) name.
  */
 function readMockCookieOptions(
   name: string,
@@ -963,7 +967,7 @@ function readMockCookieOptions(
   index: number,
 ): MockCookieOptions {
   const position = `at position ${String(index)}`;
-  // An array is an object to `typeof`, and read as options it was refused for its
+  // An array is an object to `typeof`, and read as options it would be refused for its
   // missing `value` - a message about a field the route never wrote.
   if (Array.isArray(entry)) {
     throw new TypeError(
@@ -1005,8 +1009,8 @@ function readMockCookieOptions(
     }
     assertCookieText(text, `"${name}" ${attribute}`);
   }
-  // The typed attributes, held to their types: a string in `sameSite` or `maxAge` was
-  // written into the line as it was, and either flag was read by truthiness.
+  // The typed attributes, held to their types: a string in `sameSite` or `maxAge` would
+  // be written into the line as it is, and either flag would be read by truthiness.
   if (
     sameSite !== undefined &&
     sameSite !== 'Strict' &&

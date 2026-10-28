@@ -60,11 +60,11 @@ export async function writeRequestBodyChunked(
 
   // The loop's other exit. `onClose` rejects a chunk that was waiting for its callback, but
   // a stream destroyed between chunks - with no chunk waiting, so no `'close'` listener
-  // attached - leaves the loop through `!req.destroyed` and used to resolve. `node-adapter`
-  // then follows with `req.end()`, finalizing a body short of the `Content-Length` it
-  // already declared, and on a runtime that does not emit `'error'` on `req.destroy()`
-  // nothing else reports it. A truncated write is a failed write, whichever exit reached
-  // it.
+  // attached - leaves the loop through `!req.destroyed`, and resolving there would let
+  // `node-adapter` follow with `req.end()`, finalizing a body short of the `Content-Length`
+  // it already declared; on a runtime that does not emit `'error'` on `req.destroy()`
+  // nothing else would report it. A truncated write is a failed write, whichever exit
+  // reached it.
   if (uploadedBytes < totalSize) {
     throw new Error('Request stream closed before the body was fully written');
   }
@@ -81,11 +81,12 @@ export async function writeRequestBodyChunked(
  * handed to the socket, so a writer that awaits each chunk before the next - both callers
  * do - never has more than one chunk in flight, however slowly the receiver reads; a
  * receiver that stops reading never calls it, which is what the adapter's upload-stall
- * watchdog reads as no progress. Waiting for `'drain'` as well bought nothing over that
- * and broke an upload the server acked early and went on reading: Node and Bun stop
+ * watchdog reads as no progress. Waiting for `'drain'` as well would buy nothing over that
+ * and would break an upload the server acks early and goes on reading: Node and Bun stop
  * emitting `'drain'` on a request whose response has ended while the request has not, so
  * a chunk that asked for one - every multipart `File` chunk does, being larger than the
- * request's high-water mark - waited for good, and the watchdog cut the body short.
+ * request's high-water mark - would wait for good, and the watchdog would cut the body
+ * short.
  */
 export function writeChunkWithBackpressure(
   req: RequestBodyWritable,
@@ -110,9 +111,9 @@ export function writeChunkWithBackpressure(
       isSettled = true;
       cleanup();
 
-      // Rejected with what it threw: settled and with its listeners off, a throw left the
-      // promise pending for good - and, from the write callback, escaped as an uncaught
-      // exception.
+      // Rejected with what it threw: settled and with its listeners off, an uncaught throw
+      // would leave the promise pending for good - and, from the write callback, escape as
+      // an uncaught exception.
       try {
         onAccepted?.();
       } catch (error) {
@@ -135,10 +136,11 @@ export function writeChunkWithBackpressure(
 
       // Rejects, and that is the whole point of this branch. A stream that closes while a
       // chunk is still waiting for its callback has *not* accepted the chunk, so resolving
-      // reported an upload that never happened: the loop above exits on `!req.destroyed`,
-      // `node-adapter` follows with `req.end()`, and a truncated body is finalized as
-      // though it had been sent in full. Measured on a writable that applies backpressure
-      // and then closes: nought bytes accepted, promise resolved, no error anywhere.
+      // would report an upload that never happened: the loop above would exit on
+      // `!req.destroyed`, `node-adapter` would follow with `req.end()`, and a truncated
+      // body would be finalized as though it had been sent in full - on a writable that
+      // applies backpressure and then closes, nought bytes accepted, promise resolved, no
+      // error anywhere.
       //
       // Usually a real `ClientRequest` also emits `'error'` and the adapter turns that into
       // a transport failure - but not always, and this file's own neighbour says so:
@@ -165,15 +167,15 @@ export function writeChunkWithBackpressure(
         // Guarded on the way in as well as marked on the way out. This callback can fire
         // *after* `onClose` or `onError` already settled - a chunk whose socket dies
         // delivers `'close'` first and the pending `ECONNRESET` second - and running on
-        // regardless meant a second `cleanup()` and a second `reject` on a promise that
-        // was already rejected.
+        // regardless would mean a second `cleanup()` and a second `reject` on a promise
+        // that was already rejected.
         if (isSettled) {
           return;
         }
 
         // Settled, as `onClose` and `onError` mark themselves. Left unmarked, a later
-        // `'close'` or `'error'` ran its whole body again - `cleanup()` a second time and
-        // a second `reject` on a promise already rejected - and the registration below
+        // `'close'` or `'error'` would run its whole body again - `cleanup()` a second time
+        // and a second `reject` on a promise already rejected - and the registration below
         // could not tell that there was nothing left to wait for.
         isSettled = true;
         cleanup();
@@ -189,19 +191,19 @@ export function writeChunkWithBackpressure(
     hasWriteReturned = true;
 
     // Armed for every chunk still waiting on its callback. A socket that dies while a chunk
-    // sits in the buffer never calls it: with nothing listening, nothing rejected and
-    // nothing resolved, so the writer's promise stayed pending for good. That is the promise
-    // `requestBodySettled` hands the caller - an early-ack `200` whose connection then
-    // dropped left an `await` on it hanging forever - and the adapter's own upload-stall
-    // watchdog could not help: it destroys the request, which is precisely the event
-    // nothing was listening for.
+    // sits in the buffer never calls it: with nothing listening, nothing would reject and
+    // nothing resolve, so the writer's promise would stay pending for good. That is the
+    // promise `requestBodySettled` hands the caller - an early-ack `200` whose connection
+    // then dropped would leave an `await` on it hanging forever - and the adapter's own
+    // upload-stall watchdog could not help: it destroys the request, which is precisely the
+    // event these listeners are here for.
     //
     // `!isSettled` throughout. The write callback can run synchronously with an error - a
     // `ClientRequest` already destroyed answers that way - settling the write and running
-    // `cleanup()` before any listener exists. Attaching listeners afterwards armed nothing that
-    // could take them off again: the `req.destroyed` guard calls `onClose`, which returns on
-    // `isSettled`, so they stayed on `req` for the life of the request - once per chunk, which
-    // is the `MaxListenersExceededWarning` path.
+    // `cleanup()` before any listener exists. Listeners attached afterwards would have
+    // nothing to take them off again: the `req.destroyed` guard calls `onClose`, which
+    // returns on `isSettled`, so they would stay on `req` for the life of the request -
+    // once per chunk, which is the `MaxListenersExceededWarning` path.
     if (!isSettled) {
       req.once('close', onClose);
       req.once('error', onError);

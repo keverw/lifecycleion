@@ -13,8 +13,9 @@ import { readUnknownMember as readObjectMember } from '../../internal/read-membe
  * A non-retryable adapter error for a failure that may be the caller's own error - one a
  * route, a body's `toJSON` or a header value's `toString` threw. A fresh carrier, with
  * that error on `cause` (which the client reports), rather than the flag defined on the
- * caller's object: there it stayed for good, so the same object thrown later by an
- * adapter's `send()` was read as non-retryable, and it showed up in `serializeError`.
+ * caller's object: there it would stay for good, so the same object thrown later by an
+ * adapter's `send()` would read as non-retryable, and it would show up in
+ * `serializeError`.
  */
 export function nonRetryableAdapterErrorFrom(error: unknown): Error {
   // Already one: a refusal raised inside a step that is itself read on a carrier goes
@@ -35,7 +36,7 @@ export function nonRetryableAdapterErrorFrom(error: unknown): Error {
 
   // Not an `AbortError`: the client reads that name as a cancel or a timeout before it
   // reads the flag, so a caller's own one - a `throwIfAborted()` on an unrelated signal,
-  // from a header value's `toString` - was reported as a cancel, or retried as a
+  // from a header value's `toString` - would be reported as a cancel, or retried as a
   // timeout. The caller's error stays on `cause`.
   if (typeof name === 'string' && name !== 'AbortError') {
     carrier.name = name;
@@ -62,14 +63,14 @@ export function isAdapterErrorCarrier(error: unknown): error is Error {
  * An adapter request's method as the transport takes it: converted to a string once, as
  * `fetch`, `open` and Node's request line convert it, so a non-string one does not throw
  * at the first `toUpperCase` after the request may already have gone out. Refused as a
- * non-retryable `adapter_error` when it is absent - `String` made that the verb
- * `undefined`, which `fetch` accepts as a token and sent - when its `toString` throws, or
- * when what it converts to is not an RFC 9110 token: every attempt carries the same
- * method.
+ * non-retryable `adapter_error` when it is absent - `String` would make that the verb
+ * `undefined`, which `fetch` accepts as a token and would send - when its `toString`
+ * throws, or when what it converts to is not an RFC 9110 token: every attempt carries the
+ * same method.
  *
  * The token check is here, for every adapter, rather than left to each runtime: Node's
  * refusal quotes the method (`Method must be a valid HTTP token ["GET secret-token"]`) and
- * a carrier passes that message on, while MockAdapter, with no runtime to ask, answered
+ * a carrier passes that message on, while MockAdapter, with no runtime to ask, would answer
  * one with the 404 of a route not found. The refusal names no value.
  */
 export function readAdapterMethod(method: unknown): string {
@@ -140,7 +141,8 @@ export function markNonRetryableAdapterError(error: unknown): void {
       value: true,
     });
   } catch {
-    // Not an object, or one that refuses the property; it is retried as before.
+    // Not an object, or one that refuses the property; it is retried as any untagged
+    // error is.
   }
 }
 

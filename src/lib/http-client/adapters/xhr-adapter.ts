@@ -103,8 +103,8 @@ export class XHRAdapter implements HTTPAdapter {
 
       // Refused as NodeAdapter refuses a URL it cannot parse or of another scheme:
       // whether an answer came from where the request was sent cannot be told without an
-      // absolute URL to compare `responseURL` with, and XHR opened a `file:` or `data:`
-      // URL where the runtime would load one.
+      // absolute URL to compare `responseURL` with, and XHR would open a `file:` or
+      // `data:` URL where the runtime loads one.
       if (typeof answeredURL !== 'string') {
         refuse(answeredURL);
         return;
@@ -162,8 +162,8 @@ export class XHRAdapter implements HTTPAdapter {
         //
         // A caller's `Content-Length` is left to XHR, which frames the body itself, as
         // FetchAdapter leaves it to `fetch`: a browser refuses to send one, and an XHR
-        // outside a browser sent one that disagreed with the body, so the server waited for
-        // bytes that never came. Taken off the adapter's own copy, in place.
+        // outside a browser would send one that disagreed with the body, so the server
+        // would wait for bytes that never come. Taken off the adapter's own copy, in place.
         deleteHeader(headers, 'content-length');
         for (const [name, value] of requestHeaderPairs(headers)) {
           try {
@@ -246,8 +246,8 @@ export class XHRAdapter implements HTTPAdapter {
 
         // And removed when the request ends any other way. `once` only fires on
         // abort, so on a long-lived shared signal - one controller over a whole
-        // page session - every completed request left its listener behind, one
-        // per request, until the signal finally aborted or was collected.
+        // page session - every completed request would leave its listener behind,
+        // one per request, until the signal finally aborted or was collected.
         // `loadend` fires after load, error, timeout and abort alike - and a send
         // that throws, which fires none of them, removes it itself.
         removeAbortListener = () => {
@@ -712,8 +712,8 @@ function readPageOrigin(): string | undefined {
 
 /**
  * An XHR progress event's `progress` and `total`, for upload and download alike. A length
- * is known only where it is one: a shim's `lengthComputable` with a total of `0` made the
- * progress `NaN` or `Infinity`, and a compressed response can count `loaded` in decoded
+ * is known only where it is one: a shim's `lengthComputable` with a total of `0` would make
+ * the progress `NaN` or `Infinity`, and a compressed response can count `loaded` in decoded
  * bytes against an encoded `Content-Length` (Chrome does), so a count past the total says
  * the total is not the body's length. An unknown length has progress `-1`, and the bytes
  * so far stand for the total, as NodeAdapter reports a decoded body's.
@@ -825,8 +825,8 @@ function parseXHRResponseHeaders(
     }
 
     // Lowercase to normalize across servers (header names are case-insensitive).
-    // Trimmed of HTTP whitespace only: `trim()` also took U+00A0, the 0xA0 byte a value
-    // read as latin1 may end with (the second byte of a UTF-8 `à`).
+    // Trimmed of HTTP whitespace only: `trim()` would also take U+00A0, the 0xA0 byte a
+    // value read as latin1 may end with (the second byte of a UTF-8 `à`).
     const key = lowerCaseHeaderName(
       trimHTTPWhitespace(line.slice(0, colonIndex)),
     );
