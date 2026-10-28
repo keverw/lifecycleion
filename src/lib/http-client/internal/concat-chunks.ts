@@ -5,11 +5,19 @@ import {
   readTypedArrayByteOffset,
 } from '../../internal/binary-view';
 
+const CHANGED_LENGTH_MESSAGE =
+  'Response body chunk changed length after it was read';
+
 /**
  * `chunks` joined into one plain `Uint8Array` of `byteLength` bytes that spans a
  * fixed-length `ArrayBuffer` of its own, copied once. Not a view: a `Buffer` from Node's
  * pool shares its `ArrayBuffer` with other data. Each chunk is placed by the length its
  * internal slot holds, not the `byteLength` it reports.
+ *
+ * Throws a `TypeError` when the chunks no longer hold `byteLength` bytes between them: a
+ * chunk over a resizable buffer that grew or shrank after it was counted, or one whose
+ * buffer was detached since. None is joined: one that grew would not fit the result, and
+ * one that shrank would leave it ending in zeros.
  *
  * A lone chunk that already is that - a plain `Uint8Array` spanning the whole of a plain,
  * fixed-length, unshared `ArrayBuffer`, as a web stream's chunk from the runtime's `fetch`
@@ -33,8 +41,18 @@ export function concatChunks(
   let offset = 0;
 
   for (const chunk of chunks) {
+    const chunkLength = readBinaryByteLength(chunk) ?? 0;
+
+    if (offset + chunkLength > byteLength) {
+      throw new TypeError(CHANGED_LENGTH_MESSAGE);
+    }
+
     bytes.set(chunk, offset);
-    offset += readBinaryByteLength(chunk) ?? 0;
+    offset += chunkLength;
+  }
+
+  if (offset !== byteLength) {
+    throw new TypeError(CHANGED_LENGTH_MESSAGE);
   }
 
   return bytes;

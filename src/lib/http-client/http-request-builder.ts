@@ -576,10 +576,10 @@ export class HTTPRequestBuilder<T = unknown> {
       this.params(params);
     }
 
-    // Body — type determines serialization (FormData → multipart, string → text/plain, object → JSON).
-    // A custom content-type header overrides the auto-detected one - except for a
-    // FormData body, whose content-type carries the multipart boundary and is always the
-    // client's.
+    // Body — type determines serialization (FormData → multipart, string → text/plain,
+    // object → JSON). A custom content-type header overrides the auto-detected one -
+    // except for a FormData body, whose content-type carries the multipart boundary and
+    // is always the client's.
     const body = opts.body;
     if (body !== undefined) {
       this.body(body);

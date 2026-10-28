@@ -69,4 +69,35 @@ describe('concatChunks', () => {
 
     expect(concatChunks([chunk], 0)).toBe(chunk);
   });
+
+  test.each([
+    ['grew', 5],
+    ['shrank', 1],
+  ])(
+    'a chunk over a resizable buffer that %s after it was counted is refused',
+    (_label, newLength) => {
+      const buffer = new ArrayBuffer(3, { maxByteLength: 8 });
+      const chunk = new Uint8Array(buffer);
+      chunk.set([1, 2, 3]);
+      buffer.resize(newLength);
+
+      const message = 'Response body chunk changed length after it was read';
+
+      expect(() => concatChunks([chunk, new Uint8Array([4])], 4)).toThrow(
+        new TypeError(message),
+      );
+      expect(() => concatChunks([chunk], 3)).toThrow(new TypeError(message));
+    },
+  );
+
+  test('a chunk whose buffer was detached after it was counted fails as a TypeError', () => {
+    const buffer = new ArrayBuffer(3);
+    const chunk = new Uint8Array(buffer);
+    structuredClone(buffer, { transfer: [buffer] });
+
+    expect(() => concatChunks([chunk], 3)).toThrow(TypeError);
+    expect(() => concatChunks([new Uint8Array([1]), chunk], 4)).toThrow(
+      TypeError,
+    );
+  });
 });

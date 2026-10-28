@@ -2202,6 +2202,54 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     expect([...(joined.response.body as Uint8Array)]).toEqual([1, 2, 3]);
   });
 
+  test.each([
+    ['grows', 5],
+    ['shrinks', 1],
+  ])(
+    'a chunk whose buffer %s after it is read fails the body read, not as a corrupt body',
+    async (_label, newLength) => {
+      const buffer = new ArrayBuffer(3, { maxByteLength: 8 });
+      const chunk = new Uint8Array(buffer);
+      chunk.set([1, 2, 3]);
+      let pulls = 0;
+      (globalThis as any).fetch = () =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream(
+              {
+                pull(controller) {
+                  pulls++;
+
+                  if (pulls === 1) {
+                    controller.enqueue(chunk);
+                  } else {
+                    buffer.resize(newLength);
+                    controller.close();
+                  }
+                },
+              },
+              // Pulled only when read: the chunk is counted before it is resized.
+              { highWaterMark: 0 },
+            ),
+            { status: 200 },
+          ),
+        );
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 100,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBeNull();
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_response_error');
+      expect(response.errorCause).toBeInstanceOf(TypeError);
+    },
+  );
+
   test('a Uint8Array chunk from another realm is read as one', async () => {
     const { runInNewContext } = await import('node:vm');
     const foreign = runInNewContext('new Uint8Array([4, 5, 6])') as Uint8Array;
