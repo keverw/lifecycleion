@@ -1602,7 +1602,8 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
  * @param origin - The origin to check (undefined for requests without Origin header)
  * @param allowedOrigins - Array of allowed origin patterns
  * @param opts - Options for handling edge cases
- * @param opts.treatNoOriginAsAllowed - If true, allows requests without Origin header when "*" is in the allowed list
+ * @param opts.treatNoOriginAsAllowed - If true, allows requests without Origin header
+ * when "*" is in the allowed list
  */
 export function matchesOriginList(
   origin: string | undefined,

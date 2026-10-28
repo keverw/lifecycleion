@@ -858,7 +858,8 @@ export function matchesCompiledWildcard(
     return true;
   }
 
-  // Do not wildcard-match IP addresses with non-global patterns; only exact IP matches are supported elsewhere
+  // Do not wildcard-match IP addresses with non-global patterns; only exact IP matches
+  // are supported elsewhere
   if (isIP ?? isIPAddress(normalizedDomain)) {
     return false;
   }

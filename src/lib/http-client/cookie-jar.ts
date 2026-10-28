@@ -738,17 +738,17 @@ export class CookieJar {
    *   (the host's registrable domain + all subdomains). e.g.
    *   `clear('api.example.com', 'domain')` clears every cookie stored for `example.com`
    *   or a host under it, and `clear('github.io', 'domain')` every `*.github.io` site's
-   *   cookies. A site behind a nested private suffix is its own domain and is not
-   *   cleared with its parent: `clear('amazonaws.com', 'domain')` leaves
-   *   `bucket.s3.amazonaws.com`'s cookies. The registrable domain is read under the
-   *   jar's `publicSuffixes`, removals included: with `herokuapp.com` removed,
+   *   cookies. A site behind a nested private suffix is its own domain and is not cleared
+   *   with its parent: `clear('amazonaws.com', 'domain')` leaves
+   *   `bucket.s3.amazonaws.com`'s cookies. The registrable domain is read under the jar's
+   *   `publicSuffixes`, removals included: with `herokuapp.com` removed,
    *   `clear('mine.herokuapp.com', 'domain')` clears every `*.herokuapp.com` cookie, as
    *   `herokuapp.com` is then the site, and with `com` removed,
    *   `clear('x.example.com', 'domain')` clears every `.com` cookie but those stored at
-   *   or under a suffix still listed, such as `blogspot.com` and `app.blogspot.com`.
-   *   With `uk` removed, `co.uk` is still a suffix, so `clear('x.co.uk', 'domain')`
-   *   leaves `y.co.uk`'s cookies and a `Domain=uk` one. A removed suffix named itself is cleared whole, as
-   *   a listed one is: `clear('uk', 'domain')` clears every `.uk` cookie, and
+   *   or under a suffix still listed, such as `blogspot.com` and `app.blogspot.com`. With
+   *   `uk` removed, `co.uk` is still a suffix, so `clear('x.co.uk', 'domain')` leaves
+   *   `y.co.uk`'s cookies and a `Domain=uk` one. A removed suffix named itself is cleared
+   *   whole, as a listed one is: `clear('uk', 'domain')` clears every `.uk` cookie, and
    *   `clear('com', 'domain')` with `com` removed every `.com` one, `app.blogspot.com`'s
    *   and `bucket.s3.amazonaws.com`'s included.
    *

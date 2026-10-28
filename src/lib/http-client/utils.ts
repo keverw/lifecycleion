@@ -1444,12 +1444,12 @@ const ANY_HOST: HostPattern = { kind: 'any' };
 const NO_HOST: HostPattern = { kind: 'never' };
 
 /**
- * Whether a `hosts` pattern is `*` alone, trimmed of HTTP whitespace (space, tab, CR and LF). Not `*.`: that is an
- * empty label after the wildcard - what `*.${domain}` gives with the domain unset - and
- * read as `*`, it would send a host-scoped interceptor's token to every host. It matches
- * nothing, as in the domain matchers, and is refused when the filter is added. Nor `*`
- * with a no-break space beside it, which `trim()` would take: see
- * {@link hasNonHTTPWhitespaceEdge}.
+ * Whether a `hosts` pattern is `*` alone, trimmed of HTTP whitespace (space, tab, CR and
+ * LF). Not `*.`: that is an empty label after the wildcard - what `*.${domain}` gives
+ * with the domain unset - and read as `*`, it would send a host-scoped interceptor's
+ * token to every host. It matches nothing, as in the domain matchers, and is refused when
+ * the filter is added. Nor `*` with a no-break space beside it, which `trim()` would
+ * take: see {@link hasNonHTTPWhitespaceEdge}.
  */
 export function isGlobalHostPattern(pattern: string): boolean {
   return trimHTTPWhitespace(pattern) === '*';

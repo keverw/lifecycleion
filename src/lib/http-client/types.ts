@@ -6,12 +6,13 @@ import type { RetryPolicyOptions } from '../retry-utils';
 export type AdapterType = 'fetch' | 'xhr' | 'node' | 'mock';
 
 /**
- * A request method. The standard ones are named for autocompletion, and are sent uppercase
- * whatever case they are given in; any other RFC 9110 method name - `PROPFIND`, `purge` -
- * is accepted too, except `CONNECT`, which opens a tunnel and is refused, and is case-sensitive to the client (its filters and retry rules).
- * What goes on the wire depends on the transport: Node's `http` (and so `NodeAdapter`)
- * uppercases it, `fetch` sends it as given. So code switching over a request's method
- * should keep a default branch.
+ * A request method. The standard ones are named for autocompletion, and are sent
+ * uppercase whatever case they are given in; any other RFC 9110 method name - `PROPFIND`,
+ * `purge` - is accepted too, except `CONNECT`, which opens a tunnel and is refused, and
+ * is case-sensitive to the client (its filters and retry rules). What goes on the wire
+ * depends on the transport: Node's `http` (and so `NodeAdapter`) uppercases it, `fetch`
+ * sends it as given. So code switching over a request's method should keep a default
+ * branch.
  */
 export type HTTPMethod =
   | 'GET'
@@ -512,7 +513,8 @@ export interface HTTPClientConfig {
   /**
    * The most bytes of a buffered response body this client will hold. A body past it
    * fails the request as `response_too_large` - unless it is a redirect's the client
-   * follows, whose body is never read. One piped to `streamResponse` is not limited. Counted as handed over, so a compressed body is counted decoded.
+   * follows, whose body is never read. One piped to `streamResponse` is not limited.
+   * Counted as handed over, so a compressed body is counted decoded.
    *
    * A positive integer, or `Infinity` for no limit. Null or undefined selects
    * `DEFAULT_MAX_RESPONSE_BYTES` (64 MiB). In `createSubClient` overrides, either
@@ -777,16 +779,16 @@ export interface HTTPClientError {
   requestID: string;
   isTimeout: boolean;
   /**
-   * True when the last attempt failed in a way the retry policy retries, and the
-   * policy declined because all of its attempts were spent - the request would
-   * have been tried again with budget left. False when the last failure is one no
-   * retry follows whatever the budget (an adapter veto, a stream error other than a
-   * buffered body that only failed to decode or ran past `maxResponseBytes` - none of
-   * it reached the caller, so its status decides - a non-idempotent method, a
-   * non-retryable status, an attempt with a non-empty body given up on after its
-   * adapter ignored the abort - see `retrySuppressedReason: 'upload_unsettled'`). The last attempt may still have
-   * received a response: a retryable status whose body then could not be read ends as
-   * an `adapter_error` with its status.
+   * True when the last attempt failed in a way the retry policy retries, and the policy
+   * declined because all of its attempts were spent - the request would have been tried
+   * again with budget left. False when the last failure is one no retry follows whatever
+   * the budget (an adapter veto, a stream error other than a buffered body that only
+   * failed to decode or ran past `maxResponseBytes` - none of it reached the caller, so
+   * its status decides - a non-idempotent method, a non-retryable status, an attempt with
+   * a non-empty body given up on after its adapter ignored the abort - see
+   * `retrySuppressedReason: 'upload_unsettled'`). The last attempt may still have
+   * received a response: a retryable status whose body then could not be read ends as an
+   * `adapter_error` with its status.
    */
   isRetriesExhausted: boolean;
   /**
@@ -916,10 +918,11 @@ export type ErrorObserverPhase = Extract<
 //
 //   Observers     = "what DID happen", run after an attempt produces a result, with no
 //                   say in it. They are handed the response and error themselves, so
-//                   treat them as read-only: a change is what the caller gets back. Because they run after, they are the right place for
-//                   logging, metrics, cache writes, and analytics. A common pattern is
-//                   reading auth tokens or account metadata out of response bodies (or even
-//                   error bodies) and updating client state, without touching the response
+//                   treat them as read-only: a change is what the caller gets back.
+//                   Because they run after, they are the right place for logging,
+//                   metrics, cache writes, and analytics. A common pattern is reading
+//                   auth tokens or account metadata out of response bodies (or even error
+//                   bodies) and updating client state, without touching the response
 //                   itself.
 //
 //   Response observers fire on `retry` (retryable HTTP response before the next attempt),

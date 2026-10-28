@@ -3938,9 +3938,10 @@ export class BaseHTTPClient {
         // An attempt given up on once its factory had started a stream is the cut stream
         // it left behind, not a timeout to retry: the answer's headers had arrived and
         // part of its body may be in the caller's sink, so a retry would open a second
-        // sink for the same request. A sink still on its way counts, as it may yet open. Ended as the stream error a well-behaved adapter reports when
-        // the timer cuts a stream, with the status it announced to the factory. A cancel
-        // stays the cancel it is, below.
+        // sink for the same request. A sink still on its way counts, as it may yet open.
+        // Ended as the stream error a well-behaved adapter reports when the timer cuts a
+        // stream, with the status it announced to the factory. A cancel stays the cancel
+        // it is, below.
         if (
           isAbandoned &&
           streamFactoryState !== 'none' &&
@@ -4811,7 +4812,9 @@ export class BaseHTTPClient {
    * 1. isCancelled → cancelled, whatever the override
    * 2. isTimeout → timeout, over every override but a stream code: a streamed-body
    *    failure keeps its stream_* code while still surfacing `isTimeout: true`
-   * 3. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error, adapter_error, stream_write_error, stream_response_error, stream_setup_error, response_too_large)
+   * 3. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error,
+   *    adapter_error, stream_write_error, stream_response_error, stream_setup_error,
+   *    response_too_large)
    * 4. Default fallback → network_error
    *
    * Key distinction:

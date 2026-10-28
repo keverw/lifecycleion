@@ -172,12 +172,12 @@ const MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS =
  *
  * `extend` is carried alongside the listener because the absorber is shared, while a
  * {@link PENDING_WRITABLE_ERROR_WINDOW_MS} backstop scheduled only by the request that
- * *attached* it would cover that request alone. A later request finding an absorber already in place would
- * inherit whatever was left of the first request's second - which for a request settling
- * at the end of that window is no window at all - and its own `onWritableError` has just
- * been taken off by `cleanup`, so the late `'error'` it covers for would arrive with no
- * listener at all. Every request that relies on the absorber pushes the deadline out, up to
- * {@link MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS}.
+ * *attached* it would cover that request alone. A later request finding an absorber
+ * already in place would inherit whatever was left of the first request's second - which
+ * for a request settling at the end of that window is no window at all - and its own
+ * `onWritableError` has just been taken off by `cleanup`, so the late `'error'` it covers
+ * for would arrive with no listener at all. Every request that relies on the absorber
+ * pushes the deadline out, up to {@link MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS}.
  */
 interface PendingWritableErrorEntry {
   readonly absorb: (error: Error) => void;
@@ -3078,8 +3078,8 @@ async function streamResponseBody(
  * `setImmediate`, so a sibling error in the same turn is still absorbed), a `'close'`
  * listener removes it once the stream has finished tearing down, and a backstop timer
  * (1 s, extended by later requests that settle on the same writable, up to 5 s) removes
- * it from a writable that emits neither - a hand-written {@link WritableLike} that throws from `write` or `end` is not
- * obliged to emit anything afterwards. See the file head.
+ * it from a writable that emits neither - a hand-written {@link WritableLike} that throws
+ * from `write` or `end` is not obliged to emit anything afterwards. See the file head.
  *
  * Skipped entirely for a writable with no listener-removal method, because an
  * absorber attached to one could never be taken back: the `setImmediate` would drop
@@ -4066,8 +4066,9 @@ function attachWritableListener(
     // Guarded like every other interaction with a caller-supplied `WritableLike` in this
     // file. `on` is the sink's own method and free to throw, and an unguarded throw here
     // would report a *request* failure for a response that had arrived intact - a
-    // `streamResponse` factory's writable misclassified as a network error. Losing the listener costs this writable its `'drain'` or `'error'` channel,
-    // which the write loop already tolerates; raising out of the attach does not.
+    // `streamResponse` factory's writable misclassified as a network error. Losing the
+    // listener costs this writable its `'drain'` or `'error'` channel, which the write
+    // loop already tolerates; raising out of the attach does not.
     try {
       if (event === 'error') {
         writable.on('error', listener);
