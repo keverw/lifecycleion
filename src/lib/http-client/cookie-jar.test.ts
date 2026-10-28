@@ -1977,6 +1977,37 @@ describe('CookieJar', () => {
       expect(jar.getCookiesFor('http://sub.example.com/')).toHaveLength(0);
     });
 
+    test.each([
+      {
+        direction: 'a wider plant over a Secure cookie behind a listed suffix',
+        secureURL: 'https://t.compute-1.amazonaws.com/',
+        secureHeader: 'session=real; Secure',
+        plantURL: 'http://b.s3.amazonaws.com/',
+        plantHeader: 'session=evil; Domain=amazonaws.com',
+      },
+      {
+        direction: 'a plant behind a listed suffix under a wider Secure cookie',
+        secureURL: 'https://b.s3.amazonaws.com/',
+        secureHeader: 'session=real; Secure; Domain=amazonaws.com',
+        plantURL: 'http://t.compute-1.amazonaws.com/',
+        plantHeader: 'session=evil',
+      },
+    ])(
+      'the shadow check reaches across sites: $direction',
+      ({ secureURL, secureHeader, plantURL, plantHeader }) => {
+        // With `s3.amazonaws.com` removed, `amazonaws.com` is a site holding the wider
+        // cookie, and `t.compute-1.amazonaws.com` is a site of its own beneath it: the
+        // two cookies are filed apart, and the send path delivers both to the tenant.
+        const sites = new CookieJar({
+          publicSuffixes: { remove: ['s3.amazonaws.com'] },
+        });
+        sites.parseSetCookieHeader(secureHeader, secureURL);
+        sites.parseSetCookieHeader(plantHeader, plantURL);
+
+        expect(sites.getAllCookies().map((c) => c.value)).toEqual(['real']);
+      },
+    );
+
     test('a wider-path cookie from http cannot shadow a path-scoped Secure cookie', () => {
       jar.parseSetCookieHeader(
         'scoped=real; Secure; Path=/admin',
@@ -3520,6 +3551,47 @@ describe('CookieJar - accepting and expiring cookies', () => {
     expect(jar.getAllCookies().some((cookie) => cookie.name === 'big')).toBe(
       false,
     );
+  });
+
+  test('setCookie() and fromJSON() refuse a name and value past 4096 characters, as a Set-Cookie is refused', () => {
+    const jar = new CookieJar();
+    const cookie = (value: string) => ({
+      name: 'big',
+      value,
+      domain: 'example.com',
+      path: '/',
+      createdAt: Date.now(),
+    });
+
+    expect(jar.setCookie(cookie('x'.repeat(4093)))).toBe(true);
+    expect(jar.setCookie(cookie('x'.repeat(4094)))).toBe(false);
+    expect(jar.getCookieHeaderString('http://example.com/')).toBe(
+      `big=${'x'.repeat(4093)}`,
+    );
+
+    const restored = new CookieJar();
+    expect(
+      restored.fromJSON({
+        cookies: [cookie('x'.repeat(4094)), { ...cookie('1'), name: 'ok' }],
+      }),
+    ).toBe(1);
+    expect(restored.getCookieHeaderString('http://example.com/')).toBe('ok=1');
+  });
+
+  test('a stored cookie grown past 4096 characters through getAllCookies() is withheld', () => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('big=1', 'http://example.com/');
+    jar.parseSetCookieHeader('ok=1', 'http://example.com/');
+
+    const big = jar.getAllCookies().find((cookie) => cookie.name === 'big');
+
+    if (big === undefined) {
+      throw new Error('expected the cookie to be stored');
+    }
+
+    big.value = 'x'.repeat(4094);
+
+    expect(jar.getCookieHeaderString('http://example.com/')).toBe('ok=1');
   });
 });
 

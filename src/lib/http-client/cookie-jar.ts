@@ -358,8 +358,9 @@ export class CookieJar {
    * Also returns false for a name or value that cannot be written into a `Cookie`
    * header as one cookie-pair (and `getCookiesFor` withholds a stored cookie that no
    * longer passes, so a mutation through `getAllCookies()` cannot reach the header): a name that holds `=`, `;`, whitespace or a
-   * control character, or a value holding `;` or a control character other than a tab.
-   * A name may be
+   * control character, or a value holding `;` or a control character other than a tab,
+   * or a name and value together longer than 4096 characters, the limit a `Set-Cookie`
+   * is held to. A name may be
    * empty - a nameless cookie, sent as its value alone - when the value is not empty,
    * holds no `=` and does not start with `__Secure-` / `__Host-`. The header is
    * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` was sent
@@ -1715,9 +1716,21 @@ export class CookieJar {
     // Read once, not once per stored cookie in each direction: normalizing it runs IDNA
     // and a URL parse.
     const preparedDomain = this.prepareHost(domain);
+    const normalizedDomain = this.normalizedPreparedHost(preparedDomain);
     // Matching scopes can cross bucket boundaries at nested public suffixes,
     // in either direction (a wider insecure cookie can shadow a narrow secure one).
-    for (const bucket of this.buckets.values()) {
+    // A bucket's key is a suffix of every domain stored in it, so a stored domain on
+    // either side of `domain` sits in a bucket whose key is on one side of it too, and
+    // the other buckets hold nothing to check.
+    for (const [site, bucket] of this.buckets) {
+      if (
+        site !== normalizedDomain &&
+        !site.endsWith(`.${normalizedDomain}`) &&
+        !normalizedDomain.endsWith(`.${site}`)
+      ) {
+        continue;
+      }
+
       for (const stored of bucket.values()) {
         const scope = this.storedScopes.get(stored);
 
@@ -1901,6 +1914,12 @@ export class CookieJar {
     const { name, value } = cookie;
 
     if (typeof name !== 'string' || typeof value !== 'string') {
+      return false;
+    }
+
+    // The limit a `Set-Cookie` is held to (see `storeParsed`): past it, every request to
+    // the cookie's host would carry a `Cookie` header servers refuse.
+    if (name.length + value.length > MAX_COOKIE_NAME_VALUE_BYTES) {
       return false;
     }
 
