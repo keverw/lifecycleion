@@ -1017,7 +1017,8 @@ const jar = new CookieJar();
 // if the expiry cannot be read (an `expires` that is an Invalid Date, or a `maxAge` /
 // `createdAt` that is not a finite number - such a cookie would never be found expired),
 // or if the name or value cannot be sent as one `name=value` pair: a name that holds
-// `=`, `;`, a space, a tab or a control character (U+0000-U+001F, U+007F), or a value
+// `=`, `;` or a control character other than a tab (U+0000-U+001F, U+007F) or starts or
+// ends with a space or tab (`my cookie` is kept, as RFC 6265bis keeps it), or a value
 // holding `;` or such a control character other than a tab. A name may be empty (a nameless cookie, sent as its value alone) when the
 // value is not empty, holds no `=` and does not start with `__Secure-` / `__Host-`. Looser than RFC 6265's cookie-octet grammar on purpose: spaces,
 // commas, quotes and backslashes in a value are accepted, as browsers accept them,

@@ -7152,15 +7152,18 @@ test('a string body from a custom adapter is held to maxResponseBytes', async ()
   expect(euro.error?.code).toBe('response_too_large');
 });
 
-test('cookie names refuse a tab; values keep one', () => {
+test('a tab inside a cookie name or value is kept, as RFC 6265bis keeps it; one at a name edge is refused', () => {
   const jar = new CookieJar();
-  const base = { domain: 'example.com', path: '/', value: '1' };
-  expect(jar.setCookie({ ...base, name: 'a\tb' })).toBe(false);
+  const base = { domain: 'example.com', path: '/', value: '1', hostOnly: true };
+  expect(jar.setCookie({ ...base, name: 'a\tb' })).toBe(true);
+  expect(jar.setCookie({ ...base, name: '\tab' })).toBe(false);
   jar.processResponseHeaders(
     { 'set-cookie': ['c\td=1', 'e=x\ty'] },
     'https://example.com/',
   );
-  expect(jar.getCookieHeaderString('https://example.com/')).toBe('e=x\ty');
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe(
+    'a\tb=1; c\td=1; e=x\ty',
+  );
 });
 
 test('Domain=..example.com and SameSite=None without Secure are ignored', () => {

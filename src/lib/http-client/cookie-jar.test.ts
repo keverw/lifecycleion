@@ -393,7 +393,9 @@ describe('CookieJar', () => {
       expect(jar.setCookie({ ...base, name: '', value: 'a=b' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a=b', value: 'x' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a;b', value: 'x' })).toBe(false);
-      expect(jar.setCookie({ ...base, name: 'a b', value: 'x' })).toBe(false);
+      // A space at a name's edge is trimmed off the name a server reads back.
+      expect(jar.setCookie({ ...base, name: ' ab', value: 'x' })).toBe(false);
+      expect(jar.setCookie({ ...base, name: 'ab\t', value: 'x' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a\nb', value: 'x' })).toBe(false);
       expect(
         jar.setCookie({
@@ -3353,6 +3355,78 @@ describe('CookieJar - accepting and expiring cookies', () => {
       }),
     ).toBe(1);
     expect(jar.getAllCookies().map((c) => c.name)).toEqual(['kept']);
+  });
+
+  test('a cookie name with a space or tab inside it is kept, as RFC 6265bis keeps it', () => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('my cookie=1', 'https://example.com/');
+    jar.parseSetCookieHeader('tab\tname=2', 'https://example.com/');
+
+    expect(
+      jar.setCookie({
+        name: 'set by hand',
+        value: '3',
+        domain: 'example.com',
+        hostOnly: true,
+        path: '/',
+      }),
+    ).toBe(true);
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe(
+      'my cookie=1; tab\tname=2; set by hand=3',
+    );
+  });
+
+  test('fromJSON() counts the cookies the jar holds once restored, not each entry it stored', () => {
+    const jar = new CookieJar();
+    const cookie = (
+      name: string,
+      value: string,
+      fields: Partial<Cookie> = {},
+    ) => ({
+      name,
+      value,
+      domain: 'example.com',
+      path: '/',
+      createdAt: Date.now(),
+      ...fields,
+    });
+
+    // `a` is replaced and then deleted by an expired entry of the same identity; the
+    // second `b` replaces the first.
+    expect(
+      jar.fromJSON({
+        cookies: [
+          cookie('a', '1'),
+          cookie('a', '2', { maxAge: -1 }),
+          cookie('b', '1'),
+          cookie('b', '2'),
+        ],
+      }),
+    ).toBe(1);
+    expect(jar.getAllCookies().map((c) => [c.name, c.value])).toEqual([
+      ['b', '2'],
+    ]);
+  });
+
+  test('a leading full stop that maps to a dot is refused, as only a written leading dot is dropped', () => {
+    const jar = new CookieJar();
+    const cookie = (domain: string) => ({
+      name: 'a',
+      value: '1',
+      domain,
+      path: '/',
+    });
+
+    for (const stop of ['\u3002', '\uFF0E', '\uFF61']) {
+      expect(jar.setCookie(cookie(`${stop}example.com`))).toBe(false);
+    }
+
+    expect(jar.setCookie(cookie('.example.com'))).toBe(true);
+    // Between labels and at the end a mapped full stop is a dot, as the URL parser maps it.
+    expect(jar.setCookie(cookie('example\u3002com'))).toBe(true);
+    expect(jar.getStoredDomains()).toEqual([
+      { domain: 'example.com', count: 1 },
+    ]);
   });
 
   test('setCookie() and fromJSON() refuse a path that is not a string, rather than widening it to /', () => {

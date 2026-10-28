@@ -362,8 +362,9 @@ export class CookieJar {
    * the life of the jar - see {@link fromJSON}.
    *
    * Also returns false for a name or value that cannot be written into a `Cookie`
-   * header as one cookie-pair: a name that holds `=`, `;`, whitespace or a control
-   * character, or a value holding `;` or a control character other than a tab,
+   * header as one cookie-pair: a name that holds `=`, `;` or a control character other
+   * than a tab, or starts or ends with a space or tab (one inside it is kept, as RFC
+   * 6265bis keeps it), or a value holding `;` or a control character other than a tab,
    * or a name and value together longer than 4096 characters, the limit a `Set-Cookie`
    * is held to. A name may be
    * empty - a nameless cookie, sent as its value alone - when the value is not empty,
@@ -595,7 +596,8 @@ export class CookieJar {
    * and returns a copy of the stored cookie for the same reason.
    */
   public getCookieFor(name: string, url: string): Cookie | undefined {
-    return this.collectCookies(url, name)[0];
+    const [first] = this.collectCookies(url, name);
+    return first === undefined ? undefined : copyCookie(first.cookie);
   }
 
   /**
@@ -688,7 +690,7 @@ export class CookieJar {
    * `setCookie` to update a stored cookie.
    */
   public getCookiesFor(url: string): Cookie[] {
-    return this.collectCookies(url);
+    return this.collectCookies(url).map((stored) => copyCookie(stored.cookie));
   }
 
   /**
@@ -914,8 +916,9 @@ export class CookieJar {
    * A cookie that has expired by the time it is restored is left out of the jar and out
    * of the count, as `setCookie` leaves it out.
    *
-   * @returns How many cookies were restored. Compare against `data.cookies.length` to learn
-   *          whether any were refused.
+   * @returns How many cookies the jar holds once restored. Compare against
+   *          `data.cookies.length` to learn whether any were refused; entries of the same
+   *          name, domain, path and host-only flag are one cookie, the last one stored.
    * @throws {TypeError} When `data.cookies` is not an array, its length cannot be read, or
    *         it holds a non-object or an element that cannot be read. The jar is left as
    *         it was.
@@ -1017,12 +1020,17 @@ export class CookieJar {
 
     this.buckets.clear();
 
+    for (const cookie of prepared) {
+      this.setCookie(cookie);
+    }
+
+    // What the jar holds once every entry is stored, not each entry `setCookie` took: a
+    // later entry of the same identity replaces an earlier one, or deletes it when it has
+    // expired, and neither leaves two cookies behind.
     let restored = 0;
 
-    for (const cookie of prepared) {
-      if (this.setCookie(cookie)) {
-        restored++;
-      }
+    for (const bucket of this.buckets.values()) {
+      restored += bucket.size;
     }
 
     return restored;
@@ -1031,10 +1039,10 @@ export class CookieJar {
   // --- Private helpers ---
 
   /**
-   * {@link getCookiesFor}'s cookies, in header order, or only those named `name`: the
-   * others are passed over before they are matched or copied.
+   * The stored cookies {@link getCookiesFor} returns copies of, in header order, or only
+   * those named `name`: the others are passed over before they are matched.
    */
-  private collectCookies(url: string, name?: string): Cookie[] {
+  private collectCookies(url: string, name?: string): StoredCookie[] {
     let hostname: string;
     let pathname: string;
 
@@ -1051,7 +1059,7 @@ export class CookieJar {
     }
 
     const now = Date.now();
-    const result: Array<{ cookie: Cookie; creationTime: number }> = [];
+    const result: StoredCookie[] = [];
     // The request host read once, not once per cookie: normalizing it runs IDNA and a URL
     // parse.
     const requestHost = this.prepareHost(hostname);
@@ -1062,7 +1070,7 @@ export class CookieJar {
     const site = this.siteFor(hostname);
     const candidateBuckets = new Set<string>([site]);
 
-    if (this.tryCanonicalIPLiteral(hostname) === null) {
+    if (requestHost.canonicalIP === null) {
       let parent = site;
       let dot = parent.indexOf('.');
 
@@ -1106,10 +1114,7 @@ export class CookieJar {
           continue;
         }
 
-        result.push({
-          cookie: copyCookie(cookie),
-          creationTime: stored.creationTime,
-        });
+        result.push(stored);
       }
     }
 
@@ -1124,7 +1129,7 @@ export class CookieJar {
       return a.creationTime - b.creationTime;
     });
 
-    return result.map((entry) => entry.cookie);
+    return result;
   }
 
   /**
@@ -1157,8 +1162,9 @@ export class CookieJar {
    * it. A second trailing dot names no host and is refused.
    */
   private normalizeStoredDomain(domain: string): string {
-    domain = toAsciiDots(domain);
-    const raw = domain.startsWith('.') ? domain.slice(1) : domain;
+    // Only a leading dot actually written is dropped (RFC 6265 ignores it); one that a
+    // full stop such as U+3002 maps to is left, so the check below refuses it.
+    const raw = toAsciiDots(domain.startsWith('.') ? domain.slice(1) : domain);
     const ip = this.tryCanonicalIPLiteral(raw);
 
     if (ip !== null) {
@@ -1904,7 +1910,7 @@ export class CookieJar {
       return false;
     }
 
-    // A name holds no `=` (its own delimiter) and no space. It may be empty - a nameless
+    // A name holds no `=` (its own delimiter). It may be empty - a nameless
     // cookie, sent as its value alone (RFC 6265bis) - when the value is not: and then the
     // value holds no `=`, or it would be read back as a name, and does not pose as a
     // `__Secure-` / `__Host-` cookie, which RFC 6265bis refuses.
@@ -1917,8 +1923,13 @@ export class CookieJar {
       );
     }
 
+    // Spaces and tabs inside a name are kept, as RFC 6265bis keeps them (browsers keep a
+    // space; Chrome refuses a tab, Firefox keeps it); at its edges they would be trimmed
+    // off the name a server reads back.
     return (
-      isHeaderSafeCookieText(name, '= \t') && isHeaderSafeCookieText(value, '')
+      isHeaderSafeCookieText(name, '=') &&
+      trimSpacesAndTabs(name) === name &&
+      isHeaderSafeCookieText(value, '')
     );
   }
 
