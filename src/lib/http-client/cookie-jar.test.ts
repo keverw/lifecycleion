@@ -2,6 +2,22 @@ import { describe, test, expect, beforeEach, spyOn } from 'bun:test';
 import { CookieJar } from './cookie-jar';
 import type { Cookie } from './cookie-jar';
 
+/**
+ * Expires a stored cookie through the live object `getAllCookies()` hands out: the jar
+ * stores no cookie that is already expired, so one waiting for `clearExpiredCookies()`
+ * is a stored one whose time ran out.
+ */
+function expireStored(jar: CookieJar, name: string): void {
+  const cookie = jar.getAllCookies().find((stored) => stored.name === name);
+
+  if (cookie === undefined) {
+    throw new Error(`expected the cookie ${name} to be stored`);
+  }
+
+  delete cookie.maxAge;
+  cookie.expires = new Date(Date.now() - 1000);
+}
+
 test.each([
   'my_app.example.com',
   'ab--cd.example.com',
@@ -1228,9 +1244,9 @@ describe('CookieJar', () => {
         value: 'stale',
         domain: 'example.com',
         path: '/',
-        expires: new Date(Date.now() - 10_000),
         createdAt: Date.now(),
       });
+      expireStored(jar, 'old');
       expect(jar.getCookieFor('old', 'https://example.com')).toBeUndefined();
     });
   });
@@ -2295,9 +2311,9 @@ describe('CookieJar', () => {
         value: 'no',
         domain: 'example.com',
         path: '/',
-        expires: new Date(Date.now() - 60_000),
         createdAt: Date.now(),
       });
+      expireStored(jar, 'stale');
       expect(jar.getCookieHeaderString('https://example.com/')).toBe('');
     });
 
@@ -2333,9 +2349,9 @@ describe('CookieJar', () => {
         value: '1',
         domain: 'example.com',
         path: '/',
-        expires: new Date(Date.now() - 1000),
         createdAt: Date.now(),
       });
+      expireStored(jar, 'a');
       expect(jar.getStoredDomains()).toHaveLength(1);
       jar.clearExpiredCookies();
       expect(jar.getStoredDomains()).toHaveLength(0);
@@ -2357,9 +2373,9 @@ describe('CookieJar', () => {
         value: '1',
         domain: 'example.com',
         path: '/',
-        expires: new Date(Date.now() - 1000),
         createdAt: Date.now(),
       });
+      expireStored(jar, 'a');
       jar.setCookie({
         name: 'b',
         value: '2',
@@ -2387,9 +2403,9 @@ describe('CookieJar', () => {
         value: 'no',
         domain: 'example.com',
         path: '/',
-        expires: new Date(Date.now() - 1000),
         createdAt: Date.now(),
       });
+      expireStored(jar, 'stale');
 
       expect(jar.clearExpiredCookies()).toBe(1);
       expect(jar.getAllCookies()).toHaveLength(1);
@@ -2615,33 +2631,6 @@ describe('CookieJar', () => {
       expect(com.getCookieHeaderString('https://app.blogspot.com/')).toBe(
         'e=2',
       );
-    });
-
-    test('clear() places a cookie whose stored scope cannot be read by the domain its key holds', () => {
-      const plain = new CookieJar();
-      plain.parseSetCookieHeader('a=1; Path=/', 'https://www.example.com/');
-      // With `co.uk` removed as well, `x.co.uk` and `y.org.uk` share the `uk` site and
-      // bucket, and clearing `co.uk` takes only the cookies stored at or under it.
-      const scoped = new CookieJar({
-        publicSuffixes: { remove: ['uk', 'co.uk'] },
-      });
-      scoped.parseSetCookieHeader('b=2; Path=/', 'https://x.co.uk/');
-      scoped.parseSetCookieHeader('c=3; Path=/', 'https://y.org.uk/');
-
-      for (const jar of [plain, scoped]) {
-        (
-          jar as unknown as { storedScopes: WeakMap<object, unknown> }
-        ).storedScopes = new WeakMap();
-      }
-
-      expect(plain.getStoredDomains()).toEqual([
-        { domain: 'www.example.com', count: 1 },
-      ]);
-      expect(plain.clear('www.example.com', 'hostname')).toBe(1);
-      expect(scoped.clear('co.uk', 'domain')).toBe(1);
-      expect(scoped.getStoredDomains()).toEqual([
-        { domain: 'y.org.uk', count: 1 },
-      ]);
     });
 
     test('a removed suffix below a name that is no suffix joins the site above it', () => {
@@ -3189,20 +3178,22 @@ describe('CookieJar', () => {
     });
 
     test('reads a null or absent expires as no expiry and a number as epoch milliseconds', () => {
-      // `JSON.stringify` writes `null` for an `Invalid Date`, and `0` was skipped by the
-      // old truthiness check and left in the jar as a number typed as a `Date`.
+      // `JSON.stringify` writes `null` for an `Invalid Date`.
       const base = {
         value: 'x',
         domain: 'example.com',
         path: '/',
         createdAt: Date.now(),
       };
+      const future = Date.now() + 60_000;
 
       const restored = jar.fromJSON({
         cookies: [
           { ...base, name: 'nulled', expires: null },
           { ...base, name: 'absent' },
-          { ...base, name: 'epoch', expires: 0 },
+          { ...base, name: 'epoch', expires: future },
+          // 1970 is in the past, so this one is not restored rather than kept immortal.
+          { ...base, name: 'zero', expires: 0 },
         ],
       } as unknown as Parameters<CookieJar['fromJSON']>[0]);
 
@@ -3212,9 +3203,10 @@ describe('CookieJar', () => {
       expect(nulled).toBeDefined();
       expect('expires' in (nulled ?? {})).toBe(false);
       expect(jar.getCookieFor('absent', 'https://example.com')).toBeDefined();
-      // 1970 is in the past, so the cookie is expired rather than immortal.
-      expect(jar.getCookieFor('epoch', 'https://example.com')).toBeUndefined();
-      expect(jar.clearExpiredCookies()).toBe(1);
+      expect(
+        jar.getCookieFor('epoch', 'https://example.com')?.expires?.getTime(),
+      ).toBe(future);
+      expect(jar.getCookieFor('zero', 'https://example.com')).toBeUndefined();
     });
 
     test('re-hydrates Date objects from JSON strings', () => {
@@ -3402,7 +3394,7 @@ test('sends parent-domain cookies below nested private suffixes without widening
 });
 
 test.each([false, true])(
-  'review regression: protects secure cookies across nested suffix buckets (isWide=%s)',
+  'a Secure cookie is protected across nested suffix sites (isWide=%s)',
   (isWide) => {
     const jar = new CookieJar();
     jar.parseSetCookieHeader(
@@ -3439,8 +3431,8 @@ test.each(['maxAge', 'createdAt', 'expires', 'getTime'])(
       value: 'x',
       domain: 'other.example',
       path: '/',
-      expires: new Date(0),
     });
+    expireStored(jar, 'expired');
     jar.setCookie({
       name: 'live',
       value: 'x',
@@ -3576,6 +3568,76 @@ describe('CookieJar - accepting and expiring cookies', () => {
       }),
     ).toBe(1);
     expect(restored.getCookieHeaderString('http://example.com/')).toBe('ok=1');
+  });
+
+  test('a domain cookie for a public suffix given to fromJSON() is the cookie a Set-Cookie from that host replaces and deletes', () => {
+    // Saved by a jar that did not list `corp.internal`, restored into one that does.
+    const jar = new CookieJar({ publicSuffixes: { add: ['corp.internal'] } });
+    const restored = jar.fromJSON({
+      cookies: [
+        {
+          name: 'session',
+          value: 'old',
+          domain: 'corp.internal',
+          path: '/',
+          hostOnly: false,
+          createdAt: Date.now() - 1000,
+        },
+      ],
+    });
+
+    expect(restored).toBe(1);
+    expect(jar.getAllCookies()[0]?.hostOnly).toBe(true);
+
+    jar.parseSetCookieHeader(
+      'session=new; Domain=corp.internal; Path=/',
+      'https://corp.internal/',
+    );
+    expect(jar.getCookieHeaderString('https://corp.internal/')).toBe(
+      'session=new',
+    );
+
+    jar.parseSetCookieHeader(
+      'session=; Domain=corp.internal; Path=/; Max-Age=0',
+      'https://corp.internal/',
+    );
+    expect(jar.getCookieHeaderString('https://corp.internal/')).toBe('');
+    expect(jar.getAllCookies()).toEqual([]);
+  });
+
+  test('an already-expired cookie given to setCookie() deletes its stored twin, as an expired Set-Cookie does, and fromJSON() leaves one out of its count', () => {
+    const jar = new CookieJar();
+    const cookie = (fields: Partial<Cookie>): Cookie => ({
+      name: 'a',
+      value: '1',
+      domain: 'example.com',
+      path: '/',
+      createdAt: Date.now(),
+      ...fields,
+    });
+
+    expect(jar.setCookie(cookie({}))).toBe(true);
+    expect(jar.setCookie(cookie({ maxAge: 0 }))).toBe(false);
+    expect(jar.getAllCookies()).toEqual([]);
+    expect(jar.getStoredDomains()).toEqual([]);
+
+    expect(jar.setCookie(cookie({}))).toBe(true);
+    expect(
+      jar.setCookie(cookie({ expires: new Date(Date.now() - 1000) })),
+    ).toBe(false);
+    expect(jar.getAllCookies()).toEqual([]);
+
+    // Counted out of what `fromJSON` restored, so a caller comparing the count with
+    // `data.cookies.length` sees the loss.
+    expect(
+      jar.fromJSON({
+        cookies: [
+          cookie({ name: 'gone', maxAge: 1, createdAt: Date.now() - 5000 }),
+          cookie({ name: 'kept' }),
+        ],
+      }),
+    ).toBe(1);
+    expect(jar.getAllCookies().map((c) => c.name)).toEqual(['kept']);
   });
 
   test('setCookie() and fromJSON() refuse a sameSite a Set-Cookie cannot store', () => {

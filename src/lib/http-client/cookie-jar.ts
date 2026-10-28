@@ -134,7 +134,9 @@ export interface Cookie {
    * True when the cookie must not match subdomains: a Set-Cookie with no `Domain=`, a last
    * `Domain=` that is empty or `.` (even after a valid one: the last wins, as Chrome and
    * Firefox read it), or a `Domain=` naming a public suffix that is the request host
-   * itself (`Domain=localhost` from `http://localhost/`).
+   * itself (`Domain=localhost` from `http://localhost/`). Also true for a cookie given
+   * to `setCookie` or restored by `fromJSON` whose domain is a public suffix under the
+   * jar's list, which is stored as that last `Set-Cookie` stores it.
    */
   hostOnly?: boolean;
   path?: string;
@@ -175,13 +177,6 @@ interface StoredCookieScope {
   path: string;
   hostOnly?: boolean;
   secure?: boolean;
-  /**
-   * A domain cookie whose domain is a public suffix under the jar's list - one restored
-   * through `fromJSON` from a jar with other overrides, or given to `setCookie`. Sent to
-   * that host alone, never across the suffix's tenants. The jar's list is fixed at
-   * construction, so this is decided once, when the cookie is stored.
-   */
-  isPublicSuffixDomain: boolean;
   /**
    * The latest the cookie may live to: {@link MAX_COOKIE_LIFETIME_SECONDS} from the
    * `createdAt` it was stored with. Held here, as the scope is, so a `createdAt` moved
@@ -345,8 +340,7 @@ export class CookieJar {
   //            'example.co.uk'), or the hostname itself for IPs and bare names like
   //            localhost (see `PublicSuffixResolver.registrableDomainFor`). One bucket
   //            is one site.
-  // Inner key: `cookieKey`'s JSON of [name, domain, path, hostOnly], for deduplication;
-  //            `storedDomainOf` reads the domain back from it.
+  // Inner key: `cookieKey`'s JSON of [name, domain, path, hostOnly], for deduplication.
   private buckets: Map<string, Map<string, Cookie>> = new Map();
 
   /**
@@ -394,6 +388,12 @@ export class CookieJar {
    * `example.com.` is stored, sent and cleared apart from `example.com`, as a request host
    * keeps it (RFC 6265bis §5.1.2). An IPv4 address with one (`127.0.0.1.`) is refused,
    * since the URL parser reads it as the address and no request host is that string.
+   *
+   * Also returns false for a cookie that is already expired: it is not stored, and the
+   * stored cookie of the same name, domain, path and host-only flag is deleted, as an
+   * expired `Set-Cookie` deletes it. A domain cookie whose domain is a public suffix
+   * under the jar's list is stored host-only, as a `Set-Cookie` naming the suffix from
+   * that host itself is, and replaces the cookie such a `Set-Cookie` stored.
    *
    * For server responses use parseSetCookieHeader — it also enforces PSL
    * validation and domain-suffix checks on top of the syntax check here.
@@ -512,6 +512,14 @@ export class CookieJar {
       this.copyIfPresent(input, stored, field);
     }
 
+    // A domain cookie for a public suffix is kept for that host alone, as a `Set-Cookie`
+    // naming the suffix from the host itself is (RFC 6265bis §5.5): stored host-only, and
+    // so filed under the same key as that `Set-Cookie`'s cookie, which replaces and
+    // deletes it. A jar saved under another suffix list can hold one.
+    if (stored.hostOnly !== true && this.isPublicSuffix(domain)) {
+      stored.hostOnly = true;
+    }
+
     // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
     // creation: a jar restored through `fromJSON` from before the cap kept a 10-year
     // lifetime. Readable, as `hasReadableExpiry` passed it, and its `expires` the jar's own.
@@ -532,8 +540,18 @@ export class CookieJar {
       stored.name,
       domain,
       path,
-      input.hostOnly === true,
+      stored.hostOnly === true,
     );
+    const deadline = createdAt + MAX_COOKIE_LIFETIME_MS;
+
+    // Already expired: not stored, and the stored cookie it names is deleted, as an
+    // expired `Set-Cookie` deletes it (RFC 6265 §5.3 step 11). `false`, so `fromJSON`
+    // counts it out of what it restored.
+    if (this.isExpired(stored, now, deadline)) {
+      this.buckets.get(site)?.delete(key);
+      this.pruneEmptyBucket(site);
+      return false;
+    }
     // A replacement keeps the creation time of the cookie it replaces (RFC 6265 §5.3
     // step 11.3), which orders the `Cookie` header; `createdAt` stays the new cookie's
     // own, the base of its `Max-Age`.
@@ -550,23 +568,22 @@ export class CookieJar {
       this.isExpired(replaced, now, this.storedScopes.get(replaced)?.deadline)
         ? createdAt
         : (this.creationTimes.get(replaced) ?? replaced.createdAt);
-    this.creationTimes.set(stored, creationTime);
-    this.getOrCreateBucket(site).set(key, stored);
-
+    // The scope is recorded before the cookie is filed, so every cookie in a bucket has
+    // one.
     const scope: StoredCookieScope = {
       name: stored.name,
       domain,
       preparedDomain: this.prepareHost(domain),
       path,
-      isPublicSuffixDomain:
-        stored.hostOnly !== true && this.isPublicSuffix(domain),
-      deadline: createdAt + MAX_COOKIE_LIFETIME_MS,
+      deadline,
     };
 
     this.copyIfPresent(stored, scope, 'hostOnly');
     this.copyIfPresent(stored, scope, 'secure');
 
     this.storedScopes.set(stored, scope);
+    this.creationTimes.set(stored, creationTime);
+    this.getOrCreateBucket(site).set(key, stored);
 
     return true;
   }
@@ -605,13 +622,16 @@ export class CookieJar {
     const counts = new Map<string, number>();
 
     for (const bucket of this.buckets.values()) {
-      for (const [key, cookie] of bucket.entries()) {
+      for (const cookie of bucket.values()) {
         // The scope the cookie was filed under, not the live object: `getAllCookies()`
         // hands out the stored cookies themselves, and a `domain` written through one
         // must not move the cookie in this listing while the send path, which reads the
         // same stored scope, still sends it where it was filed.
-        const domain = this.storedDomainOf(key, cookie);
-        counts.set(domain, (counts.get(domain) ?? 0) + 1);
+        const domain = this.storedDomainOf(cookie);
+
+        if (domain !== undefined) {
+          counts.set(domain, (counts.get(domain) ?? 0) + 1);
+        }
       }
     }
 
@@ -751,14 +771,6 @@ export class CookieJar {
         const scope = this.storedScopes.get(stored);
 
         if (scope === undefined) {
-          continue;
-        }
-
-        // Never let a domain cookie for a public suffix span its tenants.
-        if (
-          scope.isPublicSuffixDomain &&
-          !this.hostOnlyDomainMatches(requestHost, scope.preparedDomain)
-        ) {
           continue;
         }
 
@@ -980,7 +992,7 @@ export class CookieJar {
         // Matched on the stored scope, as the send path matches. Comparing the live
         // `domain` let a cookie mutated through `getAllCookies()` dodge the clear while
         // `getCookieHeaderString()` went on sending it from the scope it was filed under.
-        if (this.storedDomainOf(key, cookie) === normalizedHost) {
+        if (this.storedDomainOf(cookie) === normalizedHost) {
           bucket.delete(key);
           count++;
         }
@@ -1059,6 +1071,9 @@ export class CookieJar {
    * A `domain` with a trailing dot is restored as written, as `setCookie` stores it: a
    * persisted `example.com.` cookie goes only to `example.com.` and hosts under it, not
    * to `example.com`. Folding it would send a cookie to a host that never set it.
+   *
+   * A cookie that has expired by the time it is restored is left out of the jar and out
+   * of the count, as `setCookie` leaves it out.
    *
    * @returns How many cookies were restored. Compare against `data.cookies.length` to learn
    *          whether any were refused.
@@ -1394,9 +1409,12 @@ export class CookieJar {
     let count = 0;
 
     for (const [key, cookie] of bucket.entries()) {
-      const storedDomain = this.storedDomainOf(key, cookie);
+      const storedDomain = this.storedDomainOf(cookie);
 
-      if (storedDomain === domain || storedDomain.endsWith(`.${domain}`)) {
+      if (
+        storedDomain !== undefined &&
+        (storedDomain === domain || storedDomain.endsWith(`.${domain}`))
+      ) {
         bucket.delete(key);
         count++;
       }
@@ -1407,15 +1425,12 @@ export class CookieJar {
   }
 
   /**
-   * The domain `cookie` was filed under: its stored scope's, or - for one found without a
-   * scope, which the jar's single insert never leaves - the domain its key was built from.
-   * Neither is the live object's `domain`, which `getAllCookies()` lets a caller rewrite.
+   * The domain `cookie` was filed under, from its stored scope, which `setCookie` records
+   * before filing it; not the live object's `domain`, which `getAllCookies()` lets a
+   * caller rewrite.
    */
-  private storedDomainOf(key: string, cookie: Cookie): string {
-    return (
-      this.storedScopes.get(cookie)?.domain ??
-      (JSON.parse(key) as [string, string, string, boolean])[1]
-    );
+  private storedDomainOf(cookie: Cookie): string | undefined {
+    return this.storedScopes.get(cookie)?.domain;
   }
 
   private pruneEmptyBucket(site: string): void {
@@ -2013,22 +2028,13 @@ export class CookieJar {
    * is read once and vetted, so what the header carries is what passed the check.
    *
    * A read that throws withholds the cookie, the way {@link isExpired} already fails
-   * closed on an expiry it cannot read. So does a `secure` or `hostOnly` that was stored
-   * as something other than a boolean, where coercion would land on the looser side, and
-   * a cookie with no recorded scope, which is a cookie no `setCookie` filed.
+   * closed on an expiry it cannot read. So does a cookie with no recorded scope, which
+   * is a cookie no `setCookie` filed.
    */
   private snapshotForSend(stored: Cookie): Cookie | null {
     const scope = this.storedScopes.get(stored);
 
     if (scope === undefined) {
-      return null;
-    }
-
-    if (scope.secure !== undefined && typeof scope.secure !== 'boolean') {
-      return null;
-    }
-
-    if (scope.hostOnly !== undefined && typeof scope.hostOnly !== 'boolean') {
       return null;
     }
 

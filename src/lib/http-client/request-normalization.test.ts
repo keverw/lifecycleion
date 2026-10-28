@@ -7172,7 +7172,7 @@ test('Domain=..example.com and SameSite=None without Secure are ignored', () => 
 
 test('a cookie replacing an expired one takes its own place in the header', async () => {
   const jar = new CookieJar();
-  // Stored already expired, and not yet purged; host-only, so `a=new` replaces it.
+  // Expired once stored, and not yet purged; host-only, so `a=new` replaces it.
   expect(
     jar.setCookie({
       name: 'a',
@@ -7180,10 +7180,17 @@ test('a cookie replacing an expired one takes its own place in the header', asyn
       domain: 'example.com',
       hostOnly: true,
       path: '/',
-      maxAge: 0,
+      maxAge: 60,
       createdAt: Date.now() - 10_000,
     }),
   ).toBe(true);
+  const [old] = jar.getAllCookies();
+
+  if (old === undefined) {
+    throw new Error('expected the cookie to be stored');
+  }
+
+  old.maxAge = 0;
   await sleep(2);
   jar.processResponseHeaders({ 'set-cookie': 'b=1' }, 'https://example.com/');
   await sleep(2);
