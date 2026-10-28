@@ -58,9 +58,9 @@ import {
  *
  * Matched exactly rather than improved on, because the servers on the other end parse
  * what browsers send. RFC 7578 4.2 forbids `filename*=` in multipart/form-data and the
- * WHATWG parsers (Bun, undici/Node, Deno, Workers) ignore it, so the RFC 5987 form and
- * the lossy ASCII fallback this used to send turned `résumé.pdf` into `resume.pdf` and
- * `日本語.pdf` into `.pdf` there; and a backslash-escaped `a\"b` reached them as `a\\"b`.
+ * WHATWG parsers (Bun, undici/Node, Deno, Workers) ignore it, so with the RFC 5987 form
+ * and a lossy ASCII fallback they would read `résumé.pdf` as `resume.pdf` and `日本語.pdf`
+ * as `.pdf`; and a backslash-escaped `a\"b` would reach them as `a\\"b`.
  * With CR and LF encoded a name still cannot start a header of its own.
  */
 function escapeDispositionValue(value: string): string {
@@ -232,9 +232,9 @@ export async function serializeMultipartFormData(
   // Guarded as the reads of a part's stream are, and for the same reason: the sizing pass
   // runs the caller's code - a `File` subclass's `name`, `type` or `size` getter - and
   // reads a form that may be none, a `Proxy` over one; a throw there, or a value of the
-  // wrong type, fails the same way on every attempt. Untagged, it reached the adapter as
-  // a transport error and was retried for an idempotent method, failing identically each
-  // time.
+  // wrong type, fails the same way on every attempt. Untagged, it would reach the adapter
+  // as a transport error and be retried for an idempotent method, failing identically
+  // each time.
   let measured: { totalSize: number; partSizes: number[] };
 
   try {
@@ -359,10 +359,10 @@ export async function serializeMultipartFormData(
 
           // A stream torn down while this read is outstanding - by the caller's side after
           // the response, or by the peer closing - has no pending `write` to reject, so
-          // nothing would wake this writer: it stayed parked on a source that may never
-          // answer, holding the file open and leaving the upload unsettled. Cancelling the
-          // reader ends the read as done, and the `req.destroyed` checks below take it from
-          // there.
+          // nothing else would wake this writer: it would stay parked on a source that may
+          // never answer, holding the file open and leaving the upload unsettled.
+          // Cancelling the reader ends the read as done, and the `req.destroyed` checks
+          // below take it from there.
           const cancelOnClose = (): void => {
             void cancelReaderQuietly(reader);
           };
@@ -393,7 +393,8 @@ export async function serializeMultipartFormData(
 
           // Refused as the caller's source failing, not handed to `req.write`: a custom
           // `stream()` can yield anything, and the write's own refusal of a value that is
-          // not bytes was untagged - retried as a transport error - and quotes the value.
+          // not bytes is untagged - it would be retried as a transport error - and quotes
+          // the value.
           // Read by its internal slot rather than `instanceof`, so bytes made in another
           // realm - a `vm` context, Jest's node environment, whose `Blob.stream()` chunks
           // come from the host - are not mistaken for something else.
@@ -407,7 +408,7 @@ export async function serializeMultipartFormData(
             // Every count, check and slice below is made on a plain view of the chunk's
             // bytes, never on the chunk: a `Uint8Array` subclass from a custom `stream()`
             // can answer `byteLength` with anything - Node's `Buffer.byteLength` reads it
-            // too, so a chunk that said 1 passed its part's size check and put its real
+            // too, so a chunk that said 1 would pass its part's size check and put its real
             // bytes on the wire past the `Content-Length` - and can override `subarray`.
             let bytes: Uint8Array;
 
@@ -438,9 +439,10 @@ export async function serializeMultipartFormData(
             // Written in slices of the size the bytes writer uses, each awaited. Node's
             // `Blob.stream()` yields an in-memory `Blob` as one chunk - a whole 64 MiB
             // `File` in a single write - and progress is counted on a write's callback,
-            // so that upload reported nothing between 0 and 100%, and the stall watchdog,
-            // which reads that progress, destroyed an upload the server had acked early
-            // and was still reading. The slices are views, not copies.
+            // so written whole that upload would report nothing between 0 and 100%, and
+            // the stall watchdog, which reads that progress, would destroy an upload the
+            // server had acked early and was still reading. The slices are views, not
+            // copies.
             for (
               let offset = 0;
               offset < bytes.byteLength && !req.destroyed;
@@ -482,12 +484,12 @@ export async function serializeMultipartFormData(
 
   // The other exit, and the one every `req.destroyed` break above arrives at. `onClose`
   // rejects a write that was waiting for its callback, but a stream destroyed between
-  // writes - with no write waiting, so no `'close'` listener attached - used to fall
-  // through here and resolve. That is worse than the same gap in `writeRequestBodyChunked`:
-  // the body is assembled across many writes, so what is finalized by `node-adapter`'s
-  // following `req.end()` is a payload missing its closing `--boundary--` delimiter,
-  // against an exact `Content-Length`. The server reads it as truncated while this side
-  // called it a success.
+  // writes - with no write waiting, so no `'close'` listener attached - would otherwise
+  // fall through here and resolve. That would be worse than the same gap in
+  // `writeRequestBodyChunked`: the body is assembled across many writes, so what
+  // `node-adapter`'s following `req.end()` finalized would be a payload missing its
+  // closing `--boundary--` delimiter, against an exact `Content-Length`. The server would
+  // read it as truncated while this side called it a success.
   if (req.destroyed) {
     throw new Error('Request stream closed before the body was fully written');
   }

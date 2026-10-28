@@ -295,8 +295,9 @@ function reportUnclaimedWritableError(error: unknown): void {
  * The absorber currently attached to a writable, if any.
  *
  * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
- * to several concurrent requests: a per-request absorber let a dozen simultaneous write
- * failures attach a dozen listeners inside one turn. See `absorbPendingWritableError`.
+ * to several concurrent requests: a per-request absorber would let a dozen simultaneous
+ * write failures attach a dozen listeners inside one turn. See
+ * `absorbPendingWritableError`.
  */
 const pendingWritableErrorAbsorbers = new WeakMap<
   WritableLike,
@@ -582,8 +583,8 @@ export class NodeAdapter implements HTTPAdapter {
     // `createResponseBodySource`); a caller's own `Accept-Encoding` stands - `identity`
     // to ask for none. A `Range` request asks for `identity`, as the Fetch standard has it
     // (undici and browsers send it): the range is of the bytes as stored, and a server
-    // that serves ranges of a precompressed file answered with a slice of a gzip stream
-    // that cannot be decoded. `br` only over https, as undici and browsers offer it.
+    // that serves ranges of a precompressed file would answer with a slice of a gzip
+    // stream that cannot be decoded. `br` only over https, as undici and browsers offer it.
     const headerNames = Object.keys(requestHeaders).map((name) =>
       lowerCaseHeaderName(name),
     );
@@ -635,9 +636,9 @@ export class NodeAdapter implements HTTPAdapter {
     // caller named. `HTTPClient` strips userinfo from a `Location` before dispatch, so
     // the client path never reaches this - but the adapter is public, and driven directly
     // with an `initialURL` on one origin and a `requestURL` still carrying userinfo for
-    // another, it presented Basic auth to a host the caller never addressed. That is the
-    // same retargeting the socket and certificate guards exist for, with the secret going
-    // out in the request itself rather than in the handshake.
+    // another, it would otherwise present Basic auth to a host the caller never
+    // addressed. That is the same retargeting the socket and certificate guards exist
+    // for, with the secret going out in the request itself rather than in the handshake.
     if (urlOptions.auth && !isCrossOriginHop) {
       options.auth = urlOptions.auth;
     }
@@ -676,9 +677,9 @@ export class NodeAdapter implements HTTPAdapter {
       // connection this adapter opens. The configured *identity* does not, and neither
       // does `socketPath` above: see `isCrossOriginHop`.
 
-      // custom CA trust store. An empty one is refused rather than skipped: skipped, it
-      // fell back to the public roots - a client meant to trust one private CA, whose
-      // loader came back empty, then trusted every public one.
+      // Custom CA trust store. An empty one is refused rather than skipped: skipped, it
+      // would fall back to the public roots - a client meant to trust one private CA,
+      // whose loader came back empty, would then trust every public one.
       // Each read once, so the value checked is the value sent - a list's entries too,
       // copied by index (see `copyArrayValue`). A hole stays a hole, which
       // `assertTrustAnchors` reads as the `undefined` it is, and refuses.
@@ -3767,9 +3768,9 @@ const REFUSED_REQUEST_HEADERS: ReadonlyMap<string, string> = new Map([
  * Buffers cannot simply be passed through. `fs.readFileSync('bundle.pem')`
  * without an encoding returns a Buffer, which is the DEFAULT way to load a
  * file, and its contents are PEM text like any other bundle — so Node reads
- * only its first CRL exactly as it would from a string. Measured: a stale CRL
- * followed by one revoking the server's certificate accepted the connection as
- * a Buffer, and rejected it once split.
+ * only its first CRL exactly as it would from a string. A stale CRL followed by
+ * one revoking the server's certificate accepts the connection when passed as a
+ * Buffer, and rejects it once split.
  *
  * So the question is not "string or Buffer" but "PEM or DER". A Buffer holding
  * PEM goes through the same splitting and validation as a string; a Buffer
@@ -3837,7 +3838,8 @@ function normalizeCRLEntry(
   }
 
   // Copied when it starts partway into its memory (a `subarray`, a view at an offset):
-  // Bun's `tls` reads such a view from the start of the memory, and failed to parse it.
+  // Bun's `tls` reads such a view from the start of the memory, and would fail to parse
+  // it.
   return withoutBOM.byteOffset === 0 ? withoutBOM : copyToOwnMemory(withoutBOM);
 }
 
@@ -4035,7 +4037,7 @@ type WritableListenerRemover = (
  * accumulates two listeners and the request closure behind each, until Node warns about a
  * leak - and attaching none at all loses the `'error'` channel entirely, which
  * {@link WritableLike} documents as a sufficient way for a sink to report a failed write:
- * a sink that reports only that way settled a truncated download as a success.
+ * a sink that reports only that way would have a truncated download settled as a success.
  *
  * So one listener is attached, ever, and the set behind it is what changes. Registering
  * and deregistering is a `Set` operation on an entry keyed weakly by the writable, so
