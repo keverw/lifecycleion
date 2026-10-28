@@ -893,6 +893,36 @@ describe('CookieJar', () => {
       expect(jar.clearExpiredCookies()).toBe(0);
     });
 
+    test('an expired Set-Cookie deletes its cookie even with a value setCookie would refuse', () => {
+      for (const header of [
+        'sid=日本; Max-Age=0',
+        'sid=日本; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+      ]) {
+        jar.parseSetCookieHeader('sid=1', 'https://example.com');
+        jar.parseSetCookieHeader(header, 'https://example.com');
+
+        expect(jar.getCookieFor('sid', 'https://example.com')).toBeUndefined();
+      }
+    });
+
+    test('a Max-Age too long for a number still deletes when negative and stores when positive', () => {
+      const digits = '9'.repeat(400);
+      jar.parseSetCookieHeader('sid=1', 'https://example.com');
+      jar.parseSetCookieHeader(
+        `sid=2; Max-Age=-${digits}`,
+        'https://example.com',
+      );
+
+      expect(jar.getCookieFor('sid', 'https://example.com')).toBeUndefined();
+
+      jar.parseSetCookieHeader(
+        `long=1; Max-Age=${digits}`,
+        'https://example.com',
+      );
+
+      expect(jar.getCookieFor('long', 'https://example.com')?.value).toBe('1');
+    });
+
     test('RFC 6265 §5.2 — empty Path= is ignored; default-path still applies', () => {
       jar.parseSetCookieHeader(
         'sid=1; Path=',
@@ -1394,14 +1424,12 @@ describe('CookieJar', () => {
     });
 
     test('a sibling cannot evict the cookie the host set for itself', () => {
-      // The store-side half of the toss, and the one with teeth. `Max-Age=0` runs through
-      // `deleteCookieByIdentity`, which keys on the *cookie's* domain, not the request
-      // host - so before this change `evil.localhost` naming `Domain=localhost` landed on
-      // exactly the identity `http://localhost/` had stored under and deleted it. Cheaper
-      // than planting a cookie and just as damaging: log the victim out, or clear the
-      // anti-CSRF token, from a sibling name anyone can take on a shared dev host. The
-      // refusal now happens in the `Domain=` branch, above the expiry-driven deletions,
-      // so the eviction never gets to run.
+      // The store-side half of the toss, and the one with teeth. `Max-Age=0` deletes by
+      // the *cookie's* domain, not the request host, so `evil.localhost` naming
+      // `Domain=localhost` would land on exactly the identity `http://localhost/` stored
+      // under and delete it: log the victim out, or clear the anti-CSRF token, from a
+      // sibling name anyone can take on a shared dev host. The `Domain=` branch refuses
+      // it before the cookie is stored, so the deletion never runs.
       jar.parseSetCookieHeader('session=victim; Path=/', 'http://localhost/');
 
       jar.parseSetCookieHeader(

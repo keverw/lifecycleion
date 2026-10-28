@@ -961,6 +961,9 @@ function hasXMLHttpRequestGlobal(): boolean {
  * The first of a `Location` that fetch or XHR joined from repeated headers, or the value
  * whole. Split only where what follows the `, ` starts as a URL target does - a path or
  * `scheme://`: a single value with a raw space (`/files/Smith, John.pdf`) is kept whole.
+ * A single value with an unencoded `, /` or `, scheme://` in it (`/r?to=/a, /b`) is cut
+ * there too: fetch and XHR join repeats into the same text, so the two cannot be told
+ * apart. A server percent-encodes the space in such a value.
  */
 export function firstJoinedLocation(value: string): string {
   const separator = value.search(/, (?:\/|[a-z][a-z\d+.-]*:\/\/)/i);

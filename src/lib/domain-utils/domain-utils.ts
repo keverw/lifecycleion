@@ -66,21 +66,19 @@ function hasDanglingPortInAuthority(input: string): boolean {
   return hostPort.endsWith(':');
 }
 
-/** The default port of each special URL scheme, which the URL parser drops. */
-const SPECIAL_SCHEME_DEFAULT_PORTS: Readonly<Record<string, string>> = {
-  'http:': '80',
-  'https:': '443',
-  'ws:': '80',
-  'wss:': '443',
-  'ftp:': '21',
-};
+/** The URL parser's special schemes, each with its colon. */
+const SPECIAL_SCHEMES: ReadonlySet<string> = new Set([
+  'http:',
+  'https:',
+  'ws:',
+  'wss:',
+  'ftp:',
+  'file:',
+]);
 
 /** Whether the URL parser treats `protocol` (with its colon) as a special scheme. */
 function isSpecialScheme(protocol: string): boolean {
-  return (
-    Object.hasOwn(SPECIAL_SCHEME_DEFAULT_PORTS, protocol) ||
-    protocol === 'file:'
-  );
+  return SPECIAL_SCHEMES.has(protocol);
 }
 
 /**
@@ -142,16 +140,11 @@ function hasPercentEncodedHost(origin: string): boolean {
  * `https://example.com/。` would read as the bare origin, where its path is `/%E3%80%82`.
  */
 function foldOriginDots(text: string): string {
-  // `text` is already cleaned by `toOriginText`, so its scheme is where the parser sees it.
-  const scheme = /^([a-z][a-z\d+.-]*):/i.exec(text)?.[1];
-
-  if (scheme !== undefined && !isSpecialScheme(`${asciiLowercase(scheme)}:`)) {
-    return text;
-  }
-
+  // `text` is `toOriginText`'s, so it starts with `scheme://`, where the parser sees it.
   const schemeSep = text.indexOf('://');
-  if (schemeSep === -1) {
-    return toAsciiDots(text);
+
+  if (!isSpecialScheme(asciiLowercase(text.slice(0, schemeSep + 1)))) {
+    return text;
   }
 
   const authorityStart = schemeSep + 3;
@@ -181,8 +174,8 @@ function normalizeOriginHostname(protocol: string, hostname: string): string {
 /**
  * Normalize a bare origin for consistent comparison.
  * Returns the canonical origin form with a normalized hostname,
- * lowercase scheme, no trailing slash, and default ports removed
- * (80 for http, 443 for https).
+ * lowercase scheme, no trailing slash, and every special scheme's default port removed
+ * (`:443` for `https` and `wss`, `:80` for `http` and `ws`, `:21` for `ftp`).
  */
 export function normalizeOrigin(origin: string): string {
   // Preserve literal "null" origin exactly; treat all other invalids as empty sentinel
@@ -271,15 +264,9 @@ export function normalizeOrigin(origin: string): string {
       host = normalizedHostname;
     }
 
-    // Normalize default ports - every special scheme's, as the URL parser drops them:
-    // with only http and https known, a `wss://x.com:443` would keep its port.
-    let port = '';
-    const defaultPort = SPECIAL_SCHEME_DEFAULT_PORTS[protocolLower] ?? '';
-
-    // An empty `url.port` is the scheme's default (the parser drops it), so it stays off.
-    if (url.port) {
-      port = url.port === defaultPort ? '' : `:${url.port}`;
-    }
+    // An empty `url.port` is the scheme's default: the parser drops every special
+    // scheme's (`wss://x.com:443` reads as `wss://x.com`), so it stays off.
+    const port = url.port ? `:${url.port}` : '';
 
     // Explicitly use lowercase protocol for consistency
     return `${protocolLower}//${host}${port}`;

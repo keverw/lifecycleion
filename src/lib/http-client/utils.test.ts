@@ -8,6 +8,7 @@ import {
   derivedRedirectFields,
   extractFetchHeaders,
   extractHostname,
+  firstJoinedLocation,
   isBrowserEnvironment,
   matchesFilter,
   matchesFilterPhase,
@@ -1634,4 +1635,25 @@ test('serializeBody refuses a body whose prototype answers differently once it h
     'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.',
   );
   expect(looks).toBe(4);
+});
+
+describe('firstJoinedLocation', () => {
+  test('splits at a `, ` followed by a path or scheme, and nowhere else', () => {
+    expect(firstJoinedLocation('/a, /b')).toBe('/a');
+    expect(firstJoinedLocation('https://x.test/a, https://y.test/b')).toBe(
+      'https://x.test/a',
+    );
+    expect(firstJoinedLocation('/files/Smith, John.pdf')).toBe(
+      '/files/Smith, John.pdf',
+    );
+    expect(firstJoinedLocation('/r?to=a,/b')).toBe('/r?to=a,/b');
+  });
+
+  test('cuts a single value with an unencoded `, /` in it, which reads as two joined', () => {
+    expect(firstJoinedLocation('/login?next=/a, /b')).toBe('/login?next=/a');
+    expect(firstJoinedLocation('/r?to=x, https://y.example/')).toBe('/r?to=x');
+    expect(firstJoinedLocation('/login?next=/a,%20/b')).toBe(
+      '/login?next=/a,%20/b',
+    );
+  });
 });

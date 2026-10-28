@@ -1609,6 +1609,9 @@ export class CookieJar {
     // the cookie is kept, but only for the host that set it.
     const isHostOnly = !parsed.domain || isPublicSuffixHostOnly;
 
+    // Deleted here rather than through `setCookie`: an expired cookie is never stored, so
+    // its value need not be one `setCookie` would store - `sid=日本; Max-Age=0` deletes
+    // `sid`, as a browser deletes it.
     // Max-Age=0 or negative → delete the cookie
     if (parsed.maxAge !== undefined && parsed.maxAge <= 0) {
       this.deleteCookieByIdentity(parsed.name, domain, path, isHostOnly);
