@@ -176,6 +176,13 @@ interface StoredCookieScope {
   hostOnly?: boolean;
   secure?: boolean;
   /**
+   * A domain cookie whose domain is a public suffix under the jar's list - one restored
+   * through `fromJSON` from a jar with other overrides, or given to `setCookie`. Sent to
+   * that host alone, never across the suffix's tenants. The jar's list is fixed at
+   * construction, so this is decided once, when the cookie is stored.
+   */
+  isPublicSuffixDomain: boolean;
+  /**
    * The latest the cookie may live to: {@link MAX_COOKIE_LIFETIME_SECONDS} from the
    * `createdAt` it was stored with. Held here, as the scope is, so a `createdAt` moved
    * forward through `getAllCookies()` cannot move the cap with it.
@@ -188,6 +195,20 @@ const MAX_AGE_PATTERN = /^-?\d+$/;
 
 /** RFC 6265bis §5.6: a cookie whose name and value together pass this is ignored. */
 const MAX_COOKIE_NAME_VALUE_BYTES = 4096;
+
+/**
+ * The RFC 6265bis §4.1.3 name prefix `text` starts with, matched ASCII
+ * case-insensitively as browsers match it, or `null` for none.
+ */
+function cookieNamePrefix(text: string): '__host-' | '__secure-' | null {
+  const start = asciiLowercase(text.slice(0, '__secure-'.length));
+
+  if (start.startsWith('__host-')) {
+    return '__host-';
+  }
+
+  return start === '__secure-' ? '__secure-' : null;
+}
 
 const COOKIE_DATE_DELIMITER =
   /[\t\u0020-\u002f\u003b-\u0040\u005b-\u0060\u007b-\u007e]+/;
@@ -426,6 +447,16 @@ export class CookieJar {
       }
     }
 
+    // One of the three a `Set-Cookie` can store, or absent.
+    if (
+      input.sameSite !== undefined &&
+      input.sameSite !== 'Strict' &&
+      input.sameSite !== 'Lax' &&
+      input.sameSite !== 'None'
+    ) {
+      return false;
+    }
+
     if (!this.hasWritableNameAndValue(input)) {
       return false;
     }
@@ -460,12 +491,26 @@ export class CookieJar {
     const createdAt = Math.min(input.createdAt ?? now, now);
     const site = this.siteFor(domain);
 
+    // The cookie's own fields only, so what is stored, listed by `getAllCookies()` and
+    // saved by `toJSON()` is a cookie and holds nothing else of the caller's.
     const stored: Cookie = {
-      ...input,
+      name: input.name,
+      value: input.value,
       createdAt,
       domain,
       path,
     };
+
+    for (const field of [
+      'hostOnly',
+      'expires',
+      'maxAge',
+      'secure',
+      'httpOnly',
+      'sameSite',
+    ] as const) {
+      this.copyIfPresent(input, stored, field);
+    }
 
     // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
     // creation: a jar restored through `fromJSON` from before the cap kept a 10-year
@@ -513,6 +558,8 @@ export class CookieJar {
       domain,
       preparedDomain: this.prepareHost(domain),
       path,
+      isPublicSuffixDomain:
+        stored.hostOnly !== true && this.isPublicSuffix(domain),
       deadline: createdAt + MAX_COOKIE_LIFETIME_MS,
     };
 
@@ -671,27 +718,29 @@ export class CookieJar {
     const now = Date.now();
     const result: Array<{ cookie: Cookie; creationTime: number }> = [];
     // The request host read once, not once per cookie: normalizing it runs IDNA and a URL
-    // parse. Likewise each stored domain's public-suffix answer.
+    // parse.
     const requestHost = this.prepareHost(hostname);
-    const publicSuffixAnswers = new Map<string, boolean>();
-    const isPublicSuffix = (domain: string): boolean => {
-      let isSuffix = publicSuffixAnswers.get(domain);
-      if (isSuffix === undefined) {
-        isSuffix = this.isPublicSuffix(domain);
-        publicSuffixAnswers.set(domain, isSuffix);
+    // The host's own site, and the site of each name above it: a parent domain can live
+    // above a nested private suffix, in a site of its own. Every name between the host
+    // and its site has that same site, so only the names above it are resolved. An IP
+    // literal has no parent names. The ordinary domain/host-only checks below still apply.
+    const site = this.siteFor(hostname);
+    const candidateBuckets = new Set<string>([site]);
+
+    if (this.tryCanonicalIPLiteral(hostname) === null) {
+      let parent = site;
+      let dot = parent.indexOf('.');
+
+      // A trailing dot ends the walk: `com.` has no name above it.
+      while (dot !== -1 && dot !== parent.length - 1) {
+        parent = parent.slice(dot + 1);
+        candidateBuckets.add(this.siteFor(parent));
+        dot = parent.indexOf('.');
       }
-      return isSuffix;
-    };
-    // A parent domain can live above a nested private suffix. Include its
-    // bucket while retaining the ordinary domain/host-only checks below.
-    const candidateBuckets = new Set<string>();
-    const labels = hostname.split('.');
-    for (let index = 0; index < labels.length; index++) {
-      candidateBuckets.add(this.siteFor(labels.slice(index).join('.')));
     }
 
-    for (const site of candidateBuckets) {
-      const siteBucket = this.buckets.get(site);
+    for (const candidate of candidateBuckets) {
+      const siteBucket = this.buckets.get(candidate);
       if (!siteBucket) {
         continue;
       }
@@ -705,12 +754,9 @@ export class CookieJar {
           continue;
         }
 
-        // Persisted cookies can predate the current suffix policy. Never let
-        // a domain cookie for a public suffix span its tenants.
+        // Never let a domain cookie for a public suffix span its tenants.
         if (
-          !scope.hostOnly &&
-          scope.domain &&
-          isPublicSuffix(scope.domain) &&
+          scope.isPublicSuffixDomain &&
           !this.hostOnlyDomainMatches(requestHost, scope.preparedDomain)
         ) {
           continue;
@@ -1078,11 +1124,16 @@ export class CookieJar {
         delete cookie.maxAge;
       }
 
-      // A `null` flag reads as absent, as a `null` expiry does; any other non-boolean is
-      // refused by `setCookie`, and counted out of the total.
-      for (const flag of ['secure', 'hostOnly', 'httpOnly'] as const) {
-        if ((cookie[flag] as unknown) === null) {
-          delete cookie[flag];
+      // A `null` flag or `sameSite` reads as absent, as a `null` expiry does; any other
+      // value `setCookie` cannot store is refused there, and counted out of the total.
+      for (const field of [
+        'secure',
+        'hostOnly',
+        'httpOnly',
+        'sameSite',
+      ] as const) {
+        if ((cookie[field] as unknown) === null) {
+          delete cookie[field];
         }
       }
 
@@ -1582,7 +1633,7 @@ export class CookieJar {
     // A nameless cookie posing as a prefixed one - `__Host-x; Max-Age=0` - is ignored
     // whole (RFC 6265bis §5.7), before the deletions below: it deleted the jar's
     // nameless cookie, which `setCookie` would never have let it replace.
-    if (parsed.name === '' && /^__(secure|host)-/i.test(parsed.value)) {
+    if (parsed.name === '' && cookieNamePrefix(parsed.value) !== null) {
       return;
     }
 
@@ -1678,17 +1729,13 @@ export class CookieJar {
    * attribute half is checked on `setCookie` as well, since it needs no URL.
    */
   private hasValidNamePrefix(parsed: ParsedCookie): boolean {
-    const lowerName = asciiLowercase(parsed.name);
+    const prefix = cookieNamePrefix(parsed.name);
 
-    if (lowerName.startsWith('__host-')) {
+    if (prefix === '__host-') {
       return parsed.secure === true && !parsed.domain && parsed.path === '/';
     }
 
-    if (lowerName.startsWith('__secure-')) {
-      return parsed.secure === true;
-    }
-
-    return true;
+    return prefix === null || parsed.secure === true;
   }
 
   /**
@@ -1931,7 +1978,7 @@ export class CookieJar {
       return (
         value !== '' &&
         !value.includes('=') &&
-        !/^__(secure|host)-/i.test(value) &&
+        cookieNamePrefix(value) === null &&
         isHeaderSafeCookieText(value, '')
       );
     }
@@ -2060,7 +2107,7 @@ export class CookieJar {
 
   /** Copies `key` from `from` to `to` only when it is present, reading it once. */
   private copyIfPresent<K extends keyof Cookie>(
-    from: Cookie,
+    from: Partial<Pick<Cookie, K>>,
     to: Partial<Pick<Cookie, K>>,
     key: K,
   ): void {

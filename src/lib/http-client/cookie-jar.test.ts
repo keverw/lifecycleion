@@ -3578,6 +3578,68 @@ describe('CookieJar - accepting and expiring cookies', () => {
     expect(restored.getCookieHeaderString('http://example.com/')).toBe('ok=1');
   });
 
+  test('setCookie() and fromJSON() refuse a sameSite a Set-Cookie cannot store', () => {
+    const jar = new CookieJar();
+    const cookie = (sameSite: unknown) =>
+      ({
+        name: 'a',
+        value: '1',
+        domain: 'example.com',
+        path: '/',
+        createdAt: Date.now(),
+        sameSite,
+      }) as Cookie;
+
+    for (const sameSite of ['bogus', 'lax', '', null, 1]) {
+      expect(jar.setCookie(cookie(sameSite))).toBe(false);
+    }
+
+    // `fromJSON` reads a `null` one as absent, as it reads a `null` flag.
+    expect(
+      jar.fromJSON({
+        cookies: [
+          cookie('bogus'),
+          cookie('Lax'),
+          { ...cookie(null), name: 'b' },
+        ],
+      }),
+    ).toBe(2);
+    expect(
+      jar.getAllCookies().map((c) => [c.name, 'sameSite' in c, c.sameSite]),
+    ).toEqual([
+      ['a', true, 'Lax'],
+      ['b', false, undefined],
+    ]);
+  });
+
+  test('setCookie() stores the cookie fields alone, not the rest of the object it is given', () => {
+    const jar = new CookieJar();
+    const extra = { big: 'x'.repeat(1000) };
+
+    expect(
+      jar.setCookie({
+        name: 'a',
+        value: '1',
+        domain: 'example.com',
+        path: '/',
+        createdAt: Date.now(),
+        httpOnly: true,
+        extra,
+      } as Cookie),
+    ).toBe(true);
+
+    const [stored] = jar.getAllCookies();
+    expect(stored).toBeDefined();
+    expect(Object.keys(stored ?? {}).sort()).toEqual([
+      'createdAt',
+      'domain',
+      'httpOnly',
+      'name',
+      'path',
+      'value',
+    ]);
+  });
+
   test('a stored cookie grown past 4096 characters through getAllCookies() is withheld', () => {
     const jar = new CookieJar();
     jar.parseSetCookieHeader('big=1', 'http://example.com/');

@@ -6378,6 +6378,11 @@ function getSignalCancelReason(signal: AbortSignal): string | undefined {
  * appears. Looser than the `hosts` matcher, which reads `..` as naming no host: a
  * respelling must never read as the caller choosing a new host, and so taking the scope
  * to the one the server chose. `''` for a URL that names no host.
+ *
+ * The cookie jar keeps `api.example.` and `api.example` apart, as browsers keep hosts.
+ * The two rules are meant to differ: this one decides whether credentials may follow,
+ * where reading two spellings as one host is the safe answer, and the jar decides which
+ * cookies a host was given.
  */
 function comparableHost(url: string): string {
   return trimEndWhere(asciiLowercase(extractHostname(url)), isDot);
