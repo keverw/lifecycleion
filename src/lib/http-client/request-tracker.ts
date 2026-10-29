@@ -106,11 +106,14 @@ export class RequestTracker {
     // A copy, as `cancelWhere` walks one: reading a caller's signal (`isEntryCancelled`)
     // runs its code, which can start a request, and the live map would list it too.
     for (const entry of [...this.requests.values()]) {
-      if (filter?.clientID && entry.clientID !== filter.clientID) {
+      if (
+        filter?.clientID !== undefined &&
+        entry.clientID !== filter.clientID
+      ) {
         continue;
       }
 
-      if (filter?.label && entry.label !== filter.label) {
+      if (filter?.label !== undefined && entry.label !== filter.label) {
         continue;
       }
 

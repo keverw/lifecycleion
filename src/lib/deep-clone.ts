@@ -809,7 +809,8 @@ function isError(
 }
 
 /**
- * An `Error` cloned on its own prototype, so `instanceof` and a subclass's `name` hold:
+ * An `Error` cloned on its own prototype, so `instanceof` and a subclass's `name` hold -
+ * another realm's built-in error on this realm's (see {@link errorPrototype}):
  * every own string-keyed property - `message`, `stack`, `cause`, an `AggregateError`'s
  * `errors`, a subclass's `code` - read once and cloned, as enumerable as it was, and
  * writable and configurable as every clone's properties are: a frozen error's clone is not
@@ -845,11 +846,75 @@ function cloneError(source: Error, state: CloneState): Error {
     Reflect.deleteProperty(base, key);
   }
 
-  Reflect.setPrototypeOf(base, Reflect.getPrototypeOf(source));
+  Reflect.setPrototypeOf(base, errorPrototype(source));
   const cloned = remember<Error>(state.seen, source, base);
   state.frames.push(new ErrorFrame(source, cloned));
 
   return cloned;
+}
+
+/** The built-in error types whose prototype another realm's error is moved off. */
+const ERROR_TYPES: readonly string[] = [
+  'Error',
+  'EvalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+  'AggregateError',
+  'SuppressedError',
+  'DOMException',
+];
+
+/**
+ * The prototype an error's clone is put on: its own, except that another realm's
+ * built-in error prototype (its `TypeError.prototype`) is swapped for this realm's, so
+ * the clone is an `instanceof Error` here as a cloned `Date` is a `Date`. A subclass from
+ * another realm keeps its own prototype, which no type here stands in for - one named
+ * after a built-in too (`class TypeError extends TypeError`), as
+ * {@link isBuiltInErrorPrototype} tells it by its place in the chain.
+ */
+function errorPrototype(source: Error): object | null {
+  const prototype = Reflect.getPrototypeOf(source);
+
+  if (prototype === null || prototype instanceof Object) {
+    return prototype;
+  }
+
+  for (const name of ERROR_TYPES) {
+    if (isBuiltInErrorPrototype(prototype, name)) {
+      const local: unknown = globalConstructor(name)?.prototype;
+      return typeof local === 'object' && local !== null ? local : prototype;
+    }
+  }
+
+  return prototype;
+}
+
+/**
+ * Whether `prototype` is some realm's own built-in error prototype `name`: its
+ * constructor's, by {@link isBasePrototype}, and where that realm puts it - `Error`'s on
+ * the realm's root, every other directly on that realm's `Error.prototype`. A subclass
+ * named after a built-in sits one link further down.
+ */
+function isBuiltInErrorPrototype(prototype: object, name: string): boolean {
+  if (!isBasePrototype(prototype, name)) {
+    return false;
+  }
+
+  const parent = Reflect.getPrototypeOf(prototype);
+  const errorPrototype = name === 'Error' ? prototype : parent;
+
+  if (
+    errorPrototype === null ||
+    (name !== 'Error' && !isBasePrototype(errorPrototype, 'Error'))
+  ) {
+    return false;
+  }
+
+  const root = Reflect.getPrototypeOf(errorPrototype);
+  return root !== null && Reflect.getPrototypeOf(root) === null;
 }
 
 /** An error being filled with its own string-keyed properties: see {@link cloneError}. */
@@ -867,37 +932,39 @@ class ErrorFrame implements Frame {
   }
 
   public step(state: CloneState): boolean {
-    if (this.position >= this.keys.length) {
-      return false;
-    }
+    const { source, target, keys } = this;
+    const depth = state.frames.length;
 
-    const key = this.keys[this.position++];
-    const { source, target } = this;
-    const descriptor = Reflect.getOwnPropertyDescriptor(source, key);
-    const value = cloneValue(
-      (source as unknown as Record<string, unknown>)[key],
-      state,
-    );
-    const kept = Reflect.getOwnPropertyDescriptor(target, key);
+    while (this.position < keys.length) {
+      const key = keys[this.position++];
+      const descriptor = Reflect.getOwnPropertyDescriptor(source, key);
+      const value = cloneValue(
+        (source as unknown as Record<string, unknown>)[key],
+        state,
+      );
+      const kept = Reflect.getOwnPropertyDescriptor(target, key);
 
-    if (kept?.configurable === false) {
-      if (kept.writable === true) {
-        Reflect.set(target, key, value);
+      if (kept?.configurable === false) {
+        if (kept.writable === true) {
+          Reflect.set(target, key, value);
+        }
+      } else {
+        Object.defineProperty(target, key, {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          __proto__: null,
+          value,
+          writable: true,
+          enumerable: descriptor?.enumerable === true,
+          configurable: true,
+        } as PropertyDescriptor);
       }
 
-      return true;
+      if (state.frames.length !== depth) {
+        return true;
+      }
     }
 
-    Object.defineProperty(target, key, {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      __proto__: null,
-      value,
-      writable: true,
-      enumerable: descriptor?.enumerable === true,
-      configurable: true,
-    } as PropertyDescriptor);
-
-    return true;
+    return false;
   }
 }
 

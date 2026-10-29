@@ -329,6 +329,52 @@ describe('deepClone', () => {
       expect(clonedLoop.cause).toBe(clonedLoop);
       expect(clonedForeign.message).toBe('far');
       expect(clonedForeign.name).toBe('TypeError');
+      expect(Object.getPrototypeOf(clonedForeign)).toBe(TypeError.prototype);
+      expect(clonedForeign).toBeInstanceOf(Error);
+    });
+
+    test("another realm's built-in errors take this realm's prototype; its subclasses keep theirs", () => {
+      const [plain, aggregate, ...subclassed] = vm.runInNewContext(`
+        class Custom extends RangeError {}
+        class Named extends TypeError { static name = 'TypeError' }
+        const Base = Error;
+        const Shadow = class Error extends Base {};
+        [new Error('a'), new AggregateError([], 'b'), new Custom('c'), new Named('d'), new Shadow('e')]
+      `) as Error[];
+
+      expect(Object.getPrototypeOf(deepClone(plain))).toBe(Error.prototype);
+      expect(Object.getPrototypeOf(deepClone(aggregate))).toBe(
+        AggregateError.prototype,
+      );
+      for (const error of subclassed) {
+        expect(Object.getPrototypeOf(deepClone(error))).toBe(
+          Object.getPrototypeOf(error),
+        );
+      }
+    });
+
+    test("an error's properties are read in order, each nested value filled before the next", () => {
+      const reads: string[] = [];
+      const error = new Error('m') as Error & Record<string, unknown>;
+      for (const key of ['a', 'b', 'c']) {
+        Object.defineProperty(error, key, {
+          enumerable: true,
+          get: () => {
+            reads.push(key);
+            return {
+              get inner() {
+                reads.push(`${key}.inner`);
+                return 1;
+              },
+            };
+          },
+        });
+      }
+
+      const cloned = deepClone(error);
+
+      expect(reads).toEqual(['a', 'a.inner', 'b', 'b.inner', 'c', 'c.inner']);
+      expect(cloned.c).toEqual({ inner: 1 });
     });
   });
 

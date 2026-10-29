@@ -248,6 +248,19 @@ describe('RequestTracker', () => {
       expect(result.requests[0].requestID).toBe('a');
     });
 
+    test('an empty label or clientID filter matches only that value, as cancelAllWithLabel does', () => {
+      const tracker = new RequestTracker();
+      tracker.add(makeEntry({ requestID: 'a', clientID: '', label: '' }));
+      tracker.add(makeEntry({ requestID: 'b', clientID: 'c1', label: 'nav' }));
+
+      expect(
+        tracker.list({ label: '' }).requests.map((r) => r.requestID),
+      ).toEqual(['a']);
+      expect(
+        tracker.list({ clientID: '' }).requests.map((r) => r.requestID),
+      ).toEqual(['a']);
+    });
+
     test('filters by both clientID and label', () => {
       const tracker = new RequestTracker();
       tracker.add(
