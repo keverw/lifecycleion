@@ -8206,6 +8206,19 @@ test('an empty inner layer fails as a stream that ends early, whichever its codi
   }
 });
 
+test('a first chunk that fills the decoder pauses the response, as pipe does for later ones', async () => {
+  const zlib = await import('node:zlib');
+  const { randomBytes } = await import('node:crypto');
+  const res = stubResponse();
+  createResponseBodySource(res, 'gzip');
+
+  // Incompressible, so the first chunk is far past the decoder's buffer.
+  (res as unknown as PassThrough).write(zlib.gzipSync(randomBytes(1 << 20)));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect((res as unknown as PassThrough).isPaused()).toBe(true);
+});
+
 test('onFailure replays a failure held before it subscribed', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(

@@ -187,8 +187,14 @@ function cloneInternal<T>(obj: T, state: CloneState): T {
     return cloneError(obj, state) as T;
   }
 
-  // Handle plain objects
-  const cloned = remember<Record<string, unknown>>(state.seen, obj, {});
+  // Handle plain objects: on a null prototype when the original has one, as a match
+  // result's `groups` does, so such a clone inherits nothing either. Any other prototype
+  // is not kept: the clone is a plain object.
+  const cloned = remember<Record<string, unknown>>(
+    state.seen,
+    obj,
+    Reflect.getPrototypeOf(obj) === null ? Object.create(null) : {},
+  );
 
   for (const key in obj) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
@@ -279,8 +285,12 @@ function isError(value: object): value is Error {
 /**
  * An `Error` cloned on its own prototype, so `instanceof` and a subclass's `name` hold:
  * every own string-keyed property - `message`, `stack`, `cause`, an `AggregateError`'s
- * `errors`, a subclass's `code` - read once and cloned, as enumerable as it was. A
- * `stack` the engine serves through an accessor is copied as the text it reads as.
+ * `errors`, a subclass's `code` - read once and cloned, as enumerable as it was, and
+ * writable and configurable as every clone's properties are: a frozen error's clone is not
+ * frozen. A `stack` the engine serves through an accessor is copied as the text it reads
+ * as. A property of the base the engine will not let go (non-configurable, as a hardened
+ * realm can make one) is assigned over where it is writable, and otherwise kept as the
+ * base has it.
  *
  * Built on a real error - a `new Error()` emptied of its own properties, or for a
  * `DOMException` a `new DOMException` of its message and name, whose getters read that
@@ -307,10 +317,21 @@ function cloneError(source: Error, state: CloneState): Error {
     }
 
     const descriptor = Reflect.getOwnPropertyDescriptor(source, key);
+    const value = cloneInternal(record[key], state);
+    const kept = Reflect.getOwnPropertyDescriptor(cloned, key);
+
+    if (kept?.configurable === false) {
+      if (kept.writable === true) {
+        Reflect.set(cloned, key, value);
+      }
+
+      continue;
+    }
+
     Object.defineProperty(cloned, key, {
       // eslint-disable-next-line @typescript-eslint/naming-convention
       __proto__: null,
-      value: cloneInternal(record[key], state),
+      value,
       writable: true,
       enumerable: descriptor?.enumerable === true,
       configurable: true,

@@ -473,6 +473,9 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     });
 
     const head = this.decoders[0];
+    // The first chunk's backpressure is `pipe`'s too: it pauses the response at once when
+    // the head decoder is already full (`writableNeedDrain`), so the response is not read
+    // past a decoder that chunk filled.
     head.write(first);
     this.res.pipe(head);
 

@@ -218,6 +218,77 @@ describe('deepClone', () => {
       expect(String(clonedAbort)).toBe('AbortError: stopped');
     });
 
+    test('copies over a base property the engine will not delete, rather than throwing', () => {
+      const original = new Error('boom');
+      const deleteProperty = Reflect.deleteProperty;
+      // A base whose `stack` cannot be let go, as a hardened realm can leave one.
+      const spy = spyOn(Reflect, 'deleteProperty').mockImplementation(
+        (target, key) => {
+          if (key === 'stack' && target !== original) {
+            Object.defineProperty(target, 'stack', {
+              value: 'base stack',
+              writable: true,
+              configurable: false,
+            });
+            return false;
+          }
+
+          return deleteProperty(target, key);
+        },
+      );
+
+      let cloned: Error | undefined;
+      try {
+        cloned = deepClone(original);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(cloned?.message).toBe('boom');
+      expect(cloned?.stack).toBe(original.stack);
+    });
+
+    test('keeps a base property the engine will neither delete nor let be written', () => {
+      const original = new Error('boom');
+      const deleteProperty = Reflect.deleteProperty;
+      const spy = spyOn(Reflect, 'deleteProperty').mockImplementation(
+        (target, key) => {
+          if (key === 'stack' && target !== original) {
+            Object.defineProperty(target, 'stack', {
+              value: 'base stack',
+              writable: false,
+              configurable: false,
+            });
+            return false;
+          }
+
+          return deleteProperty(target, key);
+        },
+      );
+
+      let cloned: Error | undefined;
+      try {
+        cloned = deepClone(original);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(cloned?.message).toBe('boom');
+      expect(cloned?.stack).toBe('base stack');
+    });
+
+    test("a frozen error's clone is writable, as every clone is", () => {
+      const original = Object.freeze(
+        Object.assign(new Error('x'), { code: 'E1' }),
+      );
+      const cloned = deepClone(original);
+
+      (cloned as { code: string }).code = 'E2';
+
+      expect(cloned.code).toBe('E2');
+      expect(original.code).toBe('E1');
+    });
+
     test('keeps a circular cause, and clones an Error from another realm', async () => {
       const looped = new Error('loop') as Error & { cause?: unknown };
       looped.cause = looped;
@@ -230,6 +301,23 @@ describe('deepClone', () => {
       expect(clonedLoop.cause).toBe(clonedLoop);
       expect(clonedForeign.message).toBe('far');
       expect(clonedForeign.name).toBe('TypeError');
+    });
+  });
+
+  describe('null-prototype objects', () => {
+    test("keep their null prototype, a match result's groups included", () => {
+      const dictionary = Object.assign(Object.create(null) as object, {
+        a: 1,
+      });
+      const matched = /(?<a>a)/d.exec('a') as RegExpExecArray;
+
+      const cloned = deepClone({ dictionary, matched });
+
+      expect(Object.getPrototypeOf(cloned.dictionary)).toBeNull();
+      expect(cloned.dictionary).toEqual(dictionary);
+      expect(Object.getPrototypeOf(cloned.matched.groups)).toBeNull();
+      expect('valueOf' in (cloned.matched.groups ?? {})).toBe(false);
+      expect(Object.getPrototypeOf(cloned.matched.indices?.groups)).toBeNull();
     });
   });
 
@@ -580,7 +668,7 @@ describe('deepClone', () => {
       expect(() => deepClone(detached)).toThrow(TypeError);
     });
 
-    test('a strict Proxy, a null-prototype dictionary and a class instance clone as before', () => {
+    test('a strict Proxy, a null-prototype dictionary and a class instance clone as plain records', () => {
       const strict = new Proxy(
         { a: 1 },
         {
