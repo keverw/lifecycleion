@@ -967,6 +967,66 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(adapter.getType()).toBe('mock');
   });
 
+  test("a form body reaches the route with the mock's multipart Content-Type, not a caller's", async () => {
+    let contentType: string | undefined;
+    let fields: unknown;
+    adapter.routes.post('/upload', (req) => {
+      contentType = req.headers['content-type'];
+      fields = (req.body as MockFormData).fields;
+      return { status: 200 };
+    });
+    const form = new FormData();
+    form.append('a', '1');
+
+    await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/upload',
+        method: 'POST',
+        headers: { 'Content-Type': 'multipart/form-data' },
+        body: form,
+      }),
+    );
+
+    expect(contentType).toBe(
+      'multipart/form-data; boundary=----lifecycleion-mock-boundary',
+    );
+    expect(fields).toEqual({ a: '1' });
+  });
+
+  test('a body that only claims to be a form is refused, as NodeAdapter refuses it', async () => {
+    let wasReached = false;
+    adapter.routes.post('/upload', () => {
+      wasReached = true;
+      return { status: 200 };
+    });
+
+    for (const fake of [
+      new Proxy(new FormData(), {}),
+      Object.create(FormData.prototype) as FormData,
+    ]) {
+      let caught: unknown;
+      try {
+        await adapter.send(
+          makeAdapterRequest({
+            requestURL: '/upload',
+            method: 'POST',
+            body: fake,
+          }),
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(TypeError);
+      expect(
+        (caught as Record<string, unknown>)[
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+        ],
+      ).toBe(true);
+    }
+    expect(wasReached).toBe(false);
+  });
+
   test('progress events do not include attemptNumber (injected by client)', async () => {
     adapter.routes.get('/prog', () => ({ status: 200 }));
     const events: object[] = [];

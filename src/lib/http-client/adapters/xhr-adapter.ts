@@ -6,6 +6,7 @@ import {
 } from '../internal/header-utils';
 import { trimHTTPWhitespace } from '../../internal/ascii-text';
 import { defineEntry } from '../../internal/define-entry';
+import { isFormData } from '../internal/form-entries';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { knownBodyByteLength } from '../internal/progress';
 import {
@@ -165,6 +166,12 @@ export class XHRAdapter implements HTTPAdapter {
         // outside a browser would send one that disagreed with the body, so the server
         // would wait for bytes that never come. Taken off the adapter's own copy, in place.
         deleteHeader(headers, 'content-length');
+        // A form's `Content-Type` is the transport's own, with the boundary it writes - as
+        // NodeAdapter writes its own: a caller's `multipart/form-data` names no boundary, and
+        // would go out in its place, a body the server cannot split into parts.
+        if (isFormData(requestBody)) {
+          deleteHeader(headers, 'content-type');
+        }
         for (const [name, value] of requestHeaderPairs(headers)) {
           try {
             xhr.setRequestHeader(name, value);

@@ -430,6 +430,25 @@ describe('XHRAdapter', () => {
     expect(lastXHR.requestHeaders['x-custom']).toEqual(['value']);
   });
 
+  test("a form body goes out with XHR's own multipart Content-Type, not a caller's", async () => {
+    const form = new FormData();
+    form.append('a', '1');
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/upload',
+      method: 'POST',
+      headers: { 'Content-Type': 'multipart/form-data', 'x-kept': 'yes' },
+      body: form,
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(lastXHR.requestHeaders['content-type']).toBeUndefined();
+    expect(lastXHR.requestHeaders['x-kept']).toEqual(['yes']);
+  });
+
   test('materializes array headers with multiple setRequestHeader calls', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

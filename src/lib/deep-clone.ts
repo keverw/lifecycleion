@@ -261,22 +261,9 @@ function foreignBuiltInType(obj: object): string | undefined {
       return undefined;
     }
 
-    const constructor: unknown = Reflect.getOwnPropertyDescriptor(
-      prototype,
-      'constructor',
-    )?.value;
-    if (
-      typeof constructor === 'function' &&
-      Reflect.getOwnPropertyDescriptor(constructor, 'prototype')?.value ===
-        prototype
-    ) {
-      const name: unknown = Reflect.getOwnPropertyDescriptor(
-        constructor,
-        'name',
-      )?.value;
-      if (typeof name === 'string' && FOREIGN_BUILT_IN_TYPES.includes(name)) {
-        return name;
-      }
+    const name = basePrototypeName(prototype);
+    if (name !== undefined && FOREIGN_BUILT_IN_TYPES.includes(name)) {
+      return name;
     }
 
     prototype = next;
@@ -882,27 +869,27 @@ function errorPrototype(source: Error): object | null {
     return prototype;
   }
 
-  for (const name of ERROR_TYPES) {
-    if (isBuiltInErrorPrototype(prototype, name)) {
-      const local: unknown = globalConstructor(name)?.prototype;
-      return typeof local === 'object' && local !== null ? local : prototype;
-    }
+  const name = basePrototypeName(prototype);
+
+  if (
+    name === undefined ||
+    !ERROR_TYPES.includes(name) ||
+    !isBuiltInErrorPrototype(prototype, name)
+  ) {
+    return prototype;
   }
 
-  return prototype;
+  const local: unknown = globalConstructor(name)?.prototype;
+  return typeof local === 'object' && local !== null ? local : prototype;
 }
 
 /**
- * Whether `prototype` is some realm's own built-in error prototype `name`: its
- * constructor's, by {@link isBasePrototype}, and where that realm puts it - `Error`'s on
- * the realm's root, every other directly on that realm's `Error.prototype`. A subclass
- * named after a built-in sits one link further down.
+ * Whether `prototype`, the own prototype of a constructor named `name` (see
+ * {@link basePrototypeName}), sits where a realm puts its built-in error prototype of that
+ * name - `Error`'s on the realm's root, every other directly on that realm's
+ * `Error.prototype`. A subclass named after a built-in sits one link further down.
  */
 function isBuiltInErrorPrototype(prototype: object, name: string): boolean {
-  if (!isBasePrototype(prototype, name)) {
-    return false;
-  }
-
   const parent = Reflect.getPrototypeOf(prototype);
   const errorPrototype = name === 'Error' ? prototype : parent;
 
@@ -1212,17 +1199,34 @@ function isSubclass(
 
 /** Whether `prototype` is some realm's own prototype of the built-in type `name`. */
 function isBasePrototype(prototype: object, name: string): boolean {
-  const constructor: unknown = Object.getOwnPropertyDescriptor(
+  return basePrototypeName(prototype) === name;
+}
+
+/**
+ * The name of the constructor whose own prototype `prototype` is - its own `constructor`,
+ * whose own `prototype` is it, and that constructor's own `name` - read by descriptor, so
+ * no getter runs; `undefined` for any other prototype. How some realm's built-in prototype
+ * is told by name.
+ */
+function basePrototypeName(prototype: object): string | undefined {
+  const constructor: unknown = Reflect.getOwnPropertyDescriptor(
     prototype,
     'constructor',
   )?.value;
 
-  return (
-    typeof constructor === 'function' &&
-    Object.getOwnPropertyDescriptor(constructor, 'prototype')?.value ===
-      prototype &&
-    Object.getOwnPropertyDescriptor(constructor, 'name')?.value === name
-  );
+  if (
+    typeof constructor !== 'function' ||
+    Reflect.getOwnPropertyDescriptor(constructor, 'prototype')?.value !==
+      prototype
+  ) {
+    return undefined;
+  }
+
+  const name: unknown = Reflect.getOwnPropertyDescriptor(
+    constructor,
+    'name',
+  )?.value;
+  return typeof name === 'string' ? name : undefined;
 }
 
 /** A constructor this realm defines under `name`, if it does. */

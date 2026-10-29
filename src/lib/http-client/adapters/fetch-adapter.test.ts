@@ -101,6 +101,27 @@ describe('FetchAdapter', () => {
     expect(capturedInit?.redirect).toBe('manual');
   });
 
+  test("a form body goes out with fetch's own multipart Content-Type, not a caller's", async () => {
+    let capturedInit: RequestInit | undefined;
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      capturedInit = init;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+    const form = new FormData();
+    form.append('a', '1');
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/upload',
+      method: 'POST',
+      headers: { 'Content-Type': 'multipart/form-data', 'x-kept': 'yes' },
+      body: form,
+    });
+
+    const sent = new Headers(capturedInit?.headers);
+    expect(sent.has('content-type')).toBe(false);
+    expect(sent.get('x-kept')).toBe('yes');
+  });
+
   test('each header value is read once, so the build check and fetch see the same one', async () => {
     let capturedInit: RequestInit | undefined;
     (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {

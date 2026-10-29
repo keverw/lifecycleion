@@ -50,6 +50,7 @@ import {
   isRequestBodyBytes,
   normalizeAdapterResponseHeaders,
   parseContentType,
+  UNSUPPORTED_REQUEST_BODY_MESSAGE,
 } from '../utils';
 import type {
   HTTPAdapter,
@@ -314,6 +315,14 @@ export class MockAdapter implements HTTPAdapter {
       method,
       maxResponseBytes,
     } = readAdapterRequestFields(request);
+    // A body that claims to be a form by its prototype chain but holds no form's state - a
+    // `Proxy` over one, an object that only inherits from `FormData.prototype` - is refused
+    // as NodeAdapter refuses it, rather than reaching the route as the value itself.
+    if (!isFormData(body) && inheritsFromFormData(body)) {
+      const refusal = new TypeError(UNSUPPORTED_REQUEST_BODY_MESSAGE);
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
     // Names lowercased, as a Node server receives them, so a request driven straight at
     // the adapter with `Content-Type` is read like one the client sent.
     const materializedHeaders = materializeRequestHeaders(headers, {
@@ -328,10 +337,9 @@ export class MockAdapter implements HTTPAdapter {
         // A path-only URL driven straight at the adapter has no host to report.
       }
     }
-    if (
-      isFormData(body) &&
-      !Object.hasOwn(materializedHeaders, 'content-type')
-    ) {
+    // A form's own, replacing a caller's, as NodeAdapter writes the boundary it sends: a
+    // caller's `multipart/form-data` names none.
+    if (isFormData(body)) {
       defineEntry(
         materializedHeaders,
         'content-type',
@@ -1104,6 +1112,15 @@ function appendCookieAttribute(
 ): void {
   if (value !== undefined && value !== '') {
     parts.push(`${name}=${value}`);
+  }
+}
+
+/** Whether `value`'s prototype chain holds `FormData.prototype`; a chain that throws holds none. */
+function inheritsFromFormData(value: unknown): boolean {
+  try {
+    return value instanceof FormData;
+  } catch {
+    return false;
   }
 }
 

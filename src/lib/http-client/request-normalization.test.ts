@@ -984,6 +984,55 @@ test('a throwing methods getter, or a filter whose fields cannot be listed, is r
   }
 });
 
+test('a filter list is read no further than the entry it is refused at', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  const read: number[] = [];
+  const hosts = new Proxy(['api.example.com', 42, 'never.example.com'], {
+    get(target, key, receiver) {
+      if (typeof key === 'string' && /^\d+$/.test(key)) {
+        read.push(Number(key));
+      }
+      return Reflect.get(target, key, receiver) as unknown;
+    },
+  });
+
+  expect(() =>
+    client.addRequestInterceptor((request) => request, {
+      hosts: hosts as never,
+    }),
+  ).toThrow('HTTPClient request interceptor filter hosts[1] must be a string');
+  expect(read).toEqual([0, 1]);
+});
+
+test('a filter list whose length is no array length is refused without being read', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  for (const length of [Number.POSITIVE_INFINITY, 1.5, -1, 'x']) {
+    let reads = 0;
+    const hosts = new Proxy([] as string[], {
+      get(target, key, receiver) {
+        if (key === 'length') {
+          return length;
+        }
+        reads++;
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+      has: () => {
+        reads++;
+        return true;
+      },
+    });
+
+    expect(() =>
+      client.addRequestInterceptor((request) => request, {
+        hosts: hosts,
+      }),
+    ).toThrow(
+      'HTTPClient request interceptor filter hosts has no array length',
+    );
+    expect(reads).toBe(0);
+  }
+});
+
 test('a filter field that kind of callback cannot use is refused when registered', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
   // Ignored, an error observer filtered to 500 would see every error.

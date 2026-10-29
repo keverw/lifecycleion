@@ -1,7 +1,6 @@
 import { isNullish } from '../../internal/is-nullish';
 import { describeValue } from '../../internal/describe-value';
 import { isRealmRootPrototype } from './plain-record';
-import { copyArrayValue } from './array-copy';
 import {
   hasNonHTTPWhitespaceEdge,
   trimHTTPWhitespace,
@@ -342,28 +341,25 @@ function copyFilterLists(
       );
     }
     const allowed = field === 'phases' ? kind.phases : rule.allowed;
-    // Read by index (see `copyArrayValue`), not through the caller's iterator, which
-    // could yield entries other than those checked; a hole is read as the `undefined` it
-    // is, and refused.
-    const list = copyArrayValue(value as unknown[]);
-    // Refused rather than given a meaning: an empty list read as "match nothing" leaves a
-    // callback that never runs, and read as "match everything" turns `hosts: []` from a
-    // config with no hosts into a callback that runs for every host. `phases: []` is no
-    // exception: omitting `phases` gives the kind's default phases, so either reading of
-    // an empty list does something omitting it does not - "every phase" turning an auth
-    // interceptor built from a flag list that came out empty loose on redirect and retry
-    // hops. The hint says what omitting it does instead, which for `phases` is not
-    // "every request".
-    if (list.length === 0) {
-      throw new TypeError(
-        `${label} filter ${field} is empty; ${
-          field === 'phases'
-            ? `omit it for the default phases (${quoteNames(defaultPhases)}), or list each of ${quoteNames(kind.phases)} to match every phase`
-            : 'omit it to match every request'
-        }`,
-      );
+    // Read by index, each item once (as `copyArrayValue` reads one), not through the
+    // caller's iterator, which could yield entries other than those checked; a hole is
+    // read as the `undefined` it is, and refused. Each checked as it is read, so a list
+    // refused at one entry is read no further.
+    const source = value as unknown[];
+    // An array's own length is always one; a `Proxy`'s is whatever its trap answers, and
+    // one that is not - `Infinity`, `1.5` - would read on without end or past the list.
+    const length: unknown = source.length;
+    if (
+      typeof length !== 'number' ||
+      !Number.isInteger(length) ||
+      length < 0 ||
+      length > 2 ** 32 - 1
+    ) {
+      throw new TypeError(`${label} filter ${field} has no array length`);
     }
-    for (const [index, entry] of list.entries()) {
+    const list: unknown[] = [];
+    for (let index = 0; index < length; index++) {
+      const entry = index in source ? source[index] : undefined;
       // Named by its place in the list, never its text.
       const entryName = `${label} filter ${field}[${String(index)}]`;
       if (typeof entry !== rule.entryType) {
@@ -383,6 +379,24 @@ function copyFilterLists(
           `${entryName} is not one of ${quoteNames(allowed)}`,
         );
       }
+      list.push(entry);
+    }
+    // Refused rather than given a meaning: an empty list read as "match nothing" leaves a
+    // callback that never runs, and read as "match everything" turns `hosts: []` from a
+    // config with no hosts into a callback that runs for every host. `phases: []` is no
+    // exception: omitting `phases` gives the kind's default phases, so either reading of
+    // an empty list does something omitting it does not - "every phase" turning an auth
+    // interceptor built from a flag list that came out empty loose on redirect and retry
+    // hops. The hint says what omitting it does instead, which for `phases` is not
+    // "every request".
+    if (list.length === 0) {
+      throw new TypeError(
+        `${label} filter ${field} is empty; ${
+          field === 'phases'
+            ? `omit it for the default phases (${quoteNames(defaultPhases)}), or list each of ${quoteNames(kind.phases)} to match every phase`
+            : 'omit it to match every request'
+        }`,
+      );
     }
     lists[field] = list;
   }
