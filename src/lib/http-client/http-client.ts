@@ -154,6 +154,7 @@ import {
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
 import { listenForUploadSourceWait } from './internal/upload-source-wait';
 import { formEntries, isFormData } from './internal/form-entries';
+import { assertKnownFields, fieldNames } from '../internal/known-fields';
 import { copyArrayValue } from './internal/array-copy';
 import {
   adoptPromise,
@@ -417,6 +418,7 @@ export class BaseHTTPClient {
     // A getter can answer differently on each read, so validating one read and storing
     // another would let a value the checks never saw through - e.g. followRedirects: true
     // on the XHR adapter. See `snapshotClientConfigFields`.
+    assertKnownFields(config, HTTP_CLIENT_CONFIG_FIELDS, 'HTTPClient config');
     const snapshot = snapshotClientConfigFields(config);
     assertOptionalHeaderRecord(
       snapshot.defaultHeaders,
@@ -696,6 +698,11 @@ export class BaseHTTPClient {
     // maxResponseBytes inherits).
     // Capture every documented field through its original receiver, regardless of
     // enumerability or prototype placement. See `snapshotClientConfigFields`.
+    assertKnownFields(
+      overrides,
+      SUB_CLIENT_CONFIG_FIELDS,
+      'HTTPClient createSubClient config',
+    );
     const snapshot = {
       ...snapshotClientConfigFields(overrides),
       defaultHeadersStrategy: overrides.defaultHeadersStrategy,
@@ -710,8 +717,12 @@ export class BaseHTTPClient {
       cookieJar,
       maxRedirects,
     } = snapshot;
+    // The strategy is how the headers below are built, not a client option.
     const definedOverrides = Object.fromEntries(
-      Object.entries(snapshot).filter(([, value]) => value !== undefined),
+      Object.entries(snapshot).filter(
+        ([field, value]) =>
+          value !== undefined && field !== 'defaultHeadersStrategy',
+      ),
     );
     const shouldFollowRedirects =
       shouldFollowRedirectsOverride ?? this._config.followRedirects;
@@ -5512,6 +5523,31 @@ function readStringMember(
 
   return typeof value === 'string' ? value : fallback;
 }
+
+/** The fields an {@link HTTPClientConfig} takes; any other is refused as misspelled. */
+const HTTP_CLIENT_CONFIG_FIELDS = fieldNames<HTTPClientConfig>({
+  adapter: true,
+  baseURL: true,
+  defaultHeaders: true,
+  timeout: true,
+  maxResponseBytes: true,
+  cookieJar: true,
+  retryPolicy: true,
+  retryNonIdempotentMethods: true,
+  includeRequestID: true,
+  includeAttemptHeader: true,
+  userAgent: true,
+  followRedirects: true,
+  maxRedirects: true,
+});
+
+/** The fields a {@link SubClientConfig} takes: the client's, and `defaultHeadersStrategy`. */
+const SUB_CLIENT_CONFIG_FIELDS = fieldNames<SubClientConfig>({
+  ...(Object.fromEntries(
+    HTTP_CLIENT_CONFIG_FIELDS.map((field) => [field, true]),
+  ) as Record<keyof HTTPClientConfig, true>),
+  defaultHeadersStrategy: true,
+});
 
 /**
  * Read every documented {@link HTTPClientConfig} field once, through its original

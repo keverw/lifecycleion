@@ -57,6 +57,7 @@ import {
 } from '../internal/upload-source-wait';
 import { copyArrayValue } from '../internal/array-copy';
 import { isFormData } from '../internal/form-entries';
+import { assertKnownFields, fieldNames } from '../../internal/known-fields';
 import {
   ACCEPTED_CONTENT_ENCODINGS,
   createResponseBodySource,
@@ -424,10 +425,31 @@ export interface NodeAdapterConfig {
 // NodeAdapter
 // ---------------------------------------------------------------------------
 
+/** The fields a {@link NodeAdapterConfig} takes; any other is refused as misspelled. */
+const NODE_ADAPTER_CONFIG_FIELDS = fieldNames<NodeAdapterConfig>({
+  socketPath: true,
+  mtls: true,
+  ca: true,
+  servername: true,
+  crl: true,
+  decompress: true,
+  rejectUnauthorized: true,
+});
+
 export class NodeAdapter implements HTTPAdapter {
   private _config: NodeAdapterConfig;
 
   constructor(config: NodeAdapterConfig = {}) {
+    assertKnownFields(config, NODE_ADAPTER_CONFIG_FIELDS, 'NodeAdapter config');
+    assertKnownFields(
+      readObjectMember(config, 'mtls'),
+      fieldNames<NonNullable<NodeAdapterConfig['mtls']>>({
+        cert: true,
+        key: true,
+        ca: true,
+      }),
+      'NodeAdapter mtls',
+    );
     // Reject malformed initial configuration before it can enter request retries.
     // Still normalize per request below so callers can refresh their revocation list.
     if (config.crl !== undefined) {

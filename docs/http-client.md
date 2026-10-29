@@ -172,6 +172,8 @@ run. Invalid retry durations throw there, and later mutations to the supplied ob
 not change the policy. Each request starts with a fresh retry budget; `null` on the
 builder disables retries inherited from the client.
 
+**A misspelled option throws.** `new HTTPClient()`, `createSubClient()`, the request options of `client.get(path, options)` and the other method helpers, `new NodeAdapter()` (and its `mtls`) and `new CookieJar()` refuse an own enumerable field they do not take - `folowRedirects`, `timout` - with a `TypeError` naming it, rather than reading it as absent and leaving the option it meant at its default; one set to `null` or `undefined` is read as absent, as it would be anyway. Request options must be an object, not an array. A `MockAdapter` config is held live and handed to its handlers as their receiver, so it may carry fields of its own.
+
 **Invalid timeouts, size limits, retry policies and bodies throw synchronously.** A
 `timeout` that is `NaN` or not a number (a `TypeError`), a `maxResponseBytes` that is not
 a positive integer or `Infinity` (a `TypeError`), or an invalid `retryPolicy`, throws from

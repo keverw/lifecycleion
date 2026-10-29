@@ -1033,6 +1033,59 @@ test('a filter list whose length is no array length is refused without being rea
   }
 });
 
+test('a misspelled config or request option is refused rather than read as absent', () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+
+  expect(
+    () => new HTTPClient({ adapter, folowRedirects: true } as never),
+  ).toThrow('HTTPClient config has no "folowRedirects" field');
+  expect(() => client.createSubClient({ timout: 5 } as never)).toThrow(
+    'HTTPClient createSubClient config has no "timout" field',
+  );
+  expect(() => client.get('/x', { timout: 5 } as never)).toThrow(
+    'HTTPRequestOptions has no "timout" field',
+  );
+  expect(() => client.get('/x', 'fast' as never)).toThrow(
+    'HTTPRequestOptions must be an object (got string)',
+  );
+  expect(() => new NodeAdapter({ decompres: false } as never)).toThrow(
+    'NodeAdapter config has no "decompres" field',
+  );
+  expect(
+    () =>
+      new NodeAdapter({
+        mtls: { cert: 'c', key: 'k', passphrase: 'p' },
+      } as never),
+  ).toThrow('NodeAdapter mtls has no "passphrase" field');
+  expect(() => new CookieJar({ publicSufixes: {} } as never)).toThrow(
+    'CookieJar options has no "publicSufixes" field',
+  );
+
+  // A key that is no option name is not written into the refusal.
+  let refusal: unknown;
+  try {
+    client.get('/x', { 'Bearer secret-token': 1 } as never);
+  } catch (error) {
+    refusal = error;
+  }
+  expect((refusal as Error).message).toStartWith(
+    'HTTPRequestOptions has no field by that name',
+  );
+  expect((refusal as Error).message).not.toContain('secret-token');
+
+  // An unknown field left unset would be read as absent either way, and is let through.
+  expect(() =>
+    client.get('/x', { timout: undefined, extra: null } as never),
+  ).not.toThrow();
+
+  // Every documented field, and a sub-client's strategy, is still taken.
+  expect(() =>
+    client.createSubClient({ timeout: 5, defaultHeadersStrategy: 'merge' }),
+  ).not.toThrow();
+  expect(() => client.get('/x', { timeout: 5, label: 'l' })).not.toThrow();
+});
+
 test('a filter field that kind of callback cannot use is refused when registered', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
   // Ignored, an error observer filtered to 500 would see every error.

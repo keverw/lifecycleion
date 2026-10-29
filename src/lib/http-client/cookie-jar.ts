@@ -1,3 +1,4 @@
+import { assertKnownFields, fieldNames } from '../internal/known-fields';
 import { MAX_COOKIE_LIFETIME_SECONDS } from './consts';
 import { parse } from 'tldts';
 import { toASCII } from 'tr46';
@@ -356,6 +357,11 @@ export class CookieJar {
   private readonly publicSuffixes: PublicSuffixResolver;
 
   constructor(options?: CookieJarOptions) {
+    assertKnownFields(
+      options,
+      fieldNames<CookieJarOptions>({ publicSuffixes: true }),
+      'CookieJar options',
+    );
     this.publicSuffixes = new PublicSuffixResolver(options?.publicSuffixes);
   }
 

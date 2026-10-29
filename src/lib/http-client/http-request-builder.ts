@@ -9,6 +9,7 @@ import { lowerCaseHeaderName } from './utils';
 import { isBlankText } from '../internal/ascii-text';
 import { copyRequestBody } from './internal/request-body-copy';
 import { isFormData } from './internal/form-entries';
+import { assertKnownFields, fieldNames } from '../internal/known-fields';
 import { copyArrayValue, copyParamArrayValue } from './internal/array-copy';
 import {
   assertOptionalHeaderRecord,
@@ -55,6 +56,24 @@ export interface ResolvedBuilderOptions extends HTTPRequestOptions {
 }
 
 type SendFn<T> = (context: BuilderSendContext<T>) => Promise<HTTPResponse<T>>;
+
+/** The fields an {@link HTTPRequestOptions} takes; any other is refused as misspelled. */
+const REQUEST_OPTION_FIELDS = fieldNames<HTTPRequestOptions>({
+  headers: true,
+  params: true,
+  body: true,
+  timeout: true,
+  maxResponseBytes: true,
+  signal: true,
+  retryPolicy: true,
+  retryNonIdempotentMethods: true,
+  label: true,
+  onUploadProgress: true,
+  onDownloadProgress: true,
+  onAttemptStart: true,
+  onAttemptEnd: true,
+  streamResponse: true,
+});
 
 /**
  * Fluent, single-use request builder. Returned by HTTPClient methods.
@@ -108,8 +127,17 @@ export class HTTPRequestBuilder<T = unknown> {
     this._path = path;
     this._sendFn = sendFn;
 
-    if (options) {
-      this._applyOptions(options);
+    // Refused when it is not an object of known options: a misspelled `timout` would
+    // leave the request on the client's timeout, and a non-object read as no options.
+    const candidate: unknown = options;
+    if (!isNullish(candidate)) {
+      if (typeof candidate !== 'object' || Array.isArray(candidate)) {
+        throw new TypeError(
+          `HTTPRequestOptions must be an object (got ${Array.isArray(candidate) ? 'an array' : describeValue(candidate)})`,
+        );
+      }
+      assertKnownFields(candidate, REQUEST_OPTION_FIELDS, 'HTTPRequestOptions');
+      this._applyOptions(candidate);
     }
   }
 
