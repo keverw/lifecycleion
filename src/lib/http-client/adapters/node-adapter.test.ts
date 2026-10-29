@@ -10376,7 +10376,9 @@ describe('NodeAdapter - unsupported bodies and per-request option reads', () => 
       },
     } as NodeAdapterConfig;
     const adapter = new NodeAdapter(config);
-    // Construction checks `mtls.ca`; only the request's reads are counted.
+    // Construction checks the config; only the request's reads are counted.
+    reads.socketPath = 0;
+    reads.servername = 0;
     reads.mtls = 0;
 
     let captured: https.RequestOptions | undefined;
@@ -10403,6 +10405,62 @@ describe('NodeAdapter - unsupported bodies and per-request option reads', () => 
     expect(captured?.servername).toBe('first.test');
     expect(captured?.cert).toBe('first-cert');
     expect(captured?.key).toBe('first-key');
+  });
+
+  test("an encrypted key's passphrase is handed to TLS, and an option set later is checked as it is read", async () => {
+    const config: NodeAdapterConfig = {
+      mtls: {
+        cert: 'cert-pem',
+        key: 'encrypted-key-pem',
+        passphrase: 'secret',
+      },
+    };
+    const adapter = new NodeAdapter(config);
+    let captured: https.RequestOptions | undefined;
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured = options;
+
+      return failingRequest();
+    }) as unknown as typeof https.request);
+
+    try {
+      await adapter.send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(captured?.passphrase).toBe('secret');
+
+      // Set on the live config after construction: refused on the request that reads it,
+      // as non-retryable, rather than sent with no client certificate.
+      captured = undefined;
+      (config as Record<string, unknown>).mtls = 'client.pem';
+      let refusal: unknown;
+      try {
+        await adapter.send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+        });
+      } catch (error) {
+        refusal = error;
+      }
+
+      expect((refusal as Error).message).toBe(
+        'NodeAdapter mtls must be an object with cert and key (got string)',
+      );
+      expect(
+        (refusal as Record<string, unknown>)[
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+        ],
+      ).toBe(true);
+      expect(captured).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

@@ -1055,9 +1055,38 @@ test('a misspelled config or request option is refused rather than read as absen
   expect(
     () =>
       new NodeAdapter({
-        mtls: { cert: 'c', key: 'k', passphrase: 'p' },
+        mtls: { cert: 'c', key: 'k', passphrse: 'p' },
       } as never),
-  ).toThrow('NodeAdapter mtls has no "passphrase" field');
+  ).toThrow('NodeAdapter mtls has no "passphrse" field');
+  expect(
+    () => new NodeAdapter({ rejectUnauthorized: 'false' } as never),
+  ).toThrow('NodeAdapter rejectUnauthorized must be a boolean (got string)');
+  expect(() => new NodeAdapter({ socketPath: '' })).toThrow(
+    'NodeAdapter socketPath must be a non-empty string (got an empty string)',
+  );
+  expect(() => new NodeAdapter({ servername: 5 } as never)).toThrow(
+    'NodeAdapter servername must be a string (got number)',
+  );
+  expect(() => new NodeAdapter({ mtls: 'cert.pem' } as never)).toThrow(
+    'NodeAdapter mtls must be an object with cert and key (got string)',
+  );
+  expect(() => new NodeAdapter({ mtls: { cert: 'pem' } } as never)).toThrow(
+    'NodeAdapter mtls.key must be PEM text or bytes (got undefined)',
+  );
+  expect(() => new NodeAdapter({ mtls: { cert: ' ', key: 'pem' } })).toThrow(
+    'NodeAdapter mtls.cert is empty',
+  );
+  expect(() => new NodeAdapter(null as never)).toThrow(
+    'NodeAdapter config must be an object (got null)',
+  );
+  expect(
+    () =>
+      new NodeAdapter({
+        mtls: { cert: 'pem', key: Buffer.from('key') },
+        servername: '',
+        rejectUnauthorized: true,
+      }),
+  ).not.toThrow();
   expect(() => new CookieJar({ publicSufixes: {} } as never)).toThrow(
     'CookieJar options has no "publicSufixes" field',
   );

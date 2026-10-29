@@ -342,6 +342,8 @@ export interface NodeAdapterConfig {
   mtls?: {
     cert: string | Buffer;
     key: string | Buffer;
+    /** The passphrase an encrypted `key` is decrypted with. */
+    passphrase?: string;
     ca?: string | Buffer | Array<string | Buffer>;
   };
 
@@ -440,12 +442,23 @@ export class NodeAdapter implements HTTPAdapter {
   private _config: NodeAdapterConfig;
 
   constructor(config: NodeAdapterConfig = {}) {
+    const candidateConfig: unknown = config;
+    if (
+      typeof candidateConfig !== 'object' ||
+      candidateConfig === null ||
+      Array.isArray(candidateConfig)
+    ) {
+      throw new TypeError(
+        `NodeAdapter config must be an object (got ${Array.isArray(candidateConfig) ? 'an array' : describeValue(candidateConfig)})`,
+      );
+    }
     assertKnownFields(config, NODE_ADAPTER_CONFIG_FIELDS, 'NodeAdapter config');
     assertKnownFields(
       readObjectMember(config, 'mtls'),
       fieldNames<NonNullable<NodeAdapterConfig['mtls']>>({
         cert: true,
         key: true,
+        passphrase: true,
         ca: true,
       }),
       'NodeAdapter mtls',
@@ -458,15 +471,14 @@ export class NodeAdapter implements HTTPAdapter {
     assertTrustAnchors(copyArrayValue(config.ca), 'ca');
     assertTrustAnchors(copyArrayValue(config.mtls?.ca), 'mtls.ca');
 
-    const candidateDecompress: unknown = config.decompress;
-    if (
-      candidateDecompress !== undefined &&
-      typeof candidateDecompress !== 'boolean'
-    ) {
-      throw new TypeError(
-        `NodeAdapter decompress must be a boolean (got ${describeValue(candidateDecompress)})`,
-      );
-    }
+    // Held to their types here and again as each request reads them (see
+    // `assertBooleanOption`, `assertSocketPath`, `assertServername` and
+    // `readClientCertificate`), so a value set on the config later is held to them too.
+    assertBooleanOption(config.decompress, 'decompress');
+    assertBooleanOption(config.rejectUnauthorized, 'rejectUnauthorized');
+    assertSocketPath(config.socketPath);
+    assertServername(config.servername);
+    readClientCertificate(config.mtls);
 
     this._config = config;
 
@@ -542,8 +554,11 @@ export class NodeAdapter implements HTTPAdapter {
     const { guardedUploadProgress, guardedDownloadProgress, maxResponseBytes } =
       fields;
     // Read once per request, as the rest of the config is: see `decompress`.
-    const isDecompressing = this._config.decompress !== false;
+    const decompressOption: unknown = this._config.decompress;
+    assertBooleanOption(decompressOption, 'decompress');
+    const isDecompressing = decompressOption !== false;
     const socketPath = this._config.socketPath;
+    assertSocketPath(socketPath);
 
     // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
     // URL fails the same way on every attempt. In its own words, without the parser's
@@ -708,8 +723,11 @@ export class NodeAdapter implements HTTPAdapter {
       // `assertTrustAnchors` reads as the `undefined` it is, and refuses.
       const trustedCA = copyArrayValue(this._config.ca);
       const mtls = this._config.mtls;
+      // Its certificate, key and passphrase read once, as checked.
+      const clientCertificate = readClientCertificate(mtls);
       const mtlsCA = copyArrayValue(mtls?.ca);
       const servername = this._config.servername;
+      assertServername(servername);
       assertTrustAnchors(trustedCA, 'ca');
       assertTrustAnchors(mtlsCA, 'mtls.ca');
       // `mtls.ca` adds to `ca` rather than replacing it, so a client that trusts a partner
@@ -738,7 +756,7 @@ export class NodeAdapter implements HTTPAdapter {
         httpsOptions.servername = servername;
       }
 
-      if (mtls) {
+      if (clientCertificate !== undefined) {
         // mTLS: present the client certificate and default server verification to true.
         // The caller's explicit `rejectUnauthorized: false` may still override that
         // default below; client authentication and server verification are independent.
@@ -749,8 +767,11 @@ export class NodeAdapter implements HTTPAdapter {
         // remote server's choice, not the caller's, and must not be able to make this
         // adapter authenticate to a third party.
         if (!isCrossOriginHop) {
-          httpsOptions.cert = mtls.cert;
-          httpsOptions.key = mtls.key;
+          httpsOptions.cert = clientCertificate.cert;
+          httpsOptions.key = clientCertificate.key;
+          if (clientCertificate.passphrase !== undefined) {
+            httpsOptions.passphrase = clientCertificate.passphrase;
+          }
         }
 
         httpsOptions.rejectUnauthorized = true;
@@ -776,7 +797,9 @@ export class NodeAdapter implements HTTPAdapter {
         }
       }
 
-      if (this._config.rejectUnauthorized === false) {
+      const rejectUnauthorizedOption: unknown = this._config.rejectUnauthorized;
+      assertBooleanOption(rejectUnauthorizedOption, 'rejectUnauthorized');
+      if (rejectUnauthorizedOption === false) {
         // Dev-only: accept self-signed certs. Explicit false required — we do
         // not default to insecure, this must be an intentional opt-in.
         httpsOptions.rejectUnauthorized = false;
@@ -4436,6 +4459,102 @@ function describeFactoryReturn(value: unknown): string {
   }
 
   return typeof value;
+}
+
+/** A refusal of a `NodeAdapter` option: a `TypeError`, not retried - every attempt reads it alike. */
+function optionRefusal(message: string): TypeError {
+  const error = new TypeError(message);
+  markNonRetryableAdapterError(error);
+  return error;
+}
+
+/**
+ * Refuse a boolean option that is set to anything but a boolean: read by `=== false`, a
+ * `rejectUnauthorized: 'false'` would leave verification on with nothing said.
+ */
+function assertBooleanOption(value: unknown, name: string): void {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw optionRefusal(
+      `NodeAdapter ${name} must be a boolean (got ${describeValue(value)})`,
+    );
+  }
+}
+
+/** Refuse a `socketPath` that is not a non-empty string: an empty one would go out over TCP. */
+function assertSocketPath(value: unknown): void {
+  if (value !== undefined && (typeof value !== 'string' || value === '')) {
+    throw optionRefusal(
+      `NodeAdapter socketPath must be a non-empty string (got ${typeof value === 'string' ? 'an empty string' : describeValue(value)})`,
+    );
+  }
+}
+
+/**
+ * Refuse a `servername` that is not a string. An empty one is read as none: SNI and
+ * verification fall back to the URL's host.
+ */
+function assertServername(value: unknown): void {
+  if (value !== undefined && typeof value !== 'string') {
+    throw optionRefusal(
+      `NodeAdapter servername must be a string (got ${describeValue(value)})`,
+    );
+  }
+}
+
+/**
+ * The client certificate `mtls` holds, each member read once: its `cert` and `key`, each
+ * PEM text or bytes with something in them, and the `passphrase` an encrypted key is
+ * decrypted with. `undefined` for no `mtls`. Refuses anything else - an `mtls` that is not
+ * an object, a missing or empty certificate or key, a passphrase that is not a string -
+ * since the request would otherwise go out presenting no client certificate, or fail on
+ * every attempt once the handshake reads the key.
+ */
+function readClientCertificate(
+  mtls: unknown,
+):
+  | { cert: string | Buffer; key: string | Buffer; passphrase?: string }
+  | undefined {
+  if (mtls === undefined) {
+    return undefined;
+  }
+
+  if (typeof mtls !== 'object' || mtls === null || Array.isArray(mtls)) {
+    throw optionRefusal(
+      `NodeAdapter mtls must be an object with cert and key (got ${Array.isArray(mtls) ? 'an array' : describeValue(mtls)})`,
+    );
+  }
+
+  const { cert, key, passphrase } = mtls as Record<string, unknown>;
+
+  for (const [field, value] of [
+    ['cert', cert],
+    ['key', key],
+  ] as Array<[string, unknown]>) {
+    const isText = typeof value === 'string';
+    const isBytes = ArrayBuffer.isView(value);
+    if (!isText && !isBytes) {
+      throw optionRefusal(
+        `NodeAdapter mtls.${field} must be PEM text or bytes (got ${describeValue(value)})`,
+      );
+    }
+    if (
+      isText ? isBlankText(value) : (readBinaryByteLength(value) ?? 0) === 0
+    ) {
+      throw optionRefusal(`NodeAdapter mtls.${field} is empty`);
+    }
+  }
+
+  if (passphrase !== undefined && typeof passphrase !== 'string') {
+    throw optionRefusal(
+      `NodeAdapter mtls.passphrase must be a string (got ${describeValue(passphrase)})`,
+    );
+  }
+
+  return {
+    cert: cert as string | Buffer,
+    key: key as string | Buffer,
+    ...(passphrase === undefined ? {} : { passphrase }),
+  };
 }
 
 /**

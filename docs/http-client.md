@@ -172,7 +172,7 @@ run. Invalid retry durations throw there, and later mutations to the supplied ob
 not change the policy. Each request starts with a fresh retry budget; `null` on the
 builder disables retries inherited from the client.
 
-**A misspelled option throws.** `new HTTPClient()`, `createSubClient()`, the request options of `client.get(path, options)` and the other method helpers, a `retryPolicy` (given to the client, a request or `.retryPolicy()`), the `listRequests()` filter (which must be an object), `new NodeAdapter()` (and its `mtls`) and `new CookieJar()` refuse an own enumerable field they do not take - `folowRedirects`, `timout`, `maxRetryAttemps`, or the other strategy's `delayMS` on an exponential policy - with a `TypeError` naming it, rather than reading it as absent and leaving the option it meant at its default; one set to `null` or `undefined` is read as absent, as it would be anyway. Request options must be an object, not an array. A `MockAdapter` route's or `onHandlerError`'s response, its `transportError`, or one of its `cookies` options, with a field it does not take (`header`, `maxage`) fails the request as a non-retryable `adapter_error`, the route's mistake. A `MockAdapter` config is held live and handed to its handlers as their receiver, so it may carry fields of its own; an interceptor's returned request is read for its four fields, and any other is dropped.
+**A misspelled option throws.** `new HTTPClient()`, `createSubClient()`, the request options of `client.get(path, options)` and the other method helpers, a `retryPolicy` (given to the client, a request or `.retryPolicy()`), the `listRequests()` filter (which must be an object), `new NodeAdapter()` (and its `mtls`) and `new CookieJar()` refuse an own enumerable field they do not take - `folowRedirects`, `timout`, `maxRetryAttemps`, or the other strategy's `delayMS` on an exponential policy - with a `TypeError` naming it, rather than reading it as absent and leaving the option it meant at its default; one set to `null` or `undefined` is read as absent, as it would be anyway. Request options must be an object, not an array. `new NodeAdapter()` also holds its options to their types - `rejectUnauthorized` and `decompress` booleans, `socketPath` a non-empty string, `servername` a string, and `mtls` an object with a `cert` and a `key` (PEM text or bytes, not empty) and an optional string `passphrase` - and `null` is refused for each, as for `ca` and `crl`: without them a request would go out presenting no client certificate, or over TCP. Each request checks the values it reads again, so one set on the config later fails that request as a non-retryable `adapter_error`. A `MockAdapter` route's or `onHandlerError`'s response, its `transportError`, or one of its `cookies` options, with a field it does not take (`header`, `maxage`) fails the request as a non-retryable `adapter_error`, the route's mistake. A `MockAdapter` config is held live and handed to its handlers as their receiver, so it may carry fields of its own; an interceptor's returned request is read for its four fields, and any other is dropped.
 
 **Invalid timeouts, size limits, retry policies and bodies throw synchronously.** A
 `timeout` that is `NaN` or not a number (a `TypeError`), a `maxResponseBytes` that is not
@@ -1447,17 +1447,18 @@ const client = new HTTPClient({
 
 ```typescript
 interface NodeAdapterConfig {
-  socketPath?: string; // Unix domain socket path. Used only for the origin the request addressed, never on a cross-origin redirect hop.
+  socketPath?: string; // Unix domain socket path; empty, or not a string, throws. Used only for the origin the request addressed, never on a cross-origin redirect hop.
   ca?: string | Buffer | Array<string | Buffer>; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required - use mtls for that. An empty value ('' or whitespace alone, [], an empty buffer) throws: it would fall back to the runtime's public roots.
   servername?: string; // TLS SNI hostname. Required when dialing by IP but the cert SAN is a DNS name - without it, TLS verification fails because the IP does not match the DNS SAN. Sent only to the origin the request addressed, never on a cross-origin redirect hop.
   mtls?: {
     // Your TLS identity. Presented only to the origin the request addressed, never on a cross-origin redirect hop.
-    cert: string | Buffer;
-    key: string | Buffer;
+    cert: string | Buffer; // PEM text or bytes; empty, or anything else, throws.
+    key: string | Buffer; // As cert.
+    passphrase?: string; // Decrypts an encrypted `key`.
     ca?: string | Buffer | Array<string | Buffer>; // Trust anchor for the server, added to `ca`. Applies on every hop, like `ca`.
   };
   crl?: string | ArrayBufferView | Array<string | ArrayBufferView>; // PEM certificate revocation list(s). A concatenated PEM bundle is split for you - see below.
-  rejectUnauthorized?: boolean; // Default: true
+  rejectUnauthorized?: boolean; // Default: true. A non-boolean throws.
   decompress?: boolean; // Default: true - decode gzip/deflate/br/zstd bodies and send Accept-Encoding. false hands bodies over as received. A non-boolean throws.
 }
 ```
