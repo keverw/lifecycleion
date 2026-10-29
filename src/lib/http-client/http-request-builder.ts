@@ -8,6 +8,7 @@ import { defineEntry } from '../internal/define-entry';
 import { lowerCaseHeaderName } from './utils';
 import { isBlankText } from '../internal/ascii-text';
 import { copyRequestBody } from './internal/request-body-copy';
+import { isFormData } from './internal/form-entries';
 import { copyArrayValue, copyParamArrayValue } from './internal/array-copy';
 import {
   assertOptionalHeaderRecord,
@@ -177,14 +178,34 @@ export class HTTPRequestBuilder<T = unknown> {
     return this;
   }
 
+  /**
+   * A `FormData` body, or `null` / `undefined` for none; anything else - a plain object of
+   * fields among them - is refused.
+   */
   public formData(data: FormData): this {
     this._assertNotSent('formData');
+    // Refused by type rather than sent as what it is: a plain object of fields given here
+    // would go out as JSON, to a server reading multipart.
+    const candidate: unknown = data;
+    if (!isNullish(candidate) && !isFormData(candidate)) {
+      throw new TypeError(
+        `HTTPRequestBuilder formData must be a FormData (got ${describeValue(candidate)})`,
+      );
+    }
     this._body = copyRequestBody(data);
     return this;
   }
 
+  /** A string body, sent as `text/plain`, or `null` / `undefined` for none; anything else is refused. */
   public text(data: string): this {
     this._assertNotSent('text');
+    const candidate: unknown = data;
+    // As `formData()` is: an object given here would go out as JSON.
+    if (!isNullish(candidate) && typeof candidate !== 'string') {
+      throw new TypeError(
+        `HTTPRequestBuilder text must be a string (got ${describeValue(candidate)})`,
+      );
+    }
     this._body = copyRequestBody(data);
     return this;
   }

@@ -958,15 +958,40 @@ test('a form body is copied from the entries it holds, not ones it reports', asy
   ]).toEqual([['a', '1']]);
 
   // A `Proxy` over a form, or an object that only inherits from `FormData.prototype`, has
-  // no internal slots to read entries from: no form, so an unsupported body.
+  // no internal slots to read entries from: no form, so refused as one; as a body of
+  // another setter, an unsupported one.
   for (const fake of [
     new Proxy(new FormData(), {}),
     Object.create(FormData.prototype) as FormData,
   ]) {
     expect(() => makeBuilder().builder.formData(fake)).toThrow(
+      'HTTPRequestBuilder formData must be a FormData',
+    );
+    expect(() => makeBuilder().builder.body(fake)).toThrow(
       UNSUPPORTED_REQUEST_BODY_MESSAGE,
     );
   }
+});
+
+test('formData() and text() refuse a body of another type rather than sending it as one', () => {
+  const { builder } = makeBuilder();
+
+  expect(() => builder.formData({ a: '1' } as never)).toThrow(
+    'HTTPRequestBuilder formData must be a FormData (got object)',
+  );
+  expect(() => builder.formData('a=1' as never)).toThrow(
+    'HTTPRequestBuilder formData must be a FormData',
+  );
+  expect(() => builder.text({ a: 1 } as never)).toThrow(
+    'HTTPRequestBuilder text must be a string (got object)',
+  );
+  expect(() => builder.text(new Uint8Array(1) as never)).toThrow(
+    'HTTPRequestBuilder text must be a string',
+  );
+
+  // Nullish is no body, as for every body setter.
+  expect(() => builder.text(null as never)).not.toThrow();
+  expect(() => builder.formData(undefined as never)).not.toThrow();
 });
 
 test('a params array keeps a named key set on it, as qs serializes the array', async () => {

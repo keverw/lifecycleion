@@ -181,7 +181,8 @@ the call that supplies it: `new HTTPClient()`, `createSubClient()`,
 cannot be copied (see [Body Types](#body-types)) - one of an unsupported type (a
 `TypeError`), a `BigInt` or a circular reference, a getter or `toJSON` that throws - from
 `.body()`, `.json()`, `.text()`, `.formData()`, or `client.post(path, { body })` and the
-other method helpers. It never reaches `send()`, so it does not resolve as a
+other method helpers; so does a `.text()` given anything but a string, or a `.formData()`
+anything but a `FormData` - `null` or `undefined` aside, which is no body for every setter - which would otherwise go out as a body of its own type. It never reaches `send()`, so it does not resolve as a
 `request_setup_error` and no `'error'` observer sees it. A malformed setting is a
 programming mistake that no retry or response handling can repair, so it fails where it
 was written.
