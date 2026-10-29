@@ -55,7 +55,7 @@ cloned !== obj; // true (distinct object)
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | Primitives                         | Returned as-is (`number`, `string`, `boolean`, `null`, `undefined`)                                                     |
 | Plain objects                      | Recursively cloned (own enumerable properties)                                                                          |
-| Arrays                             | Recursively cloned                                                                                                      |
+| Arrays                             | Recursively cloned, same length; a hole stays a hole                                                                    |
 | `Date`                             | New `Date` instance with same time value                                                                                |
 | `RegExp`                           | New `RegExp` with same source, flags, and `lastIndex`                                                                   |
 | `Map`                              | New `Map` with deep-cloned keys and values                                                                              |

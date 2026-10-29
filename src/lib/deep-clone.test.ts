@@ -45,6 +45,32 @@ describe('deepClone', () => {
     });
   });
 
+  describe('arrays by index', () => {
+    test('keeps holes as holes and the length as it was', () => {
+      // eslint-disable-next-line no-sparse-arrays
+      const original = [1, , 3, undefined];
+      original.length = 6;
+      const cloned = deepClone(original);
+
+      expect(cloned).toHaveLength(6);
+      expect(Object.keys(cloned)).toEqual(['0', '2', '3']);
+      expect(1 in cloned).toBe(false);
+      expect(3 in cloned).toBe(true);
+      expect(cloned[2]).toBe(3);
+    });
+
+    test('reads an array by its indices, not through an own iterator', () => {
+      const original = [1, 2, 3];
+      Object.defineProperty(original, Symbol.iterator, {
+        value: function* () {
+          yield 'x';
+        },
+      });
+
+      expect([...deepClone(original).values()]).toEqual([1, 2, 3]);
+    });
+  });
+
   describe('objects', () => {
     test('should deep clone simple objects', () => {
       const original = { a: 1, b: 2, c: 3 };

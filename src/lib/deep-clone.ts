@@ -79,12 +79,16 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
     return remember(seen, obj, cloneView(obj));
   }
 
-  // Handle Array
+  // An array of the same length, each index it holds cloned: a hole stays a hole, as
+  // `structuredClone` keeps it, rather than becoming an `undefined` entry.
   if (Array.isArray(obj)) {
-    const cloned = remember<unknown[]>(seen, obj, []);
+    const source = obj as unknown[];
+    const cloned = remember<unknown[]>(seen, obj, new Array(source.length));
 
-    for (const item of obj) {
-      cloned.push(cloneInternal(item, seen));
+    for (let index = 0; index < source.length; index++) {
+      if (index in source) {
+        cloned[index] = cloneInternal(source[index], seen);
+      }
     }
 
     return cloned as T;
