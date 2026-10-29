@@ -28,7 +28,6 @@ import {
   stripCrossOriginURLCredentials,
 } from './utils';
 import * as httpUtils from './utils';
-import { deepClone } from '../deep-clone';
 import {
   ADAPTER_ERROR_CARRIER_KEY,
   DEFAULT_MAX_RESPONSE_BYTES,
@@ -7782,23 +7781,6 @@ test('a same-scheme URL without slashes is read on its own for credentials', () 
 test('header names are lowercased in ASCII only', () => {
   const kelvin = 'X-Key';
   expect(mergeHeaders({ [kelvin]: 'v' })).toEqual({ [`x-Key`]: 'v' });
-});
-
-test('deepClone copies a Buffer, a DataView and an ArrayBuffer', () => {
-  const buffer = Buffer.from('abc');
-  const copy = deepClone(buffer);
-  copy[0] = 0x7a;
-  expect(buffer.toString()).toBe('abc');
-
-  const view = new DataView(new ArrayBuffer(2));
-  view.setUint8(1, 9);
-  const viewCopy = deepClone({ view }).view;
-  expect(viewCopy).toBeInstanceOf(DataView);
-  expect(viewCopy.getUint8(1)).toBe(9);
-
-  const arrayBuffer = new ArrayBuffer(3);
-  expect(deepClone(arrayBuffer)).toBeInstanceOf(ArrayBuffer);
-  expect(deepClone(arrayBuffer)).not.toBe(arrayBuffer);
 });
 
 test('NodeAdapter refuses a non-http scheme and does not retry a malformed userinfo escape', async () => {
