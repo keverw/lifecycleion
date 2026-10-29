@@ -23,17 +23,34 @@ export function isPlainRecord(
 /**
  * Whether `value` is a realm's `Object.prototype` - this one, or another realm's (a `vm`
  * context's, an iframe's). Read by shape, not identity: no prototype of its own, and the
- * `Object.prototype` methods as its own properties, which a caller's null-prototype
- * object used as a base does not have.
+ * `Object.prototype` methods as its own properties - each a function, or an accessor as a
+ * hardened realm (SES) makes some - read by descriptor, so no getter runs. A caller's
+ * null-prototype dictionary used as a base has no such entries, or holds plain values
+ * under those names.
  */
 export function isRealmRootPrototype(value: object): boolean {
   return (
     value === Object.prototype ||
     (Reflect.getPrototypeOf(value) === null &&
-      Object.hasOwn(value, 'hasOwnProperty') &&
-      Object.hasOwn(value, 'isPrototypeOf'))
+      ROOT_PROTOTYPE_METHODS.every((name) => {
+        const descriptor = Reflect.getOwnPropertyDescriptor(value, name);
+
+        return (
+          descriptor !== undefined &&
+          (!('value' in descriptor) || typeof descriptor.value === 'function')
+        );
+      }))
   );
 }
+
+/** Methods every realm's `Object.prototype` holds as its own. */
+const ROOT_PROTOTYPE_METHODS = [
+  'hasOwnProperty',
+  'isPrototypeOf',
+  'propertyIsEnumerable',
+  'toString',
+  'valueOf',
+] as const;
 
 /** Throw a `TypeError` naming `label` unless `value` is nullish or a plain record. */
 export function assertOptionalHeaderRecord(

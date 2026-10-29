@@ -103,7 +103,7 @@ export class RequestTracker {
   } {
     const requests: RequestInfo[] = [];
 
-    // A copy, as `cancelWhere` walks one: reading a caller's signal (`isEntryPastCancel`)
+    // A copy, as `cancelWhere` walks one: reading a caller's signal (`isEntryCancelled`)
     // runs its code, which can start a request, and the live map would list it too.
     for (const entry of [...this.requests.values()]) {
       if (filter?.clientID && entry.clientID !== filter.clientID) {
@@ -121,9 +121,7 @@ export class RequestTracker {
         // A request the caller's own signal aborted reads `cancelled` at once, as one
         // cancelled here or from its builder does, rather than its last in-flight state.
         state:
-          entry.state !== 'completed' &&
-          entry.state !== 'failed' &&
-          isEntryPastCancel(entry)
+          !isEntrySettled(entry) && isEntryCancelled(entry)
             ? 'cancelled'
             : entry.state,
       });
@@ -178,10 +176,10 @@ export function cancelTrackedRequest(
   entry: TrackedRequest,
   reason: string | undefined,
 ): CancelResult {
-  if (entry.state === 'completed' || entry.state === 'failed') {
+  if (isEntrySettled(entry)) {
     return 'already_settled';
   }
-  if (isEntryPastCancel(entry)) {
+  if (isEntryCancelled(entry)) {
     return 'already_cancelled';
   }
   entry.state = 'cancelled';
@@ -190,16 +188,20 @@ export function cancelTrackedRequest(
 }
 
 /**
- * Whether a tracked request is past cancelling: settled - its outcome decided, though its
- * final observers may still be running - or cancelled already, by its own controller (a
- * cancel here or from its builder) or by the caller's signal. Shared with the builder's
- * `cancel()`, so both answer the same. The caller's `aborted` is read guarded: unreadable
- * is not aborted.
+ * Whether a tracked request is settled: its outcome decided, though its final observers
+ * may still be running.
  */
-export function isEntryPastCancel(entry: TrackedRequest): boolean {
+function isEntrySettled(entry: TrackedRequest): boolean {
+  return entry.state === 'completed' || entry.state === 'failed';
+}
+
+/**
+ * Whether a tracked request was cancelled: by its own controller (a cancel here or from its
+ * builder) or by the caller's signal, whose `aborted` is read guarded - unreadable is not
+ * aborted.
+ */
+function isEntryCancelled(entry: TrackedRequest): boolean {
   return (
-    entry.state === 'completed' ||
-    entry.state === 'failed' ||
     entry.state === 'cancelled' ||
     entry.abortController.signal.aborted ||
     isSignalAbortedQuietly(entry.callerSignal)

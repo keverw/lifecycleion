@@ -306,7 +306,8 @@ export function requestHeaderPairs(
 /**
  * Join repeated request header values into the single field each transport sends:
  * `; ` for `Cookie` (the RFC 6265 cookie-pair delimiter), `, ` for everything else.
- * Shared by NodeAdapter and MockAdapter, so it stays free of Node-only imports.
+ * Shared by NodeAdapter, MockAdapter and FetchAdapter (on a runtime with no `Headers`), so
+ * it stays free of Node-only imports.
  */
 export function materializeRequestHeaders(
   headers: Record<string, string | string[]>,

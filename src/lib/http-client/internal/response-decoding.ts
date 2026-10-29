@@ -837,6 +837,16 @@ class SniffingInflate extends InnerDecoderTransform<
   }
 
   public override _flush(callback: TransformCallback): void {
+    // No bytes at all from the coding outside it: no deflate stream is empty, so this
+    // layer ends before its compressed stream does, as an empty inner gzip, brotli or zstd
+    // layer does.
+    if (this.inner === undefined && this.pendingHead === undefined) {
+      callback(
+        new Error('Response body ends before its compressed stream does'),
+      );
+      return;
+    }
+
     // A body of one byte: read by that byte alone - no deflate stream is one byte long, so
     // either inflater refuses it.
     if (this.inner === undefined && this.pendingHead !== undefined) {

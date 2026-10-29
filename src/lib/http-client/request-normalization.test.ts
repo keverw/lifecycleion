@@ -8188,6 +8188,24 @@ test('a throwing failure listener stays contained; a body torn down by one holds
   expect(source.heldError?.()).toBeUndefined();
 });
 
+test('an empty inner layer fails as a stream that ends early, whichever its coding', async () => {
+  const zlib = await import('node:zlib');
+
+  for (const inner of ['deflate', 'gzip', 'br', 'zstd']) {
+    const res = stubResponse();
+    const { source } = createResponseBodySource(res, `${inner}, gzip`);
+    const outcome = await new Promise<string>((resolve) => {
+      source.on('data', () => undefined);
+      source.on('error', () => resolve('error'));
+      source.on('end', () => resolve('end'));
+      Object.assign(res, { complete: true });
+      (res as unknown as PassThrough).end(zlib.gzipSync(Buffer.alloc(0)));
+    });
+
+    expect({ inner, outcome }).toEqual({ inner, outcome: 'error' });
+  }
+});
+
 test('onFailure replays a failure held before it subscribed', async () => {
   const res = stubResponse();
   const { source } = createResponseBodySource(

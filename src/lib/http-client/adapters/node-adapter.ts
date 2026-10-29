@@ -3585,7 +3585,10 @@ function normalizeCRL(
 
 /**
  * A `crl` value with an array's entries each read once, into an array this adapter owns.
- * A hole is skipped, as `flatMap` skips it; anything else is left as given.
+ * A hole is skipped, as `flatMap` skips it, and not kept as one (`copyArrayValue` keeps
+ * it): the copy is the cache key `isSameCRLInput` compares entry by entry with `every`,
+ * which passes over a hole, so a later list with a CRL at that index would match it.
+ * Anything else is left as given.
  */
 function snapshotCRLInput(
   crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
