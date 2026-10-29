@@ -742,6 +742,46 @@ describe('FetchAdapter', () => {
     );
   });
 
+  test('joins a repeated request header with `, `, in any case, where the runtime has no Headers', async () => {
+    let capturedInit: RequestInit | undefined;
+
+    (globalThis as any).fetch = (
+      _url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      capturedInit = init;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    const OriginalHeaders = globalThis.Headers;
+    const OriginalRequest = globalThis.Request;
+    let response: Awaited<ReturnType<FetchAdapter['send']>>;
+
+    delete (globalThis as Record<string, unknown>).Headers;
+    delete (globalThis as Record<string, unknown>).Request;
+    try {
+      response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/users',
+        method: 'GET',
+        headers: {
+          accept: ['application/json', 'text/plain'],
+          Accept: 'text/html',
+          'x-one': 'a',
+        },
+      });
+    } finally {
+      globalThis.Headers = OriginalHeaders;
+      globalThis.Request = OriginalRequest;
+    }
+
+    expect(response.status).toBe(200);
+    // One field per name, in any case, as a `Headers` would send it.
+    expect(capturedInit?.headers).toEqual({
+      accept: 'application/json, text/plain, text/html',
+      'x-one': 'a',
+    });
+  });
+
   test('materializes single and repeated headers together', async () => {
     let capturedInit: RequestInit | undefined;
 

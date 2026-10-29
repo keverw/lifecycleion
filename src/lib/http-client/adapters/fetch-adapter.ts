@@ -1,6 +1,7 @@
 import {
   deleteHeader,
   describeRefusedHeader,
+  lowerCaseHeaderName,
   requestHeaderPairs,
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
@@ -554,8 +555,9 @@ function cancelBodyQuietly(body: unknown): void {
 
 /**
  * The request headers as `fetch` takes them, each value read once: a fresh record, or a
- * `Headers` when a name repeats. Never the caller's own object, which the build check
- * and `fetch` would each read again - a getter could answer one and send the other.
+ * `Headers` when a name repeats and the runtime has one. Never the caller's own object,
+ * which the build check and `fetch` would each read again - a getter could answer one
+ * and send the other.
  */
 function materializeFetchHeaders(
   headers: Record<string, string | string[]>,
@@ -564,6 +566,14 @@ function materializeFetchHeaders(
   // `requestHeaderPairs`), so whether it is sent, and how, does not turn on how the other
   // headers are given. Every choice below is made from these pairs alone.
   const pairs = requestHeaderPairs(headers);
+
+  // A runtime with no `Headers` (a test setup that polyfills only `fetch`) gets a record
+  // holding each name once, in any case, under its first spelling: values that repeat
+  // joined with `, `, the one field a `Headers` would send them as. The `Cookie` pair is
+  // one already.
+  if (typeof Headers !== 'function') {
+    return joinedHeaderRecord(pairs);
+  }
 
   // A record holds each name once, so a name that repeats - an array value of more than
   // one item - takes a `Headers`, which sends every value under it.
@@ -579,6 +589,28 @@ function materializeFetchHeaders(
     }
 
     defineEntry(record, name, value);
+  }
+
+  return record;
+}
+
+/** `pairs` as a record of one field per name, case folded: see `materializeFetchHeaders`. */
+function joinedHeaderRecord(
+  pairs: ReadonlyArray<[string, string]>,
+): Record<string, string> {
+  const record: Record<string, string> = {};
+  const spellings = new Map<string, string>();
+
+  for (const [name, value] of pairs) {
+    const lower = lowerCaseHeaderName(name);
+    const spelling = spellings.get(lower);
+
+    if (spelling === undefined) {
+      spellings.set(lower, name);
+      defineEntry(record, name, value);
+    } else {
+      defineEntry(record, spelling, `${record[spelling]}, ${value}`);
+    }
   }
 
   return record;
