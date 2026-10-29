@@ -90,14 +90,18 @@ describe('concatChunks', () => {
     },
   );
 
-  test('a chunk whose buffer was detached after it was counted fails as a TypeError', () => {
+  test('a chunk whose buffer was detached after it was counted is refused as one that changed length', () => {
     const buffer = new ArrayBuffer(3);
     const chunk = new Uint8Array(buffer);
     structuredClone(buffer, { transfer: [buffer] });
 
-    expect(() => concatChunks([chunk], 3)).toThrow(TypeError);
+    const refusal = new TypeError(
+      'Response body chunk changed length after it was read',
+    );
+
+    expect(() => concatChunks([chunk], 3)).toThrow(refusal);
     expect(() => concatChunks([new Uint8Array([1]), chunk], 4)).toThrow(
-      TypeError,
+      refusal,
     );
   });
 });

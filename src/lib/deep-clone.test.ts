@@ -59,6 +59,24 @@ describe('deepClone', () => {
       expect(cloned[2]).toBe(3);
     });
 
+    test('keeps a hole that an index emptied while the clone was made', () => {
+      const original: unknown[] = [];
+      Object.defineProperty(original, 0, {
+        enumerable: true,
+        get: () => {
+          Reflect.deleteProperty(original, 2);
+          return 'a';
+        },
+      });
+      original[1] = 'b';
+      original[2] = 'c';
+
+      const cloned = deepClone(original);
+
+      expect(cloned).toHaveLength(3);
+      expect(Object.keys(cloned)).toEqual(['0', '1']);
+    });
+
     test('reads an array by its indices, not through an own iterator', () => {
       const original = [1, 2, 3];
       Object.defineProperty(original, Symbol.iterator, {

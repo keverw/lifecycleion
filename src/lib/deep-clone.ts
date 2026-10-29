@@ -79,8 +79,11 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
     return remember(seen, obj, cloneView(obj));
   }
 
-  // An array of the same length, each index it holds cloned: a hole stays a hole, as
-  // `structuredClone` keeps it, rather than becoming an `undefined` entry.
+  // An array of the same length, each index it holds cloned: a hole stays a
+  // hole, as `structuredClone` keeps it, rather than becoming an `undefined` entry - one
+  // emptied while the clone is made included. Read by index, not through an own
+  // `Symbol.iterator`. Named entries (a `match` result's `index`) are not copied: listing
+  // the keys to find them costs a dense array many times its clone.
   if (Array.isArray(obj)) {
     const source = obj as unknown[];
     const cloned = remember<unknown[]>(seen, obj, new Array(source.length));

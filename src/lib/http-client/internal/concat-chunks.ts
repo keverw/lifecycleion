@@ -47,8 +47,13 @@ export function concatChunks(
       throw new TypeError(CHANGED_LENGTH_MESSAGE);
     }
 
-    bytes.set(chunk, offset);
-    offset += chunkLength;
+    // Nothing to copy from an empty chunk - nor from a detached one, which measures as
+    // empty and which `set` would refuse in the runtime's own words: one counted with
+    // bytes leaves the total short, refused below.
+    if (chunkLength > 0) {
+      bytes.set(chunk, offset);
+      offset += chunkLength;
+    }
   }
 
   if (offset !== byteLength) {

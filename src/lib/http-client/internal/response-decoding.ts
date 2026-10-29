@@ -826,7 +826,10 @@ class SniffingInflate extends InnerDecoderTransform<
       chunk = head;
     }
 
-    // Input after the deflate stream has ended: trailing bytes.
+    // Input after the deflate stream has ended: trailing bytes. Reached once the inner
+    // inflater's `'end'` has landed, which zlib emits after the first write holding bytes
+    // past the stream's end rather than waiting for `_flush`. Trailing bytes fed before
+    // that, in one chunk or several, are caught by `_flush`'s count (`hasLeftover`).
     if (this.hasInnerEnded) {
       callback(trailingBytesError());
       return;
