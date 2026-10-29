@@ -788,11 +788,11 @@ export class NodeAdapter implements HTTPAdapter {
     } = { outcome: null, settle: null };
 
     /**
-     * The `'abort'` listeners this request put on `request.signal`, as the means to take
-     * them off again.
+     * The `'abort'` listener this request put on `request.signal`, as the means to take
+     * it off again.
      *
-     * Attached with `{ once: true }`, so an abort removes them itself; without these
-     * removers, nothing would remove them when the request ends any other way. The client's signal
+     * Attached with `{ once: true }`, so an abort removes it itself; without this remover,
+     * nothing would remove it when the request ends any other way. The client's signal
      * is per attempt, so that would be one dead listener on a signal about to be
      * collected rather than a growing pile - but `XHRAdapter` takes its listener off on
      * `loadend` and `MockAdapter` on exit, and a caller driving this adapter directly
@@ -805,7 +805,7 @@ export class NodeAdapter implements HTTPAdapter {
      * client's settle deadline fires the attempt signal for exactly that, see
      * `abortAttempt` in `HTTPClient`. Not at the upload alone: a bodiless request has
      * nothing to wait for there, and a response still streaming in needs its abort path.
-     * The later of the two is the first moment neither listener has any work left.
+     * The later of the two is the first moment the listener has no work left.
      *
      * Out here rather than in the executor because the sync-throw `catch` below is a
      * terminal path too, reached after the listener is on: `req.setHeader` can throw
@@ -815,7 +815,7 @@ export class NodeAdapter implements HTTPAdapter {
     let didSettleRequest = false;
 
     /**
-     * Take this request's `'abort'` listeners off `request.signal`, once both the
+     * Take this request's `'abort'` listener off `request.signal`, once both the
      * response promise and the upload have settled. Idempotent: the removers are drained
      * on the first call that finds both conditions met, and a call that finds them unmet
      * leaves everything in place for the next terminal event.
@@ -1760,32 +1760,16 @@ export class NodeAdapter implements HTTPAdapter {
 
               abortResponseStream = abortStream;
 
-              // Propagate external cancellation (user abort, timeout) into the
-              // factory's signal. While the factory is setting up or its writable is
-              // streaming, the request's own abort listener fires the signal itself: it
-              // settles the request, which takes this relay off within the same abort
-              // dispatch. Tracked so it comes off once the request has settled; see
-              // `releaseAbortListeners`.
-              if (request.signal) {
-                const signal = request.signal;
-
-                // Already cancelled: the request's own abort listener has settled it, so
-                // the factory is not asked to open a sink nothing will write to.
-                if (readIsAborted()) {
-                  abortStream();
-                  return;
-                }
-
-                const relayAbortToStream = (): void => {
-                  abortStream();
-                };
-
-                signal.addEventListener('abort', relayAbortToStream, {
-                  once: true,
-                });
-                abortListenerRemovers.push(() => {
-                  signal.removeEventListener('abort', relayAbortToStream);
-                });
+              // External cancellation (user abort, timeout) reaches the factory's
+              // signal through the request's own abort listener, which fires it while
+              // the factory is setting up (`pendingStreamSetup`) or its writable is
+              // streaming (`activeResponseStream`) - and not once the stream has
+              // finished, so a factory's abort cleanup never undoes a completed body.
+              // Already cancelled: that listener has settled the request, so the factory
+              // is not asked to open a sink nothing will write to.
+              if (request.signal && readIsAborted()) {
+                abortStream();
+                return;
               }
 
               let writable: WritableLike | null | StreamResponseCancel;
@@ -2426,7 +2410,6 @@ export class NodeAdapter implements HTTPAdapter {
           const signal = request.signal;
 
           const onAbort = (): void => {
-            // Settlement removes the relay listener during this same abort dispatch.
             // Notify a pending factory first, while its cleanup still has ownership.
             pendingStreamSetup?.abort();
             // Nothing more is decoded for a request that was cancelled or timed out.
@@ -2436,9 +2419,7 @@ export class NodeAdapter implements HTTPAdapter {
                 activeResponseStream;
               activeResponseStream = undefined;
               destroyWritableQuietly(writable);
-              // Fired here rather than left to the relay, for the reason the pending
-              // factory is notified above: `failRequest` takes the relay off within this
-              // dispatch. Waiting for `streamResponseBody` to report back instead would
+              // Fired here, not left to `streamResponseBody` to report back: that would
               // hang on a destroyed writable that never calls its `end` callback, and the
               // factory's cleanup would never run.
               abortStream();

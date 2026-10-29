@@ -201,8 +201,7 @@ test.each(['abort', 'close'] as const)(
 
 test('an abort while a streamed writable is finishing fires the factory signal', async () => {
   // The body has fully arrived and the adapter is waiting on `end`'s callback, which this
-  // writable never calls. The abort settles the request, which takes the signal relay off
-  // within the same dispatch, so the abort listener has to fire the stream signal itself.
+  // writable never calls, so only the abort listener can fire the stream signal.
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { 'Content-Length': '4' });
     res.end('body');
@@ -8810,7 +8809,7 @@ describe('NodeAdapter — abort listeners are released when the request settles'
     expect(counts.removed).toBe(counts.added);
   });
 
-  test('a streamed response releases the stream relay listener as well', async () => {
+  test('a streamed response adds no listener of its own and leaves none behind', async () => {
     const watched = watchSignal();
     const { stream, getBytes } = makeMemoryWritable();
 
@@ -8827,8 +8826,8 @@ describe('NodeAdapter — abort listeners are released when the request settles'
 
     const counts = watched.counts();
 
-    // The main abort listener and the relay into the factory's stream signal.
-    expect(counts.added).toBe(2);
+    // The request's own abort listener, which fires the factory's stream signal too.
+    expect(counts.added).toBe(1);
     expect(counts.removed).toBe(counts.added);
   });
 
@@ -8872,7 +8871,7 @@ describe('NodeAdapter — abort listeners are released when the request settles'
 
     const counts = watched.counts();
 
-    expect(counts.added).toBe(2);
+    expect(counts.added).toBe(1);
     expect(counts.removed).toBe(counts.added);
   });
 
@@ -8929,6 +8928,79 @@ describe('NodeAdapter — abort listeners are released when the request settles'
 
       // Both sides have settled now, so the listener has been taken off.
       expect(watched.counts()).toEqual({ added: 1, removed: 1 });
+    } finally {
+      socketServer.close();
+    }
+  }, 20000);
+
+  test("an abort after a streamed body finished, while the upload is still going, leaves the factory's signal alone", async () => {
+    // A carrier whose dispatch walks a snapshot of its listeners, as an EventEmitter does:
+    // one taken off during the dispatch still runs, so a second listener on it would fire
+    // the factory's signal over the completed body.
+    const net = await import('node:net');
+
+    // Answers a complete 200 at once and stops reading, so the upload parks while the
+    // streamed body has already finished.
+    const socketServer = net.createServer((socket) => {
+      socket.on('error', () => {
+        // The teardown reaches this side as a reset.
+      });
+
+      socket.once('data', () => {
+        socket.write(
+          'HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 3\r\n\r\nabc',
+        );
+        socket.pause();
+      });
+    });
+
+    await new Promise<void>((done) => {
+      socketServer.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = socketServer.address() as { port: number };
+    let listeners: Array<() => void> = [];
+    let isAborted = false;
+    const carrier = {
+      get aborted() {
+        return isAborted;
+      },
+      reason: undefined,
+      addEventListener(_type: string, listener: () => void) {
+        listeners.push(listener);
+      },
+      removeEventListener(_type: string, listener: () => void) {
+        listeners = listeners.filter((each) => each !== listener);
+      },
+    };
+    const { stream, getBytes } = makeMemoryWritable();
+    let factorySignal: AbortSignal | undefined;
+
+    try {
+      const res = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(8 * 1024 * 1024),
+        signal: carrier as unknown as AbortSignal,
+        streamResponse: (_info, { signal }) => {
+          factorySignal = signal;
+          return stream;
+        },
+      });
+
+      expect(res.isStreamed).toBe(true);
+      expect(new TextDecoder().decode(getBytes())).toBe('abc');
+
+      // The client's settle deadline tears the upload down this way.
+      isAborted = true;
+      for (const listener of [...listeners]) {
+        listener();
+      }
+
+      expect(await res.requestBodySettled).toBeInstanceOf(Error);
+      // A factory that deletes its file on abort keeps the completed download.
+      expect(factorySignal?.aborted).toBe(false);
     } finally {
       socketServer.close();
     }

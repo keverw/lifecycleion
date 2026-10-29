@@ -697,14 +697,17 @@ export class CookieJar {
   }
 
   /**
-   * Returns a `Cookie: name=value; name2=value2` string for the given URL.
-   * Uses `getCookiesFor`, so expired cookies are never included (same as RFC
-   * behavior on the wire).
+   * Returns a `Cookie: name=value; name2=value2` string for the given URL: the cookies
+   * `getCookiesFor` returns, in its order, so expired cookies are never included (same
+   * as RFC behavior on the wire).
    */
   public getCookieHeaderString(url: string): string {
+    // Read from the stored cookies, not copies: only their names and values are used.
     // A nameless cookie goes out as its value alone, as browsers send it.
-    return this.getCookiesFor(url)
-      .map((c) => (c.name === '' ? c.value : `${c.name}=${c.value}`))
+    return this.collectCookies(url)
+      .map(({ cookie }) =>
+        cookie.name === '' ? cookie.value : `${cookie.name}=${cookie.value}`,
+      )
       .join('; ');
   }
 
