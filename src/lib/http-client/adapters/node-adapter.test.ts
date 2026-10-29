@@ -4631,6 +4631,237 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(reports[0]?.error).toBe(lateError);
   });
 
+  test("a writable's listeners are taken back through its remover as it reads when the request settles", async () => {
+    // A sink that wraps its `off` mid-request: the request's listeners are taken back
+    // through the wrapper, not a method read before it was replaced.
+    const removed: string[] = [];
+    const writable = {
+      write: () => {
+        writable.off = (event: string) => {
+          removed.push(event);
+          return writable;
+        };
+        return true;
+      },
+      end: () => {
+        throw new Error('sync end boom');
+      },
+      on: () => writable,
+      once: () => writable,
+      off: (_event: string) => writable,
+      destroy: () => writable,
+    };
+
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+    } finally {
+      requestSpy.mockRestore();
+    }
+
+    expect(removed).toEqual(
+      expect.arrayContaining(['drain', 'error', 'close']),
+    );
+  });
+
+  describe('a sink whose removal method changes between requests', () => {
+    const mockResponse = (hasBody: boolean): { restore: () => void } => {
+      const spy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const req = new MockClientRequest();
+          const res = new MockIncomingMessage(200, {
+            'content-type': 'application/octet-stream',
+            'content-length': '1',
+          });
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            if (hasBody) {
+              queueMicrotask(() => {
+                res.emit('data', Buffer.from('a'));
+                res.emit('end');
+              });
+            }
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+      return { restore: () => spy.mockRestore() };
+    };
+
+    const reportsOf = async (fire: () => void): Promise<unknown[]> => {
+      const reports: unknown[] = [];
+      const onError = (event: Event): void => {
+        reports.push((event as ErrorEvent).error);
+        event.preventDefault();
+      };
+      globalThis.addEventListener('error', onError);
+      try {
+        fire();
+        await new Promise<void>((done) => {
+          setImmediate(done);
+        });
+      } finally {
+        globalThis.removeEventListener('error', onError);
+      }
+      return reports;
+    };
+
+    test('one whose off is deleted mid-request still loses its listeners, and a late error is reported', async () => {
+      const listeners = new Map<string, Set<(error?: unknown) => void>>();
+      const sink: Record<string, unknown> = {
+        write: () => {
+          delete sink.off;
+          return true;
+        },
+        end: (callback: () => void) => {
+          callback();
+        },
+        on: (event: string, listener: (error?: unknown) => void) => {
+          const set = listeners.get(event) ?? new Set();
+          set.add(listener);
+          listeners.set(event, set);
+          return sink;
+        },
+        once: () => sink,
+        off: (event: string, listener: (error?: unknown) => void) => {
+          listeners.get(event)?.delete(listener);
+          return sink;
+        },
+        destroy: () => sink,
+      };
+      const mock = mockResponse(true);
+      try {
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => sink as unknown as WritableLike,
+        });
+        expect(response.status).toBe(200);
+      } finally {
+        mock.restore();
+      }
+
+      // Only the absorber is left listening for an error, and nothing for a drain.
+      expect(listeners.get('drain')?.size ?? 0).toBe(0);
+      expect(listeners.get('error')?.size).toBe(1);
+
+      const late = new Error('late close');
+      const reports = await reportsOf(() => {
+        for (const listener of [...(listeners.get('error') ?? [])]) {
+          listener(late);
+        }
+      });
+      expect(reports).toEqual([late]);
+    });
+
+    test('a fanned-out sink discarded long after its last request still reports a late error', async () => {
+      const errorListeners = new Set<(error?: unknown) => void>();
+      const sink: Record<string, unknown> = {
+        write: () => true,
+        end: (callback: () => void) => {
+          callback();
+        },
+        on: (event: string, listener: (error?: unknown) => void) => {
+          if (event === 'error') {
+            errorListeners.add(listener);
+          }
+          return sink;
+        },
+        once: () => sink,
+        destroy: () => sink,
+      };
+      let mock = mockResponse(true);
+      try {
+        await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => sink as unknown as WritableLike,
+        });
+      } finally {
+        mock.restore();
+      }
+
+      // The sink gains a removal method, and the first request's window has long passed.
+      sink.off = (_event: string, listener: (error?: unknown) => void) => {
+        errorListeners.delete(listener);
+        return sink;
+      };
+      const realNow = performance.now();
+      const nowSpy = spyOn(performance, 'now').mockImplementation(
+        () => realNow + 60_000,
+      );
+
+      try {
+        mock = mockResponse(false);
+        const controller = new AbortController();
+        let release!: () => void;
+        const gate = new Promise<void>((done) => {
+          release = done;
+        });
+        try {
+          const sent = new NodeAdapter().send({
+            requestURL: 'http://example.test/data',
+            method: 'GET',
+            headers: {},
+            signal: controller.signal,
+            streamResponse: async () => {
+              await gate;
+              return sink as unknown as WritableLike;
+            },
+          });
+          await new Promise((done) => setTimeout(done, 0));
+          controller.abort();
+          await sent.catch(() => undefined);
+          release();
+          await new Promise((done) => setTimeout(done, 10));
+        } finally {
+          mock.restore();
+        }
+
+        // Discarded unstreamed: the late `'error'` such a sink can still emit (a file it
+        // failed to open) is reported, not absorbed silently.
+        expect(errorListeners.size).toBe(1);
+        const late = new Error('open failed');
+        const reports = await reportsOf(() => {
+          for (const listener of [...errorListeners]) {
+            listener(late);
+          }
+        });
+        expect(reports).toEqual([late]);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+  });
+
   test('the permanent fan-out stops reporting unclaimed errors once the window has passed', async () => {
     // The permanent listener never detaches, so reporting every `'error'` that reaches it
     // with no request registered would put each error a long-lived sink's owner handles

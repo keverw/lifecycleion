@@ -1,3 +1,5 @@
+import { isPlainRecord } from './plain-record';
+
 /**
  * `form`'s entries, read through the intrinsic `FormData.prototype.entries`, as the client
  * reads a form everywhere: a subclass's or a `Proxy`'s own `entries` would report entries
@@ -14,8 +16,8 @@ export function formEntries(form: FormData): ReturnType<FormData['entries']> {
  * everywhere, rather than by `instanceof` alone: an object that only inherits from
  * `FormData.prototype`, or a `Proxy` over a form, has no entries to read and is no form.
  * Where `has` checks the internal slot (Bun, browsers), a form from another realm (an
- * iframe) is one; Node's checks `instanceof` as well. An array, bytes, or an object on
- * `Object.prototype` or none - a JSON body - is answered without asking, as `has` throws
+ * iframe) is one; Node's checks `instanceof` as well. An array, bytes, or a plain record
+ * (see `isPlainRecord`, any realm's) - a JSON body - is answered without asking, as `has` throws
  * for anything that is not a form; a form reparented onto one of those is no form here.
  */
 export function isFormData(value: unknown): value is FormData {
@@ -28,9 +30,7 @@ export function isFormData(value: unknown): value is FormData {
       return false;
     }
 
-    const prototype = Reflect.getPrototypeOf(value);
-
-    if (prototype === null || prototype === Object.prototype) {
+    if (isPlainRecord(value)) {
       return false;
     }
 

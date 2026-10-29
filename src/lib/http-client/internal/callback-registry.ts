@@ -205,6 +205,21 @@ function filterFieldsOf(filter: object): FilterFields {
 }
 
 /**
+ * {@link filterFieldsOf}, with a walk the caller's code makes throw - a `Proxy` whose
+ * `ownKeys` or `getPrototypeOf` trap throws - refused as a `TypeError` naming `label`, its
+ * error as the `cause`.
+ */
+function listFilterFields(filter: object, label: string): FilterFields {
+  try {
+    return filterFieldsOf(filter);
+  } catch (error) {
+    throw new TypeError(`${label} filter fields could not be read`, {
+      cause: error,
+    });
+  }
+}
+
+/**
  * `value`, read from a filter's `field`, unless it is a value polluted onto
  * `Object.prototype`: a field that is not one of `fields` and that the realm root
  * prototype the walk stopped at holds - as the very value read, or through an accessor,
@@ -217,6 +232,7 @@ function callerFilterValue(
   value: unknown,
   field: string,
   fields: FilterFields,
+  label: string,
 ): unknown {
   const { names, root } = fields;
 
@@ -224,7 +240,14 @@ function callerFilterValue(
     return value;
   }
 
-  const descriptor = Object.getOwnPropertyDescriptor(root, field);
+  // The root is the caller's when it only looks like one - a `Proxy` holding the
+  // `Object.prototype` method names - so its trap is guarded as the field's read is.
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(root, field);
+  } catch (error) {
+    throw fieldReadError(label, field, error);
+  }
 
   return descriptor === undefined ||
     ('value' in descriptor && !Object.is(descriptor.value, value))
@@ -251,11 +274,20 @@ function readFilterField(
   try {
     return filter[field];
   } catch (error) {
-    throw new TypeError(
-      `${label} filter ${JSON.stringify(field)} field could not be read`,
-      { cause: error },
-    );
+    throw fieldReadError(label, field, error);
   }
+}
+
+/** The refusal of a filter `field` whose read threw `error`. */
+function fieldReadError(
+  label: string,
+  field: string,
+  error: unknown,
+): TypeError {
+  return new TypeError(
+    `${label} filter ${JSON.stringify(field)} field could not be read`,
+    { cause: error },
+  );
 }
 
 /**
@@ -299,6 +331,7 @@ function copyFilterLists(
       readFilterField(filter, field, label),
       field,
       fields,
+      label,
     );
     if (isNullish(value)) {
       continue;
@@ -400,10 +433,10 @@ export class CallbackRegistry<
     // Each field read once, into a filter of the client's own: only the fields
     // `matchesFilter` reads are kept. `methods` is read before the fields are listed, so
     // one a `methods` getter adds is listed - and refused, if this kind does not take it.
-    const methodsValue = source.methods;
-    const fields = filterFieldsOf(source);
+    const methodsValue = readFilterField(source, 'methods', this.label);
+    const fields = listFilterFields(source, this.label);
     const methods = normalizeFilterMethods(
-      callerFilterValue(methodsValue, 'methods', fields),
+      callerFilterValue(methodsValue, 'methods', fields, this.label),
       this.label,
     );
     const lists = copyFilterLists(

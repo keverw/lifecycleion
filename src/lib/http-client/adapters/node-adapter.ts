@@ -3063,19 +3063,37 @@ async function streamResponseBody(
  * it from a writable that emits neither - a hand-written {@link WritableLike} that throws
  * from `write` or `end` is not obliged to emit anything afterwards. See the file head.
  *
- * Skipped entirely for a writable with no listener-removal method, because an
- * absorber attached to one could never be taken back: the `setImmediate` would drop
+ * Skipped entirely for a writable fanned out for `'error'`, and for one with no
+ * listener-removal method (see `getWritableListenerRemover`), because an absorber
+ * attached to one could never be taken back: the `setImmediate` would drop
  * the `WeakMap` entry while the listener stayed, and the next failure would attach
  * another, which is the unbounded growth this exists to prevent. Nothing is lost by
  * skipping it - such a writable is listened to through the permanent fan-out at
  * {@link attachWritableListener}, whose listener stays attached whatever this request
  * does. A late error reaches it once `cleanup` has deregistered `onWritableError`, finds
  * no request behind it, and is reported through the host error reporter exactly as this
- * absorber would report it, within the same {@link PENDING_WRITABLE_ERROR_WINDOW_MS}.
+ * absorber would report it, within the same {@link PENDING_WRITABLE_ERROR_WINDOW_MS} -
+ * restarted here, as this absorber's would be.
  */
 function absorbPendingWritableError(writable: WritableLike): void {
-  // The writable's one remover (see `getWritableListenerRemover`), used for the removal
-  // below as well.
+  // A writable fanned out for `'error'` has that permanent listener to absorb and report
+  // a late error - another here would report it twice - so its reporting window is
+  // restarted instead, as a request leaving its set restarts it: this one may never
+  // have joined the set (a discarded writable, or one attached through `on` before the
+  // fan-out began).
+  const fannedOut = sharedWritableListeners.get(writable)?.get('error');
+  if (fannedOut !== undefined) {
+    fannedOut.reportUnclaimedUntil = Math.max(
+      fannedOut.reportUnclaimedUntil,
+      performance.now() + PENDING_WRITABLE_ERROR_WINDOW_MS,
+    );
+    return;
+  }
+
+  // Captured once, here, rather than looked up again inside the removal below. Two
+  // lookups is two answers: the member is caller code and could be gone, or changed,
+  // by the time the removal runs, and a removal that cannot find its method is one
+  // that silently does not happen.
   const removeListener = getWritableListenerRemover(writable);
 
   if (removeListener === null) {
@@ -4024,7 +4042,9 @@ type WritableListenerRemover = (
  *
  * So one listener is attached, ever, and the set behind it is what changes. Registering
  * and deregistering is a `Set` operation on an entry keyed weakly by the writable, so
- * nothing accumulates and nothing is missed.
+ * nothing accumulates and nothing is missed. A writable whose remover read as none when
+ * a listener was attached - one whose `off` getter threw that once included - is fanned
+ * out for that event from then on: the listener `on` was given cannot be taken back.
  */
 const sharedWritableListeners = new WeakMap<
   WritableLike,
@@ -4045,7 +4065,12 @@ function attachWritableListener(
   event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ): void {
-  if (getWritableListenerRemover(writable) !== null) {
+  // A writable already fanned out for this event keeps that one listener: a request joins
+  // its set, whatever the writable's `off` reads as now.
+  if (
+    sharedWritableListeners.get(writable)?.get(event) === undefined &&
+    getWritableListenerRemover(writable) !== null
+  ) {
     // Guarded like every other interaction with a caller-supplied `WritableLike` in this
     // file. `on` is the sink's own method and free to throw, and an unguarded throw here
     // would report a *request* failure for a response that had arrived intact - a
@@ -4152,15 +4177,16 @@ function detachWritableListener(
   event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ): void {
-  if (getWritableListenerRemover(writable) !== null) {
-    removeWritableListener(writable, event, listener);
-
-    return;
-  }
-
+  // Taken back the way it was attached, told by where it is: a listener in the fan-out's
+  // set leaves the set, and any other was attached through `on` and is taken back through
+  // the writable's remover (see `getWritableListenerRemover`) - so a sink whose `off`
+  // reads differently by the time a request settles (a getter that threw once, a method
+  // added, wrapped or deleted since) still loses the listener it was given.
   const entry = sharedWritableListeners.get(writable)?.get(event);
 
-  if (entry === undefined) {
+  if (entry === undefined || !entry.listeners.has(listener)) {
+    removeWritableListener(writable, event, listener);
+
     return;
   }
 
@@ -4174,46 +4200,43 @@ function detachWritableListener(
 }
 
 /**
- * Each writable's listener-removal method, as first read: see
- * {@link getWritableListenerRemover}.
- */
-const writableListenerRemovers = new WeakMap<
-  WritableLike,
-  WritableListenerRemover | null
->();
-
-/**
  * The writable's own listener-removal method, or `null` when it has none.
  *
  * `removeListener` as well as `off`, because both are `EventEmitter`'s and a hand-written
  * {@link WritableLike} may define either. Neither is required by the interface, so a
  * structurally valid writable can have no way to take a listener back at all.
  *
- * Read once per writable and kept, so every attach and detach on it - this request's and
- * the next one reusing the sink - takes the same path: a listener that joined the
- * permanent fan-out of {@link attachWritableListener} is taken out of it again, even when
- * the sink's `off` reads differently by then (a getter that threw once, a method added
- * later), and one attached through `on` is taken back by the method found then.
+ * Read each time it is asked for, so a method added or replaced since is the one used.
+ * When the read finds none - deleted since, or a getter that throws - the last one read
+ * from this writable is used, so a listener attached through `on` while it had one can
+ * still be taken back; a writable never read with one has none. A failed read is never
+ * kept.
  */
 function getWritableListenerRemover(
   writable: WritableLike,
 ): WritableListenerRemover | null {
-  if (writableListenerRemovers.has(writable)) {
-    return writableListenerRemovers.get(writable) ?? null;
-  }
-
   const remover = readWritableListenerRemover(writable);
 
-  // A primitive - a factory that returned one - cannot key the map; it is read each time.
+  if (remover === null) {
+    return lastWritableListenerRemovers.get(writable) ?? null;
+  }
+
+  // A primitive - a factory that returned one - cannot key the map.
   if (
     (typeof writable === 'object' && writable !== null) ||
     typeof writable === 'function'
   ) {
-    writableListenerRemovers.set(writable, remover);
+    lastWritableListenerRemovers.set(writable, remover);
   }
 
   return remover;
 }
+
+/** Each writable's last listener-removal method read: see {@link getWritableListenerRemover}. */
+const lastWritableListenerRemovers = new WeakMap<
+  WritableLike,
+  WritableListenerRemover
+>();
 
 function readWritableListenerRemover(
   writable: WritableLike,

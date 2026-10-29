@@ -261,6 +261,14 @@ describe('RequestTracker', () => {
       ).toEqual(['a']);
     });
 
+    test('a null label or clientID filter is no filter', () => {
+      const tracker = new RequestTracker();
+      tracker.add(makeEntry({ requestID: 'a', clientID: 'c1', label: 'nav' }));
+
+      expect(tracker.list({ label: null } as never).count).toBe(1);
+      expect(tracker.list({ clientID: null } as never).count).toBe(1);
+    });
+
     test('filters by both clientID and label', () => {
       const tracker = new RequestTracker();
       tracker.add(

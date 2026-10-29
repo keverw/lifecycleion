@@ -55,7 +55,7 @@ export function checkDNSLength(host: string): boolean {
   // Label count cap for domains (127 is theoretical DNS limit). A trailing dot's empty
   // label is not one: `x.` 127 times is the same 127-label name as without it.
   const labelCount = labels.at(-1) === '' ? labels.length - 1 : labels.length;
-  if (labels.length === 0 || labelCount > 127) {
+  if (labelCount > 127) {
     return false;
   }
 

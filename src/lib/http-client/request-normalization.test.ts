@@ -919,6 +919,71 @@ test('a filter getter that throws is refused as a TypeError naming the field', (
   }
 });
 
+test('a throwing methods getter, or a filter whose fields cannot be listed, is refused as a TypeError', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  const boom = new Error('trap boom');
+  const cases: Array<[object, string]> = [
+    [
+      {
+        get methods(): string[] {
+          throw boom;
+        },
+      },
+      'HTTPClient request interceptor filter "methods" field could not be read',
+    ],
+    [
+      new Proxy(
+        {},
+        {
+          ownKeys: () => {
+            throw boom;
+          },
+        },
+      ),
+      'HTTPClient request interceptor filter fields could not be read',
+    ],
+    [
+      // A prototype that looks like a realm's root, whose trap throws for a field.
+      Object.create(
+        new Proxy(
+          Object.fromEntries(
+            [
+              'hasOwnProperty',
+              'isPrototypeOf',
+              'propertyIsEnumerable',
+              'toString',
+              'valueOf',
+            ].map((name) => [name, () => undefined]),
+          ),
+          {
+            getPrototypeOf: () => null,
+            getOwnPropertyDescriptor: (target, key) => {
+              if (key === 'methods') {
+                throw boom;
+              }
+              return Reflect.getOwnPropertyDescriptor(target, key);
+            },
+          },
+        ),
+      ) as object,
+      'HTTPClient request interceptor filter "methods" field could not be read',
+    ],
+  ];
+
+  for (const [filter, message] of cases) {
+    let caught: unknown;
+    try {
+      client.addRequestInterceptor((request) => request, filter);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(TypeError);
+    expect((caught as Error).message).toBe(message);
+    expect((caught as Error).cause).toBe(boom);
+  }
+});
+
 test('a filter field that kind of callback cannot use is refused when registered', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
   // Ignored, an error observer filtered to 500 would see every error.
