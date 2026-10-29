@@ -198,13 +198,16 @@ function cloneInternal<T>(obj: T, state: CloneState): T {
 
   for (const key in obj) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      // Defined, not assigned: an own `__proto__` key (`JSON.parse` makes one) would
-      // otherwise reparent the clone instead of being copied.
-      defineEntry(
-        cloned,
-        key,
-        cloneInternal((obj as Record<string, unknown>)[key], state),
-      );
+      const value = cloneInternal((obj as Record<string, unknown>)[key], state);
+
+      // An own `__proto__` key (`JSON.parse` makes one) is defined, not assigned, which
+      // would reparent the clone instead of copying it. Every other key is assigned onto
+      // the fresh clone, which holds none yet: defining each costs several times as much.
+      if (key === '__proto__') {
+        defineEntry(cloned, key, value);
+      } else {
+        cloned[key] = value;
+      }
     }
   }
 
@@ -267,18 +270,31 @@ function copyNamedArrayEntries(
 /**
  * Whether `value` is an `Error` or a `DOMException`, told by its internal state - through
  * `Error.isError`, from any realm (a `vm` context, an iframe), and the `DOMException`
- * check, which Bun's `Error.isError` refuses - without reading anything of it, so a
- * Proxy's traps are not run. A runtime without `Error.isError` tells an `Error` by
- * `instanceof`, this realm's only.
+ * check, which Bun's `Error.isError` refuses. A runtime without `Error.isError` tells an
+ * `Error` by `instanceof`, this realm's only.
+ *
+ * The `DOMException` check throws and catches for anything that is not one, which costs
+ * every object it is asked about, so it is asked only about a value that could be one: an
+ * `Error` by its chain (a `DOMException` inherits from `Error.prototype`), or a value from
+ * another realm, whose chain holds no `Object.prototype` of this one but a prototype of
+ * its own. This realm's plain objects, and null-prototype dictionaries, never reach it.
  */
 function isError(value: object): value is Error {
   const isErrorSlot = (Error as { isError?: (value: unknown) => boolean })
     .isError;
 
-  return (
-    (typeof isErrorSlot === 'function'
+  if (
+    typeof isErrorSlot === 'function'
       ? isErrorSlot(value)
-      : value instanceof Error) || isDOMExceptionInstance(value)
+      : value instanceof Error
+  ) {
+    return true;
+  }
+
+  return (
+    (value instanceof Error ||
+      (!(value instanceof Object) && Reflect.getPrototypeOf(value) !== null)) &&
+    isDOMExceptionInstance(value)
   );
 }
 
@@ -381,7 +397,7 @@ const SHARED_ARRAY_BUFFER = globalConstructor('SharedArrayBuffer');
  * inherits from one is not one, and is cloned as a plain object), or one from another
  * realm (a `vm` context, an iframe) whose chain holds that realm's. So this realm's plain
  * objects and class instances, another realm's plain objects, and null-prototype
- * dictionaries never pay for the check. A buffer whose prototype was taken away is not
+ * dictionaries never pay for that check. A buffer whose prototype was taken away is not
  * told, as a `Date` or `Map` whose prototype was taken away is not.
  */
 function bufferKindOf(value: object): BufferKind | undefined {

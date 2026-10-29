@@ -1,6 +1,7 @@
 import vm from 'node:vm';
 import { describe, expect, spyOn, test } from 'bun:test';
 import * as binaryView from './internal/binary-view';
+import * as domException from './internal/dom-exception';
 import { deepClone } from './deep-clone';
 
 describe('deepClone', () => {
@@ -289,6 +290,27 @@ describe('deepClone', () => {
       expect(original.code).toBe('E1');
     });
 
+    test('plain objects and class instances are passed over without the throwing DOMException check', () => {
+      class Point {
+        public x = 1;
+      }
+      const spy = spyOn(domException, 'isDOMExceptionInstance');
+
+      try {
+        deepClone({
+          list: Array.from({ length: 50 }, (_, id) => ({ id })),
+          point: new Point(),
+          dictionary: Object.create(null) as object,
+        });
+        expect(spy).not.toHaveBeenCalled();
+
+        deepClone(new DOMException('stopped', 'AbortError'));
+        expect(spy).toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     test('keeps a circular cause, and clones an Error from another realm', async () => {
       const looped = new Error('loop') as Error & { cause?: unknown };
       looped.cause = looped;
@@ -301,6 +323,21 @@ describe('deepClone', () => {
       expect(clonedLoop.cause).toBe(clonedLoop);
       expect(clonedForeign.message).toBe('far');
       expect(clonedForeign.name).toBe('TypeError');
+    });
+  });
+
+  describe('__proto__ keys', () => {
+    test('an own __proto__ key is copied as an entry, not used to reparent the clone', () => {
+      const original = JSON.parse(
+        '{"__proto__": {"polluted": true}, "a": 1}',
+      ) as Record<string, unknown>;
+
+      const cloned = deepClone(original);
+
+      expect(Object.getPrototypeOf(cloned)).toBe(Object.prototype);
+      expect(Object.hasOwn(cloned, '__proto__')).toBe(true);
+      expect(cloned.polluted).toBeUndefined();
+      expect(cloned.a).toBe(1);
     });
   });
 
