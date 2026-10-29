@@ -20,13 +20,15 @@ export function assertKnownFields(
   value: unknown,
   fields: readonly string[],
   label: string,
+  /** Keys let through without being named among the fields taken. */
+  exempt: readonly string[] = [],
 ): void {
   if (typeof value !== 'object' || value === null) {
     return;
   }
 
   for (const key of Object.keys(value)) {
-    if (fields.includes(key)) {
+    if (fields.includes(key) || exempt.includes(key)) {
       continue;
     }
 

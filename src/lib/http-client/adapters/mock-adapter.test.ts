@@ -1027,6 +1027,44 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(wasReached).toBe(false);
   });
 
+  test("a route response with a misspelled field is refused as the route's mistake", async () => {
+    adapter.routes.get(
+      '/typo',
+      () => ({ status: 200, header: { 'x-a': '1' } }) as never,
+    );
+    adapter.routes.get(
+      '/transport',
+      () =>
+        ({
+          status: 200,
+          transportError: { isRetryabel: false },
+        }) as never,
+    );
+
+    for (const path of ['/typo', '/transport']) {
+      let caught: unknown;
+      try {
+        await adapter.send(makeAdapterRequest({ requestURL: path }));
+      } catch (error) {
+        caught = error;
+      }
+
+      // A route's mistake, as its other refusals are: the transportError one on a carrier.
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toContain(
+        path === '/typo'
+          ? 'MockAdapter route response has no "header" field'
+          : 'has no "isRetryabel" field',
+      );
+      expect((caught as Error).message).not.toContain('then');
+      expect(
+        (caught as Record<string, unknown>)[
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+        ],
+      ).toBe(true);
+    }
+  });
+
   test('progress events do not include attemptNumber (injected by client)', async () => {
     adapter.routes.get('/prog', () => ({ status: 200 }));
     const events: object[] = [];

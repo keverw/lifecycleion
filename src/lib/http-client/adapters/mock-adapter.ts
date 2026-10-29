@@ -2,6 +2,7 @@ import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
 import { isHTTPToken } from '../internal/http-token';
 import { isHeaderSafeCookieText } from '../internal/cookie-text';
 import { formEntries, isFormData } from '../internal/form-entries';
+import { assertKnownFields, fieldNames } from '../../internal/known-fields';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -523,6 +524,21 @@ export class MockAdapter implements HTTPAdapter {
     // otherwise a getter that answers `200` to the status check and `0` to the response
     // would pass one and send another. A getter that throws keeps the ordinary
     // adapter-error behavior of caller code read here, as the CRL's does.
+    // A misspelled field (`header`, `statusCode`) is the route's mistake too: read as
+    // absent, the response would go out without what the test meant it to carry. A
+    // `then` is let through: an async handler's answer is adopted once, and one carrying
+    // a `then` of its own is still the answer, not a promise to adopt again.
+    try {
+      assertKnownFields(
+        mockResponse,
+        MOCK_RESPONSE_FIELDS,
+        `MockAdapter ${responseSource} response`,
+        ['then'],
+      );
+    } catch (error) {
+      markNonRetryableAdapterError(error);
+      throw error;
+    }
     mockResponse = snapshotMockResponse(mockResponse);
 
     // What the server would have put on the wire, fixed when the route answers: serialized
@@ -625,6 +641,16 @@ export class MockAdapter implements HTTPAdapter {
       // own failure.
       const { status, isRetryable, wasDefinitelyNotSent, message } =
         asRouteMistake(() => {
+          assertKnownFields(
+            options,
+            fieldNames<MockTransportErrorOptions>({
+              status: true,
+              wasDefinitelyNotSent: true,
+              isRetryable: true,
+              message: true,
+            }),
+            'MockAdapter route transportError',
+          );
           const value: unknown = options.status;
           if (
             value !== undefined &&
@@ -1200,6 +1226,18 @@ function parseRequestBody(
   // Plain strings with non-JSON content types are already in the desired form.
   return body;
 }
+
+/** The fields a {@link MockResponse} takes; any other is refused as misspelled. */
+const MOCK_RESPONSE_FIELDS = fieldNames<MockResponse>({
+  status: true,
+  body: true,
+  headers: true,
+  contentType: true,
+  delay: true,
+  cookies: true,
+  streamError: true,
+  transportError: true,
+});
 
 /**
  * The route's answer with each field read once, into a plain object: only the fields it

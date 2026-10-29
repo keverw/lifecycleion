@@ -1062,6 +1062,24 @@ test('a misspelled config or request option is refused rather than read as absen
     'CookieJar options has no "publicSufixes" field',
   );
 
+  expect(
+    () =>
+      new HTTPClient({
+        adapter,
+        retryPolicy: { strategy: 'fixed', maxRetryAttemps: 0 } as never,
+      }),
+  ).toThrow('HTTPClient retryPolicy has no "maxRetryAttemps" field');
+  expect(() =>
+    client
+      .get('/x')
+      .retryPolicy({ strategy: 'exponential', facter: 2 } as never),
+  ).toThrow('HTTPClient retryPolicy has no "facter" field');
+  expect(() =>
+    client
+      .get('/x')
+      .retryPolicy({ strategy: 'exponential', delayMS: 5 } as never),
+  ).toThrow('HTTPClient retryPolicy has no "delayMS" field');
+
   // A key that is no option name is not written into the refusal.
   let refusal: unknown;
   try {
