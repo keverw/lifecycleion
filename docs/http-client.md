@@ -932,14 +932,20 @@ When a `CookieJar` is attached to the client:
 3. Cookies are maintained across redirect hops.
 
 **Secure cookies and the request scheme.** `getCookiesFor()` sends Secure cookies only
-over `https:` or `wss:`. Response parsing refuses Secure cookies from other schemes,
+over a secure request: `https:` or `wss:`, or `http:` or `ws:` to a loopback host -
+`localhost`, a name under `.localhost`, `127.0.0.0/8` or `[::1]` - which Chrome and Firefox
+treat as secure, so a local dev server's Secure session cookie works as it does in the
+browser. The jar takes the host's word for it: a `fetch` that routes even loopback through
+an `HTTP_PROXY` (Bun's does, unless `NO_PROXY` names it) sends those cookies to the proxy
+in plain text, so list `localhost` in `NO_PROXY` there. Response parsing refuses Secure cookies from any other request,
 and refuses insecure cookies that would replace or shadow an existing, unexpired Secure
 cookie of the same name with overlapping domain/path scope, including deletion attempts.
 Overlapping in either direction: RFC 6265bis refuses only a path inside the Secure
 cookie's, and this jar also refuses a wider one (`Path=/` beside a Secure `Path=/admin`),
 which would be sent alongside it.
-HTTPS responses may replace or downgrade their cookies. HTTP localhost is not treated
-as secure. Use an HTTPS origin for Secure-cookie mocks.
+Secure responses may replace or downgrade their cookies. A `MockAdapter` route answers
+from `http://localhost` unless the request names another origin, so its Secure cookies are
+kept too.
 
 Cookie-name prefixes are matched case-insensitively. `__Secure-` requires `Secure`, while
 `__Host-` also requires no non-empty `Domain` attribute (an empty `Domain=` reads as absent, host-only) and an explicit `Path=/`, as RFC 6265bis
@@ -1123,7 +1129,7 @@ Redirects start from the latest dispatched attempt, including retry-interceptor 
 to its method, body, and headers. Structured JSON and form bodies remain available for
 redirect interceptors, and generated body headers are recalculated after their edits.
 
-**Scheme downgrades are followed.** A `307` or `308` from an `https:` URL to an `http:` `Location` is followed with the method and body intact, as curl and Node's own clients do: the target is the server's instruction, and the hop counts as cross-origin, so forwarded credentials are stripped and jar cookies are recomputed for the target. Secure cookies are withheld, but matching non-Secure cookies can be sent. The request body itself does go out in the clear on that hop. If that is not acceptable for a given client, leave `followRedirects` off and handle the `redirect_disabled` error, or reject the hop from a redirect-phase interceptor by checking `request.requestURL`'s scheme.
+**Scheme downgrades are followed.** A `307` or `308` from an `https:` URL to an `http:` `Location` is followed with the method and body intact, as curl and Node's own clients do: the target is the server's instruction, and the hop counts as cross-origin, so forwarded credentials are stripped and jar cookies are recomputed for the target. Secure cookies are withheld (unless the target is a loopback host, which counts as secure - see [Secure cookies and the request scheme](#cookie-jar)), but matching non-Secure cookies can be sent. The request body itself does go out in the clear on that hop. If that is not acceptable for a given client, leave `followRedirects` off and handle the `redirect_disabled` error, or reject the hop from a redirect-phase interceptor by checking `request.requestURL`'s scheme.
 
 Note: `MockAdapter` strips the domain before route matching, so "cross-origin" redirects in tests are effectively same-origin to its router. Header stripping still applies, but test routes don't need to be registered per-domain.
 

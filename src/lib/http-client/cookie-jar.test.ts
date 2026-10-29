@@ -1075,6 +1075,54 @@ describe('CookieJar', () => {
       expect(jar.getCookiesFor('http://example.com/')).toHaveLength(0);
     });
 
+    test('a loopback host over http is secure for cookies, as browsers treat it', () => {
+      for (const origin of [
+        'http://localhost:3000',
+        'http://LOCALHOST.',
+        'http://app.localhost',
+        'http://127.0.0.1:8080',
+        'http://2130706433',
+        'http://[::1]:8080',
+        'http://[0:0::1]',
+      ]) {
+        const local = new CookieJar();
+        local.parseSetCookieHeader(
+          'sid=1; Secure; HttpOnly; Path=/',
+          `${origin}/login`,
+        );
+        local.parseSetCookieHeader(
+          '__Host-id=2; Secure; Path=/',
+          `${origin}/login`,
+        );
+
+        expect(local.getCookieHeaderString(`${origin}/`)).toBe(
+          'sid=1; __Host-id=2',
+        );
+      }
+
+      // Any other host over http is not, one that only names localhost included.
+      const remote = new CookieJar();
+      for (const url of [
+        'http://example.com/',
+        'http://localhost.example.com/',
+        'http://127.0.0.1.nip.io/',
+      ]) {
+        remote.parseSetCookieHeader('sid=1; Secure; Path=/', url);
+      }
+      expect(remote.getAllCookies()).toHaveLength(0);
+      remote.setCookie({
+        name: 'sid',
+        value: '1',
+        domain: 'example.com',
+        secure: true,
+        createdAt: Date.now(),
+      });
+      expect(remote.getCookieHeaderString('http://example.com/')).toBe('');
+      expect(
+        remote.getCookieHeaderString('http://localhost.example.com/'),
+      ).toBe('');
+    });
+
     test('still sends non-Secure cookies over http', () => {
       jar.setCookie({
         name: 'a',

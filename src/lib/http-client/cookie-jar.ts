@@ -330,8 +330,8 @@ export interface CookieJarOptions {
  * - Rejects Domain= values that are not a suffix of the request host, or that reach
  *   above the request host's site, as browsers reject them
  * - Strips leading dots from Domain= per RFC 6265
- * - Rejects a `Secure` cookie set over a non-secure scheme, and a non-`Secure` cookie
- *   set over a non-secure scheme that would replace or evict a stored `Secure` cookie
+ * - Rejects a `Secure` cookie set by a non-secure request, and a non-`Secure` cookie
+ *   set by one that would replace or evict a stored `Secure` cookie
  *   (RFC 6265bis "Leave Secure Cookies Alone")
  * - Enforces the `__Secure-` and `__Host-` name prefixes (RFC 6265bis)
  *
@@ -689,8 +689,9 @@ export class CookieJar {
 
   /**
    * Returns cookies applicable for the given URL (domain + path matching, unexpired).
-   * Cookies with the Secure attribute are omitted unless the URL uses a secure scheme,
-   * `https:` or `wss:` (RFC 6265 §5.4).
+   * Cookies with the Secure attribute are omitted unless the request is secure - `https:`
+   * or `wss:`, or a loopback host over `http:` or `ws:`, as browsers count one (RFC 6265
+   * §5.4; see `isSecureRequest`).
    *
    * Scans the URL and ancestor-domain buckets, including parents above nested
    * private suffixes, instead of scanning all cookies.
@@ -1118,7 +1119,10 @@ export class CookieJar {
           continue;
         }
 
-        if (cookie.secure === true && !this.isSecureScheme(requestScheme)) {
+        if (
+          cookie.secure === true &&
+          !this.isSecureRequest(requestScheme, hostname)
+        ) {
           continue;
         }
 
@@ -1505,15 +1509,18 @@ export class CookieJar {
       return;
     }
 
-    const isSecureScheme = this.isSecureScheme(address.protocol);
+    const isSecureRequest = this.isSecureRequest(
+      address.protocol,
+      requestHostname,
+    );
 
-    // RFC 6265bis §5.7: a Secure cookie is only accepted from a secure scheme. The send
-    // path already withholds Secure cookies on `http:`, but a cookie *stored* from an
-    // `http:` response could still replace the `https:` session under the same key -
+    // RFC 6265bis §5.7: a Secure cookie is only accepted from a secure request. The send
+    // path already withholds Secure cookies from any other, but a cookie *stored* from a
+    // plain `http:` response could still replace the `https:` session under the same key -
     // cookie forcing - and the replacement would then go out over `https:` as the
     // real one. Refusing it here keeps a plain-text hop from writing into the secure
     // half of the jar at all.
-    if (parsed.secure && !isSecureScheme) {
+    if (parsed.secure && !isSecureRequest) {
       return;
     }
 
@@ -1600,13 +1607,13 @@ export class CookieJar {
     }
 
     // RFC 6265bis §5.7 "Leave Secure Cookies Alone": a non-Secure cookie from a
-    // non-secure scheme cannot replace, shadow or evict a stored Secure cookie of the
+    // non-secure request cannot replace, shadow or evict a stored Secure cookie of the
     // same name whose scope covers it. Checked before the expiry-driven deletions
     // below on purpose - `Max-Age=0` over `http:` is otherwise a one-line eviction of
     // the `https:` session, and a fresh one planted beside it would then be the only
     // `session` cookie left to send.
     if (
-      !isSecureScheme &&
+      !isSecureRequest &&
       this.wouldShadowSecureCookie(parsed.name, domain, path)
     ) {
       return;
@@ -1672,14 +1679,22 @@ export class CookieJar {
   }
 
   /**
-   * Whether a request scheme counts as secure for cookie purposes. The same answer the
-   * send path gives: `getCookiesFor` withholds Secure cookies unless the scheme is
-   * `https:` or `wss:`, so a scheme that could never receive a Secure cookie may not
-   * set one either. `localhost` over `http:` is not secure on either side, so
-   * store-time and send-time never disagree about a cookie.
+   * Whether a request counts as secure for cookie purposes, as browsers count one: over
+   * `https:` or `wss:`, or over `http:` or `ws:` to a loopback host - `localhost`, a name
+   * under `.localhost`, `127.0.0.0/8` or `[::1]` - which Chrome and Firefox treat as a
+   * secure origin, so a local dev server's `Secure` cookie is kept and sent. The same
+   * answer on the store and the send path, so the two never disagree about a cookie.
+   * `hostname` is a parsed URL's: lowercased, an IPv4 address canonical and an IPv6 one
+   * bracketed.
    */
-  private isSecureScheme(protocol: string): boolean {
-    return protocol === 'https:' || protocol === 'wss:';
+  private isSecureRequest(protocol: string, hostname: string): boolean {
+    if (protocol === 'https:' || protocol === 'wss:') {
+      return true;
+    }
+
+    return (
+      (protocol === 'http:' || protocol === 'ws:') && isLoopbackHost(hostname)
+    );
   }
 
   /**
@@ -2032,4 +2047,16 @@ export class CookieJar {
       );
     }
   }
+}
+
+/** Whether a parsed URL's `hostname` names this machine: see `CookieJar.isSecureRequest`. */
+function isLoopbackHost(hostname: string): boolean {
+  const name = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
+
+  return (
+    name === 'localhost' ||
+    name.endsWith('.localhost') ||
+    hostname === '[::1]' ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
+  );
 }
