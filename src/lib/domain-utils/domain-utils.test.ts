@@ -3144,7 +3144,7 @@ describe('domain-utils', () => {
 
     it('rejects an origin whose hostname fails normalization (normalizeOrigin returns empty)', () => {
       // An exact-origin list entry with a `!` in the hostname parses as a URL but fails
-      // hostname normalization (an underscore no longer does: it is a valid label
+      // hostname normalization (an underscore does not: it is a valid label
       // character) — normalizeOrigin returns '', so parseExactOriginForMatching returns null
       expect(normalizeOrigin('https://foo!bar.example.com')).toBe('');
       expect(
@@ -3187,8 +3187,8 @@ describe('domain-utils', () => {
 
     it('rejects wildcard patterns with concrete labels that fail IDN normalization', () => {
       // A `!` label fails normalization — the nd === '' branch inside
-      // isValidCredentialWildcardHost. (An underscore label is valid now, so it no longer
-      // reached that branch.) The same pattern with a valid label matches.
+      // isValidCredentialWildcardHost. (An underscore label is valid, so it does not
+      // reach that branch.) The same pattern with a valid label matches.
       expect(
         matchesCORSCredentialsList(
           'https://app.foo-bar.example.com',

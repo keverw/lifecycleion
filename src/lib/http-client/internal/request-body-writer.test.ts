@@ -261,7 +261,7 @@ describe('writeRequestBodyChunked', () => {
   });
 
   test('rejects if req emits close while waiting for the write callback', async () => {
-    // It used to resolve, and that reported an upload that had not happened. Even here -
+    // Resolving would report an upload that had not happened. Even here -
     // where the first chunk's callback fired, so those bytes were accepted - the second
     // chunk is never written, and `node-adapter` follows a resolve with `req.end()`, so a
     // truncated body is finalized as though it were complete. A truncated write is a
@@ -296,13 +296,14 @@ describe('writeRequestBodyChunked', () => {
   });
 
   test('rejects when the socket dies under a write that was never backpressured', async () => {
-    // The hang this used to be. `'close'` and `'error'` were armed only when `write()`
-    // asked for a drain, so a chunk the buffer took outright - callback pending, no
-    // backpressure - had nothing listening when the socket died. Nothing rejected and
-    // nothing resolved: the promise stayed pending for good, and it is the same promise
-    // `node-adapter` hands the caller as `requestBodySettled`, so `await` on it never
-    // returned. Measured against a real server that answers early and then resets: the
-    // response arrived in 112 ms and the upload outcome never came at all.
+    // `'close'` and `'error'` are armed for every chunk waiting on its callback, not only
+    // when `write()` asks for a drain: a chunk the buffer takes outright - callback
+    // pending, no backpressure - would otherwise have nothing listening when the socket
+    // dies. Nothing would reject and nothing resolve: the promise would stay pending for
+    // good, and it is the same promise `node-adapter` hands the caller as
+    // `requestBodySettled`, so an `await` on it would never return - against a real server
+    // that answers early and then resets, the response arrives and the upload outcome
+    // never does.
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const req = new EventEmitter() as EventEmitter &
       RequestBodyWritable & { destroyed: boolean };

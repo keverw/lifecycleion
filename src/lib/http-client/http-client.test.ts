@@ -2515,11 +2515,11 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
   });
 
   test('a caller signal reused across sends is left with no abort listener when AbortSignal.any is unavailable', async () => {
-    // The fallback composition used to add a `{ once: true }` listener to the caller's
-    // signal per `send()`, and never remove it on success - so a signal reused for the
-    // life of a page or a worker accumulated one listener per request until the
-    // runtime's listener-count warning fired. Every request now releases the listeners
-    // it added when it ends, so the count is measured net of removals.
+    // The fallback composition adds a `{ once: true }` listener to the caller's signal per
+    // `send()`. Left on after a success, a signal reused for the life of a page or a
+    // worker would gather one listener per request until the runtime's listener-count
+    // warning fired. Every request releases the listeners it added when it ends, so the
+    // count is measured net of removals.
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
       send: async (request: AdapterRequest): Promise<AdapterResponse> => {
@@ -2600,12 +2600,12 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
   test('a retry chain leaves no abort listener on any signal when AbortSignal.any is unavailable', async () => {
     // The same release covers the per-attempt composition: every attempt composes the
     // request's cancel signal - itself a composition, so the caller's signal never sees
-    // these - with its own timeout signal, and used to leave one listener per attempt
-    // on that cancel signal for as long as the signal lived. Counted per signal across
-    // the whole send, at the prototype, since the cancel signal is internal, and net of
-    // removals: the old code left fifteen on it, and the request now takes every one
-    // of them off when it ends. Within a request the count still grows by one per
-    // attempt, which is the bounded case this accepts.
+    // these - with its own timeout signal, which would otherwise leave one listener per
+    // attempt on that cancel signal for as long as the signal lived. Counted per signal
+    // across the whole send, at the prototype, since the cancel signal is internal, and
+    // net of removals: the request takes every one of them off when it ends. Within a
+    // request the count still grows by one per attempt, which is the bounded case this
+    // accepts.
     let attempts = 0;
     const adapter: HTTPAdapter = {
       getType: () => 'mock',

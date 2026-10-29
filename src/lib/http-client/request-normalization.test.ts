@@ -483,7 +483,7 @@ test('a method that is not a valid HTTP method name is refused before dispatch',
 
 test('a filter whose methods is not an array of strings is refused when registered', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
-  // As a JS caller might write it; it used to match by substring.
+  // As a JS caller might write it: read as a string, it would match by substring.
   expect(() =>
     client.addRequestInterceptor((request) => request, {
       methods: 'POST' as never,
@@ -766,7 +766,7 @@ test('a late answer is decided by the answer: delivered if readable, never re-se
 
 test('a filter list that is not an array of the right entries is refused when registered', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
-  // A string used to match by substring: 'initial,retry' ran in both phases.
+  // A string would match by substring: 'initial,retry' would run in both phases.
   expect(() =>
     client.addRequestInterceptor((request) => request, {
       phases: 'initial,retry' as never,
@@ -8302,7 +8302,8 @@ test('a decomposed Unicode label is measured composed; an Expect header is refus
   }
   expect(refusal).toBeInstanceOf(TypeError);
 
-  // A label TR46 shortens (soft hyphens map to nothing) is no longer refused before it.
+  // A label TR46 shortens (soft hyphens map to nothing) is measured after mapping, not
+  // refused before it.
   const softened = `example${'\u00ad'.repeat(60)}`;
   expect(matchesDomainList('x.example.com', [`*.${softened}.com`])).toBe(true);
 

@@ -426,7 +426,7 @@ describe('serializeMultipartFormData', () => {
     // `Content-Length` is computed from `Blob.size` in the sizing pass, but the streaming
     // pass writes whatever `Blob.stream()` actually yields. A `File` backed by a file
     // another process is rotating can yield less, and nothing is destroyed - so the inner
-    // loop exits through `isDone`, every delimiter is written, and the body used to go out
+    // loop exits through `isDone`, every delimiter is written, and the body would go out
     // short of the length already on the wire. Node does not check a `ClientRequest` for a
     // shortfall, so the caller hangs on a server waiting for bytes that never come.
     // Scripted rather than appended (see `scriptFormEntries`): `append(name, blob,
@@ -781,8 +781,8 @@ describe('serializeMultipartFormData', () => {
   });
 
   test('rejects when req emits close while a write waits for its callback', async () => {
-    // It used to resolve, and that reported parts as written when the stream had not
-    // accepted them - leaving a multipart body without its closing `--boundary--`
+    // Resolving would report parts as written when the stream had not accepted them -
+    // leaving a multipart body without its closing `--boundary--`
     // delimiter while this side called the upload a success. A truncated write is a failed
     // write; the adapter turns the rejection into a transport error.
     const fd = new FormData();
@@ -955,8 +955,8 @@ describe('serializeMultipartFormData', () => {
   });
 
   test('rejects immediately when req.destroyed at time its listeners are registered', async () => {
-    // It used to resolve, and that reported parts as written when the stream had not
-    // accepted them - leaving a multipart body without its closing `--boundary--`
+    // Resolving would report parts as written when the stream had not accepted them -
+    // leaving a multipart body without its closing `--boundary--`
     // delimiter while this side called the upload a success. A truncated write is a failed
     // write; the adapter turns the rejection into a transport error.
     const fd = new FormData();

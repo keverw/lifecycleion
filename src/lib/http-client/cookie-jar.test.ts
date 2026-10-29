@@ -1472,8 +1472,8 @@ describe('CookieJar', () => {
     });
 
     test('the same rule keeps a public-suffix cookie the host itself sets', () => {
-      // `github.io` used to be refused outright even from `https://github.io/`. RFC
-      // 6265bis keeps it host-only rather than dropping it.
+      // `Domain=github.io` from `https://github.io/` itself is kept host-only, as RFC
+      // 6265bis keeps it, rather than refused outright.
       jar.parseSetCookieHeader(
         'session=mine; Domain=github.io; Path=/',
         'https://github.io/',
@@ -2149,8 +2149,8 @@ describe('CookieJar', () => {
     test('setCookie() and fromJSON() enforce the prefix attributes too', () => {
       // No request URL is needed to check the attributes a prefix promises, so the
       // programmatic path holds them as well: a persisted jar tampered into a
-      // `__Host-` cookie with `hostOnly` cleared used to be restored and sent to every
-      // subdomain under a name that tells a server it was set host-only at `/`.
+      // `__Host-` cookie with `hostOnly` cleared would otherwise be restored and sent to
+      // every subdomain under a name that tells a server it was set host-only at `/`.
       const base = { value: '1', domain: 'example.com', createdAt: Date.now() };
 
       expect(jar.setCookie({ ...base, name: '__Secure-id', path: '/' })).toBe(
@@ -2797,8 +2797,8 @@ describe('CookieJar', () => {
 
     test('returns how many cookies were restored, so a short restore is visible', () => {
       // `setCookie` refuses a cookie with a missing or invalid domain and says so by
-      // returning `false`; `fromJSON` used to throw that answer away and return `void`, so
-      // a persisted jar could come back short with nothing to say it had.
+      // returning `false`; `fromJSON` counts those answers, so a persisted jar that comes
+      // back short says so.
       const jar2 = new CookieJar();
 
       const restored = jar2.fromJSON({
