@@ -2431,7 +2431,7 @@ describe('MockAdapter - route body bytes from another realm', () => {
   });
 });
 
-test('a route body that is a Proxy over an ArrayBuffer is refused, not sent as no bytes; one over a Uint8Array is still delivered', async () => {
+test('a route body that is a Proxy over an ArrayBuffer or a Uint8Array is refused as unsupported, and not retried', async () => {
   const proxiedView = new Proxy(new Uint8Array([4, 5, 6]), {});
   const adapter = new MockAdapter();
   adapter.routes.get('/buffer', () => ({
@@ -2460,9 +2460,30 @@ test('a route body that is a Proxy over an ArrayBuffer is refused, not sent as n
     ],
   ).toBe(true);
 
-  // Delivered as it is, as the size checks the round-6/7 tests cover expect.
-  const view = await adapter.send(makeAdapterRequest({ requestURL: '/view' }));
-  expect(view.body).toBe(proxiedView);
+  const viewRejection = await adapter
+    .send(makeAdapterRequest({ requestURL: '/view' }))
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+  expect((viewRejection as Error).message).toMatch(
+    /Unsupported mock response body type/,
+  );
+  expect(
+    (viewRejection as Record<string, unknown>)[
+      NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+    ],
+  ).toBe(true);
+
+  // Through the client, under its default limit: the route's mistake, not a body too large.
+  const builder = new HTTPClient({ adapter, baseURL: 'http://x.test' }).get(
+    '/view',
+  );
+  const response = await builder.send();
+
+  expect(response.isFailed).toBe(true);
+  expect(builder.error?.code).toBe('adapter_error');
 });
 
 test('a body the mock refuses is not labelled JSON on a HEAD route or under a simulated stream error', async () => {

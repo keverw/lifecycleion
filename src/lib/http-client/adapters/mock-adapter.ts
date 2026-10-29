@@ -1220,15 +1220,9 @@ function serializeResponseBody(response: MockResponse): Uint8Array | null {
     // Avoid JSON.stringify indexing the buffer into {"0":…,"1":…}. Delivered as this
     // realm's `Uint8Array` holding a copy of the route's bytes, so a caller that changes
     // the body it was handed does not change the route's fixture for the requests after
-    // it. Copied through the internal slots, calling none of the body's own methods. A
-    // `Proxy` over a `Uint8Array` has no slot to copy from, so it is delivered as it is
-    // (see `isRouteBinaryBody`).
+    // it. Copied through the internal slots, calling none of the body's own methods.
     if (typedArrayNameOf(body) === 'Uint8Array') {
       return new Uint8Array(body as Uint8Array);
-    }
-
-    if (body instanceof Uint8Array) {
-      return body;
     }
 
     // A view over the buffer, then a copy of what it views.
@@ -1251,28 +1245,25 @@ function serializeResponseBody(response: MockResponse): Uint8Array | null {
 }
 
 /**
- * Whether a route's body is bytes the mock sends as they are: a `Uint8Array` - this
- * realm's by `instanceof` (a `Proxy` over one included, delivered as it is, which the
- * size check then measures as it would an adapter's), or another realm's (jsdom, a `vm`
- * context) by its internal slot, as the size check beside it measures it - or an
- * `ArrayBuffer` from any realm by its internal slot alone. A `Proxy` over an
- * `ArrayBuffer` has no slot: copying its bytes reads none, so it is refused as an
- * unsupported body rather than sent as an empty one.
+ * Whether a route's body is bytes the mock sends as a copy: a `Uint8Array` or an
+ * `ArrayBuffer`, from any realm (jsdom, a `vm` context), told by its internal slot, as the
+ * size check measures it. A `Proxy` over either, or a fake view on a borrowed prototype,
+ * has no slot - its `length`, iteration and copying all throw - so it is refused as an
+ * unsupported body rather than delivered as something the size check cannot measure.
  */
 function isRouteBinaryBody(body: unknown): body is Uint8Array | ArrayBuffer {
   return (
-    body instanceof Uint8Array ||
-    (typeof body === 'object' &&
-      body !== null &&
-      (typedArrayNameOf(body) === 'Uint8Array' ||
-        arrayBufferKindOf(body) === 'ArrayBuffer'))
+    typeof body === 'object' &&
+    body !== null &&
+    (typedArrayNameOf(body) === 'Uint8Array' ||
+      arrayBufferKindOf(body) === 'ArrayBuffer')
   );
 }
 
 /**
  * The type a route body is labelled with when the route sets none: `text` for a string,
  * `json` for an array or a plain object, and `binary` for anything else - bytes, and a
- * body it refuses (a `Proxy` over an `ArrayBuffer`, a `Map`). The caller sets no
+ * body it refuses (a `Proxy` over an `ArrayBuffer` or a `Uint8Array`, a `Map`). The caller sets no
  * `content-type` for `binary`, so those are labelled nothing - a HEAD route or a
  * simulated stream error never serializes the body, and those must not call it JSON
  * either. `toJSON` is not called here, so an object whose top-level `toJSON` answers

@@ -1651,7 +1651,7 @@ interface MockResponse {
 }
 ```
 
-A route's `body` is serialized when the route answers, before its `delay`, so changing the object while the response is delayed does not change what is delivered. A `Uint8Array` or `ArrayBuffer` body is delivered as a plain `Uint8Array` copy of its bytes (a `Buffer` included, as the network adapters deliver one), so changing the bytes a request was answered with leaves the route's value as it was for the next request; a `Proxy` over a `Uint8Array` is delivered as it is.
+A route's `body` is serialized when the route answers, before its `delay`, so changing the object while the response is delayed does not change what is delivered. A `Uint8Array` or `ArrayBuffer` body is delivered as a plain `Uint8Array` copy of its bytes (a `Buffer` included, as the network adapters deliver one), so changing the bytes a request was answered with leaves the route's value as it was for the next request. A `Proxy` over either is refused as an unsupported body: it has none of the bytes it wraps to copy.
 
 `MockResponse.cookies` shorthand:
 

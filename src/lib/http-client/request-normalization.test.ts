@@ -8771,15 +8771,6 @@ test('a params value is read once, so the override check and the query agree', a
 
 test('a body no getter can measure fails closed; one reporting 0 bytes is still delivered', async () => {
   const proxied = new Proxy(new Uint8Array(1000), {});
-  const adapter = new MockAdapter();
-  adapter.routes.get('/proxied', () => ({ status: 200, body: proxied }));
-  const mocked = await adapter.send({
-    requestURL: 'http://api.test/proxied',
-    method: 'GET',
-    headers: {},
-    maxResponseBytes: 10,
-  });
-  expect(mocked.streamErrorCode).toBe('response_too_large');
 
   const custom = (body: unknown) =>
     new HTTPClient({
@@ -8838,16 +8829,6 @@ test('a non-binary body is not held to the limit; an unmeasurable binary one onl
   const unlimited = custom(proxied, Infinity).get('/x');
   await unlimited.send();
   expect(unlimited.error?.code).not.toBe('response_too_large');
-
-  const adapter = new MockAdapter();
-  adapter.routes.get('/p', () => ({ status: 200, body: proxied }));
-  const mocked = await adapter.send({
-    requestURL: 'http://api.test/p',
-    method: 'GET',
-    headers: {},
-    maxResponseBytes: Infinity,
-  });
-  expect(mocked.streamErrorCode).toBeUndefined();
 });
 
 test("a custom adapter's string body with a JSON type is parsed as text", async () => {

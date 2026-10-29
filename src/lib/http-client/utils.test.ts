@@ -1656,4 +1656,10 @@ describe('firstJoinedLocation', () => {
       '/login?next=/a,%20/b',
     );
   });
+
+  test('keeps a value whole where what follows `, ` is no path or scheme, joined or not', () => {
+    // Repeats of a bare relative reference read the same as one value with a raw space
+    // (`/files/Smith, John.pdf`), which is kept whole.
+    expect(firstJoinedLocation('next, other')).toBe('next, other');
+  });
 });
