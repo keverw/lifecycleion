@@ -644,6 +644,23 @@ export class BaseHTTPClient {
     count: number;
     requests: RequestInfo[];
   } {
+    // An object, as request options are: `listRequests('all')` would list only this
+    // client's own. A misspelled field (`lable`, `scop`) would list every request it
+    // meant to narrow.
+    const candidate: unknown = filter;
+    if (
+      !isNullish(candidate) &&
+      (typeof candidate !== 'object' || Array.isArray(candidate))
+    ) {
+      throw new TypeError(
+        `HTTPClient.listRequests() filter must be an object (got ${Array.isArray(candidate) ? 'an array' : describeValue(candidate)})`,
+      );
+    }
+    assertKnownFields(
+      filter,
+      ['scope', 'label'],
+      'HTTPClient.listRequests() filter',
+    );
     const scope = filter?.scope ?? 'own';
 
     // Refused rather than read loosely: any other `scope` - a typo such as `'mine'` -

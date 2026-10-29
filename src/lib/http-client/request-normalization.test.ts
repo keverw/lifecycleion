@@ -1080,6 +1080,16 @@ test('a misspelled config or request option is refused rather than read as absen
       .retryPolicy({ strategy: 'exponential', delayMS: 5 } as never),
   ).toThrow('HTTPClient retryPolicy has no "delayMS" field');
 
+  expect(() => client.listRequests({ lable: 'search' } as never)).toThrow(
+    'HTTPClient.listRequests() filter has no "lable" field',
+  );
+  expect(() => client.listRequests({ scop: 'all' } as never)).toThrow(
+    'HTTPClient.listRequests() filter has no "scop" field',
+  );
+  expect(() => client.listRequests('all' as never)).toThrow(
+    'HTTPClient.listRequests() filter must be an object (got string)',
+  );
+
   // A key that is no option name is not written into the refusal.
   let refusal: unknown;
   try {

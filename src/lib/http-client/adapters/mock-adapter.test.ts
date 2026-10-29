@@ -1065,6 +1065,29 @@ describe('MockAdapter.send() — low-level contract', () => {
     }
   });
 
+  test("a route cookie with a misspelled option is refused as the route's mistake", async () => {
+    adapter.routes.get('/cookie', () => ({
+      status: 200,
+      cookies: { sid: { value: 'x', maxage: 60 } } as never,
+    }));
+
+    let caught: unknown;
+    try {
+      await adapter.send(makeAdapterRequest({ requestURL: '/cookie' }));
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as Error).message).toContain(
+      'MockAdapter cookie at position 0 has no "maxage" field',
+    );
+    expect(
+      (caught as Record<string, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
+  });
+
   test('progress events do not include attemptNumber (injected by client)', async () => {
     adapter.routes.get('/prog', () => ({ status: 200 }));
     const events: object[] = [];

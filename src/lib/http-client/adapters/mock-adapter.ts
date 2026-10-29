@@ -1013,6 +1013,21 @@ function readMockCookieOptions(
     );
   }
 
+  // A misspelled field (`maxage`, `httponly`) would set a cookie the route never asked
+  // for - a session cookie, or one without its flag.
+  assertKnownFields(
+    entry,
+    fieldNames<MockCookieOptions>({
+      value: true,
+      path: true,
+      domain: true,
+      maxAge: true,
+      httpOnly: true,
+      secure: true,
+      sameSite: true,
+    }),
+    `MockAdapter cookie ${position}`,
+  );
   const options = entry as Record<keyof MockCookieOptions, unknown>;
   const value = options.value;
   const path = options.path;
