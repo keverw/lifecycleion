@@ -111,8 +111,14 @@ export function isSignalAborted(
 export function isSignalAbortedQuietly(
   signal: AbortSignal | undefined | null,
 ): boolean {
+  if (signal === undefined || signal === null) {
+    return false;
+  }
+
+  // Read here rather than through `isSignalAborted`, whose refusal would be built only
+  // to be dropped.
   try {
-    return isSignalAborted(signal);
+    return signal.aborted === true;
   } catch {
     return false;
   }

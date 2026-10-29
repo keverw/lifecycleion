@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { copyRequestBody, serializesToNothing } from './request-body-copy';
+import { UNSUPPORTED_REQUEST_BODY_MESSAGE } from '../utils';
 
 test('serializesToNothing answers as JSON.stringify does, reading only the top-level toJSON', () => {
   class Silent extends Array<number> {
@@ -70,4 +71,26 @@ test('serializesToNothing answers as JSON.stringify does, reading only the top-l
   expect(
     serializesToNothing(copyRequestBody({ toJSON: () => undefined }) as object),
   ).toBe(true);
+});
+
+test('a form is told by its own methods, not by inheriting from FormData.prototype', () => {
+  class Form extends FormData {}
+  const subclassed = new Form();
+  subclassed.append('a', '1');
+
+  const copy = copyRequestBody(subclassed);
+
+  expect(Object.getPrototypeOf(copy)).toBe(FormData.prototype);
+  expect([...FormData.prototype.entries.call(copy as FormData)]).toEqual([
+    ['a', '1'],
+  ]);
+
+  for (const fake of [
+    Object.create(FormData.prototype),
+    new Proxy(new FormData(), {}),
+  ]) {
+    expect(() => copyRequestBody(fake)).toThrow(
+      UNSUPPORTED_REQUEST_BODY_MESSAGE,
+    );
+  }
 });

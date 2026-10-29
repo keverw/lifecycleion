@@ -15,6 +15,7 @@ import { isNullish } from '../internal/is-nullish';
 import { describeValue } from '../internal/describe-value';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { copyArrayValue } from './internal/array-copy';
+import { isFormData } from './internal/form-entries';
 import { readUnknownMember } from '../internal/read-member';
 import { typedArrayNameOf } from '../internal/binary-view';
 import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
@@ -1363,7 +1364,7 @@ export function serializeBody(
 } {
   assertSupportedRequestBody(body);
 
-  if (body instanceof FormData) {
+  if (isFormData(body)) {
     return { body, contentType: null }; // browser/runtime sets multipart boundary automatically
   } else if (body === undefined || body === null) {
     return { body: null, contentType: null };
@@ -1395,7 +1396,7 @@ export function assertSupportedRequestBody(body: unknown): void {
     body === null ||
     typeof body === 'string' ||
     isRequestBodyBytes(body) ||
-    body instanceof FormData ||
+    isFormData(body) ||
     Array.isArray(body) ||
     isPlainRecord(body)
   ) {

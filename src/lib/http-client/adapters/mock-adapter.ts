@@ -1,7 +1,7 @@
 import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
 import { isHTTPToken } from '../internal/http-token';
 import { isHeaderSafeCookieText } from '../internal/cookie-text';
-import { formEntries } from '../internal/form-entries';
+import { formEntries, isFormData } from '../internal/form-entries';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -329,7 +329,7 @@ export class MockAdapter implements HTTPAdapter {
       }
     }
     if (
-      body instanceof FormData &&
+      isFormData(body) &&
       !Object.hasOwn(materializedHeaders, 'content-type')
     ) {
       defineEntry(
@@ -412,10 +412,9 @@ export class MockAdapter implements HTTPAdapter {
       query,
       headers: materializedHeaders,
       cookies,
-      body:
-        body instanceof FormData
-          ? extractFormData(body)
-          : parseRequestBody(body, materializedHeaders['content-type']),
+      body: isFormData(body)
+        ? extractFormData(body)
+        : parseRequestBody(body, materializedHeaders['content-type']),
     };
 
     // --- 4. Invoke handler ---

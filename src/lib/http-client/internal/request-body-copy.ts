@@ -1,6 +1,6 @@
 import { isRequestBodyBytes, UNSUPPORTED_REQUEST_BODY_MESSAGE } from '../utils';
 import { isPlainRecord } from './plain-record';
-import { formEntries } from './form-entries';
+import { formEntries, isFormData } from './form-entries';
 
 /**
  * The text each JSON body copy was read back from - exactly the text it serializes to, its
@@ -28,14 +28,15 @@ const jsonTextByCopy = new WeakMap<object, string | undefined>();
  *   answers it, so it is still a JSON body and serializes to exactly the text the
  *   caller's does.
  * - Bytes are copied, into this realm; a `Buffer` as a `Buffer` (see `copyBytes`).
- * - Form data is a new form with the same entries; a `Blob` or `File` entry is kept as
- *   it is, being immutable.
+ * - Form data - told by `FormData`'s own methods (see `isFormData`) - is a new form with
+ *   the same entries; a `Blob` or `File` entry is kept as it is, being
+ *   immutable.
  * - A string, `null` or `undefined` cannot be changed in place and is returned as it is.
  *
  * Each kind is told once, and the value read as that kind, so a `Proxy` whose prototype
  * answers differently on a second look cannot be passed on uncopied. Throws on a body of
- * any other type, and on a read that throws - a getter or a `toJSON`, a `BigInt` or a
- * circular reference in a JSON body, a `Proxy` over a form.
+ * any other type - a `Proxy` over a form among them - and on a read that throws: a getter
+ * or a `toJSON`, a `BigInt` or a circular reference in a JSON body.
  */
 export function copyRequestBody(body: unknown): unknown {
   if (body === undefined || body === null || typeof body === 'string') {
@@ -46,7 +47,7 @@ export function copyRequestBody(body: unknown): unknown {
     return copyBytes(body);
   }
 
-  if (body instanceof FormData) {
+  if (isFormData(body)) {
     return copyFormData(body);
   }
 
@@ -93,12 +94,12 @@ export function copiedJSONText(body: unknown): string | undefined {
  * whose `toJSON` may answer differently the next time - is never asked.
  */
 export function isCopySerializingToNothing(body: unknown): boolean {
-  return (
-    typeof body === 'object' &&
-    body !== null &&
-    jsonTextByCopy.has(body) &&
-    jsonTextByCopy.get(body) === undefined
-  );
+  return typeof body === 'object' && body !== null && isRecordedAsNothing(body);
+}
+
+/** Whether `jsonTextByCopy` records `body` as a copy that serializes to nothing. */
+function isRecordedAsNothing(body: object): boolean {
+  return jsonTextByCopy.has(body) && jsonTextByCopy.get(body) === undefined;
 }
 
 /**
@@ -128,7 +129,7 @@ function jsonTextOf(body: object): string | undefined {
  */
 export function serializesToNothing(body: object): boolean {
   if (jsonTextByCopy.has(body)) {
-    return jsonTextByCopy.get(body) === undefined;
+    return isRecordedAsNothing(body);
   }
 
   const toJSON: unknown = (body as { toJSON?: unknown }).toJSON;
@@ -160,7 +161,7 @@ export function releaseRequestBody(body: unknown): void {
  * slots, so another realm's are copied into this one's - and any other value as it is.
  */
 export function cloneBodyValue(body: unknown): unknown {
-  if (body instanceof FormData) {
+  if (isFormData(body)) {
     return copyFormData(body);
   } else if (isRequestBodyBytes(body)) {
     return copyBytes(body);

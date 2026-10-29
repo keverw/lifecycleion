@@ -153,7 +153,7 @@ import {
 } from './internal/request-body-copy';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
 import { listenForUploadSourceWait } from './internal/upload-source-wait';
-import { formEntries } from './internal/form-entries';
+import { formEntries, isFormData } from './internal/form-entries';
 import { copyArrayValue } from './internal/array-copy';
 import {
   adoptPromise,
@@ -3224,7 +3224,7 @@ export class BaseHTTPClient {
         // progress hook is - the wait it was in is ended there - and once a later attempt
         // is dispatched: a writer still parked from an earlier one does not make that
         // attempt's upload look busy.
-        if (sentBody instanceof FormData) {
+        if (isFormData(sentBody)) {
           listenForUploadSourceWait(adapterRequest, (isWaiting) => {
             if (!isAbandoned && uploadActivity.dispatches === dispatchNumber) {
               noteUploadSourceWait(uploadActivity, isWaiting);
@@ -5082,7 +5082,7 @@ export class BaseHTTPClient {
 
     // A native FormData body owns its Content-Type: Fetch/XHR install the multipart
     // boundary, and NodeAdapter replaces it with the boundary used by its serializer.
-    if (sentBody instanceof FormData) {
+    if (isFormData(sentBody)) {
       delete headers['content-type'];
     } else if (contentType && headers['content-type'] === undefined) {
       // Preserve an explicit content-type for every other body; otherwise infer it.
@@ -5593,7 +5593,7 @@ function buildAttemptBodies(
   let observed: ObservedBodies | undefined;
 
   if (isObserved) {
-    if (isRequestBodyBytes(body) || body instanceof FormData) {
+    if (isRequestBodyBytes(body) || isFormData(body)) {
       const copy = cloneBodyValue(body) as typeof body;
       observed = { body: copy, rawBody: copy };
     } else {
@@ -6484,7 +6484,7 @@ function handedRequestPreparer(
  * result whose body is sent: a retry held to a hop's own request sends the hop's body. The
  * GET and HEAD rule reads the copy (see `hasRequestBody`), so a body is judged by what it
  * serialized to when it was copied, which is what is sent. A body that cannot be copied -
- * a `toJSON` that throws, a `Proxy` over a form - is the body's failure, as one that
+ * a `toJSON` that throws, a `BigInt` - is the body's failure, as one that
  * cannot be serialized is, not an interceptor's: `outcome.didFail` is set before it
  * throws, and the phase reports it as `request_setup_error` - but on a GET or HEAD the
  * rule refuses, which `_copyChainResultBody` reports as that refusal.
@@ -6515,8 +6515,7 @@ function copyChainResultBody(
  * declares. A JSON body that serializes to nothing is answered as no body, told from its
  * top-level `toJSON` alone rather than by serializing it (see `serializesToNothing`): a
  * body only read here, as an interceptor's on a hop held to its own, is never serialized.
- * Throws on a body those reads refuse, such as a `Proxy` over a form, as building it
- * would.
+ * Throws on a body those reads refuse, as building it would.
  */
 function emptyRequestBody(body: unknown): { body: unknown } | undefined {
   if (body === undefined || body === null || body === '') {
@@ -6533,7 +6532,7 @@ function emptyRequestBody(body: unknown): { body: unknown } | undefined {
       : undefined;
   }
 
-  if (body instanceof FormData && formEntries(body).next().done === true) {
+  if (isFormData(body) && formEntries(body).next().done === true) {
     return { body: new FormData() };
   }
 

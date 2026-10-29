@@ -56,6 +56,7 @@ import {
   readUploadSourceWaitListener,
 } from '../internal/upload-source-wait';
 import { copyArrayValue } from '../internal/array-copy';
+import { isFormData } from '../internal/form-entries';
 import {
   ACCEPTED_CONTENT_ENCODINGS,
   createResponseBodySource,
@@ -1493,7 +1494,7 @@ export class NodeAdapter implements HTTPAdapter {
           openBodyOutcome();
         } else if (request.body !== undefined && request.body !== null) {
           // Refused rather than dropped: anything else - an `ArrayBuffer`, a `Blob`, a
-          // plain object, another realm's `FormData` - would go out as no body at all,
+          // plain object, a `Proxy` over a `FormData` - would go out as no body at all,
           // and the request would succeed without it. `HTTPClient` serializes bodies
           // first; this is the adapter called directly. Here, before the 0% upload event
           // and before the request is created, so a request refused before it is sent
@@ -3073,10 +3074,8 @@ async function streamResponseBody(
  * absorber would report it, within the same {@link PENDING_WRITABLE_ERROR_WINDOW_MS}.
  */
 function absorbPendingWritableError(writable: WritableLike): void {
-  // Captured once, here, rather than looked up again inside the removal below. Two
-  // lookups is two answers: the member is caller code and could be gone, or changed,
-  // by the time the removal runs, and a removal that cannot find its method is one
-  // that silently does not happen.
+  // The writable's one remover (see `getWritableListenerRemover`), used for the removal
+  // below as well.
   const removeListener = getWritableListenerRemover(writable);
 
   if (removeListener === null) {
@@ -3406,7 +3405,7 @@ function classifyRequestBody(
   | { kind: 'form'; body: FormData }
   | { kind: 'bytes'; body: string | Uint8Array }
   | undefined {
-  if (body instanceof FormData) {
+  if (isFormData(body)) {
     return { kind: 'form', body };
   }
 
@@ -4175,13 +4174,48 @@ function detachWritableListener(
 }
 
 /**
+ * Each writable's listener-removal method, as first read: see
+ * {@link getWritableListenerRemover}.
+ */
+const writableListenerRemovers = new WeakMap<
+  WritableLike,
+  WritableListenerRemover | null
+>();
+
+/**
  * The writable's own listener-removal method, or `null` when it has none.
  *
  * `removeListener` as well as `off`, because both are `EventEmitter`'s and a hand-written
  * {@link WritableLike} may define either. Neither is required by the interface, so a
  * structurally valid writable can have no way to take a listener back at all.
+ *
+ * Read once per writable and kept, so every attach and detach on it - this request's and
+ * the next one reusing the sink - takes the same path: a listener that joined the
+ * permanent fan-out of {@link attachWritableListener} is taken out of it again, even when
+ * the sink's `off` reads differently by then (a getter that threw once, a method added
+ * later), and one attached through `on` is taken back by the method found then.
  */
 function getWritableListenerRemover(
+  writable: WritableLike,
+): WritableListenerRemover | null {
+  if (writableListenerRemovers.has(writable)) {
+    return writableListenerRemovers.get(writable) ?? null;
+  }
+
+  const remover = readWritableListenerRemover(writable);
+
+  // A primitive - a factory that returned one - cannot key the map; it is read each time.
+  if (
+    (typeof writable === 'object' && writable !== null) ||
+    typeof writable === 'function'
+  ) {
+    writableListenerRemovers.set(writable, remover);
+  }
+
+  return remover;
+}
+
+function readWritableListenerRemover(
   writable: WritableLike,
 ): WritableListenerRemover | null {
   try {

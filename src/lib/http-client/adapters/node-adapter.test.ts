@@ -4538,6 +4538,99 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(handlers.length).toBe(1);
   });
 
+  test('a writable that gains a removal method mid-request is detached from the fan-out it joined', async () => {
+    // Attached while `off` reads as absent, so the request joined the permanent fan-out.
+    // Detaching by `off` instead would leave the settled request in that set for good,
+    // and a later `'error'` would reach it rather than being reported as unclaimed.
+    const handlers: ((error: Error) => void)[] = [];
+    let hasOff = false;
+    const track = (event: string, listener: (error: Error) => void): void => {
+      if (event === 'error') {
+        handlers.push(listener);
+      }
+    };
+    const writable = {
+      write: () => {
+        hasOff = true;
+        return true;
+      },
+      end: () => {
+        throw new Error('sync end boom');
+      },
+      on: (event: string, listener: (error: Error) => void) => {
+        track(event, listener);
+
+        return writable;
+      },
+      once: (event: string, listener: (error: Error) => void) => {
+        track(event, listener);
+
+        return writable;
+      },
+      get off() {
+        return hasOff ? () => writable : undefined;
+      },
+      destroy: () => writable,
+    } as unknown as WritableLike;
+
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(response.streamErrorCode).toBe('stream_write_error');
+    } finally {
+      requestSpy.mockRestore();
+    }
+
+    expect(handlers.length).toBe(1);
+
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    const lateError = new Error('late boom');
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      handlers[0]?.(lateError);
+
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(reports.length).toBe(1);
+    expect(reports[0]?.error).toBe(lateError);
+  });
+
   test('the permanent fan-out stops reporting unclaimed errors once the window has passed', async () => {
     // The permanent listener never detaches, so reporting every `'error'` that reaches it
     // with no request registered would put each error a long-lived sink's owner handles

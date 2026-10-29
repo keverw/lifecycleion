@@ -238,6 +238,27 @@ function quoteNames(names: readonly string[]): string {
 }
 
 /**
+ * A filter's `field`, read as it is checked: a getter of the caller's that throws -
+ * a class instance's, a field it does not take included - is refused as a `TypeError`
+ * naming the field, its error as the `cause`, rather than escaping raw from adding the
+ * callback.
+ */
+function readFilterField(
+  filter: Record<string, unknown>,
+  field: string,
+  label: string,
+): unknown {
+  try {
+    return filter[field];
+  } catch (error) {
+    throw new TypeError(
+      `${label} filter ${JSON.stringify(field)} field could not be read`,
+      { cause: error },
+    );
+  }
+}
+
+/**
  * The lists of `filter`, each read once, checked and copied - so a getter is not read
  * again, and a list the caller changes later does not change what matches. Nullish means
  * the list is absent. Throws a `TypeError` naming `label` for anything else that is not
@@ -260,7 +281,7 @@ function copyFilterLists(
     if (
       field !== 'methods' &&
       !kind.fields.includes(field) &&
-      !isNullish(filter[field])
+      !isNullish(readFilterField(filter, field, label))
     ) {
       throw new TypeError(
         `${label} filter has no ${JSON.stringify(field)} field (it takes ${['methods', ...kind.fields].join(', ')})`,
@@ -274,7 +295,11 @@ function copyFilterLists(
     if (!kind.fields.includes(field)) {
       continue;
     }
-    const value = callerFilterValue(filter[field], field, fields);
+    const value = callerFilterValue(
+      readFilterField(filter, field, label),
+      field,
+      fields,
+    );
     if (isNullish(value)) {
       continue;
     }

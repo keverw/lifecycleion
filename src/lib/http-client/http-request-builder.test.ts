@@ -4,6 +4,7 @@ import type { BuilderSendContext } from './http-request-builder';
 import type { HTTPRequestOptions, HTTPResponse } from './types';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
+import { UNSUPPORTED_REQUEST_BODY_MESSAGE } from './utils';
 
 // Captures the context passed to sendFn so tests can inspect it.
 function makeSendFn(
@@ -956,10 +957,16 @@ test('a form body is copied from the entries it holds, not ones it reports', asy
     ),
   ]).toEqual([['a', '1']]);
 
-  // A `Proxy` over a form has no internal slots to read entries from.
-  expect(() =>
-    makeBuilder().builder.formData(new Proxy(new FormData(), {})),
-  ).toThrow();
+  // A `Proxy` over a form, or an object that only inherits from `FormData.prototype`, has
+  // no internal slots to read entries from: no form, so an unsupported body.
+  for (const fake of [
+    new Proxy(new FormData(), {}),
+    Object.create(FormData.prototype) as FormData,
+  ]) {
+    expect(() => makeBuilder().builder.formData(fake)).toThrow(
+      UNSUPPORTED_REQUEST_BODY_MESSAGE,
+    );
+  }
 });
 
 test('a params array keeps a named key set on it, as qs serializes the array', async () => {

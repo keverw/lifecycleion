@@ -885,6 +885,40 @@ test('a filter naming a phase, scheme or content type that cannot occur is refus
   );
 });
 
+test('a filter getter that throws is refused as a TypeError naming the field', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  const boom = new Error('getter boom');
+  class Filter {
+    public get note(): string {
+      throw boom;
+    }
+
+    public get hosts(): string[] {
+      throw boom;
+    }
+  }
+
+  for (const filter of [
+    // A field the kind does not take, read only to check it is absent.
+    Object.defineProperty(new Filter(), 'hosts', { value: undefined }),
+    // A field the kind does take.
+    Object.defineProperty(new Filter(), 'note', { value: undefined }),
+  ]) {
+    let caught: unknown;
+    try {
+      client.addRequestInterceptor((request) => request, filter);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(TypeError);
+    expect((caught as Error).message).toMatch(
+      /^HTTPClient request interceptor filter "(note|hosts)" field could not be read$/,
+    );
+    expect((caught as Error).cause).toBe(boom);
+  }
+});
+
 test('a filter field that kind of callback cannot use is refused when registered', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
   // Ignored, an error observer filtered to 500 would see every error.
@@ -14092,7 +14126,7 @@ test('an abandoned attempt whose retry interceptor removed the body is retried',
   expect(response.status).toBe(200);
 });
 
-test('a retry body that cannot be read fails a cross-origin redirect hop as a same-origin one, its attempt ended', async () => {
+test('a retry body of an unsupported type fails a cross-origin redirect hop as a same-origin one, its attempt ended', async () => {
   for (const target of [
     'https://api.example/next',
     'https://evil.example/next',
@@ -14103,7 +14137,7 @@ test('a retry body that cannot be read fails a cross-origin redirect hop as a sa
       followRedirects: true,
       retryPolicy: crossOriginRetryPolicy,
     });
-    // A `FormData` by its prototype, whose entries no `FormData` method can read.
+    // A `Proxy` over a form: no form by its internal slot, so an unsupported body.
     const form = new FormData();
     form.append('field', 'value');
     client.addRequestInterceptor(
@@ -14121,14 +14155,14 @@ test('a retry body that cannot be read fails a cross-origin redirect hop as a sa
     const response = await builder.send();
 
     expect(response.status).toBe(0);
-    expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.code).toBe('interceptor_error');
     expect(sentToTarget).toHaveLength(1);
     expect(started).toEqual([1, 2, 3]);
     expect(ended).toEqual([1, 2, 3]);
   }
 });
 
-test('a cross-origin retry whose body cannot be read reports the hop request, not what the interceptor added', async () => {
+test('a cross-origin retry whose body is of an unsupported type reports the hop request, not what the interceptor added', async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -14171,7 +14205,7 @@ test('a cross-origin retry whose body cannot be read reports the hop request, no
   const builder = client.put('https://api.example/start').json({ a: 1 });
   const response = await builder.send();
 
-  expect(builder.error?.code).toBe('request_setup_error');
+  expect(builder.error?.code).toBe('interceptor_error');
   expect(sentToTarget).toHaveLength(1);
   expect(response.requestURL).toBe('https://evil.example/next');
   expect(builder.error?.requestURL).toBe('https://evil.example/next');
