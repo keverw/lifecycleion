@@ -77,6 +77,87 @@ describe('deepClone', () => {
       expect(Object.keys(cloned)).toEqual(['0', '1']);
     });
 
+    test('finds an item past a run of holes', () => {
+      const original: unknown[] = [1, 2, 3];
+      original[53] = { last: true };
+
+      const cloned = deepClone(original);
+
+      expect(cloned).toHaveLength(54);
+      expect(Object.keys(cloned)).toEqual(['0', '1', '2', '53']);
+      expect(cloned[53]).toEqual({ last: true });
+      expect(cloned[53]).not.toBe(original[53]);
+    });
+
+    test("copies a match result's index, input, groups and indices", () => {
+      const matched = /(?<x>b)/d.exec('ab') as RegExpExecArray;
+
+      const cloned = deepClone(matched);
+
+      expect([...cloned]).toEqual(['b', 'b']);
+      expect(cloned.index).toBe(1);
+      expect(cloned.input).toBe('ab');
+      expect(cloned.groups).toEqual({ x: 'b' });
+      expect(cloned.groups).not.toBe(matched.groups);
+      expect(cloned.indices?.[0]).toEqual([1, 2]);
+      expect(cloned.indices?.groups).toEqual({ x: [1, 2] });
+    });
+
+    test('copies the named entries arrayKeys lists, at any depth, and no others', () => {
+      const inner = Object.assign([1], { meta: { id: 1 }, other: 'x' });
+      const original = { list: Object.assign([inner], { meta: { id: 2 } }) };
+
+      const cloned = deepClone(original, { arrayKeys: ['meta', 'missing'] });
+
+      expect(cloned.list.meta).toEqual({ id: 2 });
+      expect(cloned.list.meta).not.toBe(original.list.meta);
+      expect(cloned.list[0]?.meta).toEqual({ id: 1 });
+      expect(Object.keys(cloned.list[0] ?? {})).toEqual(['0', 'meta']);
+      expect(Object.hasOwn(cloned.list, 'missing')).toBe(false);
+      // Without the option, named entries are not copied.
+      expect(Object.hasOwn(deepClone(original).list, 'meta')).toBe(false);
+    });
+
+    test('arrayKeys keeps circular references, and copies __proto__ as an entry', () => {
+      const original = Object.assign([1], {}) as unknown[] & {
+        self?: unknown;
+      };
+      original.self = original;
+      Object.defineProperty(original, '__proto__', {
+        value: { polluted: true },
+        enumerable: true,
+      });
+
+      const cloned = deepClone(original, {
+        arrayKeys: ['self', '__proto__', 'length', 'self'],
+      });
+
+      expect(cloned.self).toBe(cloned);
+      expect(Object.getPrototypeOf(cloned)).toBe(Array.prototype);
+      expect(Object.hasOwn(cloned, '__proto__')).toBe(true);
+      expect(cloned).toHaveLength(1);
+    });
+
+    test('refuses options that are not an object', () => {
+      for (const options of [null, 'meta', 5]) {
+        expect(() =>
+          deepClone([], options as unknown as { arrayKeys?: string[] }),
+        ).toThrow(new TypeError('deepClone: options must be an object'));
+      }
+    });
+
+    test('refuses an arrayKeys that is not an array of strings', () => {
+      for (const arrayKeys of ['meta', [1], [Symbol('meta')], null]) {
+        expect(() =>
+          deepClone([], { arrayKeys: arrayKeys as unknown as string[] }),
+        ).toThrow(
+          new TypeError(
+            'deepClone: options.arrayKeys must be an array of strings',
+          ),
+        );
+      }
+    });
+
     test('reads an array by its indices, not through an own iterator', () => {
       const original = [1, 2, 3];
       Object.defineProperty(original, Symbol.iterator, {

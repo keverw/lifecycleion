@@ -16,30 +16,103 @@ import {
   typedArrayNameOf,
 } from './internal/binary-view';
 
+/** Options for {@link deepClone}. */
+export interface DeepCloneOptions {
+  /**
+   * Named keys copied from every array, at any depth, when the array holds them as its
+   * own - `meta` on an array tagged with `arr.meta = {...}`, say. Each value is cloned.
+   * Only these keys are looked up: an array's other named entries are not listed, which
+   * would cost a large array many times its clone. A regex match result's `index`,
+   * `input`, `groups` and `indices` are copied without being listed.
+   */
+  arrayKeys?: readonly string[];
+}
+
+/** What one `deepClone` call carries through its recursion. */
+interface CloneState {
+  seen: WeakMap<object, unknown>;
+  arrayKeys: readonly string[];
+}
+
+/** The named entries `exec` and `match` give a match result. */
+const MATCH_RESULT_KEYS: readonly string[] = [
+  'index',
+  'input',
+  'groups',
+  'indices',
+];
+
 /**
  * Deep clone an object or value
  *
  * @param obj - The value to clone
+ * @param options - See {@link DeepCloneOptions}
  * @returns A deep clone of the input value
  */
-export function deepClone<T>(obj: T): T {
-  return cloneInternal(obj, new WeakMap());
+export function deepClone<T>(obj: T, options?: DeepCloneOptions): T {
+  // An object or absent: anything else is refused here, in this module's words, rather
+  // than read as no options or failing in the runtime's.
+  const given: unknown = options;
+  if (given !== undefined && (typeof given !== 'object' || given === null)) {
+    throw new TypeError('deepClone: options must be an object');
+  }
+
+  return cloneInternal(obj, {
+    seen: new WeakMap(),
+    arrayKeys: readArrayKeys(options?.arrayKeys),
+  });
 }
 
-function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
+/**
+ * `arrayKeys` read once, into a list of this module's own: a string array or absent,
+ * anything else a `TypeError`. `length` is left out - every clone sets its own.
+ */
+function readArrayKeys(arrayKeys: unknown): readonly string[] {
+  if (arrayKeys === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(arrayKeys)) {
+    throw new TypeError(
+      'deepClone: options.arrayKeys must be an array of strings',
+    );
+  }
+
+  const keys: string[] = [];
+  // By index, not `for...of`, and to the length read once: a caller's array is read
+  // without running its iterator, and a length that grows cannot keep the loop going.
+  const length = arrayKeys.length;
+  for (let index = 0; index < length; index++) {
+    const key: unknown = arrayKeys[index];
+
+    if (typeof key !== 'string') {
+      throw new TypeError(
+        'deepClone: options.arrayKeys must be an array of strings',
+      );
+    }
+
+    if (key !== 'length' && !keys.includes(key)) {
+      keys.push(key);
+    }
+  }
+
+  return keys;
+}
+
+function cloneInternal<T>(obj: T, state: CloneState): T {
   // Primitives and null/undefined return as-is
   if (obj === null || typeof obj !== 'object') {
     return obj;
   }
 
   // Check for circular references
-  if (seen.has(obj)) {
-    return seen.get(obj) as T;
+  if (state.seen.has(obj)) {
+    return state.seen.get(obj) as T;
   }
 
   // Handle Date
   if (obj instanceof Date) {
-    return remember(seen, obj, new Date(obj));
+    return remember(state.seen, obj, new Date(obj));
   }
 
   // Handle RegExp
@@ -47,15 +120,15 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
     const flags = obj.flags;
     const cloned = new RegExp(obj.source, flags);
     cloned.lastIndex = obj.lastIndex;
-    return remember(seen, obj, cloned);
+    return remember(state.seen, obj, cloned);
   }
 
   // Handle Map
   if (obj instanceof Map) {
-    const cloned = remember<Map<unknown, unknown>>(seen, obj, new Map());
+    const cloned = remember<Map<unknown, unknown>>(state.seen, obj, new Map());
 
     for (const [key, value] of obj) {
-      cloned.set(cloneInternal(key, seen), cloneInternal(value, seen));
+      cloned.set(cloneInternal(key, state), cloneInternal(value, state));
     }
 
     return cloned as T;
@@ -63,10 +136,10 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
 
   // Handle Set
   if (obj instanceof Set) {
-    const cloned = remember<Set<unknown>>(seen, obj, new Set());
+    const cloned = remember<Set<unknown>>(state.seen, obj, new Set());
 
     for (const value of obj) {
-      cloned.add(cloneInternal(value, seen));
+      cloned.add(cloneInternal(value, state));
     }
 
     return cloned as T;
@@ -76,23 +149,29 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
   // large buffer - a `subarray` of a file read whole - does not copy the buffer behind it.
   // Two views of one buffer, or a view and its buffer, do not share memory in the clone.
   if (ArrayBuffer.isView(obj)) {
-    return remember(seen, obj, cloneView(obj));
+    return remember(state.seen, obj, cloneView(obj));
   }
 
   // An array of the same length, each index it holds cloned: a hole stays a
   // hole, as `structuredClone` keeps it, rather than becoming an `undefined` entry - one
   // emptied while the clone is made included. Read by index, not through an own
-  // `Symbol.iterator`. Named entries (a `match` result's `index`) are not copied: listing
-  // the keys to find them costs a dense array many times its clone.
+  // `Symbol.iterator`. Named entries are not listed - that would cost a dense array many
+  // times its clone - so only a match result's and `arrayKeys`' are copied.
   if (Array.isArray(obj)) {
     const source = obj as unknown[];
-    const cloned = remember<unknown[]>(seen, obj, new Array(source.length));
+    const cloned = remember<unknown[]>(
+      state.seen,
+      obj,
+      new Array(source.length),
+    );
 
     for (let index = 0; index < source.length; index++) {
       if (index in source) {
-        cloned[index] = cloneInternal(source[index], seen);
+        cloned[index] = cloneInternal(source[index], state);
       }
     }
+
+    copyNamedArrayEntries(source, cloned, state);
 
     return cloned as T;
   }
@@ -100,11 +179,11 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
   // An `ArrayBuffer` or `SharedArrayBuffer`: copied whole into a new one of its kind.
   const bufferKind = bufferKindOf(obj);
   if (bufferKind !== undefined) {
-    return remember(seen, obj, copyBuffer(obj, bufferKind));
+    return remember(state.seen, obj, copyBuffer(obj, bufferKind));
   }
 
   // Handle plain objects
-  const cloned = remember<Record<string, unknown>>(seen, obj, {});
+  const cloned = remember<Record<string, unknown>>(state.seen, obj, {});
 
   for (const key in obj) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
@@ -113,12 +192,65 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
       defineEntry(
         cloned,
         key,
-        cloneInternal((obj as Record<string, unknown>)[key], seen),
+        cloneInternal((obj as Record<string, unknown>)[key], state),
       );
     }
   }
 
   return cloned as T;
+}
+
+/**
+ * The named entries of `source` that `cloned` carries over: a match result's (one whose
+ * first entry is a string and that holds an own `index`, as lodash tells one), with the
+ * `groups` its `indices` array holds under the `d` flag, and those named in `arrayKeys` -
+ * each only when `source` holds it as its own, read once and cloned. Defined, not
+ * assigned, so a `__proto__` named there is copied as an entry.
+ */
+function copyNamedArrayEntries(
+  source: unknown[],
+  cloned: unknown[],
+  state: CloneState,
+): void {
+  // Told by the clone's first entry, not read again from the source: a string clones as
+  // itself.
+  const isMatchResult =
+    typeof cloned[0] === 'string' && Object.hasOwn(source, 'index');
+  const keys = isMatchResult
+    ? [
+        ...MATCH_RESULT_KEYS,
+        ...state.arrayKeys.filter((key) => !MATCH_RESULT_KEYS.includes(key)),
+      ]
+    : state.arrayKeys;
+  const record = source as unknown as Record<string, unknown>;
+  const target = cloned as unknown as Record<string, unknown>;
+
+  for (const key of keys) {
+    if (!Object.hasOwn(record, key)) {
+      continue;
+    }
+
+    const value = record[key];
+    const copy = cloneInternal(value, state);
+    defineEntry(target, key, copy);
+
+    if (
+      isMatchResult &&
+      key === 'indices' &&
+      Array.isArray(value) &&
+      Array.isArray(copy) &&
+      Object.hasOwn(value, 'groups')
+    ) {
+      defineEntry(
+        copy as unknown as Record<string, unknown>,
+        'groups',
+        cloneInternal(
+          (value as unknown as Record<string, unknown>).groups,
+          state,
+        ),
+      );
+    }
+  }
 }
 
 /**
