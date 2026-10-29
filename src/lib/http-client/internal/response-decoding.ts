@@ -451,9 +451,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
             ),
           );
         } else if (frames?.isAtFrameEnd === false) {
-          this.failDecoding(
-            new Error('Response body ends before its compressed stream does'),
-          );
+          this.failDecoding(truncatedStreamError());
         }
       });
     }
@@ -673,9 +671,7 @@ function createDecoder(
         return new SniffingInflate();
       }
 
-      return isZlibHeader(firstChunk)
-        ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
-        : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
+      return createInflater(firstChunk);
     case 'br':
       return zlib.createBrotliDecompress({
         flush: zlib.constants.BROTLI_OPERATION_FLUSH,
@@ -844,9 +840,7 @@ class SniffingInflate extends InnerDecoderTransform<
     // layer ends before its compressed stream does, as an empty inner gzip, brotli or zstd
     // layer does.
     if (this.inner === undefined && this.pendingHead === undefined) {
-      callback(
-        new Error('Response body ends before its compressed stream does'),
-      );
+      callback(truncatedStreamError());
       return;
     }
 
@@ -870,11 +864,7 @@ class SniffingInflate extends InnerDecoderTransform<
 
   /** The inner inflater, zlib or raw by the first bytes it will be given. */
   private startInner(head: Buffer): zlib.Inflate | zlib.InflateRaw {
-    return this.attachInner(
-      isZlibHeader(head)
-        ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
-        : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH }),
-    );
+    return this.attachInner(createInflater(head));
   }
 
   /**
@@ -1135,6 +1125,17 @@ export function isDecodeFailure(error: Error): boolean {
 
 function trailingBytesError(): Error {
   return new Error('Response body has bytes after its compressed stream');
+}
+
+function truncatedStreamError(): Error {
+  return new Error('Response body ends before its compressed stream does');
+}
+
+/** A `deflate` inflater, zlib-wrapped or raw as the first bytes tell (`isZlibHeader`). */
+function createInflater(head: Buffer): zlib.Inflate | zlib.InflateRaw {
+  return isZlibHeader(head)
+    ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
+    : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
 }
 
 /**

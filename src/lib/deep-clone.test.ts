@@ -170,6 +170,69 @@ describe('deepClone', () => {
     });
   });
 
+  describe('errors', () => {
+    test('keeps message, stack, cause and prototype', () => {
+      const original = new Error('boom', { cause: { code: 1 } });
+      const cloned = deepClone(original);
+
+      expect(cloned).not.toBe(original);
+      expect(cloned).toBeInstanceOf(Error);
+      expect(cloned.message).toBe('boom');
+      expect(cloned.stack).toBe(original.stack);
+      expect(cloned.cause).toEqual({ code: 1 });
+      expect(cloned.cause).not.toBe(original.cause);
+      expect(Object.keys(cloned)).toEqual([]);
+    });
+
+    test("keeps a subclass's prototype and fields, and an AggregateError's errors", () => {
+      class CodedError extends Error {
+        public code = 'E_CODE';
+        public override name = 'CodedError';
+      }
+
+      const coded = deepClone(new CodedError('bad'));
+      const aggregate = deepClone(new AggregateError([new Error('a')], 'many'));
+
+      expect(coded).toBeInstanceOf(CodedError);
+      expect(coded.code).toBe('E_CODE');
+      expect(coded.message).toBe('bad');
+      expect(String(coded)).toBe('CodedError: bad');
+      expect(aggregate.errors[0]).toBeInstanceOf(Error);
+      expect((aggregate.errors[0] as Error).message).toBe('a');
+    });
+
+    test('a clone is a real error, a DOMException included, and clones again as one', () => {
+      const error = new RangeError('far');
+      const aborted = new DOMException('stopped', 'AbortError');
+
+      const twice = deepClone(deepClone(error));
+      const clonedAbort = deepClone(aborted);
+
+      expect(Object.prototype.toString.call(twice)).toBe('[object Error]');
+      expect(twice).toBeInstanceOf(RangeError);
+      expect(twice.message).toBe('far');
+      expect(clonedAbort).toBeInstanceOf(DOMException);
+      expect(clonedAbort.name).toBe('AbortError');
+      expect(clonedAbort.message).toBe('stopped');
+      expect(clonedAbort.code).toBe(DOMException.ABORT_ERR);
+      expect(String(clonedAbort)).toBe('AbortError: stopped');
+    });
+
+    test('keeps a circular cause, and clones an Error from another realm', async () => {
+      const looped = new Error('loop') as Error & { cause?: unknown };
+      looped.cause = looped;
+      const { runInNewContext } = await import('node:vm');
+      const foreign = runInNewContext('new TypeError("far")') as Error;
+
+      const clonedLoop = deepClone(looped);
+      const clonedForeign = deepClone(foreign);
+
+      expect(clonedLoop.cause).toBe(clonedLoop);
+      expect(clonedForeign.message).toBe('far');
+      expect(clonedForeign.name).toBe('TypeError');
+    });
+  });
+
   describe('objects', () => {
     test('should deep clone simple objects', () => {
       const original = { a: 1, b: 2, c: 3 };

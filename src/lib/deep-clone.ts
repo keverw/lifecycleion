@@ -3,13 +3,14 @@
  *
  * Creates a deep copy of a value, recursively cloning nested structures.
  * Handles most common data types including objects, arrays, dates, regexes,
- * Maps, Sets, and typed arrays.
+ * errors, Maps, Sets, and typed arrays.
  *
  * Note: Functions are returned by reference (not cloned). Circular references
  * are detected and handled to prevent infinite recursion.
  */
 
 import { defineEntry } from './internal/define-entry';
+import { isDOMExceptionInstance } from './internal/dom-exception';
 import {
   arrayBufferKindOf,
   hasBufferTagInChain,
@@ -182,6 +183,10 @@ function cloneInternal<T>(obj: T, state: CloneState): T {
     return remember(state.seen, obj, copyBuffer(obj, bufferKind));
   }
 
+  if (isError(obj)) {
+    return cloneError(obj, state) as T;
+  }
+
   // Handle plain objects
   const cloned = remember<Record<string, unknown>>(state.seen, obj, {});
 
@@ -251,6 +256,68 @@ function copyNamedArrayEntries(
       );
     }
   }
+}
+
+/**
+ * Whether `value` is an `Error` or a `DOMException`, told by its internal state - through
+ * `Error.isError`, from any realm (a `vm` context, an iframe), and the `DOMException`
+ * check, which Bun's `Error.isError` refuses - without reading anything of it, so a
+ * Proxy's traps are not run. A runtime without `Error.isError` tells an `Error` by
+ * `instanceof`, this realm's only.
+ */
+function isError(value: object): value is Error {
+  const isErrorSlot = (Error as { isError?: (value: unknown) => boolean })
+    .isError;
+
+  return (
+    (typeof isErrorSlot === 'function'
+      ? isErrorSlot(value)
+      : value instanceof Error) || isDOMExceptionInstance(value)
+  );
+}
+
+/**
+ * An `Error` cloned on its own prototype, so `instanceof` and a subclass's `name` hold:
+ * every own string-keyed property - `message`, `stack`, `cause`, an `AggregateError`'s
+ * `errors`, a subclass's `code` - read once and cloned, as enumerable as it was. A
+ * `stack` the engine serves through an accessor is copied as the text it reads as.
+ *
+ * Built on a real error - a `new Error()` emptied of its own properties, or for a
+ * `DOMException` a `new DOMException` of its message and name, whose getters read that
+ * state - so the clone is an error to `Error.isError` and `Object.prototype.toString`, and
+ * clones again as one. A subclass's private fields, and anything else its constructor sets
+ * up beyond own properties, are not there: its methods that read them throw on the clone.
+ */
+function cloneError(source: Error, state: CloneState): Error {
+  const base = isDOMExceptionInstance(source)
+    ? new DOMException(source.message, source.name)
+    : new Error();
+
+  for (const key of Reflect.ownKeys(base)) {
+    Reflect.deleteProperty(base, key);
+  }
+
+  Reflect.setPrototypeOf(base, Reflect.getPrototypeOf(source));
+  const cloned = remember<Error>(state.seen, source, base);
+  const record = source as unknown as Record<string, unknown>;
+
+  for (const key of Reflect.ownKeys(source)) {
+    if (typeof key !== 'string') {
+      continue;
+    }
+
+    const descriptor = Reflect.getOwnPropertyDescriptor(source, key);
+    Object.defineProperty(cloned, key, {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
+      value: cloneInternal(record[key], state),
+      writable: true,
+      enumerable: descriptor?.enumerable === true,
+      configurable: true,
+    } as PropertyDescriptor);
+  }
+
+  return cloned;
 }
 
 /**

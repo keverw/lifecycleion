@@ -12540,9 +12540,9 @@ test("an abandoned adapter's upload progress does not hold the next attempt's se
       timeout: 50,
       retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
     });
-    // The abandoned attempt is bodiless - one with a body is not retried (PR review round
-    // 59) - and is handed the progress hook because the caller asked for progress; the
-    // retry carries the body whose settle wait is watched.
+    // The abandoned attempt is bodiless - one with a body is not retried - and is handed
+    // the progress hook because the caller asked for progress; the retry carries the
+    // body whose settle wait is watched.
     client.addRequestInterceptor(
       (request) => ({ ...request, body: { a: 1 } }),
       { phases: ['retry'] },
