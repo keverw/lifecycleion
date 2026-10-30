@@ -3535,6 +3535,59 @@ describe('HTTPClient — retry', () => {
 
     expect(attempts.length).toBe(1); // retry disabled per-request
   });
+
+  test('a progress report that arrives after the next attempt began names the attempt it came from', async () => {
+    const uploadEvents: unknown[] = [];
+    const downloadEvents: unknown[] = [];
+    let callCount = 0;
+    let firstRequest: AdapterRequest | undefined;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        callCount++;
+
+        if (callCount === 1) {
+          // Answered at once, its body still going out: the rest of this attempt's
+          // progress arrives once the retry has been dispatched.
+          firstRequest = request;
+          return Promise.resolve({ status: 503, headers: {}, body: null });
+        }
+
+        firstRequest?.onUploadProgress?.({
+          loaded: 10,
+          total: 10,
+          progress: 1,
+        });
+        firstRequest?.onDownloadProgress?.({
+          loaded: 3,
+          total: 3,
+          progress: 1,
+        });
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    const res = await client
+      .put('https://example.com/upload')
+      .text('0123456789')
+      .onUploadProgress((event) => uploadEvents.push(event))
+      .onDownloadProgress((event) => downloadEvents.push(event))
+      .send();
+
+    expect(res.status).toBe(200);
+    expect(callCount).toBe(2);
+    expect(uploadEvents).toEqual([
+      { loaded: 10, total: 10, progress: 1, attemptNumber: 1 },
+    ]);
+    expect(downloadEvents).toEqual([
+      { loaded: 3, total: 3, progress: 1, attemptNumber: 1 },
+    ]);
+  });
 });
 
 describe('HTTPClient — cookies', () => {

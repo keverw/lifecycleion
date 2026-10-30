@@ -2585,11 +2585,14 @@ export class BaseHTTPClient {
     const allowNonIdempotentRetry =
       options.retryNonIdempotentMethods ??
       this._config.retryNonIdempotentMethods;
-    let attemptNumber = startAttempt - 1;
+    let previousAttemptNumber = startAttempt - 1;
     let isRetriesExhausted = false;
 
     while (true) {
-      attemptNumber++;
+      // Each attempt's own: a callback of this attempt that runs after the next has begun -
+      // an adapter's progress report for a body still going out beside a retry - reports
+      // the attempt it belongs to.
+      const attemptNumber = ++previousAttemptNumber;
       const isRetry = attemptNumber > startAttempt;
 
       let didEmitAttemptEnd = false;
