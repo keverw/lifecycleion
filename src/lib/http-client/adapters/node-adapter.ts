@@ -9,6 +9,7 @@ import { describeValue } from '../../internal/describe-value';
 import {
   defineHiddenTags,
   makeAbortError,
+  connectRefusal,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
@@ -539,9 +540,7 @@ export class NodeAdapter implements HTTPAdapter {
     }
 
     if (asciiUppercase(request.method) === 'CONNECT') {
-      throw optionRefusal(
-        'NodeAdapter does not open tunnels; a CONNECT request is not supported',
-      );
+      throw connectRefusal('NodeAdapter');
     }
 
     // Guarded once, at the boundary, so every call site below is covered - including the

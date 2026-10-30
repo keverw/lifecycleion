@@ -4,7 +4,7 @@ import {
   requestHeaderPairs,
   lowerCaseHeaderName,
 } from '../internal/header-utils';
-import { trimHTTPWhitespace } from '../../internal/ascii-text';
+import { asciiUppercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 import { defineEntry } from '../../internal/define-entry';
 import { isFormData } from '../internal/form-entries';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
@@ -13,6 +13,7 @@ import {
   knownBodyByteLength,
 } from '../internal/progress';
 import {
+  connectRefusal,
   makeAbortError,
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
@@ -84,6 +85,10 @@ export class XHRAdapter implements HTTPAdapter {
       requestURL,
       initialURL,
     } = readAdapterRequestFields(request);
+    if (asciiUppercase(method) === 'CONNECT') {
+      throw connectRefusal('XHRAdapter');
+    }
+
     // Resolved once, as the browser resolves it - against the document's base URL, or the
     // worker's `location` - with credentials withheld for another origin than the initial
     // URL's, and that one absolute URL is what is opened, what `didBrowserFollowRedirect`

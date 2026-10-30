@@ -3788,3 +3788,22 @@ describe('XHRAdapter - progress past the declared length', () => {
     expect(uploadEvents.every((e) => e.progress <= 1)).toBe(true);
   });
 });
+
+test('a CONNECT is refused as non-retryable before an XHR is opened', async () => {
+  const before = FakeXHR.instances.length;
+
+  const outcome = await new XHRAdapter()
+    .send({
+      requestURL: 'http://example.test/',
+      method: 'CONNECT',
+      headers: {},
+    })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+
+  expect(outcome).toBeInstanceOf(TypeError);
+  expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+  expect(FakeXHR.instances.length).toBe(before);
+});

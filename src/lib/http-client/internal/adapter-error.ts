@@ -131,6 +131,15 @@ export function isAbortError(error: unknown): error is Error {
   );
 }
 
+/** The refusal of a `CONNECT`, which asks for a tunnel no adapter here opens. Non-retryable. */
+export function connectRefusal(adapterName: string): TypeError {
+  const refusal = new TypeError(
+    `${adapterName} does not open tunnels; a CONNECT request is not supported`,
+  );
+  markNonRetryableAdapterError(refusal);
+  return refusal;
+}
+
 /**
  * Tag a terminal adapter configuration failure so `HTTPClient` reports it as a
  * non-retryable `adapter_error` rather than retrying it as a network error.

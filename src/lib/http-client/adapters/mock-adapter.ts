@@ -14,6 +14,7 @@ import {
 } from '../internal/plain-record';
 import { describeValue } from '../../internal/describe-value';
 import {
+  connectRefusal,
   makeAbortError,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
@@ -367,6 +368,10 @@ export class MockAdapter implements HTTPAdapter {
         'content-type',
         'multipart/form-data; boundary=----lifecycleion-mock-boundary',
       );
+    }
+
+    if (asciiUppercase(method) === 'CONNECT') {
+      throw connectRefusal('MockAdapter');
     }
 
     // --- 1. Pre-flight abort check ---

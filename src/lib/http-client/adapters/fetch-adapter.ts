@@ -56,6 +56,7 @@ import {
   typedArrayNameOf,
 } from '../../internal/binary-view';
 import { asciiLowercase } from '../../internal/ascii-text';
+import { BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES } from '../consts';
 
 export class FetchAdapter implements HTTPAdapter {
   constructor() {
@@ -98,6 +99,16 @@ export class FetchAdapter implements HTTPAdapter {
 
     if (typeof dispatchedURL !== 'string') {
       throw dispatchedURL;
+    }
+
+    // The Fetch Standard forbids these, but Bun's `fetch` sends a `CONNECT` or `TRACE`, so
+    // they are refused here, on every runtime, rather than left to it.
+    if (BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(asciiLowercase(method))) {
+      const refusal = new Error(
+        `[FetchAdapter] Cannot send a ${method} request: fetch refuses the CONNECT, TRACE and TRACK methods.`,
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
     }
 
     // A caller's `Content-Length` is left to `fetch`, which frames the body itself:

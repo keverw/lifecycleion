@@ -234,6 +234,7 @@
 - HTTP: a failure resolving a name or opening the socket, whatever its code, reads as a transport failure whatever the host or `socketPath` is called, rather than a permanent `495` for a name like `certificates.internal.corp`.
 - HTTP: a multipart form that lost entries after it was measured is refused before its closing delimiter is written.
 - HTTP: a caller's polyfilled or jsdom `AbortSignal` is listened to where the runtime's `AbortSignal.any` refuses it, as axios does, so `send()` runs the request rather than rejecting at setup.
+- HTTP: `FetchAdapter` refuses `CONNECT`, `TRACE` and `TRACK` itself, and `XHRAdapter` and `MockAdapter` refuse `CONNECT`, when driven directly; Bun's `fetch` sent `CONNECT` and `TRACE`.
 - HTTP: a `cancel()` no longer waits on a `redirect` or `retry` phase observer: `send()` answers as cancelled at once, so one that never settles cannot hold it up. That observer carries on by itself, and no later observer of the phase runs.
 - HTTP: a custom adapter's unusable `requestBodySettled`, or one reported for a bodiless hop, no longer wipes the upload failure an earlier redirect hop reported.
 - HTTP: `NodeAdapter` sends a `Uint8Array` subclass's real bytes when driven directly, rather than as many as its own `length` claims.

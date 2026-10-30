@@ -2638,6 +2638,29 @@ test('a body the mock refuses is not labelled JSON on a HEAD route or under a si
 });
 
 describe('MockAdapter - invalid route status and delayed abort', () => {
+  test('a CONNECT is refused as non-retryable, a route or none', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.on('CONNECT', '/x', () => ({ status: 200 }));
+    const progress: unknown[] = [];
+
+    const rejection = await adapter
+      .send(
+        makeAdapterRequest({
+          requestURL: '/x',
+          method: 'CONNECT',
+          onUploadProgress: (event) => progress.push(event),
+        }),
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(rejection).toBeInstanceOf(TypeError);
+    expect(rejection?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(progress).toEqual([]);
+  });
+
   test.each([
     ['transportError', 0],
     ['transportError', ''],

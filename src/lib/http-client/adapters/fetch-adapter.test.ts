@@ -513,6 +513,28 @@ describe('FetchAdapter', () => {
     expect(response.errorCause).toBe(failure);
   });
 
+  test.each(['CONNECT', 'connect', 'TRACE', 'trace', 'TRACK'])(
+    'a %s is refused as non-retryable before it is fetched',
+    async (method) => {
+      let calls = 0;
+      (globalThis as any).fetch = () => {
+        calls++;
+        return Promise.resolve(new Response('ok'));
+      };
+
+      const outcome = await new FetchAdapter()
+        .send({ requestURL: 'http://example.test/', method, headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(calls).toBe(0);
+    },
+  );
+
   test('a URL that is not http(s) is refused as non-retryable before it is fetched', async () => {
     let calls = 0;
     (globalThis as any).fetch = () => {
