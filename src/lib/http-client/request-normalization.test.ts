@@ -1079,6 +1079,28 @@ test('a misspelled config or request option is refused rather than read as absen
   expect(() => new NodeAdapter(null as never)).toThrow(
     'NodeAdapter config must be an object (got null)',
   );
+  // Built, it would fail every HTTPS request.
+  expect(() => new NodeAdapter({ ca: 5 } as never)).toThrow(
+    'NodeAdapter ca must be PEM text or bytes, or a list of them (got number)',
+  );
+  expect(() => new NodeAdapter({ ca: ['pem', { pem: 'x' }] } as never)).toThrow(
+    'NodeAdapter ca must be PEM text or bytes, or a list of them (got a plain object)',
+  );
+  expect(
+    () =>
+      new NodeAdapter({
+        mtls: { cert: 'c', key: 'k', ca: 7 },
+      } as never),
+  ).toThrow(
+    'NodeAdapter mtls.ca must be PEM text or bytes, or a list of them (got number)',
+  );
+  // What Bun takes as a CA - a `Bun.file()`, an `ArrayBuffer` - is let through.
+  expect(
+    () =>
+      new NodeAdapter({
+        ca: [new ArrayBuffer(4), new Blob(['pem']), Buffer.from('pem')],
+      } as never),
+  ).not.toThrow();
   expect(
     () =>
       new NodeAdapter({
@@ -15865,6 +15887,16 @@ test('a redirect-phase interceptor that edits the body in place changes the next
   // so the client may send its next request on it: each connection is read as a run of
   // requests.
   const received = new Map<string, Buffer>();
+  // Told when a request's whole body has arrived: with large socket buffers (macOS) the
+  // upload of `/start` can be taken whole while the server is not reading, so `/next` is
+  // sent - on a connection of its own - and answered before the server reads `/start`.
+  const arrivals = new Map<string, () => void>();
+  const arrived = (path: string): Promise<void> =>
+    received.has(path)
+      ? Promise.resolve()
+      : new Promise((resolve) => {
+          arrivals.set(path, resolve);
+        });
   const server = net.createServer((socket) => {
     let buffered = Buffer.alloc(0);
     let head: { path: string; length: number; start: number } | undefined;
@@ -15896,6 +15928,7 @@ test('a redirect-phase interceptor that edits the body in place changes the next
           return;
         }
         received.set(head.path, buffered.subarray(head.start, bodyEnd));
+        arrivals.get(head.path)?.();
         if (head.path !== '/start') {
           socket.end(
             'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok',
@@ -15936,6 +15969,7 @@ test('a redirect-phase interceptor that edits the body in place changes the next
     const formResponse = await client.post('/start').formData(form).send();
 
     expect(formResponse.status).toBe(200);
+    await arrived('/start');
     expect(received.get('/start')?.toString('latin1')).toContain('AAAA');
     expect(received.get('/start')?.toString('latin1')).not.toContain('BBBB');
     expect(received.get('/next')?.toString('latin1')).toContain('BBBB');
@@ -15947,6 +15981,7 @@ test('a redirect-phase interceptor that edits the body in place changes the next
     const bytesResponse = await client.post('/start').body(bytes).send();
 
     expect(bytesResponse.status).toBe(200);
+    await arrived('/start');
     expect(received.get('/start')?.subarray(bigPart).toString('latin1')).toBe(
       'AAAA',
     );

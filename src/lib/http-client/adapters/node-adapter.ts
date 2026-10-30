@@ -12,6 +12,7 @@ import {
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
+import { isPlainRecord } from '../internal/plain-record';
 import {
   isSignalAborted,
   isSignalAbortedQuietly,
@@ -4595,5 +4596,23 @@ function assertTrustAnchors(value: unknown, name: string): void {
     );
     markNonRetryableAdapterError(error);
     throw error;
+  }
+
+  // Text or an object that holds one - Node takes PEM text or bytes, and Bun a
+  // `Bun.file()`, an `ArrayBuffer` or a `String` too - or a list of them. A number, a
+  // boolean or a plain object (`{ pem }`, a loader's result) is a trust store on no
+  // runtime, and would build the adapter and fail every HTTPS request.
+  const isAnchor = (entry: unknown): boolean =>
+    typeof entry === 'string' ||
+    (typeof entry === 'object' && entry !== null && !isPlainRecord(entry));
+  const wrongEntry: unknown = Array.isArray(value)
+    ? (value as unknown[]).find((entry) => !isAnchor(entry))
+    : isAnchor(value)
+      ? undefined
+      : value;
+  if (wrongEntry !== undefined) {
+    throw optionRefusal(
+      `NodeAdapter ${name} must be PEM text or bytes, or a list of them (got ${isPlainRecord(wrongEntry) ? 'a plain object' : describeValue(wrongEntry)})`,
+    );
   }
 }

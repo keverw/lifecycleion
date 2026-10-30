@@ -10557,6 +10557,45 @@ describe('NodeAdapter - unsupported bodies and per-request option reads', () => 
       spy.mockRestore();
     }
   });
+
+  test('a ca set later that is no trust store is refused on the request that reads it', async () => {
+    const config: NodeAdapterConfig = {};
+    const adapter = new NodeAdapter(config);
+    let captured: https.RequestOptions | undefined;
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured = options;
+
+      return failingRequest();
+    }) as unknown as typeof https.request);
+
+    try {
+      (config as Record<string, unknown>).ca = { pem: 'x' };
+      let refusal: unknown;
+      try {
+        await adapter.send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+        });
+      } catch (error) {
+        refusal = error;
+      }
+
+      expect((refusal as Error).message).toBe(
+        'NodeAdapter ca must be PEM text or bytes, or a list of them (got a plain object)',
+      );
+      expect(
+        (refusal as Record<string, unknown>)[
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+        ],
+      ).toBe(true);
+      expect(captured).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('NodeAdapter - request body bytes from another realm', () => {
