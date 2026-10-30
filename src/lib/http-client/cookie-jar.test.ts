@@ -2136,7 +2136,7 @@ describe('CookieJar', () => {
       },
     );
 
-    test('a wider-path cookie from http cannot shadow a path-scoped Secure cookie', () => {
+    test('a wider-path cookie from http is stored beside a path-scoped Secure cookie, as browsers store it', () => {
       jar.parseSetCookieHeader(
         'scoped=real; Secure; Path=/admin',
         'https://example.com/admin',
@@ -2148,7 +2148,7 @@ describe('CookieJar', () => {
           .getCookiesFor('https://example.com/admin')
           .filter((c) => c.name === 'scoped')
           .map((c) => c.value),
-      ).toEqual(['real']);
+      ).toEqual(['real', 'other']);
     });
 
     test("a non-Secure cookie outside the Secure cookie's domain tree is stored", () => {

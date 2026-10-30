@@ -1,6 +1,9 @@
 // cspell:ignore résumé
 import { EventEmitter } from 'node:events';
 import * as vm from 'node:vm';
+import { mkdtempSync, openAsBlob, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test, spyOn } from 'bun:test';
 import {
   calculateMultipartFormDataSize,
@@ -1984,5 +1987,35 @@ test('a form is read through the intrinsic entries, not one it declares', async 
     expect(body).not.toContain('reported');
     expect(headers['content-length']).toBe(String(getBody().length));
     expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+  }
+});
+
+test('a file part on Bun is written under the last segment of its name, never a path', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lc-part-name-'));
+  const path = join(directory, 'report.txt');
+  writeFileSync(path, 'hello');
+  try {
+    const form = new FormData();
+    form.append('named', Bun.file(path), 'given.txt');
+    form.append('fromNode', await openAsBlob(path));
+    form.append('plain', new File(['x'], 'dir/kept.txt'));
+    form.append('endsInSlash', new File(['x'], 'dir/'));
+    form.append('backslash', new File(['x'], 'a\\b.txt'));
+
+    const { req, getBody } = makeCapture();
+    await serializeMultipartFormData(form, req, generateMultipartBoundary());
+    const written = getBody().toString();
+
+    expect(written).toContain('name="named"; filename="report.txt"');
+    expect(written).toContain('name="fromNode"; filename="report.txt"');
+    // A form's entries do not tell this `File` from one backed by a path.
+    expect(written).toContain('name="plain"; filename="kept.txt"');
+    expect(written).toContain('name="endsInSlash"; filename="dir/"');
+    if (process.platform !== 'win32') {
+      expect(written).toContain('name="backslash"; filename="a\\b.txt"');
+    }
+    expect(written).not.toContain(directory);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });

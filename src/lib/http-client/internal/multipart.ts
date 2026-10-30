@@ -42,7 +42,7 @@
 import { types } from 'node:util';
 import { plainBytesView } from '../../internal/binary-view';
 import { markNonRetryableAdapterError } from './adapter-error';
-import { formEntries } from './form-entries';
+import { formEntries, bunFilePartName } from './form-entries';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 import {
@@ -103,7 +103,7 @@ export function sanitizeContentType(raw: string): string {
 function formatFilePartHeaders(fieldName: string, value: unknown): string {
   // A `File` named `''` is sent as `filename=""`, as browsers send it (a server reads it as
   // no file chosen); only a part with no name at all is `blob`.
-  const partName: unknown = (value as File).name;
+  const partName: unknown = bunFilePartName(value) ?? (value as File).name;
   const filename = typeof partName === 'string' ? partName : 'blob';
   const type: unknown = (value as Blob).type;
 

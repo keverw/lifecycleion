@@ -880,27 +880,32 @@ export class BaseHTTPClient {
       dispatches: 0,
     };
 
+    const adapterType = this._adapterType;
+
+    // In order of what wins, the request's headers last, as axios and `fetch` have it: a
+    // `user-agent` the caller sets on a request wins, and a null one removes it, as for
+    // any other default. `userAgent` is refused at construction where a browser would not
+    // send it.
+    const builtInUserAgent =
+      adapterType === 'node' ||
+      adapterType === 'mock' ||
+      (adapterType === 'fetch' && !this._isBrowserRuntime)
+        ? { 'user-agent': DEFAULT_USER_AGENT }
+        : undefined;
+    const configuredUserAgent = this._config.userAgent
+      ? { 'user-agent': this._config.userAgent }
+      : undefined;
+
     // Merge headers
     const baseHeaders = mergeHeaders(
+      builtInUserAgent,
       this._config.defaultHeaders,
+      configuredUserAgent,
       options.headers,
     );
 
     if (this._config.includeRequestID) {
       baseHeaders[DEFAULT_REQUEST_ID_HEADER] = requestID;
-    }
-
-    const adapterType = this._adapterType;
-
-    // Refused at construction where a browser would not send it, so here it is sent.
-    if (this._config.userAgent) {
-      baseHeaders['user-agent'] = this._config.userAgent;
-    } else if (
-      adapterType === 'node' ||
-      adapterType === 'mock' ||
-      (adapterType === 'fetch' && !this._isBrowserRuntime)
-    ) {
-      baseHeaders['user-agent'] = DEFAULT_USER_AGENT;
     }
 
     // Build intercepted request context. The body is the builder's own copy, taken when
@@ -5263,7 +5268,7 @@ export class BaseHTTPClient {
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
     // Jar cookies and the attempt header (x-local-client-request-attempt) are not added
     // here - they are applied at dispatch time, and no attempt went out. The request ID
-    // header and the default user-agent are already on it: they are set before the
+    // header and the client's user-agent are already on it: they are set before the
     // interceptors run. A request that already carries them (a redirect
     // hop's, built from the previous hop's sent headers, or a retry interceptor's input)
     // keeps them, as it would have sent them. Unsupported body types are caught

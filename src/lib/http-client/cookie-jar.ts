@@ -1769,17 +1769,14 @@ export class CookieJar {
   }
 
   /**
-   * Whether the jar already holds a Secure cookie named `name` whose scope meets a new
-   * cookie stored for `domain` / `path` - RFC 6265bis §5.7 step 21: the stored cookie's
-   * domain domain-matches the new cookie's domain *or vice versa*, and either path
-   * path-matches the other. The RFC asks only that the new path path-match the stored
-   * one; the reverse is refused too, on purpose and stricter than browsers: a `/`
-   * cookie planted beside a Secure `/admin` one is sent with it, and a server that reads
-   * the last of two same-named cookies reads the plant. Both directions, and without
-   * regard to `hostOnly`: a
-   * host-only Secure cookie on `app.example.com` is shadowed by a `Domain=example.com`
-   * cookie planted from `http://example.com`, which the send path would deliver beside
-   * it, so the wider plant must be refused as much as the narrower one.
+   * Whether the jar already holds a Secure cookie named `name` whose scope covers a new
+   * cookie stored for `domain` / `path` - RFC 6265bis §5.7 step 21, as browsers apply it:
+   * the stored cookie's domain domain-matches the new cookie's domain *or vice versa*, and
+   * the new cookie's path path-matches the stored one's. A wider path is stored: a `/`
+   * cookie beside a Secure `/admin` one is sent after it. The domains match either way,
+   * without regard to `hostOnly`: a host-only Secure cookie on `app.example.com` is
+   * shadowed by a `Domain=example.com` cookie planted from `http://example.com`, which the
+   * send path would deliver beside it, so the wider plant is refused as the narrower is.
    */
   private wouldShadowSecureCookie(
     name: string,
@@ -1821,11 +1818,7 @@ export class CookieJar {
           this.domainMatches(preparedDomain, stored.preparedDomain) ||
           this.domainMatches(stored.preparedDomain, preparedDomain);
 
-        if (
-          isDomainMatch &&
-          (this.pathMatches(path, storedPath) ||
-            this.pathMatches(storedPath, path))
-        ) {
+        if (isDomainMatch && this.pathMatches(path, storedPath)) {
           return true;
         }
       }

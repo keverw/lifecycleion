@@ -7,6 +7,9 @@ import {
   spyOn,
   test,
 } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { HTTPClient } from './http-client';
 import {
   muteConsoleError,
@@ -10574,6 +10577,92 @@ describe('observers and a request that ends without them', () => {
       expect(sentHeaders['user-agent']).toBe('mine/1');
     } finally {
       (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = original;
+    }
+  });
+});
+
+describe('user-agent header', () => {
+  const sentUserAgent = async (
+    config: Partial<HTTPClientConfig>,
+    headers?: Record<string, string | null>,
+  ) => {
+    let sent: Record<string, unknown> = {};
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: (request: { headers: Record<string, unknown> }) => {
+          sent = request.headers;
+          return Promise.resolve({ status: 200, headers: {}, body: null });
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+      ...config,
+    });
+
+    await client
+      .get('/')
+      .headers(headers ?? {})
+      .send();
+
+    return sent['user-agent'];
+  };
+
+  test('the default, then defaultHeaders, then userAgent, then a request, each win over the last', async () => {
+    expect(await sentUserAgent({})).toBe(DEFAULT_USER_AGENT);
+    expect(
+      await sentUserAgent({ defaultHeaders: { 'User-Agent': 'default/1' } }),
+    ).toBe('default/1');
+    expect(
+      await sentUserAgent({
+        userAgent: 'config/1',
+        defaultHeaders: { 'User-Agent': 'default/1' },
+      }),
+    ).toBe('config/1');
+    expect(
+      await sentUserAgent(
+        {
+          userAgent: 'config/1',
+          defaultHeaders: { 'User-Agent': 'default/1' },
+        },
+        { 'USER-AGENT': 'request/1' },
+      ),
+    ).toBe('request/1');
+  });
+
+  test('a null one on a request sends none', async () => {
+    expect(
+      await sentUserAgent({ userAgent: 'config/1' }, { 'user-agent': null }),
+    ).toBeUndefined();
+  });
+});
+
+describe('a file backed by a path on Bun', () => {
+  test('the form copy a fetch encodes names it by the last segment of its path', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'lc-part-name-'));
+    const path = join(directory, 'report.txt');
+    writeFileSync(path, 'hello');
+    try {
+      let sentBody: unknown;
+      const client = new HTTPClient({
+        adapter: {
+          getType: () => 'mock',
+          send: (request: { body: unknown }) => {
+            sentBody = request.body;
+            return Promise.resolve({ status: 200, headers: {}, body: null });
+          },
+        } as unknown as HTTPAdapter,
+        baseURL: 'http://a.test',
+      });
+      const form = new FormData();
+      form.append('upload', Bun.file(path));
+
+      await client.post('/').formData(form).send();
+
+      const encoded = await new Response(sentBody as FormData).text();
+      expect(encoded).toContain('filename="report.txt"');
+      expect(encoded).not.toContain(directory);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 });
