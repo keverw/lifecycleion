@@ -1847,7 +1847,6 @@ export class NodeAdapter implements HTTPAdapter {
                   isResponseComplete: () => res.complete,
                   failOnSocketError: (error: Error): void => {
                     setup.failOnSocketError = undefined;
-                    abortStream();
                     // Guarded, because this one runs from inside `req.on('error', ...)`.
                     // Every other destroy on this path is in the request's own promise
                     // chain, where a throw is rejected into it; a throw out of an event
@@ -1875,6 +1874,9 @@ export class NodeAdapter implements HTTPAdapter {
                       streamErrorCode: 'stream_response_error',
                       errorCause: error,
                     });
+                    // After the settle: a cleanup listener the factory added that cancels
+                    // the request cannot stand in for the failure.
+                    abortStream();
                   },
                 };
 
@@ -1960,9 +1962,8 @@ export class NodeAdapter implements HTTPAdapter {
                 // the request's own signal is not one that landed mid-setup.
                 pendingStreamSetup = undefined;
                 // Factory threw — non-retryable setup error, equivalent to an
-                // interceptor throw. Abort the stream signal so any partial cleanup
-                // listeners run, destroy the request, and propagate as a setup failure.
-                abortStream();
+                // interceptor throw. Destroy the request, propagate it as a setup failure,
+                // then abort the stream signal so any partial cleanup listeners run.
                 tearDownAfterResponse();
                 failRequest(
                   markStreamFactoryError(error, req, request.headers, {
@@ -1970,6 +1971,9 @@ export class NodeAdapter implements HTTPAdapter {
                     headers,
                   }),
                 );
+                // After the reject: a cleanup listener that cancels the request cannot
+                // stand in for the factory's error.
+                abortStream();
                 return;
               } finally {
                 pendingStreamSetup = undefined;
@@ -1996,15 +2000,15 @@ export class NodeAdapter implements HTTPAdapter {
               }
 
               if (writable === null || isCancelReturn) {
-                // Factory declined to stream — user-initiated cancel. Fire the stream
-                // signal so any cleanup listeners wired in the factory run, then throw
-                // AbortError so the client's cancel path takes over (isCancelled: true).
+                // Factory declined to stream — user-initiated cancel. Reject with an
+                // AbortError so the client's cancel path takes over (isCancelled: true),
+                // then fire the stream signal so any cleanup listeners wired in the
+                // factory run.
                 const cancelReason =
                   writable !== null
                     ? readObjectMember(writable, 'reason')
                     : undefined;
 
-                abortStream();
                 tearDownAfterResponse();
                 const abortErr = makeAbortError(
                   'Request cancelled by streamResponse factory',
@@ -2018,6 +2022,8 @@ export class NodeAdapter implements HTTPAdapter {
                   [STREAM_ABORT_HEADERS_KEY]: headers,
                 });
                 failRequest(abortErr);
+                // After the reject, as for a factory that threw.
+                abortStream();
                 return;
               }
 
@@ -2064,8 +2070,6 @@ export class NodeAdapter implements HTTPAdapter {
                 // isStreamError rather than throwing/retrying.
                 //   - The stream signal fires so factory cleanup listeners run
                 //   - Non-retryable once streaming has started
-                abortStream();
-                destroyWritableQuietly(sink);
                 tearDownAfterResponse();
                 settleResponse({
                   status,
@@ -2075,6 +2079,10 @@ export class NodeAdapter implements HTTPAdapter {
                   streamErrorCode: streamResult.code,
                   errorCause: streamResult.cause,
                 });
+                // After the settle, as every teardown that runs caller code is: a cleanup
+                // listener that cancels the request cannot stand in for the failure.
+                abortStream();
+                destroyWritableQuietly(sink);
               }
 
               return;

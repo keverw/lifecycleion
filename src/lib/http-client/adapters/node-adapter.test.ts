@@ -692,6 +692,101 @@ describe('post-header stream aborts report why the retry stopped', () => {
 });
 
 describe('NodeAdapter streamResponse factory failures', () => {
+  test('a stream signal listener that cancels the request does not replace the outcome it was fired for', async () => {
+    // The factory's signal fires on a stream failure, and a cleanup listener on it may
+    // cancel the request's own controller. Fired before the request settled, that abort
+    // would answer first, as a bare `AbortError`, and the real outcome would be lost.
+    const net = await import('node:net');
+
+    const server = net.createServer((socket) => {
+      socket.on('data', (data: Buffer) => {
+        if (socket.writableEnded) {
+          return;
+        }
+
+        if (data.toString().startsWith('GET /cut')) {
+          // Headers and part of the body, then the connection is gone.
+          socket.write(
+            'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 100\r\nConnection: close\r\n\r\nbody',
+          );
+          setTimeout(() => socket.destroy(), 10);
+          return;
+        }
+
+        socket.end(
+          'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody',
+        );
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const send = (
+      path: string,
+      factory: (signal: AbortSignal) => unknown,
+    ): Promise<AdapterResponse> => {
+      const controller = new AbortController();
+
+      return new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}${path}`,
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+        streamResponse: (_info, context) => {
+          context.signal.addEventListener('abort', () => controller.abort());
+          return factory(context.signal) as WritableLike;
+        },
+      });
+    };
+
+    try {
+      const writeFailure = await send(
+        '/data',
+        () =>
+          new Writable({
+            write(_chunk, _encoding, callback): void {
+              callback(new Error('disk full'));
+            },
+          }),
+      );
+      expect(writeFailure.status).toBe(200);
+      expect(writeFailure.isStreamError).toBe(true);
+      expect(writeFailure.streamErrorCode).toBe('stream_write_error');
+
+      const thrown = await send('/data', () => {
+        throw new Error('factory failure');
+      }).catch((error: unknown) => error);
+      expect((thrown as Error).message).toBe('factory failure');
+
+      const declined = await send('/data', () => ({
+        cancel: true,
+        reason: 'not wanted',
+      })).catch((error: unknown) => error);
+      expect((declined as Error).message).toBe(
+        'Request cancelled by streamResponse factory',
+      );
+
+      // A connection lost while the factory is still opening its sink.
+      const cut = await send(
+        '/cut',
+        (signal) =>
+          new Promise<WritableLike | null>((resolve) => {
+            signal.addEventListener('abort', () => resolve(null));
+          }),
+      );
+      expect(cut.status).toBe(200);
+      expect(cut.isStreamError).toBe(true);
+      expect(cut.streamErrorCode).toBe('stream_response_error');
+    } finally {
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+
   test("the factory is called on the caller's request, not on the adapter's copy", async () => {
     // `send()` reads every member of the request once, into a plain object of its own.
     // Calling `streamResponse` off that copy would hand a class-instance request's method
