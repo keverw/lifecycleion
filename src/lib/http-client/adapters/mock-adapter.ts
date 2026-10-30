@@ -1,4 +1,5 @@
 import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
+import { isNullish } from '../../internal/is-nullish';
 import { isHTTPToken } from '../internal/http-token';
 import { isHeaderSafeCookieText } from '../internal/cookie-text';
 import { formEntries, isFormData } from '../internal/form-entries';
@@ -288,6 +289,18 @@ export class MockAdapter implements HTTPAdapter {
     // Preserve inherited handlers, their receiver, and live config updates.
     // Validate now and again when a response selects the current default delay.
     this.config = config ?? {};
+    // A function or nothing: anything else would fail each route error as a reported
+    // `onHandlerError` failure and a 500, rather than once, here. An own data value only,
+    // read by descriptor: a getter is read when a route fails, as the config is live.
+    const onHandlerError: unknown = Object.getOwnPropertyDescriptor(
+      this.config,
+      'onHandlerError',
+    )?.value;
+    if (!isNullish(onHandlerError) && typeof onHandlerError !== 'function') {
+      throw new TypeError(
+        `MockAdapter onHandlerError must be a function (got ${describeValue(onHandlerError)})`,
+      );
+    }
     resolveTimeoutMS(this.config.defaultDelay, 0, 'MockAdapter defaultDelay');
 
     this.router = Router({

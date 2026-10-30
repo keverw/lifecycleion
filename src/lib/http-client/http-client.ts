@@ -426,6 +426,20 @@ export class BaseHTTPClient {
     );
 
     this._clientID = generateID('ulid');
+    const adapterCandidate: unknown = snapshot.adapter;
+    // An adapter by its two methods, said as the other options are, rather than as the
+    // engine's `getType is not a function` from the call below or `send` on the first
+    // request.
+    if (
+      !isNullish(adapterCandidate) &&
+      (typeof adapterCandidate !== 'object' ||
+        typeof readObjectMember(adapterCandidate, 'getType') !== 'function' ||
+        typeof readObjectMember(adapterCandidate, 'send') !== 'function')
+    ) {
+      throw new TypeError(
+        `HTTPClient adapter must be an object with getType() and send() methods (got ${describeValue(adapterCandidate)})`,
+      );
+    }
     this._adapter = snapshot.adapter ?? new FetchAdapter();
     const adapterType: unknown =
       internal.inheritedAdapter?.adapter === this._adapter
