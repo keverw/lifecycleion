@@ -31,8 +31,8 @@
  *
  * File/blob parts are read chunk-by-chunk via the Web Streams API reader (a
  * WHATWG standard — available in browsers, Node 18+, and Bun) so large files
- * are never fully buffered in memory. String fields are already in memory so
- * they are written in one shot.
+ * are never fully buffered in memory. String fields are already in memory, and
+ * are written in the same slices, so a large one reports progress as it goes.
  *
  * The functions accept a RequestBodyWritable instead of a concrete
  * http.ClientRequest so they can be tested and reused without a live socket.
@@ -263,8 +263,9 @@ export async function serializeMultipartFormData(
   const overrunMessage = (written: number, refused: number): string =>
     `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(written)} bytes written and a further ${String(refused)} refused, with ${String(closingBytes)} kept for the closing delimiter`;
 
-  // The write itself, unchecked: through `write` below for every part, and directly for
-  // the closing delimiter, which always fits - every part's write was held to
+  // The write itself, unchecked: through `write` below for a file part's bytes, through
+  // `writePartHead` for each part's head once it is held to `partsBudget` as a whole, and
+  // directly for the closing delimiter, which always fits - every part's write was held to
   // `partsBudget`, so at least `closingBytes` remain.
   const writeToRequest = (data: string | Buffer | Uint8Array): Promise<void> =>
     // Bytes counted, and progress reported, only once the writable has accepted them: a
@@ -295,6 +296,41 @@ export async function serializeMultipartFormData(
         )
       : writeToRequest(data);
 
+  // A part's head - a string field's whole part, or a file part's headers - held to
+  // `partsBudget` as a whole, so none of it goes out when it does not fit, then written in
+  // the slices a file's bytes are (see below): a large text field written at once would
+  // report no progress until all of it was accepted, and the stall watchdog, which reads
+  // that progress, would destroy an upload the server had acked early and was still
+  // reading. One that fits in a slice - every file part's headers, most fields - is one
+  // write, as any other part's write is.
+  const writePartHead = (partHead: string): Promise<void> => {
+    const bytes = Buffer.from(partHead);
+
+    if (uploadedBytes + bytes.byteLength > partsBudget) {
+      return Promise.reject(
+        sourceMismatch(overrunMessage(uploadedBytes, bytes.byteLength)),
+      );
+    }
+
+    return bytes.byteLength <= REQUEST_BODY_CHUNK_SIZE
+      ? writeToRequest(bytes)
+      : writeInSlices(bytes);
+  };
+
+  // A part head larger than a slice, written slice by slice once `writePartHead` has held
+  // it to the budget as a whole.
+  const writeInSlices = async (bytes: Buffer): Promise<void> => {
+    for (
+      let offset = 0;
+      offset < bytes.byteLength && !req.destroyed;
+      offset += REQUEST_BODY_CHUNK_SIZE
+    ) {
+      await writeToRequest(
+        bytes.subarray(offset, offset + REQUEST_BODY_CHUNK_SIZE),
+      );
+    }
+  };
+
   // Read again, and live: a form changed after the sizing pass is caught against the
   // measured sizes below.
   for (const [name, value] of formEntries(formData)) {
@@ -322,7 +358,7 @@ export async function serializeMultipartFormData(
 
     // Simple field: one header, blank line, then the field value. File/blob field:
     // multipart headers first, then the binary payload below.
-    await write(partHead);
+    await writePartHead(partHead);
 
     if (typeof value !== 'string') {
       // Compare against the sizing pass, even if the source's size later changes.

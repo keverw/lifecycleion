@@ -1568,6 +1568,35 @@ describe('source chunks the writing pass reads', () => {
     expect(getBody().includes(Buffer.from(source))).toBe(true);
   });
 
+  test('a large text field is written in REQUEST_BODY_CHUNK_SIZE slices, as a file is', async () => {
+    // Written as one `req.write`, a 16 MiB text field reported no progress until all of
+    // it was accepted, and the stall watchdog destroyed an upload the server had acked
+    // early and was still reading.
+    const value = 'é'.repeat(REQUEST_BODY_CHUNK_SIZE) + 'tail';
+    const fd = new FormData();
+    fd.append('text', value);
+
+    const { req, writes, getBody, headers } = makeCapture();
+    const progress: number[] = [];
+
+    await serializeMultipartFormData(
+      fd,
+      req,
+      generateMultipartBoundary(),
+      (e) => {
+        progress.push(e.loaded);
+      },
+    );
+
+    expect(
+      writes.every((write) => write.data.length <= REQUEST_BODY_CHUNK_SIZE),
+    ).toBe(true);
+    // The value's UTF-8 bytes are two chunks' worth and more.
+    expect(progress.length).toBeGreaterThan(3);
+    expect(getBody().includes(Buffer.from(value))).toBe(true);
+    expect(getBody().length).toBe(Number(headers['content-length']));
+  });
+
   test('a chunk made in another realm is written as the bytes it is', async () => {
     // `instanceof Uint8Array` is false for bytes from another realm - a `vm` context, or
     // Jest's node environment, whose `Blob.stream()` chunks come from the host - and the
