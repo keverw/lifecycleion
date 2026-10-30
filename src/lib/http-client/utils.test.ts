@@ -297,6 +297,35 @@ describe('stripCrossOriginURLCredentials', () => {
 });
 
 describe('URL userinfo removal', () => {
+  test('a URL the parser refuses has the userinfo of its authority cut as written', () => {
+    // A `Location` with a port out of range or a broken IPv6 literal is still recorded
+    // in the redirect history and reported, so its credentials must not be.
+    // The `@` is kept, so the host after it reads as before and is still refused.
+    expect(stripURLCredentials('https://admin:secret@b.test:99999/x')).toBe(
+      'https://@b.test:99999/x',
+    );
+    expect(stripURLCredentials('https://a:b@c@[bad/x?q=1#f')).toBe(
+      'https://@[bad/x?q=1#f',
+    );
+    expect(stripURLCredentials('HTTPS:\\\\u:p@[bad\\x')).toBe(
+      'HTTPS:\\\\@[bad\\x',
+    );
+    // Cut with the `@`, these would read as `https://evil.test/x`.
+    for (const location of [
+      'https://u:p@/evil.test/x',
+      'https://u:p@\\evil.test/x',
+    ]) {
+      const stripped = stripURLCredentials(location);
+      expect(stripped).not.toContain('u:p');
+      expect(() => new URL(stripped)).toThrow();
+    }
+    // An `@` outside the authority, or no authority at all, is left alone.
+    expect(stripURLCredentials('https://b.test:99999/x?u=a@b')).toBe(
+      'https://b.test:99999/x?u=a@b',
+    );
+    expect(stripURLCredentials('not a url @x')).toBe('not a url @x');
+  });
+
   test('every userinfo remover keeps an absolute URL absolute and a network-path reference in its network-path form', () => {
     const cases: Array<[string, string]> = [
       [stripURLCredentials('https://u:p@a.test/x?q#h'), 'https://a.test/x?q#h'],

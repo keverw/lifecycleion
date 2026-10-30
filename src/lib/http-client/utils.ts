@@ -314,11 +314,13 @@ export function isCrossOrigin(
  * remote server, so a `Location` carrying credentials must not be able to authenticate
  * this client to a host the caller never named - see `_sanitizeRedirectRequest`.
  *
- * A string that does not parse is returned unchanged: there is no userinfo to find in it,
- * and this is on the redirect path, which already tolerates a `Location` it cannot parse.
+ * A string that does not parse - a `Location` with a port out of range, a broken IPv6
+ * literal - has the userinfo cut from its authority as written (see
+ * {@link withoutTextualUserinfo}): it is still recorded in `redirectHistory` and reported
+ * as the hop's URL, and nothing is sent to it.
  *
  * @param url - The URL to strip.
- * @returns The URL without userinfo, or `url` unchanged when it cannot be parsed.
+ * @returns The URL without userinfo.
  */
 export function stripURLCredentials(url: string): string {
   try {
@@ -330,7 +332,40 @@ export function stripURLCredentials(url: string): string {
 
     return withoutUserinfo(parsed, false);
   } catch {
+    return withoutTextualUserinfo(url);
+  }
+}
+
+/**
+ * `url` with the userinfo of its authority cut out as the text reads, for a string the URL
+ * parser refuses: everything after `//` (or `\\`, as the parser reads a special scheme's)
+ * up to the last `@` before the authority ends at `/`, `\`, `?` or `#`. The `@` itself is
+ * kept, so the host after it is read exactly as before and the string is still refused:
+ * cut with it, `https://u:p@/evil.test/x` would become `https:///evil.test/x`, which the
+ * parser reads as `https://evil.test/x`. Unchanged when it has no authority or no `@` in
+ * it, or, as a last guard, when the cut would parse.
+ */
+function withoutTextualUserinfo(url: string): string {
+  const authority = /^(\s*(?:[a-z][a-z\d+.-]*:)?[/\\]{2})([^/\\?#]*)/i.exec(
+    url,
+  );
+  if (authority === null) {
     return url;
+  }
+
+  const [whole, prefix, host] = authority;
+  const at = host.lastIndexOf('@');
+  if (at === -1) {
+    return url;
+  }
+
+  const cut = prefix + host.slice(at) + url.slice(whole.length);
+
+  try {
+    new URL(cut);
+    return url;
+  } catch {
+    return cut;
   }
 }
 

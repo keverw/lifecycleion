@@ -9915,6 +9915,139 @@ test('a cookie jar that throws on a stream aborted after headers ends as the jar
   }
 });
 
+describe('a redirect hop the cookie jar fails before it goes out', () => {
+  test("is handed to the error observers without the previous request's credentials", async () => {
+    class FailingJar extends CookieJar {
+      public override getCookieHeaderString(url: string): string {
+        if (url.includes('b.test')) {
+          throw new Error('jar down');
+        }
+        return super.getCookieHeaderString(url);
+      }
+    }
+
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> => {
+        sends++;
+        return Promise.resolve({
+          status: 307,
+          headers: { location: 'https://b.test/x' },
+          body: null,
+        });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      cookieJar: new FailingJar(),
+    });
+    const observed: Array<{ url: string; headers: Record<string, unknown> }> =
+      [];
+    client.addErrorObserver(
+      (_error, request) => {
+        observed.push({ url: request.requestURL, headers: request.headers });
+      },
+      { hosts: ['b.test'] },
+    );
+
+    const builder = client
+      .post('https://a.test/start')
+      .headers({ authorization: 'Bearer secret-for-a', 'x-api-key': 'k-a' })
+      .json({ ok: true });
+    await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(sends).toBe(1);
+    expect(observed).toHaveLength(1);
+    expect(observed[0].url).toBe('https://b.test/x');
+    expect(observed[0].headers).not.toHaveProperty('authorization');
+    expect(observed[0].headers).not.toHaveProperty('x-api-key');
+  });
+
+  test("rewritten by a redirect interceptor to another origin, is reported without that URL's userinfo", async () => {
+    class FailingJar extends CookieJar {
+      public override getCookieHeaderString(url: string): string {
+        if (url.includes('c.test')) {
+          throw new Error('jar down');
+        }
+        return super.getCookieHeaderString(url);
+      }
+    }
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: 'https://b.test/x' },
+          body: null,
+        }),
+    };
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      cookieJar: new FailingJar(),
+    });
+    client.addRequestInterceptor(
+      (request) => ({ ...request, requestURL: 'https://u:p@c.test/x' }),
+      { phases: ['redirect'] },
+    );
+    const observedURLs: string[] = [];
+    client.addErrorObserver((_error, request) => {
+      observedURLs.push(request.requestURL);
+    });
+
+    const builder = client.get('https://a.test/start');
+    const response = await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(response.requestURL).toBe('https://c.test/x');
+    expect(builder.error?.requestURL).toBe('https://c.test/x');
+    expect(observedURLs).toEqual(['https://c.test/x']);
+  });
+
+  test('to the same origin, is reported without the Cookie the jar built for the previous URL', async () => {
+    class FailingJar extends CookieJar {
+      public override getCookieHeaderString(url: string): string {
+        if (url.includes('/public')) {
+          throw new Error('jar down');
+        }
+        return super.getCookieHeaderString(url);
+      }
+    }
+
+    const jar = new FailingJar();
+    jar.parseSetCookieHeader('admin=1; Path=/admin', 'https://a.test/admin');
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: '/public' },
+          body: null,
+        }),
+    };
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      cookieJar: jar,
+    });
+    const observed: Array<Record<string, unknown>> = [];
+    client.addErrorObserver((_error, request) => {
+      observed.push(request.headers);
+    });
+
+    const builder = client.get('https://a.test/admin/x');
+    await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).not.toHaveProperty('cookie');
+  });
+});
+
 describe('a cancel or timeout wins over a cookie jar that throws', () => {
   function throwingJar(failure: unknown = new Error('jar refused')): {
     jar: CookieJar;

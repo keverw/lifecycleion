@@ -1751,7 +1751,7 @@ export class BaseHTTPClient {
               // The target, as the other failures before the hop went out report it - to
               // the error observers too, so a host filter agrees with the response.
               observerRequest = this._bestEffortAttemptRequestFromPending(
-                pendingRedirectRequest,
+                this._unsentRedirectRequest(pendingRedirectRequest, hopFromURL),
                 attemptLimits,
                 requestID,
               );
@@ -2011,8 +2011,15 @@ export class BaseHTTPClient {
                 },
               );
             } catch (error) {
-              observerRequest = this._bestEffortAttemptRequestFromPending(
+              // Its URL too, for the response and error: an interceptor's rewrite to
+              // another origin is reported without the userinfo it would have been sent
+              // without, as a hop that went out is recorded.
+              const unsentRequest = this._unsentRedirectRequest(
                 redirectEnd.request,
+                redirectTargetURL,
+              );
+              observerRequest = this._bestEffortAttemptRequestFromPending(
+                unsentRequest,
                 attemptLimits,
                 requestID,
               );
@@ -2023,7 +2030,7 @@ export class BaseHTTPClient {
                 wasTimeout: false,
                 adapterType: this._adapterType,
                 initialURL: initialRequestURL,
-                requestURL: redirectInterceptURL,
+                requestURL: unsentRequest.requestURL,
                 redirectHistory: nextRedirectHistory,
                 undispatchedRedirect: {
                   url: detectedTargetURL,
@@ -2338,6 +2345,31 @@ export class BaseHTTPClient {
           // Nothing more to do for that signal.
         }
       }
+    }
+  }
+
+  /**
+   * A redirect hop whose sanitizing threw - a cookie jar failing to build the target's
+   * `Cookie` - as its error observers are handed it: with the header stripping that
+   * sanitizing applies, so a hop to an origin the caller did not name is not reported
+   * carrying the previous request's credentials under that origin's URL, and with no
+   * `Cookie`: the jar, whose failure ended the hop, decides every `Cookie` sent, and the
+   * one the request holds is the jar's for the previous URL. No headers at all if even
+   * that throws.
+   */
+  private _unsentRedirectRequest(
+    request: ResolvedRequest,
+    fromURL: string,
+  ): ResolvedRequest {
+    try {
+      const unsent = this._sanitizeRedirectRequest(request, {
+        fromURL,
+        cookieJar: null,
+      });
+      delete unsent.headers.cookie;
+      return unsent;
+    } catch {
+      return { ...request, headers: {} };
     }
   }
 
