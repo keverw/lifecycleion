@@ -1220,19 +1220,17 @@ export function scalarHeader(
 }
 
 /**
- * Decodes UTF-8 bytes, refusing a sequence that is not valid UTF-8 and keeping a BOM: a
- * `Location` of nothing but one must not read as empty, which resolves to the request's
- * own URL.
- */
-const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-
-/**
  * A `Location` header's value as the URL it names is written, before it is resolved: its
  * bytes read as UTF-8, as browsers and `fetch` read them. A runtime hands a header value
  * over a character per byte (latin1), so a server's raw `/caf\xC3\xA9` arrives as
  * `/cafÃ©`, which would otherwise be followed as `/caf%C3%83%C2%A9` rather than the
  * `/caf%C3%A9` it means. A value holding a character past one byte is already text, and
  * one whose bytes are not valid UTF-8 is kept as it came.
+ *
+ * The decoder refuses invalid bytes and keeps a BOM: a `Location` of nothing but one must
+ * not read as empty, which resolves to the request's own URL. Made here rather than as the
+ * module loads, and kept as it came on a runtime that has none or refuses these options
+ * (React Native's), so that importing the client does not depend on it.
  */
 export function locationText(value: string): string {
   // eslint-disable-next-line no-control-regex -- every byte past ASCII, as a byte
@@ -1246,7 +1244,9 @@ export function locationText(value: string): string {
   }
 
   try {
-    return STRICT_UTF8.decode(bytes);
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
   } catch {
     return value;
   }

@@ -720,12 +720,15 @@ describe('NodeAdapter streamResponse factory failures', () => {
 
     try {
       let cancelled: number | undefined;
+      let stateInCleanup: string | undefined;
       const batch = client
         .get('/file')
         .label('batch')
         .streamResponse((_info, context) => {
           context.signal.addEventListener('abort', () => {
             cancelled = client.cancelAllWithLabel('batch', 'batch aborted');
+            // Not settled to a reader until it has its response and error.
+            stateInCleanup = batch.state;
           });
           return sink();
         });
@@ -737,6 +740,7 @@ describe('NodeAdapter streamResponse factory failures', () => {
       expect(batch.error?.code).toBe('stream_response_error');
       expect(batch.state).toBe('failed');
       expect(cancelled).toBe(0);
+      expect(stateInCleanup).toBe('sending');
 
       const controller = new AbortController();
       const own = client

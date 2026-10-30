@@ -1388,7 +1388,9 @@ export class BaseHTTPClient {
             },
             settleByStreamTimeout: () => {
               wasSettledByStreamTimeout = true;
-              trackedCallbacks.setState('failed');
+              // The tracked request only, which is what a cancel reads: the builder turns
+              // `failed` with its response and error, as for every other outcome.
+              trackedRequest.state = 'failed';
             },
             sentBody,
             latestUpload,
@@ -2522,7 +2524,7 @@ export class BaseHTTPClient {
      */
     markCancelled: (reason: string | undefined) => void;
     /**
-     * Settle the request as failed, for a timeout that cuts a stream its factory started:
+     * Settle the tracked request as failed, for a timeout that cuts a stream its factory started:
      * that timeout is not retried, so it is the outcome from the moment it fires, and a
      * cancel made while the attempt is torn down - by a cleanup listener on the factory's
      * signal - finds the request settled, as `fetch`, got and axios keep the first cause.

@@ -1707,6 +1707,25 @@ describe('locationText', () => {
     expect(locationText('/caf\u00c3\u00a9?q=\u00c3\u00a9')).toBe('/café?q=é');
   });
 
+  test('a runtime without a TextDecoder that takes these options keeps the value as it came', () => {
+    const original = globalThis.TextDecoder;
+    const value = '/caf\u00c3\u00a9';
+
+    try {
+      Reflect.deleteProperty(globalThis, 'TextDecoder');
+      expect(locationText(value)).toBe(value);
+      // As fast-text-encoding, the polyfill React Native apps use, refuses `fatal`.
+      globalThis.TextDecoder = class {
+        constructor() {
+          throw new RangeError('the fatal option is unsupported');
+        }
+      } as unknown as typeof TextDecoder;
+      expect(locationText(value)).toBe(value);
+    } finally {
+      globalThis.TextDecoder = original;
+    }
+  });
+
   test('keeps ASCII, text already decoded, and bytes that are not UTF-8 as they came', () => {
     expect(locationText('/plain?q=%C3%A9')).toBe('/plain?q=%C3%A9');
     expect(locationText('/日本')).toBe('/日本');
