@@ -1568,6 +1568,36 @@ describe('source chunks the writing pass reads', () => {
     expect(getBody().includes(Buffer.from(source))).toBe(true);
   });
 
+  test('a large text field cut off by a destroyed stream fails the body, its remaining slices unwritten', async () => {
+    const value = 'x'.repeat(REQUEST_BODY_CHUNK_SIZE * 4);
+    const fd = new FormData();
+    fd.append('text', value);
+
+    const { req, writes } = makeCapture();
+    const originalWrite = req.write.bind(req);
+    // Destroyed once the field's first slice has been accepted.
+    req.write = (data, callback) => {
+      const isAccepted = originalWrite(data, callback);
+      if (Buffer.byteLength(data) === REQUEST_BODY_CHUNK_SIZE) {
+        (req as { destroyed: boolean }).destroyed = true;
+      }
+      return isAccepted;
+    };
+
+    let failure: unknown;
+    try {
+      await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+    } catch (error) {
+      failure = error;
+    }
+
+    expect((failure as Error).message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+    // The boundary line and one slice: nothing of the field past the destroy.
+    expect(writes).toHaveLength(2);
+  });
+
   test('a large text field is written in REQUEST_BODY_CHUNK_SIZE slices, as a file is', async () => {
     // Written as one `req.write`, a 16 MiB text field reported no progress until all of
     // it was accepted, and the stall watchdog destroyed an upload the server had acked

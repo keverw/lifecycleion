@@ -2355,7 +2355,8 @@ export class BaseHTTPClient {
    * carrying the previous request's credentials under that origin's URL, and with no
    * `Cookie`: the jar, whose failure ended the hop, decides every `Cookie` sent, and the
    * one the request holds is the jar's for the previous URL. No headers at all if even
-   * that throws.
+   * that throws, and its URL's userinfo cut when it is another origin's, as sanitizing
+   * would have cut it.
    */
   private _unsentRedirectRequest(
     request: ResolvedRequest,
@@ -2369,7 +2370,13 @@ export class BaseHTTPClient {
       delete unsent.headers.cookie;
       return unsent;
     } catch {
-      return { ...request, headers: {} };
+      return {
+        ...request,
+        requestURL: isCrossOrigin(fromURL, request.requestURL)
+          ? stripURLCredentials(request.requestURL)
+          : request.requestURL,
+        headers: {},
+      };
     }
   }
 

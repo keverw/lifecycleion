@@ -338,17 +338,19 @@ export function stripURLCredentials(url: string): string {
 
 /**
  * `url` with the userinfo of its authority cut out as the text reads, for a string the URL
- * parser refuses: everything after `//` (or `\\`, as the parser reads a special scheme's)
- * up to the last `@` before the authority ends at `/`, `\`, `?` or `#`. The `@` itself is
+ * parser refuses: everything after `//` (or `\\`, as the parser reads a special scheme's;
+ * after a special scheme, any number of slashes, none included, as the parser reads
+ * `https:u:p@host`) up to the last `@` before the authority ends at `/`, `\`, `?` or `#`. The `@` itself is
  * kept, so the host after it is read exactly as before and the string is still refused:
  * cut with it, `https://u:p@/evil.test/x` would become `https:///evil.test/x`, which the
  * parser reads as `https://evil.test/x`. Unchanged when it has no authority or no `@` in
  * it, or, as a last guard, when the cut would parse.
  */
 function withoutTextualUserinfo(url: string): string {
-  const authority = /^(\s*(?:[a-z][a-z\d+.-]*:)?[/\\]{2})([^/\\?#]*)/i.exec(
-    url,
-  );
+  const authority =
+    /^(\s*(?:(?:https?|wss?|ftp|file):[/\\]*|(?:[a-z][a-z\d+.-]*:)?[/\\]{2}))([^/\\?#]*)/i.exec(
+      url,
+    );
   if (authority === null) {
     return url;
   }

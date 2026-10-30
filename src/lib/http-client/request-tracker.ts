@@ -104,15 +104,19 @@ export class RequestTracker {
     requests: RequestInfo[];
   } {
     const requests: RequestInfo[] = [];
+    // Each read once, not once per entry: a getter answering differently on a later read
+    // would otherwise be checked as one value and compared as another.
+    const clientID = filter?.clientID;
+    const label = filter?.label;
 
     // A copy, as `cancelWhere` walks one: reading a caller's signal (`isEntryCancelled`)
     // runs its code, which can start a request, and the live map would list it too.
     for (const entry of [...this.requests.values()]) {
-      if (!isNullish(filter?.clientID) && entry.clientID !== filter.clientID) {
+      if (!isNullish(clientID) && entry.clientID !== clientID) {
         continue;
       }
 
-      if (!isNullish(filter?.label) && entry.label !== filter.label) {
+      if (!isNullish(label) && entry.label !== label) {
         continue;
       }
 

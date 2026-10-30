@@ -1,5 +1,6 @@
 import { asciiUppercase, isBlankText } from '../../internal/ascii-text';
 import {
+  arrayBufferKindOf,
   plainBytesView,
   readBinaryByteLength,
   readTypedArrayByteOffset,
@@ -25,6 +26,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
 import { urlToHttpOptions } from 'node:url';
+import { types } from 'node:util';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -4561,11 +4563,80 @@ function readClientCertificate(
   };
 }
 
+/** Whether this is Bun, whose TLS takes more kinds of trust anchor than Node's. */
+const isBunRuntime =
+  typeof process === 'object' && typeof process.versions.bun === 'string';
+
+/** `Blob.prototype`'s `size` getter, to measure a blob without asking it. */
+const BLOB_SIZE: ((this: Blob) => number) | undefined =
+  typeof Blob === 'function'
+    ? // eslint-disable-next-line @typescript-eslint/unbound-method -- called on the value below
+      Object.getOwnPropertyDescriptor(Blob.prototype, 'size')?.get
+    : undefined;
+
 /**
- * Refuse a trust store with nothing in it - `''`, `[]`, an empty buffer, or a list with
- * any empty entry (`['', pem]` reads as a mistake, not a store) - as `crl` refuses an
+ * A trust anchor's size in bytes, through the intrinsic getters - a view's, a buffer's
+ * (another realm's too) or a blob's (`Bun.file()`) - so a subclass's own `byteLength` or
+ * `size` cannot claim bytes it does not hold; `undefined` for anything else.
+ */
+function trustAnchorByteSize(entry: object): number | undefined {
+  const byteLength = readBinaryByteLength(entry);
+  if (byteLength !== null) {
+    return byteLength;
+  }
+
+  if (BLOB_SIZE !== undefined && entry instanceof Blob) {
+    return Reflect.apply(BLOB_SIZE, entry, []);
+  }
+
+  return undefined;
+}
+
+/**
+ * Whether `entry` is one trust anchor the runtime's TLS takes: PEM text or bytes - a view
+ * over them, though Bun refuses a `DataView` - and on Bun an `ArrayBuffer` or a
+ * `Bun.file()` as well. A list inside the list, a number or any other object is not one.
+ *
+ * A `Bun.file()` is a `Blob` no different by type from one made in memory, which Bun's TLS
+ * refuses, so a blob is asked of Bun's TLS itself: one it cannot build a context from - a
+ * `new Blob([pem])`, a `File`, a file that holds no certificate - is not one.
+ */
+function isTrustAnchor(entry: unknown): boolean {
+  if (typeof entry === 'string') {
+    return true;
+  }
+
+  if (ArrayBuffer.isView(entry)) {
+    return !(isBunRuntime && types.isDataView(entry));
+  }
+
+  if (!isBunRuntime || typeof entry !== 'object' || entry === null) {
+    return false;
+  }
+
+  if (arrayBufferKindOf(entry) === 'ArrayBuffer') {
+    return true;
+  }
+
+  if (typeof Blob !== 'function' || !(entry instanceof Blob)) {
+    return false;
+  }
+
+  try {
+    tls.createSecureContext({ ca: entry as unknown as string });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refuse a trust store with nothing in it - `''`, `[]`, an empty buffer or blob, or a list
+ * with any empty entry (`['', pem]` reads as a mistake, not a store) - as `crl` refuses an
  * empty list: it would leave the connection on the
- * runtime's public roots, the opposite of what a caller supplying its own CA meant.
+ * runtime's public roots, the opposite of what a caller supplying its own CA meant. And
+ * refuse one that is not a trust anchor or a list of them (see {@link isTrustAnchor}),
+ * which would build the adapter and fail every HTTPS request.
  */
 function assertTrustAnchors(value: unknown, name: string): void {
   if (value === undefined) {
@@ -4577,9 +4648,7 @@ function assertTrustAnchors(value: unknown, name: string): void {
     entry === null ||
     entry === undefined ||
     (typeof entry === 'string' && isBlankText(entry)) ||
-    // Measured through the intrinsic getter: a subclass's own `byteLength` may claim
-    // bytes an empty view does not hold.
-    (ArrayBuffer.isView(entry) && readBinaryByteLength(entry) === 0);
+    (typeof entry === 'object' && trustAnchorByteSize(entry) === 0);
   // Every entry, not `some`, which skips a hole: the list is this adapter's own copy, and
   // its iterator reads a hole as the `undefined` it is.
   const hasEmptyEntry = (list: unknown[]): boolean => {
@@ -4598,21 +4667,22 @@ function assertTrustAnchors(value: unknown, name: string): void {
     throw error;
   }
 
-  // Text or an object that holds one - Node takes PEM text or bytes, and Bun a
-  // `Bun.file()`, an `ArrayBuffer` or a `String` too - or a list of them. A number, a
-  // boolean or a plain object (`{ pem }`, a loader's result) is a trust store on no
-  // runtime, and would build the adapter and fail every HTTPS request.
-  const isAnchor = (entry: unknown): boolean =>
-    typeof entry === 'string' ||
-    (typeof entry === 'object' && entry !== null && !isPlainRecord(entry));
-  const wrongEntry: unknown = Array.isArray(value)
-    ? (value as unknown[]).find((entry) => !isAnchor(entry))
-    : isAnchor(value)
-      ? undefined
-      : value;
-  if (wrongEntry !== undefined) {
+  // A list's entries each one anchor, never a list of their own (`[loadPems()]`).
+  const isWrong = (entry: unknown): boolean => !isTrustAnchor(entry);
+  const isList = Array.isArray(value);
+  const list: unknown[] = isList ? (value as unknown[]) : [value];
+  const index = list.findIndex(isWrong);
+  if (index !== -1) {
+    const wrongEntry = list[index];
+    const got = Array.isArray(wrongEntry)
+      ? 'an array'
+      : isPlainRecord(wrongEntry)
+        ? 'a plain object'
+        : typeof Blob === 'function' && wrongEntry instanceof Blob
+          ? 'a blob that is not a Bun.file() of a certificate'
+          : describeValue(wrongEntry);
     throw optionRefusal(
-      `NodeAdapter ${name} must be PEM text or bytes, or a list of them (got ${isPlainRecord(wrongEntry) ? 'a plain object' : describeValue(wrongEntry)})`,
+      `NodeAdapter ${name} must be PEM text or bytes, or a list of them (got ${isList ? `${got} in the list` : got})`,
     );
   }
 }

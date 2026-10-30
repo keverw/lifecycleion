@@ -319,6 +319,13 @@ describe('URL userinfo removal', () => {
       expect(stripped).not.toContain('u:p');
       expect(() => new URL(stripped)).toThrow();
     }
+    // A special scheme's authority may follow any number of slashes, none included.
+    expect(stripURLCredentials('https:admin:secret@evil.test:99999/')).toBe(
+      'https:@evil.test:99999/',
+    );
+    expect(stripURLCredentials('https:/u:p@b.test:99999/x')).toBe(
+      'https:/@b.test:99999/x',
+    );
     // An `@` outside the authority, or no authority at all, is left alone.
     expect(stripURLCredentials('https://b.test:99999/x?u=a@b')).toBe(
       'https://b.test:99999/x?u=a@b',

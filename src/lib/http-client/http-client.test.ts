@@ -10008,6 +10008,60 @@ describe('a redirect hop the cookie jar fails before it goes out', () => {
     expect(observedURLs).toEqual(['https://c.test/x']);
   });
 
+  test("whose sanitizing fails even without the jar, is reported without another origin's userinfo", async () => {
+    // The hop's first sanitizing runs as usual; every later one throws, as a cookie jar
+    // would and then as nothing should, so the report falls back to the bare request.
+    const original = Reflect.get(
+      HTTPClient.prototype,
+      '_sanitizeRedirectRequest',
+    ) as (...args: unknown[]) => unknown;
+    let calls = 0;
+    const sanitizeSpy = spyOn(
+      HTTPClient.prototype as unknown as Record<
+        string,
+        (...args: unknown[]) => unknown
+      >,
+      '_sanitizeRedirectRequest',
+    ).mockImplementation(function (this: unknown, ...args: unknown[]) {
+      calls++;
+      if (calls === 1) {
+        return Reflect.apply(original, this, args);
+      }
+      throw new Error('sanitizing failed');
+    });
+
+    try {
+      const adapter: HTTPAdapter = {
+        getType: () => 'mock',
+        send: (): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 302,
+            headers: { location: 'https://b.test/x' },
+            body: null,
+          }),
+      };
+      const client = new HTTPClient({ adapter, followRedirects: true });
+      client.addRequestInterceptor(
+        (request) => ({ ...request, requestURL: 'https://u:p@c.test/x' }),
+        { phases: ['redirect'] },
+      );
+      const observedURLs: string[] = [];
+      client.addErrorObserver((_error, request) => {
+        observedURLs.push(request.requestURL);
+      });
+
+      const builder = client.get('https://a.test/start');
+      const response = await builder.send();
+
+      expect(builder.error?.code).toBe('request_setup_error');
+      expect(calls).toBe(3);
+      expect(response.requestURL).toBe('https://c.test/x');
+      expect(observedURLs).toEqual(['https://c.test/x']);
+    } finally {
+      sanitizeSpy.mockRestore();
+    }
+  });
+
   test('to the same origin, is reported without the Cookie the jar built for the previous URL', async () => {
     class FailingJar extends CookieJar {
       public override getCookieHeaderString(url: string): string {

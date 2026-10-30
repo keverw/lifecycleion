@@ -207,6 +207,11 @@ function measureMultipartFormData(
   return { totalSize: size, partSizes };
 }
 
+/** The failure of a body whose stream was destroyed before all of it was written. */
+function closedBeforeWritten(): Error {
+  return new Error('Request stream closed before the body was fully written');
+}
+
 /**
  * Writes a FormData body into a RequestBodyWritable following the
  * multipart/form-data wire format (RFC 7578), setting Content-Type and
@@ -280,21 +285,24 @@ export async function serializeMultipartFormData(
       });
     });
 
-  // Every part's write: refused before it is written, since bytes past the
+  // Every part's write is held to this before it is written, since bytes past the
   // `Content-Length` already on the wire would be read by the server as the start of
   // another message. Reached when the FormData changed after the sizing pass - a field
   // appended mid-upload, a later part's headers grown longer - as the per-part check
   // below is for a file that grew. Held to the parts' share of it, not the whole: a new
   // part's `--boundary` line fits in the bytes kept for the closing delimiter, and would
   // otherwise go out before its headers were refused.
-  const write = (data: string | Buffer | Uint8Array): Promise<void> =>
-    uploadedBytes + Buffer.byteLength(data) > partsBudget
-      ? Promise.reject(
-          sourceMismatch(
-            overrunMessage(uploadedBytes, Buffer.byteLength(data)),
-          ),
-        )
-      : writeToRequest(data);
+  const budgetRefusal = (byteLength: number): Error | undefined =>
+    uploadedBytes + byteLength > partsBudget
+      ? sourceMismatch(overrunMessage(uploadedBytes, byteLength))
+      : undefined;
+
+  const write = (data: string | Buffer | Uint8Array): Promise<void> => {
+    const refusal = budgetRefusal(Buffer.byteLength(data));
+    return refusal === undefined
+      ? writeToRequest(data)
+      : Promise.reject(refusal);
+  };
 
   // A part's head - a string field's whole part, or a file part's headers - held to
   // `partsBudget` as a whole, so none of it goes out when it does not fit, then written in
@@ -305,11 +313,9 @@ export async function serializeMultipartFormData(
   // write, as any other part's write is.
   const writePartHead = (partHead: string): Promise<void> => {
     const bytes = Buffer.from(partHead);
-
-    if (uploadedBytes + bytes.byteLength > partsBudget) {
-      return Promise.reject(
-        sourceMismatch(overrunMessage(uploadedBytes, bytes.byteLength)),
-      );
+    const refusal = budgetRefusal(bytes.byteLength);
+    if (refusal !== undefined) {
+      return Promise.reject(refusal);
     }
 
     return bytes.byteLength <= REQUEST_BODY_CHUNK_SIZE
@@ -318,13 +324,18 @@ export async function serializeMultipartFormData(
   };
 
   // A part head larger than a slice, written slice by slice once `writePartHead` has held
-  // it to the budget as a whole.
+  // it to the budget as a whole. A stream destroyed between slices fails it, as it fails
+  // the whole body below, rather than leaving a part cut short to read as written.
   const writeInSlices = async (bytes: Buffer): Promise<void> => {
     for (
       let offset = 0;
-      offset < bytes.byteLength && !req.destroyed;
+      offset < bytes.byteLength;
       offset += REQUEST_BODY_CHUNK_SIZE
     ) {
+      if (req.destroyed) {
+        throw closedBeforeWritten();
+      }
+
       await writeToRequest(
         bytes.subarray(offset, offset + REQUEST_BODY_CHUNK_SIZE),
       );
@@ -527,7 +538,7 @@ export async function serializeMultipartFormData(
   // closing `--boundary--` delimiter, against an exact `Content-Length`. The server would
   // read it as truncated while this side called it a success.
   if (req.destroyed) {
-    throw new Error('Request stream closed before the body was fully written');
+    throw closedBeforeWritten();
   }
 
   // Closing delimiter that tells the server there are no more parts.
