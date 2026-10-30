@@ -3,7 +3,11 @@ import { isNullish } from '../../internal/is-nullish';
 import { isHTTPToken } from '../internal/http-token';
 import { isHeaderSafeCookieText } from '../internal/cookie-text';
 import { formEntries, isFormData } from '../internal/form-entries';
-import { assertKnownFields, fieldNames } from '../../internal/known-fields';
+import {
+  assertKnownFields,
+  assertOptionsObject,
+  fieldNames,
+} from '../../internal/known-fields';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -288,6 +292,7 @@ export class MockAdapter implements HTTPAdapter {
   constructor(config?: MockAdapterConfig) {
     // Preserve inherited handlers, their receiver, and live config updates.
     // Validate now and again when a response selects the current default delay.
+    assertOptionsObject(config, 'MockAdapter config', true);
     this.config = config ?? {};
     // A function or nothing: anything else would fail each route error as a reported
     // `onHandlerError` failure and a 500, rather than once, here. An own data value only,

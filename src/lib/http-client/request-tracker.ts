@@ -1,3 +1,4 @@
+import { describeValue } from '../internal/describe-value';
 import { isNullish } from '../internal/is-nullish';
 import { isSignalAbortedQuietly } from './internal/request-fields';
 import type { CancelResult, RequestState } from './types';
@@ -158,6 +159,18 @@ export interface RequestInfo {
   clientID: string;
   label?: string;
   state: RequestState;
+}
+
+/**
+ * Refuses a cancel reason that is not a string, naming `method`: the request would be
+ * cancelled with the reason dropped - `cancelReason` reads only a string - and nothing said.
+ */
+export function assertCancelReason(reason: unknown, method: string): void {
+  if (reason !== undefined && typeof reason !== 'string') {
+    throw new TypeError(
+      `${method} reason must be a string (got ${describeValue(reason)})`,
+    );
+  }
 }
 
 /**

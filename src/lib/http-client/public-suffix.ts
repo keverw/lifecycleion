@@ -1,6 +1,7 @@
 import { isPlainRecord } from './internal/plain-record';
 import { copyArrayValue } from './internal/array-copy';
 import { describeValue } from '../internal/describe-value';
+import { assertKnownFields } from '../internal/known-fields';
 import { parse } from 'tldts';
 import { endsInANumber } from '../domain-utils/helpers';
 import { asciiLowercase } from '../internal/ascii-text';
@@ -72,9 +73,7 @@ function normalizeSuffix(
   listName: string,
   index: number,
 ): string {
-  // Named by its place in the list, never its text, as every entry refused here is. The
-  // only text a refusal here quotes is an unknown field's key, an option name and not a
-  // hostname.
+  // Named by its place in the list, never its text, as every entry refused here is.
   const entryName = `publicSuffixes.${listName}[${String(index)}]`;
 
   if (typeof entry !== 'string') {
@@ -194,13 +193,7 @@ export class PublicSuffixResolver {
         );
       }
 
-      for (const key of Object.keys(overrides)) {
-        if (key !== 'add' && key !== 'remove') {
-          throw new TypeError(
-            `publicSuffixes has an unknown field '${key}'; only 'add' and 'remove' are read`,
-          );
-        }
-      }
+      assertKnownFields(overrides, ['add', 'remove'], 'publicSuffixes');
     }
 
     const added = normalizeList(overrides?.add, 'add');

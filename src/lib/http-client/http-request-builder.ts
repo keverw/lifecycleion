@@ -1,4 +1,5 @@
 import { isSignalAbortedQuietly } from './internal/request-fields';
+import { assertCancelReason } from './request-tracker';
 import { isNullish } from '../internal/is-nullish';
 import { describeValue } from '../internal/describe-value';
 import { generateID } from '../id-helpers';
@@ -9,7 +10,11 @@ import { lowerCaseHeaderName } from './utils';
 import { isBlankText } from '../internal/ascii-text';
 import { copyRequestBody } from './internal/request-body-copy';
 import { isFormData } from './internal/form-entries';
-import { assertKnownFields, fieldNames } from '../internal/known-fields';
+import {
+  assertKnownFields,
+  assertOptionsObject,
+  fieldNames,
+} from '../internal/known-fields';
 import { copyArrayValue, copyParamArrayValue } from './internal/array-copy';
 import {
   assertOptionalHeaderRecord,
@@ -129,15 +134,10 @@ export class HTTPRequestBuilder<T = unknown> {
 
     // Refused when it is not an object of known options: a misspelled `timout` would
     // leave the request on the client's timeout, and a non-object read as no options.
-    const candidate: unknown = options;
-    if (!isNullish(candidate)) {
-      if (typeof candidate !== 'object' || Array.isArray(candidate)) {
-        throw new TypeError(
-          `HTTPRequestOptions must be an object (got ${Array.isArray(candidate) ? 'an array' : describeValue(candidate)})`,
-        );
-      }
-      assertKnownFields(candidate, REQUEST_OPTION_FIELDS, 'HTTPRequestOptions');
-      this._applyOptions(candidate);
+    assertOptionsObject(options, 'HTTPRequestOptions', true);
+    if (!isNullish(options)) {
+      assertKnownFields(options, REQUEST_OPTION_FIELDS, 'HTTPRequestOptions');
+      this._applyOptions(options);
     }
   }
 
@@ -452,6 +452,7 @@ export class HTTPRequestBuilder<T = unknown> {
    * send() throws instead of dispatching the request.
    */
   public cancel(reason?: string): CancelResult {
+    assertCancelReason(reason, 'HTTPRequestBuilder.cancel()');
     if (this._state === 'completed' || this._state === 'failed') {
       return 'already_settled';
     }

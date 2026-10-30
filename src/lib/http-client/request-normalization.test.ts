@@ -1149,6 +1149,91 @@ test('a misspelled config or request option is refused rather than read as absen
   expect(() => client.get('/x', { timeout: 5, label: 'l' })).not.toThrow();
 });
 
+test('a config or options argument that is not an object is refused rather than read as empty', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+
+  // The base URL passed where the config belongs would build a client with none.
+  expect(() => new HTTPClient('https://api.test' as never)).toThrow(
+    'HTTPClient config must be an object (got string)',
+  );
+  expect(() => new HTTPClient(null as never)).toThrow(
+    'HTTPClient config must be an object (got null)',
+  );
+  expect(() => client.createSubClient([] as never)).toThrow(
+    'HTTPClient createSubClient config must be an object (got an array)',
+  );
+  expect(() => client.createSubClient(null as never)).toThrow(
+    'HTTPClient createSubClient config must be an object (got null)',
+  );
+  // The suffix list given where `{ publicSuffixes: { add } }` belongs.
+  expect(() => new CookieJar(['corp.internal'] as never)).toThrow(
+    'CookieJar options must be an object (got an array)',
+  );
+  expect(() => new MockAdapter(100 as never)).toThrow(
+    'MockAdapter config must be an object (got number)',
+  );
+  expect(() => new MockAdapter((() => undefined) as never)).toThrow(
+    'MockAdapter config must be an object (got function)',
+  );
+
+  // `null` is no options where it always was.
+  expect(() => new CookieJar(null as never)).not.toThrow();
+  expect(() => new MockAdapter(null as never)).not.toThrow();
+  expect(() => client.get('/x', null as never)).not.toThrow();
+  expect(() => client.listRequests(null as never)).not.toThrow();
+});
+
+test('a publicSuffixes field it does not take is refused without its key written out unless it is a name', () => {
+  expect(
+    () => new CookieJar({ publicSuffixes: { ad: ['corp.internal'] } } as never),
+  ).toThrow('publicSuffixes has no "ad" field (it takes add, remove)');
+
+  let refusal: unknown;
+  try {
+    new CookieJar({
+      publicSuffixes: { 'Bearer secret-token': [] },
+    } as never);
+  } catch (error) {
+    refusal = error;
+  }
+  expect((refusal as Error).message).toStartWith(
+    'publicSuffixes has no field by that name',
+  );
+  expect((refusal as Error).message).not.toContain('secret-token');
+});
+
+test('a cancel reason or request ID that is not a string is refused rather than dropped', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+
+  expect(() => client.cancel(123 as never)).toThrow(
+    'HTTPClient.cancel() requestID must be a string (got number)',
+  );
+  expect(() => client.cancel('id', { why: 'logout' } as never)).toThrow(
+    'HTTPClient.cancel() reason must be a string (got object)',
+  );
+  expect(() => client.cancelAll(5 as never)).toThrow(
+    'HTTPClient.cancelAll() reason must be a string (got number)',
+  );
+  expect(() => client.cancelOwn(null as never)).toThrow(
+    'HTTPClient.cancelOwn() reason must be a string (got null)',
+  );
+  expect(() => client.cancelAllWithLabel('l', 5 as never)).toThrow(
+    'HTTPClient.cancelAllWithLabel() reason must be a string (got number)',
+  );
+  expect(() => client.cancelOwnWithLabel('l', 5 as never)).toThrow(
+    'HTTPClient.cancelOwnWithLabel() reason must be a string (got number)',
+  );
+
+  const builder = client.get('/x');
+  expect(() => builder.cancel(7 as never)).toThrow(
+    'HTTPRequestBuilder.cancel() reason must be a string (got number)',
+  );
+  // Refused, not applied: the builder can still be cancelled, or sent.
+  expect(builder.state).toBe('pending');
+  expect(builder.cancel('logout')).toBe('cancelled');
+  expect(client.cancelAll()).toBe(0);
+});
+
 test('a filter field that kind of callback cannot use is refused when registered', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
   // Ignored, an error observer filtered to 500 would see every error.

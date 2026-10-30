@@ -1,4 +1,28 @@
+import { describeValue } from './describe-value';
 import { isNullish } from './is-nullish';
+
+/**
+ * Refuses, with a `TypeError` naming `label`, an options argument that is not an object: a
+ * string, number, array or function would otherwise be read as one with no fields, every
+ * option at its default - `new HTTPClient('https://api.test')` a client with no
+ * `baseURL`. `undefined` is no options; so is `null` where `isNullAbsent` says so, and
+ * elsewhere it is refused.
+ */
+export function assertOptionsObject(
+  value: unknown,
+  label: string,
+  isNullAbsent = false,
+): void {
+  if (value === undefined || (isNullAbsent && value === null)) {
+    return;
+  }
+
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError(
+      `${label} must be an object (got ${Array.isArray(value) ? 'an array' : describeValue(value)})`,
+    );
+  }
+}
 
 /** What a field name reads as when it is an option's, or a typo of one. */
 const OPTION_NAME = /^[A-Za-z_$][\w$]{0,63}$/;

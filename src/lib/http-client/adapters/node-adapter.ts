@@ -57,7 +57,11 @@ import {
 } from '../internal/upload-source-wait';
 import { copyArrayValue } from '../internal/array-copy';
 import { isFormData } from '../internal/form-entries';
-import { assertKnownFields, fieldNames } from '../../internal/known-fields';
+import {
+  assertKnownFields,
+  assertOptionsObject,
+  fieldNames,
+} from '../../internal/known-fields';
 import {
   ACCEPTED_CONTENT_ENCODINGS,
   createResponseBodySource,
@@ -442,16 +446,7 @@ export class NodeAdapter implements HTTPAdapter {
   private _config: NodeAdapterConfig;
 
   constructor(config: NodeAdapterConfig = {}) {
-    const candidateConfig: unknown = config;
-    if (
-      typeof candidateConfig !== 'object' ||
-      candidateConfig === null ||
-      Array.isArray(candidateConfig)
-    ) {
-      throw new TypeError(
-        `NodeAdapter config must be an object (got ${Array.isArray(candidateConfig) ? 'an array' : describeValue(candidateConfig)})`,
-      );
-    }
+    assertOptionsObject(config, 'NodeAdapter config');
     assertKnownFields(config, NODE_ADAPTER_CONFIG_FIELDS, 'NodeAdapter config');
     assertKnownFields(
       readObjectMember(config, 'mtls'),

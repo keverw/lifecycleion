@@ -29,6 +29,7 @@ import {
 } from './internal/header-utils';
 import {
   RequestTracker,
+  assertCancelReason,
   cancelEntry,
   cancelTrackedRequest,
 } from './request-tracker';
@@ -154,7 +155,11 @@ import {
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
 import { listenForUploadSourceWait } from './internal/upload-source-wait';
 import { formEntries, isFormData } from './internal/form-entries';
-import { assertKnownFields, fieldNames } from '../internal/known-fields';
+import {
+  assertKnownFields,
+  assertOptionsObject,
+  fieldNames,
+} from '../internal/known-fields';
 import { copyArrayValue } from './internal/array-copy';
 import {
   adoptPromise,
@@ -418,6 +423,7 @@ export class BaseHTTPClient {
     // A getter can answer differently on each read, so validating one read and storing
     // another would let a value the checks never saw through - e.g. followRedirects: true
     // on the XHR adapter. See `snapshotClientConfigFields`.
+    assertOptionsObject(config, 'HTTPClient config');
     assertKnownFields(config, HTTP_CLIENT_CONFIG_FIELDS, 'HTTPClient config');
     const snapshot = snapshotClientConfigFields(config);
     assertOptionalHeaderRecord(
@@ -627,28 +633,39 @@ export class BaseHTTPClient {
    *          matched nothing is visible without calling `listRequests()` first.
    */
   public cancel(requestID: string, reason?: string): number {
+    const candidateID: unknown = requestID;
+    if (typeof candidateID !== 'string') {
+      throw new TypeError(
+        `HTTPClient.cancel() requestID must be a string (got ${describeValue(candidateID)})`,
+      );
+    }
+    assertCancelReason(reason, 'HTTPClient.cancel()');
     return this._tracker.cancel(requestID, reason);
   }
 
   /** @returns How many requests were cancelled. */
   public cancelAll(reason?: string): number {
+    assertCancelReason(reason, 'HTTPClient.cancelAll()');
     return this._tracker.cancelAll(reason);
   }
 
   /** @returns How many requests were cancelled. */
   public cancelOwn(reason?: string): number {
+    assertCancelReason(reason, 'HTTPClient.cancelOwn()');
     return this._tracker.cancelOwn(this._clientID, reason);
   }
 
   /** @returns How many requests were cancelled. */
   public cancelAllWithLabel(label: string, reason?: string): number {
     assertLabelArgument(label, 'cancelAllWithLabel');
+    assertCancelReason(reason, 'HTTPClient.cancelAllWithLabel()');
     return this._tracker.cancelAllWithLabel(label, reason);
   }
 
   /** @returns How many requests were cancelled. */
   public cancelOwnWithLabel(label: string, reason?: string): number {
     assertLabelArgument(label, 'cancelOwnWithLabel');
+    assertCancelReason(reason, 'HTTPClient.cancelOwnWithLabel()');
     return this._tracker.cancelOwnWithLabel(this._clientID, label, reason);
   }
 
@@ -661,15 +678,7 @@ export class BaseHTTPClient {
     // An object, as request options are: `listRequests('all')` would list only this
     // client's own. A misspelled field (`lable`, `scop`) would list every request it
     // meant to narrow.
-    const candidate: unknown = filter;
-    if (
-      !isNullish(candidate) &&
-      (typeof candidate !== 'object' || Array.isArray(candidate))
-    ) {
-      throw new TypeError(
-        `HTTPClient.listRequests() filter must be an object (got ${Array.isArray(candidate) ? 'an array' : describeValue(candidate)})`,
-      );
-    }
+    assertOptionsObject(filter, 'HTTPClient.listRequests() filter', true);
     assertKnownFields(
       filter,
       ['scope', 'label'],
@@ -729,6 +738,7 @@ export class BaseHTTPClient {
     // maxResponseBytes inherits).
     // Capture every documented field through its original receiver, regardless of
     // enumerability or prototype placement. See `snapshotClientConfigFields`.
+    assertOptionsObject(overrides, 'HTTPClient createSubClient config');
     assertKnownFields(
       overrides,
       SUB_CLIENT_CONFIG_FIELDS,
