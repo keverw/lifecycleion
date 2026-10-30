@@ -271,7 +271,7 @@ async function runInterceptors(
  * the cancel it is before looking at the value. A rejection after that is `answer`'s own,
  * handled here, and dropped as its result would be.
  */
-function untilCancelled<T>(
+export function untilCancelled<T>(
   answer: Promise<{ value: T }>,
   signal: AbortSignal | undefined,
 ): Promise<{ value: T }> {

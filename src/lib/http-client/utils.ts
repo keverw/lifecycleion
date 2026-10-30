@@ -158,7 +158,8 @@ function topLevelKeyOf(key: string): string {
  *
  * **Relative paths (usual case)** — When `baseURL` is set and `path` is not
  * absolute, `path` is joined to `baseURL` (leading slash normalized). Example:
- * `baseURL: https://api.test`, `path: /v1/users` → `https://api.test/v1/users`.
+ * `baseURL: https://api.test`, `path: /v1/users` → `https://api.test/v1/users`. An empty
+ * `path`, or one that is only a query or fragment, is added to `baseURL` as written.
  *
  * **Absolute / protocol-relative `path` (escape hatch)** — If `path` is a full
  * `http:` or `https:` URL, it is **not** prefixed with `baseURL` (after
@@ -184,10 +185,15 @@ export function buildURL(
   const absoluteHref = tryAbsoluteWebHref(path);
 
   if (baseURL && absoluteHref === null && !path.startsWith('//')) {
-    // Avoid double slashes when joining base + path
-    const base = baseURL.endsWith('/') ? baseURL.slice(0, -1) : baseURL;
-    const p = path.startsWith('/') ? path : `/${path}`;
-    url = `${base}${p}`;
+    if (path === '' || path.startsWith('?') || path.startsWith('#')) {
+      // No path to join: the base as written, with no slash the caller did not ask for.
+      url = `${baseURL}${path}`;
+    } else {
+      // Avoid double slashes when joining base + path
+      const base = baseURL.endsWith('/') ? baseURL.slice(0, -1) : baseURL;
+      const p = path.startsWith('/') ? path : `/${path}`;
+      url = `${base}${p}`;
+    }
   } else if (absoluteHref !== null) {
     url = absoluteHref;
   } else {

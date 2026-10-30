@@ -2659,7 +2659,7 @@ export class NodeAdapter implements HTTPAdapter {
           const bytes =
             typeof body === 'string'
               ? Buffer.from(body, 'utf8')
-              : Buffer.from(body);
+              : plainBodyBytes(body);
 
           req.setHeader('Content-Length', bytes.length.toString());
 
@@ -3707,6 +3707,16 @@ function crlBytesOf(view: ArrayBufferView): Buffer {
 
   const plain = plainBytesView(view);
   return Buffer.from(plain.buffer, plain.byteOffset, plain.byteLength);
+}
+
+/**
+ * A copy of a byte body by its plain view: a subclass's own `length` is not read as how
+ * much to copy. A detached one reads as empty, as a `Buffer` copies it.
+ */
+function plainBodyBytes(body: Uint8Array): Buffer {
+  return readBinaryByteLength(body) === 0
+    ? Buffer.alloc(0)
+    : Buffer.from(plainBytesView(body));
 }
 
 /** A `crl` value as given, copied: a string as is, a buffer's bytes into one of its own. */

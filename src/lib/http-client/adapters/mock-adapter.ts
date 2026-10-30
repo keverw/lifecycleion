@@ -648,11 +648,18 @@ export class MockAdapter implements HTTPAdapter {
     // A simulated transport failure never produced a response, so it returns
     // before any of the response-shaped work below — no body, no headers, no
     // cookies, and no terminal progress, exactly as a real one delivers none.
-    if (mockResponse.transportError) {
-      // A boolean or its options: `'yes'` would be read as `true`.
+    if (
+      mockResponse.transportError !== undefined &&
+      mockResponse.transportError !== null &&
+      mockResponse.transportError !== false
+    ) {
+      // A boolean or its options: `'yes'` would be read as `true`, and `0` as none.
       asRouteMistake(() => {
         const candidate: unknown = mockResponse.transportError;
-        if (candidate !== true && typeof candidate !== 'object') {
+        if (
+          candidate !== true &&
+          (typeof candidate !== 'object' || Array.isArray(candidate))
+        ) {
           throw new TypeError(
             `MockAdapter route returned an unknown transportError (got ${describeValue(candidate)}); it is a boolean or its options`,
           );
@@ -770,7 +777,7 @@ export class MockAdapter implements HTTPAdapter {
     // given name takes precedence in browsers and CookieJar).
     // Read once, as the headers are: the value used is the value checked.
     const routeCookies: unknown = mockResponse.cookies;
-    if (routeCookies) {
+    if (routeCookies !== undefined && routeCookies !== null) {
       const setCookieEntries = asRouteMistake(() => {
         // A plain object, as the headers are: a `Map` read through `Object.entries` would
         // set no cookies at all.
@@ -801,6 +808,21 @@ export class MockAdapter implements HTTPAdapter {
     // format-specific (image/png, application/pdf, etc.) so the handler is
     // responsible for setting it via `headers` when it matters.
     // A HEAD response carries the content-type its GET would, body or no body.
+    const routeContentType: unknown = mockResponse.contentType;
+    if (
+      routeContentType !== undefined &&
+      routeContentType !== null &&
+      routeContentType !== 'json' &&
+      routeContentType !== 'text' &&
+      routeContentType !== 'binary'
+    ) {
+      asRouteMistake(() => {
+        throw new TypeError(
+          `MockAdapter route returned an unknown contentType (got ${describeValue(routeContentType)}); it is 'json', 'text' or 'binary'`,
+        );
+      });
+    }
+
     const hasRouteBody =
       intendedBody !== null ||
       ((routeMethod === 'HEAD' ||

@@ -49,10 +49,11 @@ export class ResponseObserverManager extends CallbackRegistry<
   public snapshot(): ResponseObserverChain {
     const observers = this.currentRegistrations();
 
-    return (response, request, phase) =>
+    return (response, request, phase, cancelSignal) =>
       runObservers(
         'ResponseObserver',
         observers,
+        cancelSignal,
         (filter) =>
           matchesFilterPhase(filter.phases, phase.type) &&
           matchesFilter(
@@ -76,6 +77,7 @@ export type ResponseObserverChain = (
   response: HTTPResponse,
   request: AttemptRequest,
   phase: ResponseObserverPhase,
+  cancelSignal?: AbortSignal,
 ) => Promise<void>;
 
 export class ErrorObserverManager extends CallbackRegistry<
@@ -96,10 +98,11 @@ export class ErrorObserverManager extends CallbackRegistry<
   public snapshot(): ErrorObserverChain {
     const observers = this.currentRegistrations();
 
-    return (error, request, phase) =>
+    return (error, request, phase, cancelSignal) =>
       runObservers(
         'ErrorObserver',
         observers,
+        cancelSignal,
         (filter) =>
           matchesFilterPhase(filter.phases, phase.type) &&
           matchesFilter(
@@ -119,6 +122,7 @@ export type ErrorObserverChain = (
   error: HTTPClientError,
   request: AttemptRequest,
   phase: ErrorObserverPhase,
+  cancelSignal?: AbortSignal,
 ) => Promise<void>;
 
 /**
@@ -126,15 +130,21 @@ export type ErrorObserverChain = (
  * the next. `matches` is asked once per observer, so a filter target is read afresh for
  * every one; a filter that throws is reported and its observer skipped, and an observer
  * that throws is reported without stopping the rest. Each observer's arguments come from
- * `argsFor`, so each is handed its own phase object.
+ * `argsFor`, so each is handed its own phase object. Once `cancelSignal` has aborted no
+ * further observer runs: `send()` has stopped waiting on the chain, and may have answered.
  */
 async function runObservers<Filter, Args extends unknown[]>(
   label: 'ResponseObserver' | 'ErrorObserver',
   observers: ReadonlyArray<RegisteredCallback<unknown, Filter>>,
+  cancelSignal: AbortSignal | undefined,
   matches: (filter: Filter) => boolean,
   argsFor: () => Args,
 ): Promise<void> {
   for (const { fn, filter } of observers) {
+    if (cancelSignal?.aborted) {
+      return;
+    }
+
     let doesMatch: boolean;
     try {
       doesMatch = matches(filter);

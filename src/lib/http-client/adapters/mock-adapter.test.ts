@@ -2638,6 +2638,53 @@ test('a body the mock refuses is not labelled JSON on a HEAD route or under a si
 });
 
 describe('MockAdapter - invalid route status and delayed abort', () => {
+  test.each([
+    ['transportError', 0],
+    ['transportError', ''],
+    ['transportError', []],
+    ['cookies', 0],
+    ['cookies', ''],
+    ['cookies', false],
+    ['contentType', 'jsn'],
+  ])('a route %s of %j is refused, not ignored', async (field, value) => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/x', () => ({
+      status: 200,
+      body: { ok: true },
+      [field]: value,
+    }));
+
+    const rejection = await adapter
+      .send(makeAdapterRequest({ requestURL: '/x' }))
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect(rejection?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+  });
+
+  test.each([
+    ['transportError', false],
+    ['transportError', null],
+    ['cookies', null],
+    ['contentType', null],
+  ])('a route %s of %j reads as none', async (field, isNone) => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/x', () => ({
+      status: 200,
+      body: { ok: true },
+      [field]: isNone,
+    }));
+
+    const response = await adapter.send(
+      makeAdapterRequest({ requestURL: '/x' }),
+    );
+
+    expect(response.status).toBe(200);
+  });
+
   test('a route status that is not a number is described by its type, not echoed', async () => {
     const adapter = new MockAdapter();
     let didCallToString = false;

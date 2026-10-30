@@ -39,6 +39,7 @@ import {
   RequestInterceptorManager,
   isInterceptorCancel,
   snapshotInterceptedRequest,
+  untilCancelled,
 } from './interceptors';
 import type { ResolvedRequest } from './interceptors';
 import {
@@ -891,12 +892,8 @@ export class BaseHTTPClient {
 
     const adapterType = this._adapterType;
 
-    if (
-      this._config.userAgent &&
-      (adapterType === 'node' ||
-        adapterType === 'fetch' ||
-        adapterType === 'mock')
-    ) {
+    // Refused at construction where a browser would not send it, so here it is sent.
+    if (this._config.userAgent) {
       baseHeaders['user-agent'] = this._config.userAgent;
     } else if (
       adapterType === 'node' ||
@@ -1683,6 +1680,7 @@ export class BaseHTTPClient {
               redirectResponse.response,
               attemptResult.sentRequest,
               { type: 'redirect', ...hopInfo },
+              cancelSignal,
             );
 
             // Nor the interceptors, once one of those observers cancelled it.
@@ -3468,7 +3466,14 @@ export class BaseHTTPClient {
         );
         if (rawUploadOutcome !== undefined) {
           responseUploadOutcome = adoptRequestBodySettled(rawUploadOutcome);
-          params.latestUpload.outcome = responseUploadOutcome;
+          // A value that cannot be adopted says nothing, as an absent one does, and a hop
+          // with no body has no upload to report on: an earlier hop's outcome stands.
+          if (
+            responseUploadOutcome !== undefined &&
+            (isBodySent || params.latestUpload.outcome === undefined)
+          ) {
+            params.latestUpload.outcome = responseUploadOutcome;
+          }
         }
         const headers = rawAdapterResponse.headers;
         // Advisory as well, and read under the same rule: it only feeds observers (see
@@ -3816,6 +3821,7 @@ export class BaseHTTPClient {
                   attemptNumber,
                   hopContext?.redirect,
                 ),
+                cancelSignal,
               );
             }
 
@@ -3973,7 +3979,10 @@ export class BaseHTTPClient {
         const uploadOutcome = isUploadAbandoned
           ? Promise.resolve(new Error(ABANDONED_UPLOAD_MESSAGE))
           : (responseUploadOutcome ?? getRequestBodySettled(error));
-        if (uploadOutcome !== undefined) {
+        if (
+          uploadOutcome !== undefined &&
+          (isBodySent || params.latestUpload.outcome === undefined)
+        ) {
           params.latestUpload.outcome = uploadOutcome;
         }
 
@@ -4519,6 +4528,7 @@ export class BaseHTTPClient {
                   attemptNumber,
                   hopContext?.redirect,
                 ),
+                cancelSignal,
               );
             }
 
@@ -5359,13 +5369,18 @@ export class BaseHTTPClient {
     response: HTTPResponse,
     request: AttemptRequest,
     phase: ResponseObserverPhase,
+    cancelSignal?: AbortSignal,
   ): Promise<void> {
-    return runParentThenOwnObservers(
-      this._parentClient?._responseObservers,
-      this._responseObservers,
-      response,
-      request,
-      phase,
+    return observedUntilCancelled(
+      runParentThenOwnObservers(
+        this._parentClient?._responseObservers,
+        this._responseObservers,
+        response,
+        request,
+        phase,
+        cancelSignal,
+      ),
+      cancelSignal,
     );
   }
 
@@ -5373,13 +5388,18 @@ export class BaseHTTPClient {
     error: HTTPClientError,
     request: AttemptRequest,
     phase: ErrorObserverPhase,
+    cancelSignal?: AbortSignal,
   ): Promise<void> {
-    return runParentThenOwnObservers(
-      this._parentClient?._errorObservers,
-      this._errorObservers,
-      error,
-      request,
-      phase,
+    return observedUntilCancelled(
+      runParentThenOwnObservers(
+        this._parentClient?._errorObservers,
+        this._errorObservers,
+        error,
+        request,
+        phase,
+        cancelSignal,
+      ),
+      cancelSignal,
     );
   }
 
@@ -6510,6 +6530,21 @@ function reportUploadSettleDeadline(
     new Error(
       `HTTPClient waited for the previous attempt's upload to settle before the next ${nextDispatch}, and it made no progress for ${String(deadlineMS)}ms without settling - the server may have stopped reading the body after answering, or the '${adapterType}' adapter's requestBodySettled does not settle. The request failed as a timeout rather than dispatching a second upload beside the first.`,
     ),
+  );
+}
+
+/**
+ * Waits for a request's observers, or for a cancel when given its signal: an observer that
+ * never settles must not leave a cancelled request unsettled, as an interceptor cannot.
+ * The one it was waiting on carries on by itself, and the chain runs none after it.
+ */
+async function observedUntilCancelled(
+  observers: Promise<void>,
+  cancelSignal: AbortSignal | undefined,
+): Promise<void> {
+  await untilCancelled(
+    observers.then(() => ({ value: undefined })),
+    cancelSignal,
   );
 }
 

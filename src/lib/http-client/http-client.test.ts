@@ -10315,3 +10315,265 @@ test('a caller signal whose removeEventListener throws neither rejects a finishe
     }
   }
 });
+
+describe('observers and a request that ends without them', () => {
+  const answering = (type: string, answers: Record<string, unknown>[]) => {
+    let index = 0;
+    return {
+      getType: () => type,
+      send: () =>
+        Promise.resolve(answers[Math.min(index++, answers.length - 1)]),
+    } as unknown as HTTPAdapter;
+  };
+  const settledWithin = <T>(promise: Promise<T>) =>
+    Promise.race([
+      promise,
+      new Promise<'still pending'>((resolve) => {
+        setTimeout(() => resolve('still pending'), 1000);
+      }),
+    ]);
+
+  test.each([
+    {
+      phase: 'redirect',
+      answers: [
+        { status: 302, headers: { location: '/next' }, body: null },
+        { status: 200, headers: {}, body: null },
+      ],
+    },
+    {
+      phase: 'retry',
+      answers: [
+        { status: 503, headers: {}, body: null },
+        { status: 200, headers: {}, body: null },
+      ],
+    },
+  ] as const)(
+    'a cancel does not wait on a $phase observer that never settles',
+    async ({ phase, answers }) => {
+      const client = new HTTPClient({
+        adapter: answering('node', [...answers]),
+        baseURL: 'http://a.test',
+        followRedirects: true,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+      });
+      let isObserved: () => void = () => {};
+      const observed = new Promise<void>((resolve) => {
+        isObserved = resolve;
+      });
+      client.addResponseObserver(
+        () => {
+          isObserved();
+          return new Promise<void>(() => {});
+        },
+        { phases: [phase] },
+      );
+
+      const builder = client.get('/');
+      const sent = builder.send();
+      await observed;
+      builder.cancel('stop');
+
+      const response = await settledWithin(sent);
+
+      expect(response).not.toBe('still pending');
+      expect((response as { isCancelled: boolean }).isCancelled).toBe(true);
+      expect(builder.state).toBe('cancelled');
+      expect(client.listRequests().count).toBe(0);
+    },
+  );
+
+  test('a cancel does not wait on a retry error observer that never settles', async () => {
+    let attempts = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () => {
+          attempts++;
+          return Promise.reject(new Error('down'));
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    let isObserved: () => void = () => {};
+    const observed = new Promise<void>((resolve) => {
+      isObserved = resolve;
+    });
+    client.addErrorObserver(
+      () => {
+        isObserved();
+        return new Promise<void>(() => {});
+      },
+      { phases: ['retry'] },
+    );
+
+    const builder = client.get('/');
+    const sent = builder.send();
+    await observed;
+    builder.cancel('stop');
+
+    const response = await settledWithin(sent);
+
+    expect((response as { isCancelled: boolean }).isCancelled).toBe(true);
+    expect(attempts).toBe(1);
+  });
+
+  test('a cancel while an observer runs leaves the later ones of that phase unrun', async () => {
+    const client = new HTTPClient({
+      adapter: answering('node', [
+        { status: 503, headers: {}, body: null },
+        { status: 200, headers: {}, body: null },
+      ]),
+      baseURL: 'http://a.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    let calls: string[] = [];
+    let release: () => void = () => {};
+    const builder = client.get('/');
+    client.addResponseObserver(
+      () => {
+        calls.push('first');
+        builder.cancel('stop');
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+      { phases: ['retry'] },
+    );
+    client.addResponseObserver(
+      () => {
+        calls.push('second');
+      },
+      { phases: ['retry'] },
+    );
+    client.addErrorObserver(
+      () => {
+        calls.push('final');
+      },
+      { phases: ['final'] },
+    );
+
+    const response = await settledWithin(builder.send());
+    const seenAtAnswer = calls;
+    calls = [...calls];
+    release();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5);
+    });
+
+    expect((response as { isCancelled: boolean }).isCancelled).toBe(true);
+    expect(seenAtAnswer).toEqual(['first', 'final']);
+    expect(calls).toEqual(['first', 'final']);
+  });
+
+  test('a bodiless hop that fails reporting the body went out keeps the earlier upload failure', async () => {
+    let attempts = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () => {
+          attempts++;
+          if (attempts === 1) {
+            return Promise.resolve({
+              status: 302,
+              headers: { location: '/next' },
+              body: null,
+              requestBodySettled: Promise.resolve(new Error('cut')),
+            });
+          }
+          const failure = new Error('down');
+          Object.defineProperty(failure, REQUEST_BODY_SETTLED_KEY, {
+            value: Promise.resolve(undefined),
+          });
+          return Promise.reject(failure);
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+      followRedirects: true,
+    });
+
+    const response = await client.post('/x', { body: 'hi' }).send();
+
+    expect((await response.requestBodySettled)?.message).toBe('cut');
+  });
+
+  test('a bodiless hop that reports the body went out keeps the earlier upload failure', async () => {
+    const client = new HTTPClient({
+      adapter: answering('node', [
+        {
+          status: 302,
+          headers: { location: '/next' },
+          body: null,
+          requestBodySettled: Promise.resolve(new Error('cut')),
+        },
+        {
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(undefined),
+        },
+      ]),
+      baseURL: 'http://a.test',
+      followRedirects: true,
+    });
+
+    const response = await client.post('/x', { body: 'hi' }).send();
+
+    expect((await response.requestBodySettled)?.message).toBe('cut');
+  });
+
+  test.each([[null], ['nope']])(
+    'an unusable requestBodySettled (%p) on a later hop keeps the earlier upload failure',
+    async (unusable) => {
+      const client = new HTTPClient({
+        adapter: answering('node', [
+          {
+            status: 302,
+            headers: { location: '/next' },
+            body: null,
+            requestBodySettled: Promise.resolve(new Error('cut')),
+          },
+          {
+            status: 200,
+            headers: {},
+            body: null,
+            requestBodySettled: unusable,
+          },
+        ]),
+        baseURL: 'http://a.test',
+        followRedirects: true,
+      });
+
+      const response = await client.post('/x', { body: 'hi' }).send();
+
+      expect((await response.requestBodySettled)?.message).toBe('cut');
+    },
+  );
+
+  test('userAgent is sent with an xhr adapter outside a browser', async () => {
+    const original = (globalThis as { XMLHttpRequest?: unknown })
+      .XMLHttpRequest;
+    (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = class {};
+    try {
+      let sentHeaders: Record<string, unknown> = {};
+      const client = new HTTPClient({
+        adapter: {
+          getType: () => 'xhr',
+          send: (request: { headers: Record<string, unknown> }) => {
+            sentHeaders = request.headers;
+            return Promise.resolve({ status: 200, headers: {}, body: null });
+          },
+        } as unknown as HTTPAdapter,
+        baseURL: 'http://a.test',
+        userAgent: 'mine/1',
+      });
+
+      await client.get('/').send();
+
+      expect(sentHeaders['user-agent']).toBe('mine/1');
+    } finally {
+      (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = original;
+    }
+  });
+});

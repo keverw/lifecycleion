@@ -69,6 +69,22 @@ afterEach(() => {
 });
 
 describe('buildURL', () => {
+  test('adds no slash when there is no path to join', () => {
+    expect(buildURL('https://api.test/v1', '')).toBe('https://api.test/v1');
+    expect(buildURL('https://api.test/v1', '?page=2')).toBe(
+      'https://api.test/v1?page=2',
+    );
+    expect(buildURL('https://api.test/v1', '#top')).toBe(
+      'https://api.test/v1#top',
+    );
+    expect(buildURL('https://api.test/v1/', '?page=2')).toBe(
+      'https://api.test/v1/?page=2',
+    );
+    expect(buildURL('https://api.test/v1', '', { page: 2 })).toBe(
+      'https://api.test/v1?page=2',
+    );
+  });
+
   test('joins base and path', () => {
     expect(buildURL('https://example.com', '/users')).toBe(
       'https://example.com/users',

@@ -209,7 +209,7 @@ client.request<T>(method, path, options?)
 
 **Path resolution:**
 
-- Relative paths (`/v1/users`, `v1/users`) are appended to `baseURL`.
+- Relative paths (`/v1/users`, `v1/users`) are appended to `baseURL`. An empty path, or one that is only a query or fragment (`?page=2`), is added to `baseURL` as written, with no slash inserted.
 - Absolute `http(s)://` URLs bypass `baseURL` entirely and work with or without a `baseURL`.
 - In a browser runtime, a URL still relative after `baseURL` - every relative path when `baseURL` is omitted (MockAdapter aside, see below), or one joined to a relative `baseURL` (`/api`, `api`) - is resolved against the document's base URL (a worker's location), as `fetch` and XHR resolve it: from a page at `https://app.test/dir/page`, `v1/users` is `https://app.test/dir/v1/users`, and `users` under `baseURL: 'api'` is `https://app.test/dir/api/users`. Unlike a configured `baseURL`, the page URL is not treated as a directory.
 - Protocol-relative `//host/path` URLs also bypass `baseURL` as a path prefix. If `baseURL` is configured, they are resolved using its scheme. If `baseURL` is omitted, browser runtimes resolve them against the current page/worker scheme, `MockAdapter` materializes them as `http://host/...`, and other server-side adapters cannot resolve them so the request fails at send time as a configuration error.
@@ -681,7 +681,7 @@ interface RequestInterceptorContext {
 
 ## Response Observers
 
-Observers run **after** an adapter attempt and have no say in the outcome: what they return is ignored, and a throw is reported, not raised. They are handed the response, request and error themselves, not copies - a final observer's change to the response is what `send()` returns and the next observer sees - so treat them as read-only. They are the right place for logging, metrics, cache writes, and reading token state out of response bodies.
+Observers run **after** an adapter attempt and have no say in the outcome: what they return is ignored, and a throw is reported, not raised. They are handed the response, request and error themselves, not copies - a final observer's change to the response is what `send()` returns and the next observer sees - so treat them as read-only. They are the right place for logging, metrics, cache writes, and reading token state out of response bodies. The request waits for them in order, with no timeout, so one that never settles holds it up. In the `redirect` and `retry` phases a cancel stops that wait: `send()` answers at once, the observer it was waiting on carries on by itself, and no later observer of that phase runs. A `final` observer runs after the request has settled, so `send()` waits for it regardless.
 
 ```typescript
 const removeObserver = client.addResponseObserver(
@@ -1361,7 +1361,7 @@ The adapter resolves a relative request URL as `fetch` does - against the docume
 **Browser constraints (enforced at client construction):**
 
 - `cookieJar` must not be set
-- `userAgent` must not be set
+- `userAgent` must not be set in a browser
 - `followRedirects` must not be `true`
 
 Browsers automatically strip forbidden headers (`cookie`, `user-agent`, `host`, all `proxy-*` and `sec-*` headers, etc.). Attempting to set them from calling code produces a `request_setup_error`. Attempting to set them from an interceptor produces an `interceptor_error`.
