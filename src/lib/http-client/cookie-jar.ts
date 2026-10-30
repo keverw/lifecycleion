@@ -637,8 +637,20 @@ export class CookieJar {
   /**
    * Parses a Set-Cookie header string and stores the resulting cookie.
    * The request URL is used to infer and validate the domain (PSL + suffix checks).
+   *
+   * @throws {TypeError} When `header` is not a string - one `Set-Cookie` line, not an
+   *         array of them (see {@link processResponseHeaders}).
    */
   public parseSetCookieHeader(header: string, url: string): void {
+    // One line, as `processResponseHeaders` reads each: an array of lines (Node's
+    // `set-cookie`) would otherwise fail with the engine's own error.
+    const candidate: unknown = header;
+    if (typeof candidate !== 'string') {
+      throw new TypeError(
+        `CookieJar parseSetCookieHeader header must be a string (got ${Array.isArray(candidate) ? 'an array' : describeValue(candidate)})`,
+      );
+    }
+
     const parsed = this.parseCookieString(header);
 
     if (!parsed) {

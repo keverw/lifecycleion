@@ -21,12 +21,63 @@ import {
   MAX_LABELS,
   readTrimmedEntry,
 } from './helpers';
+import { describeValue } from '../internal/describe-value';
+import { isNullish } from '../internal/is-nullish';
 import {
   asciiLowercase,
   hasNonHTTPWhitespaceEdge,
   trimHTTPWhitespace,
   trimWhere,
 } from '../internal/ascii-text';
+
+/**
+ * Refuses a pattern that is not a string, naming `fn`: a config mistake, which read on
+ * would fail with the engine's own error on every call.
+ */
+function assertPattern(pattern: unknown, fn: string): void {
+  if (typeof pattern !== 'string') {
+    throw new TypeError(
+      `${fn}: pattern must be a string (got ${describeValue(pattern)})`,
+    );
+  }
+}
+
+/**
+ * Refuses an allowlist that is not an array, naming `fn` and its `argument`: a
+ * comma-separated string read from an environment variable would otherwise fail with the
+ * engine's own error on every call. See {@link copyEntryList} for its entries.
+ */
+function assertEntryListIsArray(
+  list: unknown,
+  fn: string,
+  argument: string,
+): asserts list is unknown[] {
+  if (!Array.isArray(list)) {
+    throw new TypeError(
+      `${fn}: ${argument} must be an array of strings (got ${describeValue(list)})`,
+    );
+  }
+}
+
+/**
+ * An allowlist's entries, each read once into a copy the matcher reads from then on, with
+ * one that is not a string refused as {@link assertEntryListIsArray} refuses the list: a
+ * number in it would fail with the engine's own error. `slice`, not a spread: a sparse
+ * list's holes stay holes, which `some` and the matchers' `map` skip, rather than becoming
+ * `undefined` entries.
+ */
+function copyEntryList(list: unknown, fn: string, argument: string): string[] {
+  assertEntryListIsArray(list, fn, argument);
+  const copy = list.slice();
+
+  if (copy.some((entry) => typeof entry !== 'string')) {
+    throw new TypeError(
+      `${fn}: ${argument} must be an array of strings (an entry is not one)`,
+    );
+  }
+
+  return copy as string[];
+}
 
 export function safeParseURL(input: string): URL | null {
   try {
@@ -93,6 +144,11 @@ function isSpecialScheme(protocol: string): boolean {
  * header takes: in any other, they would never see the host the parser then decodes.
  */
 function toOriginText(text: string): string | undefined {
+  // A value that is not a string is no origin - an `Origin` header that was never sent.
+  if (typeof text !== 'string') {
+    return undefined;
+  }
+
   const cleaned = trimWhere(
     text.replace(/[\t\n\r]/g, ''),
     (code) => code <= 0x20,
@@ -300,6 +356,7 @@ export function matchesWildcardDomain(
   domain: string,
   pattern: string,
 ): boolean {
+  assertPattern(pattern, 'matchesWildcardDomain');
   return matchesWildcardDomainIn(domain, pattern, true);
 }
 
@@ -355,6 +412,7 @@ export function matchesWildcardOrigin(
   origin: string,
   pattern: string,
 ): boolean {
+  assertPattern(pattern, 'matchesWildcardOrigin');
   return wildcardOriginMatcher(origin, true)(pattern);
 }
 
@@ -652,10 +710,12 @@ function compiledDomainList(
     return kept;
   }
 
-  // Each entry read once, into the copy the list is checked against next time. `slice`,
-  // not a spread: a sparse list's holes stay holes, which the `map` below skips, rather
-  // than becoming `undefined` entries that throw.
-  const source = allowedDomains.slice();
+  // Each entry read once, into the copy the list is checked against next time.
+  const source = copyEntryList(
+    allowedDomains,
+    'matchesDomainList',
+    'allowedDomains',
+  );
 
   // Trim and filter out empty entries first - and any edged with whitespace other than
   // spaces, tabs, CRs and LFs, which match nothing (see `readTrimmedEntry`).
@@ -724,6 +784,8 @@ const originListPatternMaps = new WeakMap<
 
 function originListPatterns(
   allowedOrigins: readonly string[],
+  /** The list's entries as the matcher read them (see `copyEntryList`), kept as its source. */
+  entries: readonly string[],
 ): Map<string, ReturnType<typeof compileWildcardPattern>> {
   const kept = originListPatternMaps.get(allowedOrigins);
   if (kept !== undefined && isSameList(kept.source, allowedOrigins)) {
@@ -732,7 +794,7 @@ function originListPatterns(
 
   const patterns = new Map<string, ReturnType<typeof compileWildcardPattern>>();
   originListPatternMaps.set(allowedOrigins, {
-    source: allowedOrigins.slice(),
+    source: entries,
     patterns,
   });
 
@@ -774,6 +836,9 @@ export function matchesDomainList(
   domain: string,
   allowedDomains: string[],
 ): boolean {
+  // Before the early exit below, so a list that is no list is refused on every call; its
+  // entries are checked when it is compiled.
+  assertEntryListIsArray(allowedDomains, 'matchesDomainList', 'allowedDomains');
   const normalizedDomain = normalizeDomain(domain);
 
   // Early exit: invalid input cannot match any allowed domain. Nor can `"null"`, the
@@ -883,6 +948,13 @@ export function validateConfigEntry(
   options?: { allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean },
 ): ValidationResult {
   const SCHEME_RE = /^[a-z][a-z0-9+\-.]*$/i;
+  if (typeof entry !== 'string' && !isNullish(entry)) {
+    return {
+      valid: false,
+      info: 'entry is not a string',
+      wildcardKind: 'none',
+    };
+  }
   // Trimmed of HTTP whitespace, as the matchers trim it; see `readTrimmedEntry`.
   const raw = readTrimmedEntry(entry ?? '');
   if (raw === undefined) {
@@ -1597,9 +1669,12 @@ export function matchesOriginList(
   allowedOrigins: string[],
   opts: { treatNoOriginAsAllowed?: boolean } = {},
 ): boolean {
-  const cleaned = allowedOrigins
-    .map((s) => readTrimmedEntry(s) ?? '')
-    .filter(Boolean);
+  const entries = copyEntryList(
+    allowedOrigins,
+    'matchesOriginList',
+    'allowedOrigins',
+  );
+  const cleaned = entries.map((s) => readTrimmedEntry(s) ?? '').filter(Boolean);
 
   if (!origin) {
     // Only allow requests without Origin header if explicitly opted in AND "*" is in the list
@@ -1615,7 +1690,7 @@ export function matchesOriginList(
   // in turn, would evict each other there on every call (see `originListPatterns`).
   const matchesWildcard = wildcardOriginMatcher(
     origin,
-    originListPatterns(allowedOrigins),
+    originListPatterns(allowedOrigins, entries),
   );
 
   return cleaned.some((allowed) => {
@@ -1672,6 +1747,12 @@ export function matchesCORSCredentialsList(
   allowedOrigins: string[],
   options: { allowWildcardSubdomains?: boolean } = {},
 ): boolean {
+  // Read before the origin is: a list that is no list is refused on every call.
+  const entries = copyEntryList(
+    allowedOrigins,
+    'matchesCORSCredentialsList',
+    'allowedOrigins',
+  );
   if (!origin) {
     return false;
   }
@@ -1681,15 +1762,13 @@ export function matchesCORSCredentialsList(
     return false;
   }
 
-  const cleaned = allowedOrigins
-    .map((s) => readTrimmedEntry(s) ?? '')
-    .filter(Boolean);
+  const cleaned = entries.map((s) => readTrimmedEntry(s) ?? '').filter(Boolean);
 
   const allowWildcard = !!options.allowWildcardSubdomains;
   // The list's own compiled patterns (see `originListPatterns`).
   const matchesWildcard = wildcardOriginMatcher(
     origin,
-    originListPatterns(allowedOrigins),
+    originListPatterns(allowedOrigins, entries),
   );
 
   for (const allowed of cleaned) {
@@ -1797,6 +1876,11 @@ export interface ParsedHost {
  * // => { domain: '', port: '' }
  */
 export function parseHostHeader(host: string): ParsedHost {
+  // A value that is not a string - a `Host` header that was never sent - is malformed.
+  if (typeof host !== 'string') {
+    return { domain: '', port: '' };
+  }
+
   // Of HTTP whitespace only: a value with other whitespace at an end (a no-break space)
   // is malformed, as the URL parser refuses such a host.
   const trimmedHost = readTrimmedEntry(host);

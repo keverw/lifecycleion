@@ -50,6 +50,11 @@ export function hasPartialLabelWildcard(s: string): boolean {
  * Assumes ASCII input (post-TR46 processing).
  */
 export function checkDNSLength(host: string): boolean {
+  // A value that is not a string is no name, as a header that was never sent is not.
+  if (typeof host !== 'string') {
+    return false;
+  }
+
   const labels = host.split('.');
 
   // Label count cap for domains (127 is theoretical DNS limit). A trailing dot's empty
@@ -89,6 +94,11 @@ export function checkDNSLength(host: string): boolean {
  * Check if a string is an IPv4 address
  */
 export function isIPv4(str: string): boolean {
+  // A string only: `RegExp.test` would read an array or boxed string as its text.
+  if (typeof str !== 'string') {
+    return false;
+  }
+
   const ipv4Regex =
     /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
   return ipv4Regex.test(str);
@@ -98,6 +108,10 @@ export function isIPv4(str: string): boolean {
  * Check if a string is an IPv6 address
  */
 export function isIPv6(str: string): boolean {
+  if (typeof str !== 'string') {
+    return false;
+  }
+
   // Zone identifiers are intentionally rejected to keep behavior portable across
   // Node, Bun, and browser-facing URL handling.
   // Both brackets or neither: `[::1` is no address, and the URL parser refuses it.
@@ -132,7 +146,7 @@ export function isIPv6(str: string): boolean {
  * Check if a string is an IP address (IPv4 or IPv6)
  */
 export function isIPAddress(str: string): boolean {
-  return isIPv4(str) || isIPv6(str);
+  return typeof str === 'string' && (isIPv4(str) || isIPv6(str));
 }
 
 /**
@@ -268,6 +282,10 @@ function canonicalizeIPAddressLiteral(host: string): string | null {
  * Uses the platform URL parser so the result matches WHATWG URL origin semantics.
  */
 export function canonicalizeBracketedIPv6Content(content: string): string {
+  if (typeof content !== 'string') {
+    return '';
+  }
+
   try {
     const url = new URL(`http://[${content}]/`);
     return url.hostname.replace(/^\[|\]$/g, '');
@@ -505,7 +523,9 @@ export function toAsciiDots(s: string): string {
  * IP literals are canonicalized to a stable WHATWG URL-compatible form.
  */
 export function normalizeDomain(domain: string): string {
-  return normalizeHostText(domain, true);
+  // `''`, the invalid-input sentinel, for a value that is not a string - a `Host` header
+  // that was never sent - as for any other text that names no host.
+  return typeof domain === 'string' ? normalizeHostText(domain, true) : '';
 }
 
 /**

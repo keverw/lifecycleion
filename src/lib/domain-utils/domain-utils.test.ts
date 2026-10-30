@@ -12,6 +12,9 @@ import {
   validateConfigEntry,
   parseHostHeader,
   isApexDomain,
+  isIPv4,
+  isIPv6,
+  canonicalizeBracketedIPv6Content,
 } from './domain-utils';
 import {
   checkDNSLength,
@@ -3855,6 +3858,102 @@ describe('config entry whitespace and scheme case', () => {
     expect(validateConfigEntry('\u212Aa://x.example', 'origin')).toEqual({
       valid: false,
       info: 'invalid scheme in origin',
+      wildcardKind: 'none',
+    });
+  });
+});
+
+describe('a value that is not a string', () => {
+  // A request header that was never sent reads as `undefined`.
+  // An array or a `String` object is no string either, though it reads as one's text.
+  const notStrings: unknown[] = [
+    undefined,
+    null,
+    5,
+    {},
+    ['1.2.3.4'],
+    // eslint-disable-next-line unicorn/new-for-builtins
+    new String('1.2.3.4'),
+  ];
+
+  it('is invalid input where a request header is read, not a thrown engine error', () => {
+    for (const value of notStrings) {
+      const text = value as string;
+      expect(parseHostHeader(text)).toEqual({ domain: '', port: '' });
+      expect(normalizeDomain(text)).toBe('');
+      expect(normalizeOrigin(text)).toBe('');
+      expect(isApexDomain(text)).toBe(false);
+      expect(isIPAddress(text)).toBe(false);
+      expect(isIPv4(text)).toBe(false);
+      expect(isIPv6(text)).toBe(false);
+      expect(checkDNSLength(text)).toBe(false);
+      expect(canonicalizeBracketedIPv6Content(text)).toBe('');
+      expect(matchesWildcardDomain(text, '*')).toBe(false);
+      expect(matchesWildcardOrigin(text, '*')).toBe(false);
+      expect(matchesDomainList(text, ['*'])).toBe(false);
+      expect(matchesOriginList(text, ['*'])).toBe(false);
+      expect(matchesCORSCredentialsList(text, ['https://a.test'])).toBe(false);
+    }
+  });
+
+  it('is refused as a pattern or allowlist, naming the function and argument', () => {
+    expect(() => matchesWildcardDomain('a.test', 5 as never)).toThrow(
+      'matchesWildcardDomain: pattern must be a string (got number)',
+    );
+    expect(() =>
+      matchesWildcardOrigin('https://a.test', undefined as never),
+    ).toThrow(
+      'matchesWildcardOrigin: pattern must be a string (got undefined)',
+    );
+    // A comma-separated list read from the environment, not split.
+    expect(() =>
+      matchesOriginList('https://a.test', 'https://a.test' as never),
+    ).toThrow(
+      'matchesOriginList: allowedOrigins must be an array of strings (got string)',
+    );
+    // Checked whether or not there is an origin to match.
+    expect(() =>
+      matchesCORSCredentialsList(undefined, undefined as never),
+    ).toThrow(
+      'matchesCORSCredentialsList: allowedOrigins must be an array of strings (got undefined)',
+    );
+    expect(() => matchesDomainList('a.test', ['a.test', 5] as never)).toThrow(
+      'matchesDomainList: allowedDomains must be an array of strings (an entry is not one)',
+    );
+    // Refused whatever the domain is, an invalid one included.
+    expect(() =>
+      matchesDomainList(undefined as never, 'a.test,b.test' as never),
+    ).toThrow(
+      'matchesDomainList: allowedDomains must be an array of strings (got string)',
+    );
+    // A hole is skipped, as before.
+    // eslint-disable-next-line no-sparse-arrays
+    expect(matchesDomainList('a.test', [, 'a.test'] as never)).toBe(true);
+  });
+
+  it('is checked on the copy the matcher reads, each entry read once', () => {
+    for (const match of [
+      (list: string[]) => matchesDomainList('a.test', list),
+      (list: string[]) => matchesOriginList('https://a.test', list),
+      (list: string[]) => matchesCORSCredentialsList('https://a.test', list),
+    ]) {
+      let reads = 0;
+      const list: string[] = [];
+      // A string on its first read and a number after: read twice, it would pass the
+      // check and reach the matcher as the number.
+      Object.defineProperty(list, 0, {
+        get: () => (reads++ === 0 ? 'nothing.test' : 42),
+        enumerable: true,
+      });
+      expect(match(list)).toBe(false);
+      expect(reads).toBe(1);
+    }
+  });
+
+  it('is an invalid config entry, not a thrown engine error', () => {
+    expect(validateConfigEntry(5 as never, 'domain')).toEqual({
+      valid: false,
+      info: 'entry is not a string',
       wildcardKind: 'none',
     });
   });

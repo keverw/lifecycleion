@@ -650,6 +650,21 @@ describe('CookieJar', () => {
   });
 
   describe('parseSetCookieHeader', () => {
+    test('a header that is not one string is refused as a TypeError', () => {
+      // Node's `set-cookie` is an array of lines; `processResponseHeaders` reads one.
+      expect(() =>
+        jar.parseSetCookieHeader(['a=1'] as never, 'https://example.com'),
+      ).toThrow(
+        'CookieJar parseSetCookieHeader header must be a string (got an array)',
+      );
+      expect(() =>
+        jar.parseSetCookieHeader(undefined as never, 'https://example.com'),
+      ).toThrow(
+        'CookieJar parseSetCookieHeader header must be a string (got undefined)',
+      );
+      expect(jar.getAllCookies()).toEqual([]);
+    });
+
     test('a Set-Cookie value carrying CR or LF never reaches the wire', () => {
       // `setCookie` refuses a name or value with a line break; this is the server-fed
       // road onto the same check, which was only pinned from the programmatic side.
