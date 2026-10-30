@@ -42,7 +42,7 @@
 import { types } from 'node:util';
 import { plainBytesView } from '../../internal/binary-view';
 import { markNonRetryableAdapterError } from './adapter-error';
-import { formEntries, bunFilePartName } from './form-entries';
+import { filePartNameToSend, formEntries } from './form-entries';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 import {
@@ -103,7 +103,7 @@ export function sanitizeContentType(raw: string): string {
 function formatFilePartHeaders(fieldName: string, value: unknown): string {
   // A `File` named `''` is sent as `filename=""`, as browsers send it (a server reads it as
   // no file chosen); only a part with no name at all is `blob`.
-  const partName: unknown = bunFilePartName(value) ?? (value as File).name;
+  const partName = filePartNameToSend((value as File).name);
   const filename = typeof partName === 'string' ? partName : 'blob';
   const type: unknown = (value as Blob).type;
 
@@ -543,27 +543,22 @@ export async function serializeMultipartFormData(
     throw closedBeforeWritten();
   }
 
-  // Closing delimiter that tells the server there are no more parts.
-  await writeToRequest(closingDelimiter);
-
-  // Bytes, not just `req.destroyed`, matching what `writeRequestBodyChunked` checks.
-  // `Content-Length` is computed in the sizing pass from each `Blob.size`, but this pass
-  // writes whatever `Blob.stream()` actually yields - and a `File` backed by a file
-  // another process is rotating can yield fewer. The inner loop then exits through
-  // `isDone` with nothing destroyed, every delimiter is written, and the body goes out
-  // short of the length already on the wire. Node does not check a `ClientRequest` for a
-  // Content-Length shortfall, so the server simply waits for bytes that never arrive and
-  // the caller hangs until its own timeout rather than seeing the transport error it
-  // should have.
+  // Bytes, not just `req.destroyed`, matching what `writeRequestBodyChunked` checks. Each
+  // part's own shortfall is refused where it is read, so what reaches here is a form that
+  // lost entries after the sizing pass: `Content-Length` promised them, and Node does not
+  // check a `ClientRequest` for a shortfall, so the server would wait for bytes that never
+  // arrive. Refused before the closing delimiter, which would tell it the form had ended.
   //
-  // Only a shortfall reaches here. An overrun cannot: every part's write is refused
-  // before it would pass `partsBudget`, so the closing delimiter lands at most at
-  // `totalSize`.
-  if (uploadedBytes < totalSize) {
+  // Only a shortfall reaches here. An overrun cannot: every part's write is refused before
+  // it would pass `partsBudget`, so the closing delimiter lands at most at `totalSize`.
+  if (uploadedBytes + closingBytes < totalSize) {
     throw sourceMismatch(
-      `Request body source produced fewer bytes than its Content-Length: ${String(uploadedBytes)} of ${String(totalSize)}`,
+      `Request body source produced fewer bytes than its Content-Length: ${String(uploadedBytes + closingBytes)} of ${String(totalSize)}`,
     );
   }
+
+  // Closing delimiter that tells the server there are no more parts.
+  await writeToRequest(closingDelimiter);
 }
 
 async function cancelReaderQuietly(

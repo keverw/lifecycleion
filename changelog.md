@@ -231,6 +231,8 @@
 - **BREAKING:** HTTP: a request's own `user-agent` header wins over `userAgent`, as with axios and `fetch`, and a null one removes it (`fetch` then adds the runtime's own); one in `defaultHeaders` wins over the built-in default. Both were overwritten.
 - HTTP: on Bun, a file part is sent under the last segment of its name, so one backed by a path (`Bun.file()`, `openAsBlob`) no longer sends the absolute local path as its `filename`.
 - HTTP CookieJar: a non-Secure cookie from an insecure request with a wider path than a stored Secure cookie of the same name (`Path=/` beside `Path=/admin`) is stored, as RFC 6265bis and browsers store it. One at or inside its path is still refused.
+- HTTP: a failure resolving a name or opening the socket, whatever its code, reads as a transport failure whatever the host or `socketPath` is called, rather than a permanent `495` for a name like `certificates.internal.corp`.
+- HTTP: a multipart form that lost entries after it was measured is refused before its closing delimiter is written.
 - HTTP: a `cancel()` no longer waits on a `redirect` or `retry` phase observer: `send()` answers as cancelled at once, so one that never settles cannot hold it up. That observer carries on by itself, and no later observer of the phase runs.
 - HTTP: a custom adapter's unusable `requestBodySettled`, or one reported for a bodiless hop, no longer wipes the upload failure an earlier redirect hop reported.
 - HTTP: `NodeAdapter` sends a `Uint8Array` subclass's real bytes when driven directly, rather than as many as its own `length` claims.

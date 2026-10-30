@@ -14,6 +14,7 @@ import {
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
 import { isPlainRecord } from '../internal/plain-record';
+import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { completeProgressEvent } from '../internal/progress';
 import {
   isSignalAborted,
@@ -4576,10 +4577,6 @@ function readClientCertificate(
 function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
-
-/** Whether this is Bun, whose TLS takes more kinds of trust anchor than Node's. */
-const isBunRuntime =
-  typeof process === 'object' && typeof process.versions.bun === 'string';
 
 /** `Blob.prototype`'s `size` getter, to measure a blob without asking it. */
 const BLOB_SIZE: ((this: Blob) => number) | undefined =

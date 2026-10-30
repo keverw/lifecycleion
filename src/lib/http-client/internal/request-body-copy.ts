@@ -1,6 +1,7 @@
 import { isRequestBodyBytes, UNSUPPORTED_REQUEST_BODY_MESSAGE } from '../utils';
 import { isPlainRecord } from './plain-record';
-import { formEntries, isFormData, bunFilePartName } from './form-entries';
+import { isBunRuntime } from '../../internal/is-bun-runtime';
+import { filePartNameToSend, formEntries, isFormData } from './form-entries';
 
 /**
  * The text each JSON body copy was read back from - exactly the text it serializes to, its
@@ -176,12 +177,18 @@ function copyFormData(form: FormData): FormData {
   for (const [key, value] of formEntries(form)) {
     // Under the name it is sent by, on Bun as on NodeAdapter: Bun's own encoding of a file
     // backed by a path, appended under none, would send the path.
-    const name = bunFilePartName(value);
+    if (!isBunRuntime || typeof value === 'string') {
+      cloned.append(key, value);
+      continue;
+    }
 
-    if (name === undefined) {
+    const name: unknown = (value as File).name;
+    const nameToSend = filePartNameToSend(name);
+
+    if (typeof nameToSend !== 'string' || nameToSend === name) {
       cloned.append(key, value);
     } else {
-      cloned.append(key, value as unknown as File, name);
+      cloned.append(key, value as unknown as File, nameToSend);
     }
   }
 

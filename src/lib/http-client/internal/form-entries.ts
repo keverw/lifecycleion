@@ -1,4 +1,5 @@
 import { isPlainRecord } from './plain-record';
+import { isBunRuntime } from '../../internal/is-bun-runtime';
 
 /**
  * `form`'s entries, read through the intrinsic `FormData.prototype.entries`, as the client
@@ -41,26 +42,17 @@ export function isFormData(value: unknown): value is FormData {
   }
 }
 
-const isBunRuntime =
-  typeof process === 'object' && typeof process.versions.bun === 'string';
-
 /**
- * The name a file part is sent under on Bun where that is not its own, or `undefined`. A
- * file backed by a path - `Bun.file()`, `openAsBlob` - reports the path as its name, even
- * when appended under another, and a form's entries do not tell it from a `File` named
- * with a slash. So only the last segment is sent, as the form-data package sends it: a
- * local path is no business of the server's. A name ending in a separator has none, and is
- * left as it is.
+ * The name a file part named `name` is sent under: `name`, except on Bun. A file backed by
+ * a path there - `Bun.file()`, `openAsBlob` - reports the path as its name, even when
+ * appended under another, and a form's entries do not tell it from a `File` named with a
+ * slash. So only the last segment is sent, as the form-data package sends it: a local path
+ * is no business of the server's. A name ending in a separator has none, and is left as it
+ * is. Handed the name rather than the part, so each use reads a part's name once.
  */
-export function bunFilePartName(value: unknown): string | undefined {
-  if (!isBunRuntime) {
-    return undefined;
-  }
-
-  const name: unknown = (value as File).name;
-
-  if (typeof name !== 'string') {
-    return undefined;
+export function filePartNameToSend(name: unknown): unknown {
+  if (!isBunRuntime || typeof name !== 'string') {
+    return name;
   }
 
   const separator =
@@ -69,6 +61,6 @@ export function bunFilePartName(value: unknown): string | undefined {
       : name.lastIndexOf('/');
 
   return separator === -1 || separator === name.length - 1
-    ? undefined
+    ? name
     : name.slice(separator + 1);
 }

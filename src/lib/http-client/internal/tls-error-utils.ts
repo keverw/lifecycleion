@@ -46,10 +46,13 @@ const CRL_CODE_PATTERN = /(?:^|_)CRLS?(?:_|$)/;
  */
 const TRANSPORT_ERROR_CODES = new Set([
   'ENOTFOUND',
-  'EAI_AGAIN',
-  // A permanent getaddrinfo failure, whatever the message says about the host
-  // (`certificates.internal.corp`); Node reports `EAI_NONAME` / `EAI_NODATA` as `ENOTFOUND`.
-  'EAI_FAIL',
+  // A resolver's own codes, for one reported with no `syscall`.
+  'ENODATA',
+  'ESERVFAIL',
+  'EREFUSED',
+  'ETIMEOUT',
+  'EFORMERR',
+  'EBADRESP',
   'ECONNREFUSED',
   'ECONNRESET',
   'ECONNABORTED',
@@ -75,6 +78,28 @@ const TRANSPORT_ERROR_CODES = new Set([
  * which uses `node:http` / `node:https` — emits Undici errors too.
  */
 const UNDICI_TRANSPORT_ERROR_PREFIX = 'UND_ERR_';
+
+/**
+ * Every getaddrinfo failure (`EAI_AGAIN`, `EAI_FAIL`, `EAI_SYSTEM`, ...), whatever the
+ * message says about the host (`certificates.internal.corp`). Node reports `EAI_NONAME` and
+ * `EAI_NODATA` as `ENOTFOUND`.
+ */
+const GETADDRINFO_ERROR_PREFIX = 'EAI_';
+
+/**
+ * Whether the system call that failed resolves a name or opens the socket, which is before
+ * any certificate exists: a code of any kind, `EBADNAME` from `queryA` or `ENOTDIR` from a
+ * `socketPath`'s `connect`, says nothing of one. A TLS failure comes from `read` or `write`
+ * (`EPROTO`), and stays with the message.
+ */
+function isBeforeTLS(syscall: unknown): boolean {
+  return (
+    typeof syscall === 'string' &&
+    (syscall === 'connect' ||
+      syscall === 'getaddrinfo' ||
+      syscall.startsWith('query'))
+  );
+}
 
 /**
  * Best-effort classification for TLS certificate failures that should be
@@ -149,7 +174,9 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
   // Only the fallback is suppressed; the code checks above still run first.
   if (
     TRANSPORT_ERROR_CODES.has(code) ||
-    code.startsWith(UNDICI_TRANSPORT_ERROR_PREFIX)
+    code.startsWith(GETADDRINFO_ERROR_PREFIX) ||
+    code.startsWith(UNDICI_TRANSPORT_ERROR_PREFIX) ||
+    isBeforeTLS(readMember(error, 'syscall'))
   ) {
     return false;
   }

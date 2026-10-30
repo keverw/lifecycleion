@@ -616,6 +616,12 @@ export class CookieJar {
    * and returns a copy of the stored cookie for the same reason.
    */
   public getCookieFor(name: string, url: string): Cookie | undefined {
+    // No cookie has a name that is not a string: `undefined`, a config value left unset,
+    // is not "any name", which is what it means to `collectCookies`.
+    if (typeof name !== 'string') {
+      return undefined;
+    }
+
     const [first] = this.collectCookies(url, name);
     return first === undefined ? undefined : copyCookie(first.cookie);
   }
@@ -1431,19 +1437,9 @@ export class CookieJar {
       return '/';
     }
 
-    let slashCount = 0;
+    const lastSlash = pathname.lastIndexOf('/');
 
-    for (let i = 0; i < pathname.length; i++) {
-      if (pathname.charCodeAt(i) === 47) {
-        slashCount++;
-      }
-    }
-
-    if (slashCount <= 1) {
-      return '/';
-    }
-
-    return pathname.slice(0, pathname.lastIndexOf('/'));
+    return lastSlash === 0 ? '/' : pathname.slice(0, lastSlash);
   }
 
   /** Path from Set-Cookie when present (the parser keeps only `/...`); otherwise §5.1.4 default-path. */

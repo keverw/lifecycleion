@@ -1634,10 +1634,8 @@ export class BaseHTTPClient {
               statusCode: adapterResponse.status,
             };
 
-            // Nothing more runs for a request already cancelled - from this hop's
-            // `onAttemptEnd`, say: not the redirect-phase observers, nor the interceptors.
-            if (cancelSignal.aborted) {
-              response = this._buildResponse<T>({
+            const cancelledBeforeFollowing = () =>
+              this._buildResponse<T>({
                 adapterResponse: null,
                 requestID,
                 wasCancelled: true,
@@ -1652,6 +1650,11 @@ export class BaseHTTPClient {
                   isRecorded: false,
                 },
               });
+
+            // Nothing more runs for a request already cancelled - from this hop's
+            // `onAttemptEnd`, say: not the redirect-phase observers, nor the interceptors.
+            if (cancelSignal.aborted) {
+              response = cancelledBeforeFollowing();
               cancelReason = getSignalCancelReason(cancelSignal);
 
               break;
@@ -1690,21 +1693,7 @@ export class BaseHTTPClient {
 
             // Nor the interceptors, once one of those observers cancelled it.
             if (cancelSignal.aborted) {
-              response = this._buildResponse<T>({
-                adapterResponse: null,
-                requestID,
-                wasCancelled: true,
-                wasTimeout: false,
-                adapterType: this._adapterType,
-                initialURL: initialRequestURL,
-                requestURL: hopFromURL,
-                redirectHistory,
-                // The redirect this hop answered with, detected and never followed.
-                undispatchedRedirect: {
-                  url: detectedTargetURL,
-                  isRecorded: false,
-                },
-              });
+              response = cancelledBeforeFollowing();
               cancelReason = getSignalCancelReason(cancelSignal);
 
               break;

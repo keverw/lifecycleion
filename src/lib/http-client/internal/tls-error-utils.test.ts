@@ -362,3 +362,50 @@ test('a getaddrinfo EAI_FAIL is a transport failure whatever the host name says'
   );
   expect(isTLSCertificateError(dns)).toBe(false);
 });
+
+test.each([
+  'EAI_SYSTEM',
+  'EAI_MEMORY',
+  'ESERVFAIL',
+  'EREFUSED',
+  'ENODATA',
+  'ETIMEOUT',
+  'EFORMERR',
+  'EBADRESP',
+])(
+  'a resolver failure %s is a transport failure whatever the host name says',
+  (code) => {
+    const error = Object.assign(
+      new Error(`getaddrinfo ${code} certificates.internal.corp`),
+      { code },
+    );
+
+    expect(isTLSCertificateError(error)).toBe(false);
+  },
+);
+
+test.each([
+  ['EBADNAME', 'queryA'],
+  ['ENOTIMP', 'getaddrinfo'],
+  ['ENOTDIR', 'connect'],
+  ['ELOOP', 'connect'],
+])(
+  'a failure resolving or connecting is a transport failure whatever the host name says: %s from %s',
+  (code, syscall) => {
+    const error = Object.assign(
+      new Error(`${syscall} ${code} certificates.internal.corp`),
+      { code, syscall },
+    );
+
+    expect(isTLSCertificateError(error)).toBe(false);
+  },
+);
+
+test('a TLS failure from a write is still read by its message', () => {
+  const error = Object.assign(new Error('bad certificate'), {
+    code: 'EPROTO',
+    syscall: 'write',
+  });
+
+  expect(isTLSCertificateError(error)).toBe(true);
+});

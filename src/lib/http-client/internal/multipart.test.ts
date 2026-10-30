@@ -2019,3 +2019,53 @@ test('a file part on Bun is written under the last segment of its name, never a 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('a form that loses an entry after sizing is refused before its closing delimiter', async () => {
+  let passes = 0;
+  const fd = scriptFormEntries(new FormData(), function* () {
+    passes++;
+    yield ['kept', 'value'];
+    if (passes === 1) {
+      yield ['lost', 'value'];
+    }
+  });
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+
+  const failure = await serializeMultipartFormData(fd, req, boundary).then(
+    () => undefined,
+    (error: unknown) => error as Error,
+  );
+
+  expect(failure?.message).toContain(
+    'Request body source produced fewer bytes than its Content-Length',
+  );
+
+  expect(getBody().toString()).not.toContain(`--${boundary}--`);
+});
+
+test('a file part name is read once each time it is formatted', async () => {
+  let reads = 0;
+  const fd = scriptFormEntries(new FormData(), function* () {
+    yield [
+      'upload',
+      {
+        get name() {
+          reads++;
+          return 'report.txt';
+        },
+        type: 'text/plain',
+        size: 1,
+        stream() {
+          return new Blob(['x']).stream();
+        },
+      },
+    ];
+  });
+  const { req } = makeCapture();
+
+  await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+
+  // The sizing pass, and the write.
+  expect(reads).toBe(2);
+});

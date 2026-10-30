@@ -2136,6 +2136,17 @@ describe('CookieJar', () => {
       },
     );
 
+    test('getCookieFor with an unset name finds nothing', () => {
+      jar.parseSetCookieHeader('session=secret', 'https://example.com/');
+
+      expect(
+        jar.getCookieFor(
+          undefined as unknown as string,
+          'https://example.com/',
+        ),
+      ).toBeUndefined();
+    });
+
     test('a wider-path cookie from http is stored beside a path-scoped Secure cookie, as browsers store it', () => {
       jar.parseSetCookieHeader(
         'scoped=real; Secure; Path=/admin',

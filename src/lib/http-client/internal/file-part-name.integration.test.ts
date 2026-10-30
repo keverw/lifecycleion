@@ -5,6 +5,43 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+test('the client loads where process has no versions', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'no-process-versions-'));
+  try {
+    const build = await Bun.build({
+      entrypoints: [
+        fileURLToPath(new URL('../http-client.ts', import.meta.url)),
+      ],
+      target: 'node',
+      format: 'esm',
+    });
+    expect(build.success).toBe(true);
+    await writeFile(
+      join(directory, 'http-client.mjs'),
+      await build.outputs[0].text(),
+    );
+    const fixture = join(directory, 'fixture.mjs');
+    await writeFile(
+      fixture,
+      `
+        const real = process;
+        globalThis.process = { env: {} };
+        const { HTTPClient } = await import('./http-client.mjs');
+        globalThis.process = real;
+        real.exit(typeof HTTPClient === 'function' ? 0 : 1);
+      `,
+    );
+    const child = spawnSync('node', [fixture], {
+      encoding: 'utf8',
+      timeout: 8000,
+    });
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 15_000);
+
 test('on Node, a file part keeps its name, and a form copy keeps a File subclass whole', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'file-part-name-'));
   try {
@@ -32,7 +69,13 @@ test('on Node, a file part keeps its name, and a form copy keeps a File subclass
         import { HTTPClient } from './http-client.js';
         import { NodeAdapter } from './node-adapter.js';
 
+        let nameReads = 0;
+
         class Lazy extends File {
+          get name() {
+            nameReads++;
+            return super.name;
+          }
           exists() {
             return true;
           }
@@ -67,6 +110,8 @@ test('on Node, a file part keeps its name, and a form copy keeps a File subclass
         assert.equal(answer.status, 200);
         assert.ok(answer.body.includes('filename="a/b.txt"'), answer.body);
         assert.ok(answer.body.includes('OVERRIDE'), answer.body);
+        // The sizing pass and the write, and none for the copies.
+        assert.equal(nameReads, 2);
         process.exit(0);
       `,
     );
