@@ -1710,6 +1710,8 @@ describe('locationText', () => {
   test('keeps ASCII, text already decoded, and bytes that are not UTF-8 as they came', () => {
     expect(locationText('/plain?q=%C3%A9')).toBe('/plain?q=%C3%A9');
     expect(locationText('/日本')).toBe('/日本');
+    // A BOM is kept: read as nothing, the value would resolve to the request's own URL.
+    expect(locationText('\u00ef\u00bb\u00bf')).toBe('\ufeff');
     // A lone latin1 byte is no UTF-8 sequence.
     expect(locationText('/caf\u00e9')).toBe('/caf\u00e9');
   });

@@ -370,7 +370,7 @@ export class HTTPRequestBuilder<T = unknown> {
   }
 
   /**
-   * NodeAdapter only. Called after response headers arrive on a 200 response,
+   * NodeAdapter only. Called after response headers arrive on a 2xx response,
    * before any body bytes are read. Return a WritableLike to pipe the body into
    * it, or null to cancel the request entirely.
    *

@@ -1446,16 +1446,12 @@ export class CookieJar {
     return pathname.slice(0, pathname.lastIndexOf('/'));
   }
 
-  /** Path from Set-Cookie when present and non-empty; otherwise §5.1.4 default-path. */
+  /** Path from Set-Cookie when present (the parser keeps only `/...`); otherwise §5.1.4 default-path. */
   private resolvedCookiePath(
     parsed: ParsedCookie,
     requestPathname: string,
   ): string {
-    if (parsed.path !== undefined && parsed.path !== '') {
-      return parsed.path;
-    }
-
-    return this.defaultCookiePathFromPathname(requestPathname);
+    return parsed.path ?? this.defaultCookiePathFromPathname(requestPathname);
   }
 
   /** The bucket key for `hostname`: its site, the registrable domain under this jar's

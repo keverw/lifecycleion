@@ -59,7 +59,7 @@ export interface AdapterRequest {
   onDownloadProgress?: (event: AdapterProgressEvent) => void;
   /**
    * NodeAdapter only. HTTPClient rejects non-node adapters before dispatch if
-   * this is set. Called after response headers arrive on a 200 response.
+   * this is set. Called after response headers arrive on a 2xx response.
    * Return a writable stream to pipe the body into it, or null to cancel.
    */
   streamResponse?: StreamResponseFactory;
@@ -341,12 +341,12 @@ export interface WritableLike {
 }
 
 /**
- * Info passed to a StreamResponseFactory. Status is always 200 — the factory
- * is never called for any other status code.
+ * Info passed to a StreamResponseFactory. Status is a 2xx — the factory is never
+ * called for any other status code.
  */
 export interface StreamResponseInfo {
-  /** Always 200 — factory is not called for any other status. */
-  status: 200;
+  /** The response's status: a 2xx (`200`, `206`) — factory is not called for any other. */
+  status: number;
   /** Response headers for this attempt. Most values are string; set-cookie is string[]. */
   headers: Record<string, string | string[]>;
   /** Fully resolved request URL for this attempt. */
@@ -378,8 +378,9 @@ export interface StreamResponseCancel {
 }
 
 /**
- * Factory called by NodeAdapter after response headers arrive on a 200 with a body (not
- * a `HEAD` answer).
+ * Factory called by NodeAdapter after response headers arrive on a 2xx that may carry a
+ * body (not a `HEAD` answer, a `204` or a `205`); one with `Content-Length: 0` is an empty
+ * body, and the factory is still called.
  * Return a WritableLike to pipe the body into it, null to cancel, or
  * `{ cancel: true, reason?: string }` to cancel with an optional reason string
  * surfaced on HTTPClientError.cancelReason.
@@ -605,7 +606,7 @@ export interface HTTPRequestOptions {
   onAttemptStart?: (event: AttemptStartEvent) => void;
   onAttemptEnd?: (event: AttemptEndEvent) => void;
   /**
-   * NodeAdapter only. Called after response headers arrive on a 200 response.
+   * NodeAdapter only. Called after response headers arrive on a 2xx response.
    * Return a WritableLike to pipe the body to it, or null to cancel.
    * HTTPClient rejects non-node adapters before dispatch if this is set.
    */

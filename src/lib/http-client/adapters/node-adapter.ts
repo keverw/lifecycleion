@@ -1778,14 +1778,16 @@ export class NodeAdapter implements HTTPAdapter {
 
             // --- Response streaming (NodeAdapter-only feature) ---
             //
-            // Only offered on HTTP 200 responses that carry a body - a `HEAD` answer
-            // has none, and a factory called for it would open (or truncate) a sink for
-            // nothing. All others bypass the factory and return a normal buffered
-            // response. This prevents:
+            // Only offered on 2xx responses that may carry a body, a `206` to a resumed
+            // download among them - a `HEAD` answer has none, and a factory called for it
+            // would open (or truncate) a sink for nothing. An empty body with a
+            // `Content-Length: 0` still is one: an empty file downloads as an empty file,
+            // as `fetch` and got hand over an empty stream. All others bypass the factory and
+            // return a normal buffered response. This prevents:
             //   1. Accidentally streaming error bodies (you'd lose the error detail)
-            //   2. The mistake of buffering a large 200 into memory when you forgot
+            //   2. The mistake of buffering a large success into memory when you forgot
             //      to check the status — factory null = cancel, not buffer
-            if (request.streamResponse && status === 200 && hasBody) {
+            if (request.streamResponse && isSuccessStatus(status) && hasBody) {
               // Per-attempt abort controller for the stream context signal. This is
               // separate from the top-level request signal so we can fire it on local
               // write failures (disk full, etc.) without aborting the request itself —
@@ -1914,7 +1916,7 @@ export class NodeAdapter implements HTTPAdapter {
                 setup.didCallFactory = true;
                 const returned = request.streamResponse(
                   {
-                    status: 200,
+                    status,
                     // A copy, arrays too: the record is the response's own, delivered
                     // with it and read by the cookie jar, so a factory that writes into
                     // it - a `set-cookie` added - changes neither.
@@ -1950,7 +1952,7 @@ export class NodeAdapter implements HTTPAdapter {
                 // open. The same goes for an object that is neither a cancel object nor
                 // something with callable `write` and `end` - `{}`, or `{ cancel: false }` -
                 // which would get as far as the first `write` and settle as a
-                // `stream_write_error` on a 200, blaming the sink for the factory's mistake.
+                // `stream_write_error` on a 2xx, blaming the sink for the factory's mistake.
                 isCancelReturn =
                   writable !== null && isStreamResponseCancel(writable);
                 if (
@@ -2071,7 +2073,7 @@ export class NodeAdapter implements HTTPAdapter {
                 // Body streaming failure after headers (disk full, writable
                 // destroyed, upstream socket reset, etc.)
                 //
-                // The server already returned a real 200 response, so retries are no
+                // The server already returned a real 2xx response, so retries are no
                 // longer safe: the caller's sink may already contain partial bytes.
                 // We therefore preserve the real HTTP status and resolve with
                 // isStreamError rather than throwing/retrying.
@@ -2111,11 +2113,11 @@ export class NodeAdapter implements HTTPAdapter {
                 isStreamError: true,
                 streamErrorCode: 'response_too_large',
                 // `streamResponse` is only offered where it would help: a factory is
-                // called for a `200` alone, so any other status is buffered whatever the
+                // called for a 2xx alone, so any other status is buffered whatever the
                 // request asked for.
                 errorCause: makeResponseTooLargeError(
                   maxResponseBytes,
-                  status === 200,
+                  isSuccessStatus(status),
                 ),
               });
             };
@@ -3022,7 +3024,7 @@ async function streamResponseBody(
     };
 
     const onResponseError = (err: Error): void => {
-      // Response stream error after headers is terminal for streamed 200
+      // Response stream error after headers is terminal for streamed 2xx
       // responses too: bytes may already have been written to the caller's
       // sink, so retrying would risk duplicate/corrupt output.
       const streamError = new Error('Response stream error');
@@ -4565,6 +4567,11 @@ function readClientCertificate(
     key: key as string | Buffer,
     ...(passphrase === undefined ? {} : { passphrase }),
   };
+}
+
+/** Whether a status is a success, as `Response.ok` reads one: `streamResponse` takes these. */
+function isSuccessStatus(status: number): boolean {
+  return status >= 200 && status < 300;
 }
 
 /** Whether this is Bun, whose TLS takes more kinds of trust anchor than Node's. */

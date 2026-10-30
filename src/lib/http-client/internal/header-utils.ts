@@ -80,9 +80,6 @@ export function deleteHeader(
   }
 }
 
-/** Empty, or only the whitespace `fetch` trims from a header value (tab, LF, CR, space). */
-const HTTP_WHITESPACE_ONLY = /^[\t\n\r ]*$/;
-
 /**
  * A header value's comma-separated values, split as the Fetch standard's "get, decode,
  * and split" splits them: a comma inside a quoted string (`"a,b"`, with `\` escaping the
@@ -261,7 +258,8 @@ export function joinCookieHeader(
       continue;
     }
     for (const item of Array.isArray(present) ? present : [present]) {
-      if (HTTP_WHITESPACE_ONLY.test(item)) {
+      // Empty, or only the whitespace `fetch` trims from a header value.
+      if (trimHTTPWhitespace(item) === '') {
         continue;
       }
       name ??= key;

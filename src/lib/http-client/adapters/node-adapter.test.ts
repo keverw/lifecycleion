@@ -6528,8 +6528,64 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(builder.error?.cancelReason).toBe('not enough disk space');
   });
 
-  test('streamResponse is only called on 200, not on error status codes', async () => {
-    // The factory must not be invoked for non-200 responses — error bodies
+  test('streamResponse is called on a 2xx with its real status, a resumed download among them', async () => {
+    const server = http.createServer((req, res) => {
+      if (req.url === '/created') {
+        res.writeHead(201, { 'Content-Length': '4' });
+      } else {
+        expect(req.headers.range).toBe('bytes=4-');
+        res.writeHead(206, {
+          'Content-Length': '4',
+          'Content-Range': 'bytes 4-7/8',
+        });
+      }
+      res.end('body');
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    const rangeClient = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL: `http://127.0.0.1:${String(port)}`,
+    });
+
+    try {
+      for (const [path, status, headers] of [
+        ['/resume', 206, { range: 'bytes=4-' }],
+        ['/created', 201, {}],
+      ] as const) {
+        const statuses: number[] = [];
+        const chunks: Buffer[] = [];
+        const res = await rangeClient
+          .get(path)
+          .headers(headers)
+          .streamResponse((info) => {
+            statuses.push(info.status);
+            return new Writable({
+              write(chunk: Buffer, _encoding, callback): void {
+                chunks.push(chunk);
+                callback();
+              },
+            });
+          })
+          .send();
+
+        expect(statuses).toEqual([status]);
+        expect(res.status).toBe(status);
+        expect(res.isStreamed).toBe(true);
+        expect(res.isFailed).toBe(false);
+        expect(res.body).toBeNull();
+        expect(Buffer.concat(chunks).toString()).toBe('body');
+      }
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  test('streamResponse is not called on error status codes', async () => {
+    // The factory must not be invoked for a response that is no success — error bodies
     // should be buffered normally so callers can inspect them.
     let wasFactoryCalled = false;
 

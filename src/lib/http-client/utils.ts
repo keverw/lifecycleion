@@ -1219,8 +1219,12 @@ export function scalarHeader(
   return Array.isArray(v) ? v[0] : v;
 }
 
-/** Decodes UTF-8 bytes, refusing a sequence that is not valid UTF-8. */
-const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
+/**
+ * Decodes UTF-8 bytes, refusing a sequence that is not valid UTF-8 and keeping a BOM: a
+ * `Location` of nothing but one must not read as empty, which resolves to the request's
+ * own URL.
+ */
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
  * A `Location` header's value as the URL it names is written, before it is resolved: its

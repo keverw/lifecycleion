@@ -1499,10 +1499,8 @@ export class BaseHTTPClient {
               adapterResponse.headers,
               'location',
             );
-            const location =
-              rawLocation === undefined ? undefined : locationText(rawLocation);
 
-            if (!location) {
+            if (!rawLocation) {
               // Redirect status but no Location header — treat as final response
               const built = this._buildAnsweredResponse<T>({
                 adapterResponse,
@@ -1523,6 +1521,8 @@ export class BaseHTTPClient {
 
               break;
             }
+
+            const location = locationText(rawLocation);
 
             hopCount++;
 
@@ -1579,8 +1579,9 @@ export class BaseHTTPClient {
             // adapter's own, or one resolved by this same rule where the adapter gave none
             // (`unfollowedRedirectAnswer`). None for a `Location` that does not resolve.
             // Nothing is sent to it.
+            // Handed the header as it came: this reads it as `locationText` does, once.
             const detectedTargetURL = detectedRedirectTarget(
-              location,
+              rawLocation,
               attemptResult.sentRequest.requestURL,
             );
             lastDetectedTargetURL = detectedTargetURL;
@@ -2787,6 +2788,35 @@ export class BaseHTTPClient {
         timeoutController.abort();
       };
 
+      // A retry given up on while waiting for this attempt's upload to settle: cancelled
+      // during the wait, or, past its deadline, failed as a timeout, with the attempt torn
+      // down, since the retry would put the body on the wire beside an upload nobody can
+      // say has finished.
+      const endForUnsettledUpload = (
+        wait: Exclude<UploadSettleWait, 'settled'>,
+        reported: AttemptRequest,
+      ) => {
+        const signalReason =
+          wait === 'cancelled'
+            ? getSignalCancelReason(cancelSignal)
+            : undefined;
+
+        if (wait === 'deadline') {
+          reportUploadSettleDeadline(this._adapterType, timeout, 'retry');
+          abortAttempt();
+        }
+
+        return {
+          adapterResponse: null,
+          sentRequest: reported,
+          attemptCount: attemptNumber,
+          wasCancelled: wait === 'cancelled',
+          wasTimeout: wait === 'deadline',
+          isRetriesExhausted: false,
+          ...(signalReason !== undefined ? { cancelReason: signalReason } : {}),
+        };
+      };
+
       // Final signal: cancel OR timeout
       const attemptSignal = this._composeSignals(
         cancelSignal,
@@ -3253,7 +3283,7 @@ export class BaseHTTPClient {
           body: adapterRequestBody(adapter, send, sentBody),
           signal: attemptSignal,
           // Forward the builder's streaming factory to each adapter attempt.
-          // NodeAdapter invokes it only for a 200 response with a body, letting the caller
+          // NodeAdapter invokes it only for a 2xx response with a body, letting the caller
           // create attempt-local writable state when a retry happens.
           // Called on the receiver the adapter calls it on, so a factory reading `this`
           // reads the receiver it would if the adapter called it directly.
@@ -3826,27 +3856,7 @@ export class BaseHTTPClient {
             // path gives: the retry would put the body on the wire beside an upload
             // nobody can say has finished.
             if (wait !== 'settled') {
-              const signalReason =
-                wait === 'cancelled'
-                  ? getSignalCancelReason(cancelSignal)
-                  : undefined;
-
-              if (wait === 'deadline') {
-                reportUploadSettleDeadline(this._adapterType, timeout, 'retry');
-                abortAttempt();
-              }
-
-              return {
-                adapterResponse: null,
-                sentRequest: observedSentRequest,
-                attemptCount: attemptNumber,
-                wasCancelled: wait === 'cancelled',
-                wasTimeout: wait === 'deadline',
-                isRetriesExhausted: false,
-                ...(signalReason !== undefined
-                  ? { cancelReason: signalReason }
-                  : {}),
-              };
+              return endForUnsettledUpload(wait, observedSentRequest);
             }
 
             continue;
@@ -4058,9 +4068,9 @@ export class BaseHTTPClient {
             )
           : sentRequest;
 
-        // When abort(string) is called, fetch() rejects with the string itself (per Fetch spec),
-        // not an AbortError. Check for a cancel first so string-reason cancels are caught.
-        if (isCancelOutcome() && !isAbortError(error)) {
+        // The attempt ended by a cancel: reported to `onAttemptEnd` with the status `send()`
+        // resolved with, if it had, and to the caller with its reason.
+        const endCancelled = (reported: AttemptRequest) => {
           emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
@@ -4072,7 +4082,7 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: null,
-            sentRequest: reportedSentRequest,
+            sentRequest: reported,
             attemptCount: attemptNumber,
             wasCancelled: true,
             // A cancel is the outcome, as the docs say a timeout is "instead": not both.
@@ -4082,6 +4092,12 @@ export class BaseHTTPClient {
               ? { cancelReason: signalReason }
               : {}),
           };
+        };
+
+        // When abort(string) is called, fetch() rejects with the string itself (per Fetch spec),
+        // not an AbortError. Check for a cancel first so string-reason cancels are caught.
+        if (isCancelOutcome() && !isAbortError(error)) {
+          return endCancelled(reportedSentRequest);
         }
 
         // An attempt given up on once its factory had started a stream is the cut stream
@@ -4154,30 +4170,13 @@ export class BaseHTTPClient {
               : undefined;
 
           if (isCancelOutcome()) {
-            emitAttemptEnd({
-              willRetry: false,
-              nextRetryDelayMS: undefined,
-              nextRetryAt: undefined,
-              status: 0,
-            });
-
-            const signalReason = getSignalCancelReason(cancelSignal);
-            return {
-              adapterResponse: null,
-              sentRequest: sentRequestForObservedAdapterError(
+            return endCancelled(
+              sentRequestForObservedAdapterError(
                 sentRequest,
                 error,
                 observedSentRequest,
               ),
-              attemptCount: attemptNumber,
-              wasCancelled: true,
-              // A cancel is the outcome, as the docs say a timeout is "instead": not both.
-              wasTimeout: false,
-              isRetriesExhausted: false,
-              ...(signalReason !== undefined
-                ? { cancelReason: signalReason }
-                : {}),
-            };
+            );
           }
 
           if (isTimedOut && abortedResponse) {
@@ -4298,26 +4297,7 @@ export class BaseHTTPClient {
         ) {
           // User/parent cancellation — never retry (even if a timeout fired in the same window).
           if (isCancelOutcome()) {
-            emitAttemptEnd({
-              willRetry: false,
-              nextRetryDelayMS: undefined,
-              nextRetryAt: undefined,
-              status: answeredStatus,
-            });
-
-            const signalReason = getSignalCancelReason(cancelSignal);
-            return {
-              adapterResponse: null,
-              sentRequest: reportedSentRequest,
-              attemptCount: attemptNumber,
-              wasCancelled: true,
-              // A cancel is the outcome, as the docs say a timeout is "instead": not both.
-              wasTimeout: false,
-              isRetriesExhausted: false,
-              ...(signalReason !== undefined
-                ? { cancelReason: signalReason }
-                : {}),
-            };
+            return endCancelled(reportedSentRequest);
           }
 
           // A per-attempt timeout falls through to the timeout and network retry path
@@ -4567,27 +4547,7 @@ export class BaseHTTPClient {
             );
 
             if (wait !== 'settled') {
-              const signalReason =
-                wait === 'cancelled'
-                  ? getSignalCancelReason(cancelSignal)
-                  : undefined;
-
-              if (wait === 'deadline') {
-                reportUploadSettleDeadline(this._adapterType, timeout, 'retry');
-                abortAttempt();
-              }
-
-              return {
-                adapterResponse: null,
-                sentRequest: reportedSentRequest,
-                attemptCount: attemptNumber,
-                wasCancelled: wait === 'cancelled',
-                wasTimeout: wait === 'deadline',
-                isRetriesExhausted: false,
-                ...(signalReason !== undefined
-                  ? { cancelReason: signalReason }
-                  : {}),
-              };
+              return endForUnsettledUpload(wait, reportedSentRequest);
             }
 
             continue;

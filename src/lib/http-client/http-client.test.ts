@@ -5397,6 +5397,32 @@ describe('HTTPClient — redirect', () => {
     ]);
   });
 
+  test('a redirect not followed reports the URL that would have been followed, its Location read as UTF-8 once', async () => {
+    // The raw UTF-8 bytes of a path that really holds `Ã©`, a character per byte. Read as
+    // UTF-8 twice, the report would name `/caf%C3%A9`, another URL.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: '/caf\u00c3\u0083\u00c2\u00a9' },
+          body: null,
+        }),
+    };
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addRequestInterceptor(() => ({ cancel: true }), {
+      phases: ['redirect'],
+    });
+
+    const response = await client.get('https://a.test/start').send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.redirectHistory).toEqual([
+      'https://a.test/caf%C3%83%C2%A9',
+    ]);
+    expect(response.detectedRedirectURL).toBe('https://a.test/caf%C3%83%C2%A9');
+  });
+
   test('returns redirect_loop when maxRedirects is exceeded', async () => {
     const client = makeClient({ followRedirects: true, maxRedirects: 1 });
     const errorCodes: string[] = [];
