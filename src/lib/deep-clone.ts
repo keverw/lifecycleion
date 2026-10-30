@@ -79,10 +79,12 @@ const SPARSE_RUN_PER_ENTRY = 64;
 
 /**
  * How many plain objects deep a clone fills by recursion, the fastest way to fill one,
- * before it fills them as frames instead: deep enough for any ordinary value, far short
- * of the call stack.
+ * before it fills them as frames instead: deep enough for any ordinary value, and a small
+ * share of the call stack even when an array, `Map`, `Set` or error sits between each
+ * object and the next - each adds calls of its own between the two - so a clone called
+ * from deep in a stack does not overflow it.
  */
-const RECURSION_LIMIT = 1000;
+const RECURSION_LIMIT = 250;
 
 /**
  * Deep clone an object or value
