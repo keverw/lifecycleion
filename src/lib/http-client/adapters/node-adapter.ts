@@ -26,6 +26,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
 import { urlToHttpOptions } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { types } from 'node:util';
 import type {
   HTTPAdapter,
@@ -730,20 +731,23 @@ export class NodeAdapter implements HTTPAdapter {
       assertTrustAnchors(mtlsCA, 'mtls.ca');
       // `mtls.ca` adds to `ca` rather than replacing it, so a client that trusts a partner
       // CA through `ca` keeps it when it also configures mTLS.
-      const anchors = [
+      // Each as TLS takes it (see `tlsMaterial`), named by the option it came from.
+      const ownAnchors = [
         ...(trustedCA === undefined
           ? []
           : Array.isArray(trustedCA)
             ? trustedCA
-            : [trustedCA]),
+            : [trustedCA]
+        ).map((anchor) => tlsMaterial(anchor, 'ca')),
         ...(mtlsCA === undefined
           ? []
           : Array.isArray(mtlsCA)
             ? mtlsCA
-            : [mtlsCA]),
+            : [mtlsCA]
+        ).map((anchor) => tlsMaterial(anchor, 'mtls.ca')),
       ];
-      if (anchors.length > 0) {
-        httpsOptions.ca = anchors.length === 1 ? anchors[0] : anchors;
+      if (ownAnchors.length > 0) {
+        httpsOptions.ca = ownAnchors.length === 1 ? ownAnchors[0] : ownAnchors;
       }
 
       // SNI hostname — required when dialing by IP with a DNS-named cert. Withheld on a
@@ -765,8 +769,8 @@ export class NodeAdapter implements HTTPAdapter {
         // remote server's choice, not the caller's, and must not be able to make this
         // adapter authenticate to a third party.
         if (!isCrossOriginHop) {
-          httpsOptions.cert = clientCertificate.cert;
-          httpsOptions.key = clientCertificate.key;
+          httpsOptions.cert = tlsMaterial(clientCertificate.cert, 'mtls.cert');
+          httpsOptions.key = tlsMaterial(clientCertificate.key, 'mtls.key');
           if (clientCertificate.passphrase !== undefined) {
             httpsOptions.passphrase = clientCertificate.passphrase;
           }
@@ -4599,7 +4603,9 @@ function trustAnchorByteSize(entry: object): number | undefined {
  *
  * A `Bun.file()` is a `Blob` no different by type from one made in memory, which Bun's TLS
  * refuses, so a blob is asked of Bun's TLS itself: one it cannot build a context from - a
- * `new Blob([pem])`, a `File`, a file that holds no certificate - is not one.
+ * `new Blob([pem])`, a `File`, a file that holds no certificate - is not one. Nor is one
+ * opened from a file descriptor, which names no path: it is read for each request (see
+ * `tlsMaterial`), and a descriptor cannot be read again from its start.
  */
 function isTrustAnchor(entry: unknown): boolean {
   if (typeof entry === 'string') {
@@ -4618,7 +4624,11 @@ function isTrustAnchor(entry: unknown): boolean {
     return true;
   }
 
-  if (typeof Blob !== 'function' || !(entry instanceof Blob)) {
+  if (
+    typeof Blob !== 'function' ||
+    !(entry instanceof Blob) ||
+    typeof blobPath(entry) !== 'string'
+  ) {
     return false;
   }
 
@@ -4627,6 +4637,60 @@ function isTrustAnchor(entry: unknown): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** A `Bun.file()`'s path, or `undefined` for a blob that names none (one made in memory). */
+function blobPath(blob: Blob): string | undefined {
+  const name: unknown = Reflect.get(blob, 'name');
+  return typeof name === 'string' &&
+    !(typeof File === 'function' && blob instanceof File)
+    ? name
+    : undefined;
+}
+
+/**
+ * A `ca`, `mtls.cert` or `mtls.key` value as handed to TLS: text as it is, and anything
+ * else as a `Buffer` of its own bytes - a view's or an `ArrayBuffer`'s copied, a
+ * `Bun.file()` read from its path. The runtime's shared connection pool tells one TLS
+ * setup from another by these values' text, and a `DataView`, an `ArrayBuffer` or a blob
+ * reads as the same `[object ...]` whatever it holds: passed on as they are, a connection
+ * one adapter opened trusting one CA, or presenting one client certificate, would be
+ * reused by another adapter configured with different ones. A `Buffer` reads as its
+ * bytes.
+ */
+function tlsMaterial(
+  value: string | Buffer | object,
+  name: string,
+): string | Buffer {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (ArrayBuffer.isView(value)) {
+    return copyToOwnMemory(crlBytesOf(value));
+  }
+
+  if (arrayBufferKindOf(value) === 'ArrayBuffer') {
+    return copyToOwnMemory(new Uint8Array(value as ArrayBuffer));
+  }
+
+  const path =
+    typeof Blob === 'function' && value instanceof Blob
+      ? blobPath(value)
+      : undefined;
+  if (path === undefined) {
+    throw optionRefusal(`NodeAdapter ${name} must be PEM text or bytes`);
+  }
+
+  try {
+    return readFileSync(path);
+  } catch (error) {
+    throw nonRetryableAdapterErrorFrom(
+      new Error(`NodeAdapter ${name} file could not be read`, {
+        cause: error,
+      }),
+    );
   }
 }
 
@@ -4679,7 +4743,7 @@ function assertTrustAnchors(value: unknown, name: string): void {
       : isPlainRecord(wrongEntry)
         ? 'a plain object'
         : typeof Blob === 'function' && wrongEntry instanceof Blob
-          ? 'a blob that is not a Bun.file() of a certificate'
+          ? 'a blob that is not a Bun.file() of a certificate opened by its path'
           : describeValue(wrongEntry);
     throw optionRefusal(
       `NodeAdapter ${name} must be PEM text or bytes, or a list of them (got ${isList ? `${got} in the list` : got})`,

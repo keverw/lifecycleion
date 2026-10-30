@@ -1137,7 +1137,7 @@ test('a misspelled config or request option is refused rather than read as absen
     new File([getRevocationFixtures().caCert], 'ca.pem'),
   ]) {
     expect(() => new NodeAdapter({ ca: notOnBun } as never)).toThrow(
-      'NodeAdapter ca must be PEM text or bytes, or a list of them (got a blob that is not a Bun.file() of a certificate)',
+      'NodeAdapter ca must be PEM text or bytes, or a list of them (got a blob that is not a Bun.file() of a certificate opened by its path)',
     );
   }
   expect(

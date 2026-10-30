@@ -10558,6 +10558,70 @@ describe('NodeAdapter - unsupported bodies and per-request option reads', () => 
     }
   });
 
+  test('a trust anchor, certificate or key that is not text reaches TLS as a Buffer of its bytes', async () => {
+    // The shared connection pool tells TLS setups apart by these values' text, and a
+    // `DataView`, an `ArrayBuffer` or a `Bun.file()` reads as the same `[object ...]`
+    // whatever it holds: passed on as they are, one adapter's connection would be reused
+    // by another trusting a different CA or presenting a different certificate.
+    const { caCert, good } = getRevocationFixtures();
+    const caPath = path.join(
+      os.tmpdir(),
+      `anchor-${String(process.pid)}-${String(Date.now())}.pem`,
+    );
+    fs.writeFileSync(caPath, caCert);
+    const bytes = (text: string) => Buffer.from(text);
+    const asDataView = (text: string) => {
+      const b = bytes(text);
+      return new DataView(b.buffer, b.byteOffset, b.byteLength);
+    };
+    const asArrayBuffer = (text: string) => new Uint8Array(bytes(text)).buffer;
+
+    const captured: https.RequestOptions[] = [];
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured.push(options);
+
+      return failingRequest();
+    }) as unknown as typeof https.request);
+
+    try {
+      for (const ca of [
+        asArrayBuffer(caCert),
+        Bun.file(caPath),
+        new Uint16Array(
+          new Uint8Array(bytes(caCert + 'x'.repeat(caCert.length % 2))).buffer,
+        ),
+      ]) {
+        await new NodeAdapter({ ca } as never).send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+        });
+      }
+      await new NodeAdapter({
+        mtls: {
+          cert: asDataView(good.cert) as never,
+          key: asDataView(good.key) as never,
+        },
+      }).send({ requestURL: 'https://api.test/x', method: 'GET', headers: {} });
+
+      expect(captured).toHaveLength(4);
+      for (const options of captured.slice(0, 2)) {
+        expect(Buffer.isBuffer(options.ca)).toBe(true);
+        expect(String(options.ca)).toBe(caCert);
+      }
+      expect(Buffer.isBuffer(captured[2].ca)).toBe(true);
+      expect(Buffer.isBuffer(captured[3].cert)).toBe(true);
+      expect(String(captured[3].cert)).toBe(good.cert);
+      expect(Buffer.isBuffer(captured[3].key)).toBe(true);
+      expect(String(captured[3].key as Buffer)).toBe(good.key);
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(caPath, { force: true });
+    }
+  });
+
   test('a ca set later that is no trust store is refused on the request that reads it', async () => {
     const config: NodeAdapterConfig = {};
     const adapter = new NodeAdapter(config);
