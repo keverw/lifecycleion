@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
-import type { Socket } from 'node:net';
+import type { AddressInfo, Socket } from 'node:net';
 import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -692,6 +692,73 @@ describe('post-header stream aborts report why the retry stopped', () => {
 });
 
 describe('NodeAdapter streamResponse factory failures', () => {
+  test('a timeout that cuts a started stream stays the outcome when a cleanup listener cancels', async () => {
+    // The timeout started the teardown; a cancel its cleanup provokes - the rest of a
+    // batch, or the caller's own controller - is no new cause, as fetch, got and axios
+    // keep the first. The request is settled from the moment the timer fires, so the
+    // cancel answers that it found nothing to cancel.
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Length': '100000' });
+      res.write(Buffer.alloc(1024));
+      // Then stalls, holding the response open.
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL: `http://127.0.0.1:${String(port)}`,
+      timeout: 150,
+    });
+    const sink = () =>
+      new Writable({
+        write(_chunk, _encoding, callback): void {
+          callback();
+        },
+      });
+
+    try {
+      let cancelled: number | undefined;
+      const batch = client
+        .get('/file')
+        .label('batch')
+        .streamResponse((_info, context) => {
+          context.signal.addEventListener('abort', () => {
+            cancelled = client.cancelAllWithLabel('batch', 'batch aborted');
+          });
+          return sink();
+        });
+      const batchResponse = await batch.send();
+
+      expect(batchResponse.status).toBe(200);
+      expect(batchResponse.isTimeout).toBe(true);
+      expect(batchResponse.isCancelled).toBe(false);
+      expect(batch.error?.code).toBe('stream_response_error');
+      expect(batch.state).toBe('failed');
+      expect(cancelled).toBe(0);
+
+      const controller = new AbortController();
+      const own = client
+        .get('/file')
+        .signal(controller.signal)
+        .streamResponse((_info, context) => {
+          context.signal.addEventListener('abort', () => {
+            controller.abort('cleanup');
+          });
+          return sink();
+        });
+      const ownResponse = await own.send();
+
+      expect(ownResponse.isTimeout).toBe(true);
+      expect(ownResponse.isCancelled).toBe(false);
+      expect(own.error?.code).toBe('stream_response_error');
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   test('a stream signal listener that cancels the request does not replace the outcome it was fired for', async () => {
     // The factory's signal fires on a stream failure, and a cleanup listener on it may
     // cancel the request's own controller. Fired before the request settled, that abort

@@ -66,6 +66,7 @@ import {
   reportedRedirectTarget,
   derivedRedirectFields,
   detectedRedirectTarget,
+  locationText,
   type AdapterRedirectFields,
   scalarHeader,
   serializeBody,
@@ -1073,6 +1074,14 @@ export class BaseHTTPClient {
       let initialRequestURL = url;
 
       /**
+       * Whether a timeout that cut a stream its factory had started settled the request
+       * (see `settleByStreamTimeout`): a cancel that landed after it - the caller's own
+       * signal, aborted from the factory's cleanup listener - does not turn the request
+       * cancelled below.
+       */
+      let wasSettledByStreamTimeout = false;
+
+      /**
        * Where the redirect loop below has got to: the request of the hop being followed,
        * and the redirect history leading to it. Declared out here for the same reason, so
        * a throw between hops reports the hop it happened on, as every other terminal path
@@ -1377,6 +1386,10 @@ export class BaseHTTPClient {
             markCancelled: (reason) => {
               cancelEntry(trackedRequest, reason);
             },
+            settleByStreamTimeout: () => {
+              wasSettledByStreamTimeout = true;
+              trackedCallbacks.setState('failed');
+            },
             sentBody,
             latestUpload,
             credentialScope,
@@ -1481,7 +1494,13 @@ export class BaseHTTPClient {
             // counted: a 3xx with nothing to follow is the final response, not a redirect
             // over the limit.
             // Relative paths (e.g. "/new-path") resolve against the current request URL.
-            const location = scalarHeader(adapterResponse.headers, 'location');
+            // Its bytes read as UTF-8, as browsers read them (see `locationText`).
+            const rawLocation = scalarHeader(
+              adapterResponse.headers,
+              'location',
+            );
+            const location =
+              rawLocation === undefined ? undefined : locationText(rawLocation);
 
             if (!location) {
               // Redirect status but no Location header — treat as final response
@@ -2232,7 +2251,11 @@ export class BaseHTTPClient {
       // A cancel that landed after the answer arrived but before the request settled -
       // from the final `onAttemptEnd`, say - told its caller it cancelled the request, so
       // it does: the request ends cancelled rather than settling under that answer.
-      if (cancelSignal.aborted && !response.isCancelled) {
+      if (
+        cancelSignal.aborted &&
+        !response.isCancelled &&
+        !wasSettledByStreamTimeout
+      ) {
         response = this._buildResponse<T>({
           adapterResponse: null,
           requestID,
@@ -2498,6 +2521,13 @@ export class BaseHTTPClient {
      */
     markCancelled: (reason: string | undefined) => void;
     /**
+     * Settle the request as failed, for a timeout that cuts a stream its factory started:
+     * that timeout is not retried, so it is the outcome from the moment it fires, and a
+     * cancel made while the attempt is torn down - by a cleanup listener on the factory's
+     * signal - finds the request settled, as `fetch`, got and axios keep the first cause.
+     */
+    settleByStreamTimeout: () => void;
+    /**
      * Set to the request's body of each attempt as it is dispatched - the client's own
      * copy, which no caller holds (see `copyRequestBody`) - so a 307/308 replays that
      * value, serialized as the attempt's was, rather than the observers' copy, which is
@@ -2727,6 +2757,21 @@ export class BaseHTTPClient {
       // activity. Set timeout <= 0 to disable the per-attempt timer.
       const timeoutController = new AbortController();
       let isTimedOut = false;
+      // Set when the timer fired, before any cancel, on an attempt whose stream factory had
+      // started a stream: the timeout is the outcome (see `settleByStreamTimeout`), and a
+      // cancel the attempt's teardown provokes - the caller's own signal aborted from the
+      // factory's cleanup listener - is not.
+      let isStreamTimeoutFirst = false;
+      // Whether this attempt's adapter is the built-in `NodeAdapter`, whose timeout of a
+      // stream its factory started always ends the request (`stream_response_error`, or
+      // `stream_setup_error` for a factory still opening its sink), never retried: only
+      // then is that timeout settled the moment it fires. A custom adapter may retry
+      // after it, or answer within the abort grace.
+      let isBuiltInNodeSend = false;
+      // Whether the attempt ended cancelled, read at each exit as the cancel signal is,
+      // except when the timeout came first (see `isStreamTimeoutFirst`).
+      const isCancelOutcome = (): boolean =>
+        cancelSignal.aborted && !isStreamTimeoutFirst;
       let timeoutID: ReturnType<typeof setTimeout> | undefined;
 
       // The settle deadline's teardown. Giving up on this attempt's upload at that
@@ -3050,6 +3095,14 @@ export class BaseHTTPClient {
       if (timeout > 0) {
         timeoutID = setTimeout(() => {
           isTimedOut = true;
+          if (
+            didCallStreamFactory &&
+            isBuiltInNodeSend &&
+            !cancelSignal.aborted
+          ) {
+            isStreamTimeoutFirst = true;
+            params.settleByStreamTimeout();
+          }
           timeoutController.abort();
         }, timeout);
       }
@@ -3189,6 +3242,8 @@ export class BaseHTTPClient {
         // Read once, before the request is built as a call reads it, and called as read:
         // whether the body is copied for it is decided by the function handed it.
         const send: unknown = Reflect.get(adapter, 'send');
+        isBuiltInNodeSend =
+          this._adapterType === 'node' && isBuiltInNetworkSend(adapter, send);
         const adapterRequest: AdapterRequest = {
           requestURL: sentRequest.requestURL,
           method: sentRequest.method,
@@ -3953,7 +4008,7 @@ export class BaseHTTPClient {
             // is the answered response's adapter_error, timer or not - except a transport
             // failure answered after the timer fired, which is the timeout there too.)
             // A factory's own cancel is a cancel too.
-            if (!cancelSignal.aborted && !isTimedOut && !isFactoryCancel) {
+            if (!isCancelOutcome() && !isTimedOut && !isFactoryCancel) {
               // The jar threw on headers the server did send, so this ends as the
               // answered response's adapter_error, named for the jar, as on the
               // resolved path - not as a stream error, and never re-sent.
@@ -4004,8 +4059,8 @@ export class BaseHTTPClient {
           : sentRequest;
 
         // When abort(string) is called, fetch() rejects with the string itself (per Fetch spec),
-        // not an AbortError. Check cancelSignal.aborted first so string-reason cancels are caught.
-        if (cancelSignal.aborted && !isAbortError(error)) {
+        // not an AbortError. Check for a cancel first so string-reason cancels are caught.
+        if (isCancelOutcome() && !isAbortError(error)) {
           emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
@@ -4039,7 +4094,7 @@ export class BaseHTTPClient {
         if (
           isAbandoned &&
           streamFactoryState !== 'none' &&
-          !cancelSignal.aborted
+          !isCancelOutcome()
         ) {
           const streamCause = normalizeError(error);
 
@@ -4094,11 +4149,11 @@ export class BaseHTTPClient {
           ): 'stream_error' | undefined =>
             isRetryAvailable() &&
             RETRYABLE_STATUS_CODES.has(status) &&
-            !cancelSignal.aborted
+            !isCancelOutcome()
               ? 'stream_error'
               : undefined;
 
-          if (cancelSignal.aborted) {
+          if (isCancelOutcome()) {
             emitAttemptEnd({
               willRetry: false,
               nextRetryDelayMS: undefined,
@@ -4225,7 +4280,7 @@ export class BaseHTTPClient {
         const isFactoryOwnAbort =
           hasAdapterMarker(error, STREAM_FACTORY_ERROR_FLAG) &&
           readObjectMember(error, STREAM_FACTORY_CANCEL_KEY) === undefined &&
-          !cancelSignal.aborted &&
+          !isCancelOutcome() &&
           !isTimedOut;
 
         // An adapter's flagged non-retryable failure is its own, whatever its name: a
@@ -4239,10 +4294,10 @@ export class BaseHTTPClient {
         if (
           isAbortError(error) &&
           !isFactoryOwnAbort &&
-          (!isFlaggedAdapterFailure || cancelSignal.aborted)
+          (!isFlaggedAdapterFailure || isCancelOutcome())
         ) {
           // User/parent cancellation — never retry (even if a timeout fired in the same window).
-          if (cancelSignal.aborted) {
+          if (isCancelOutcome()) {
             emitAttemptEnd({
               willRetry: false,
               nextRetryDelayMS: undefined,
@@ -4428,7 +4483,7 @@ export class BaseHTTPClient {
         // Either way a non-idempotent method is not retried.
         if (
           policy &&
-          !cancelSignal.aborted &&
+          !isCancelOutcome() &&
           !isUploadAbandoned &&
           (allowNonIdempotentRetry ||
             IDEMPOTENT_METHODS.has(sentRequest.method))
@@ -4477,7 +4532,7 @@ export class BaseHTTPClient {
               normalizeError(error),
             );
 
-            if (!cancelSignal.aborted) {
+            if (!isCancelOutcome()) {
               await this._runErrorObservers(
                 retryError,
                 reportedSentRequest,
@@ -4543,8 +4598,7 @@ export class BaseHTTPClient {
           // A throw (or a timed-out answer) leaves the method rule and an abandoned
           // upload as the only things that can have suppressed a policy-eligible retry
           // here. The method rule is named first: it would have stopped the retry anyway.
-          const isRetrySuppressible =
-            isRetryAvailable() && !cancelSignal.aborted;
+          const isRetrySuppressible = isRetryAvailable() && !isCancelOutcome();
           const isSuppressedByMethod =
             isRetrySuppressible &&
             !allowNonIdempotentRetry &&

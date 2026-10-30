@@ -1746,7 +1746,7 @@ interface StreamResponseInfo {
 }
 
 interface StreamResponseContext {
-  signal: AbortSignal; // Fires on cancel, timeout, or stream write failure
+  signal: AbortSignal; // Fires on cancel, timeout, or stream write failure. On a timeout the request is settled first: a cancel its cleanup makes (the rest of a batch) finds nothing to cancel, and the timeout stays the outcome.
 }
 
 interface StreamResponseCancel {

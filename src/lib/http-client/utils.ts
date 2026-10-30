@@ -1219,6 +1219,35 @@ export function scalarHeader(
   return Array.isArray(v) ? v[0] : v;
 }
 
+/** Decodes UTF-8 bytes, refusing a sequence that is not valid UTF-8. */
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true });
+
+/**
+ * A `Location` header's value as the URL it names is written, before it is resolved: its
+ * bytes read as UTF-8, as browsers and `fetch` read them. A runtime hands a header value
+ * over a character per byte (latin1), so a server's raw `/caf\xC3\xA9` arrives as
+ * `/cafÃ©`, which would otherwise be followed as `/caf%C3%83%C2%A9` rather than the
+ * `/caf%C3%A9` it means. A value holding a character past one byte is already text, and
+ * one whose bytes are not valid UTF-8 is kept as it came.
+ */
+export function locationText(value: string): string {
+  // eslint-disable-next-line no-control-regex -- every byte past ASCII, as a byte
+  if (!/[\u0080-\u00ff]/.test(value) || /[^\u0000-\u00ff]/.test(value)) {
+    return value;
+  }
+
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index++) {
+    bytes[index] = value.charCodeAt(index);
+  }
+
+  try {
+    return STRICT_UTF8.decode(bytes);
+  } catch {
+    return value;
+  }
+}
+
 /**
  * Where a redirect's `Location` points, as `detectedRedirectURL` reports it: resolved
  * against the URL that was answered, without that URL's userinfo. A relative `Location`
@@ -1248,7 +1277,7 @@ export function detectedRedirectTarget(
 
   let target: string;
   try {
-    target = new URL(location, base).href;
+    target = new URL(locationText(location), base).href;
   } catch {
     return undefined;
   }

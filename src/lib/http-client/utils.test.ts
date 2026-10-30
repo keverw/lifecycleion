@@ -23,6 +23,7 @@ import {
   serializeBody,
   stripCrossOriginURLCredentials,
   stripURLCredentials,
+  locationText,
 } from './utils';
 import { materializeRequestHeaders } from './internal/header-utils';
 import { matchesHostPattern } from './test-helpers/host-pattern';
@@ -1697,5 +1698,19 @@ describe('firstJoinedLocation', () => {
     // Repeats of a bare relative reference read the same as one value with a raw space
     // (`/files/Smith, John.pdf`), which is kept whole.
     expect(firstJoinedLocation('next, other')).toBe('next, other');
+  });
+});
+
+describe('locationText', () => {
+  test('reads a header value a character per byte as the UTF-8 it was sent as', () => {
+    // `/café?q=é` as a runtime hands raw UTF-8 header bytes over.
+    expect(locationText('/caf\u00c3\u00a9?q=\u00c3\u00a9')).toBe('/café?q=é');
+  });
+
+  test('keeps ASCII, text already decoded, and bytes that are not UTF-8 as they came', () => {
+    expect(locationText('/plain?q=%C3%A9')).toBe('/plain?q=%C3%A9');
+    expect(locationText('/日本')).toBe('/日本');
+    // A lone latin1 byte is no UTF-8 sequence.
+    expect(locationText('/caf\u00e9')).toBe('/caf\u00e9');
   });
 });

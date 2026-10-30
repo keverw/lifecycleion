@@ -17078,3 +17078,48 @@ test('repeated Content-Length values agree by their digits, not as numbers', () 
     9007199254740992,
   );
 });
+
+test('a Location sent as raw UTF-8 bytes is followed to the URL it names, on NodeAdapter and FetchAdapter', async () => {
+  // Header bytes reach the client a character per byte; read so and percent-encoded, the
+  // server's `/café` was followed as `/caf%C3%83%C2%A9`, where `fetch` and browsers go
+  // to `/caf%C3%A9`.
+  const paths: string[] = [];
+  const server = net.createServer((socket) => {
+    socket.on('error', () => {});
+    socket.once('data', (data: Buffer) => {
+      const path = data.toString('latin1').split(' ')[1] ?? '';
+      paths.push(path);
+      socket.end(
+        path === '/start'
+          ? Buffer.concat([
+              Buffer.from('HTTP/1.1 302 Found\r\nLocation: '),
+              Buffer.from('/café?q=é', 'utf8'),
+              Buffer.from('\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'),
+            ])
+          : 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok',
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    for (const adapter of [new NodeAdapter(), new FetchAdapter()]) {
+      paths.length = 0;
+      const client = new HTTPClient({
+        adapter,
+        baseURL,
+        followRedirects: true,
+      });
+      const response = await client.get('/start').send();
+
+      expect(response.status).toBe(200);
+      expect(paths).toEqual(['/start', '/caf%C3%A9?q=%C3%A9']);
+      expect(response.redirectHistory).toEqual([
+        `${baseURL}/caf%C3%A9?q=%C3%A9`,
+      ]);
+    }
+  } finally {
+    server.close();
+  }
+});
