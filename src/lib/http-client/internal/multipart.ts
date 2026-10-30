@@ -395,7 +395,7 @@ export async function serializeMultipartFormData(
       try {
         while (true) {
           if (req.destroyed) {
-            await cancelReaderQuietly(reader);
+            void cancelReaderQuietly(reader);
             break;
           }
 
@@ -434,7 +434,7 @@ export async function serializeMultipartFormData(
           }
 
           if (req.destroyed) {
-            await cancelReaderQuietly(reader);
+            void cancelReaderQuietly(reader);
             break;
           }
 
@@ -473,7 +473,7 @@ export async function serializeMultipartFormData(
             // chunk to `partsBudget` as well. The shortfall check below the loop has no
             // equivalent problem - bytes that were never written need no undoing.
             if (partBytes + bytes.byteLength > partSize) {
-              await cancelReaderQuietly(reader);
+              void cancelReaderQuietly(reader);
 
               // What actually went on the wire, and the chunk that was refused, kept
               // apart: counting the refused chunk into the written total would name up to
@@ -512,8 +512,10 @@ export async function serializeMultipartFormData(
         // with the reader still locked and the blob's underlying stream never cancelled,
         // which for a disk-backed `File` is a handle held for the life of the process.
         // Cancelling a reader whose stream has already closed is a no-op, so the ordinary
-        // `isDone` exit costs nothing by coming through here too.
-        await cancelReaderQuietly(reader);
+        // `isDone` exit costs nothing by coming through here too. Not waited on, here or
+        // above: a custom `stream()` whose `cancel` never settles would otherwise hold back
+        // the write failure or refusal on its way out, and leave the upload unsettled.
+        void cancelReaderQuietly(reader);
       }
 
       if (!req.destroyed && partBytes !== partSize) {

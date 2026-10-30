@@ -87,8 +87,8 @@ export function knownBodyByteLength(body: unknown): number | undefined {
   return undefined;
 }
 
-/** The terminal upload event for a body of `byteLength` bytes, or of unknown size. */
-export function uploadCompleteEvent(byteLength: number | undefined): {
+/** The terminal progress event for a transfer of `byteLength` bytes, or of unknown size. */
+export function completeProgressEvent(byteLength: number | undefined): {
   loaded: number;
   total: number;
   progress: 1;

@@ -1,5 +1,6 @@
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
+import { completeProgressEvent } from './progress';
 
 /**
  * 16 KB chunks: meaningful upload progress granularity (a 1 MB body fires ~64
@@ -32,7 +33,7 @@ export async function writeRequestBodyChunked(
   if (totalSize === 0) {
     // Empty explicit bodies still need a terminal completion event so progress
     // consumers do not wait forever for a 100% upload signal.
-    onProgress?.({ loaded: 0, total: 0, progress: 1 });
+    onProgress?.(completeProgressEvent(0));
     return;
   }
 

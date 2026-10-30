@@ -1121,6 +1121,108 @@ describe('serializeMultipartFormData', () => {
     );
   });
 
+  test('a stream whose cancel never settles does not hold back how the upload ends', async () => {
+    const CLOSED = 'Request stream closed before the body was fully written';
+    const fileBytes = (data: unknown) =>
+      data instanceof Uint8Array && !Buffer.isBuffer(data);
+
+    const run = async (
+      chunkSize: number,
+      options: {
+        onStream?: () => void;
+        onPull?: () => void;
+        onWrite?: (data: unknown) => Error | null;
+        isDestroyed?: () => boolean;
+      } = {},
+    ) => {
+      let streamCalls = 0;
+      const fd = scriptFormEntries(new FormData(), function* () {
+        yield [
+          'upload',
+          {
+            name: 'data.bin',
+            type: 'application/octet-stream',
+            size: 2,
+            stream() {
+              streamCalls++;
+              options.onStream?.();
+              return new ReadableStream<Uint8Array>({
+                pull(controller) {
+                  options.onPull?.();
+                  controller.enqueue(new Uint8Array(chunkSize));
+                },
+                cancel() {
+                  return new Promise<void>(() => {});
+                },
+              });
+            },
+          },
+        ];
+      });
+      const req = {
+        get destroyed() {
+          return options.isDestroyed?.() ?? false;
+        },
+        setHeader() {},
+        write(data, callback) {
+          callback?.(options.onWrite?.(data) ?? null);
+          return true;
+        },
+        once() {
+          return this;
+        },
+        off() {
+          return this;
+        },
+      } as RequestBodyWritable;
+
+      const outcome = await Promise.race([
+        serializeMultipartFormData(fd, req, generateMultipartBoundary()).then(
+          () => 'resolved',
+          (error: Error) => error.message,
+        ),
+        new Promise<string>((resolve) => {
+          setTimeout(() => resolve('still pending'), 1000);
+        }),
+      ]);
+
+      expect(streamCalls).toBe(1);
+      return outcome;
+    };
+
+    // More than the part measured: the refusal before the write.
+    expect(await run(4)).toContain('did not match its Content-Length');
+
+    // A rejected write, through the `finally` every exit passes.
+    expect(
+      await run(1, {
+        onWrite: (data) => (fileBytes(data) ? new Error('write failed') : null),
+      }),
+    ).toBe('write failed');
+
+    // Destroyed while a read was out: found once the read answers.
+    let isDestroyedOnPull = false;
+    expect(
+      await run(1, {
+        onPull: () => {
+          isDestroyedOnPull = true;
+        },
+        isDestroyed: () => isDestroyedOnPull,
+      }),
+    ).toBe(CLOSED);
+
+    // Destroyed as the source opened: found before the first read.
+    let isDestroyedOnStream = false;
+    expect(
+      await run(1, {
+        onStream: () => {
+          isDestroyedOnStream = true;
+        },
+        isDestroyed: () => isDestroyedOnStream,
+      }),
+    ).toBe(CLOSED);
+  });
+
   test('waits for the write callback before writing the next multipart chunk', async () => {
     const fd = new FormData();
     fd.append('field', 'value');

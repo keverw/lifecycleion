@@ -14,6 +14,7 @@ import {
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
 import { isPlainRecord } from '../internal/plain-record';
+import { completeProgressEvent } from '../internal/progress';
 import {
   isSignalAborted,
   isSignalAbortedQuietly,
@@ -2203,11 +2204,7 @@ export class NodeAdapter implements HTTPAdapter {
               // headers, so its `Set-Cookie` is stored whether or not a Content-Length
               // let the 100% event fire from a chunk.
               if (!didFireDownload100) {
-                guardedDownloadProgress?.({
-                  loaded: loadedBytes,
-                  total: loadedBytes,
-                  progress: 1,
-                });
+                guardedDownloadProgress?.(completeProgressEvent(loadedBytes));
               }
 
               activeBufferedResponse = undefined;
@@ -2673,7 +2670,7 @@ export class NodeAdapter implements HTTPAdapter {
           // No body (any other was refused above) — fire 100% upload immediately and end
           // the request. (A caller's `Content-Length` has been taken off the request; see
           // `dropBodilessContentLength`.)
-          reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
+          reportUploadProgress(completeProgressEvent(0));
           req.end();
         }
       } catch (error) {
@@ -3001,11 +2998,7 @@ async function streamResponseBody(
           // data chunk already reported exactly 100% (Content-Length known and
           // last chunk completed the body).
           if (!didFireDownload100) {
-            onProgress?.({
-              loaded: handedBytes,
-              total: handedBytes,
-              progress: 1,
-            });
+            onProgress?.(completeProgressEvent(handedBytes));
           }
 
           settle(true);

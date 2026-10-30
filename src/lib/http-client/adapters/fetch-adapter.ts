@@ -23,7 +23,10 @@ import {
   derivedRedirectFields,
   resolveBrowserDispatchURL,
 } from '../utils';
-import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
+import {
+  knownBodyByteLength,
+  completeProgressEvent,
+} from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   hasResponseBody,
@@ -223,6 +226,18 @@ export class FetchAdapter implements HTTPAdapter {
         throw nonRetryableAdapterErrorFrom(normalizedError);
       }
 
+      // A signal that is not this runtime's own AbortSignal - from a polyfill or jsdom's
+      // `AbortController`, which `fetch` cannot read - is refused the same way too. Asked
+      // only of what `fetch` threw, so a stubbed `fetch` that takes one still gets it, and
+      // a network failure with one stays a network failure.
+      if (isSignalRefusal(normalizedError, dispatchedURL, signal)) {
+        throw nonRetryableAdapterErrorFrom(
+          new TypeError(
+            "FetchAdapter request could not be sent: this runtime's fetch refused its signal, which is not a native AbortSignal",
+          ),
+        );
+      }
+
       // TLS certificate failures → 495, matching NodeAdapter. A rejected
       // certificate fails identically every time, and `status: 0` is retryable.
       // Server runtimes only: Bun puts the OpenSSL code on the error and Node
@@ -257,8 +272,8 @@ export class FetchAdapter implements HTTPAdapter {
       // Even though the client will classify this as redirect_disabled, the
       // browser completed the fetch operation. Emit terminal progress so the
       // browser adapters match the server/mock adapters' completion semantics.
-      guardedUploadProgress?.(uploadCompleteEvent(knownBodyByteLength(body)));
-      guardedDownloadProgress?.({ loaded: 0, total: 0, progress: 1 });
+      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+      guardedDownloadProgress?.(completeProgressEvent(0));
 
       return {
         status: 0,
@@ -269,7 +284,7 @@ export class FetchAdapter implements HTTPAdapter {
     }
 
     // Fire 100% upload + download progress (fetch has no real per-chunk progress)
-    guardedUploadProgress?.(uploadCompleteEvent(knownBodyByteLength(body)));
+    guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
 
     const responseHeadersForBody = extractFetchHeaders(response.headers);
 
@@ -333,11 +348,7 @@ export class FetchAdapter implements HTTPAdapter {
       );
     }
 
-    guardedDownloadProgress?.({
-      loaded: rawBody?.length ?? 0,
-      total: rawBody?.length ?? 0,
-      progress: 1,
-    });
+    guardedDownloadProgress?.(completeProgressEvent(rawBody?.length ?? 0));
 
     return {
       status: response.status,
@@ -644,6 +655,35 @@ function isHeaderNameAccepted(name: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Whether `error` is `fetch` refusing `signal`: it names `AbortSignal`, as Node's, Bun's and
+ * browsers' refusals do, and this runtime's `Request` refuses the signal too. The name
+ * alone could come from a URL quoted in some other failure.
+ */
+function isSignalRefusal(
+  error: Error,
+  url: string,
+  signal: AbortSignal | undefined,
+): boolean {
+  const message = readUnknownMember(error, 'message');
+
+  if (
+    signal === undefined ||
+    typeof Request !== 'function' ||
+    typeof message !== 'string' ||
+    !message.includes('AbortSignal')
+  ) {
+    return false;
+  }
+
+  try {
+    new Request(url, { signal });
+    return false;
+  } catch {
+    return true;
   }
 }
 

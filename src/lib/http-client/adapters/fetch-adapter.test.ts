@@ -438,6 +438,81 @@ describe('FetchAdapter', () => {
     expect(calls).toBe(0);
   });
 
+  test('a signal this runtime cannot read is refused as non-retryable, without quoting it', async () => {
+    (globalThis as any).fetch = originalFetch;
+
+    const signal = {
+      aborted: false,
+      addEventListener() {},
+      removeEventListener() {},
+      secret: 'do-not-quote',
+    } as unknown as AbortSignal;
+
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: 'http://127.0.0.1:1/',
+        method: 'GET',
+        headers: {},
+        signal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as unknown as Error).message).toBe(
+      "FetchAdapter request could not be sent: this runtime's fetch refused its signal, which is not a native AbortSignal",
+    );
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(
+      JSON.stringify(serializeError(outcome as unknown as Error)),
+    ).not.toContain('do-not-quote');
+  });
+
+  test('a stubbed fetch that takes a non-native signal still gets it', async () => {
+    const signal = {
+      aborted: false,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+    let received: unknown;
+    (globalThis as any).fetch = (_url: string, init: RequestInit) => {
+      received = init.signal;
+      return Promise.resolve(new Response('ok'));
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'http://example.test/',
+      method: 'GET',
+      headers: {},
+      signal,
+    });
+
+    expect(response.status).toBe(200);
+    expect(received).toBe(signal);
+  });
+
+  test('a network failure with a non-native signal stays a network failure', async () => {
+    const signal = {
+      aborted: false,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+    const failure = new TypeError('Failed to fetch');
+    (globalThis as any).fetch = () => Promise.reject(failure);
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'http://example.test/',
+      method: 'GET',
+      headers: {},
+      signal,
+    });
+
+    expect(response.status).toBe(0);
+    expect(response.errorCause).toBe(failure);
+  });
+
   test('a URL that is not http(s) is refused as non-retryable before it is fetched', async () => {
     let calls = 0;
     (globalThis as any).fetch = () => {

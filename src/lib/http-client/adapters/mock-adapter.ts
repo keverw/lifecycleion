@@ -31,7 +31,10 @@ import {
 import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
 import type { HTTPMethod as RouterHTTPMethod } from 'find-my-way';
-import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
+import {
+  knownBodyByteLength,
+  completeProgressEvent,
+} from '../internal/progress';
 import {
   lowerCaseHeaderName,
   materializeRequestHeaders,
@@ -823,17 +826,15 @@ export class MockAdapter implements HTTPAdapter {
     // After the headers are built and checked, as a real adapter has the headers before
     // any body progress: a route mistake found there does not follow a completed download.
     // Signal upload complete, then report download size based on serialised body.
-    guardedUploadProgress?.(uploadCompleteEvent(knownBodyByteLength(body)));
+    guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
 
     // A simulated stream error reports no terminal download progress: real
     // adapters fail the body read before that point, so `progress: 1` here would
     // signal a completed download for a body that never arrived.
     if (streamErrorCode === undefined) {
-      guardedDownloadProgress?.({
-        loaded: responseBody === null ? 0 : intendedByteLength,
-        total: responseBody === null ? 0 : intendedByteLength,
-        progress: 1,
-      });
+      guardedDownloadProgress?.(
+        completeProgressEvent(responseBody === null ? 0 : intendedByteLength),
+      );
     }
 
     return {

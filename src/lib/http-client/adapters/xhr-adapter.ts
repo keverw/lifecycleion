@@ -8,7 +8,10 @@ import { trimHTTPWhitespace } from '../../internal/ascii-text';
 import { defineEntry } from '../../internal/define-entry';
 import { isFormData } from '../internal/form-entries';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
-import { knownBodyByteLength } from '../internal/progress';
+import {
+  completeProgressEvent,
+  knownBodyByteLength,
+} from '../internal/progress';
 import {
   makeAbortError,
   markResponseStreamAbort,
@@ -324,7 +327,7 @@ export class XHRAdapter implements HTTPAdapter {
             ? knownBodyByteLength(requestBody)
             : binaryBodyByteLength) ??
             0);
-        guardedUploadProgress({ loaded: bytes, total: bytes, progress: 1 });
+        guardedUploadProgress(completeProgressEvent(bytes));
       };
 
       // `upload` is optional where XHR runs outside a browser - Node's `xmlhttprequest` has
@@ -502,11 +505,7 @@ export class XHRAdapter implements HTTPAdapter {
             // One number for both, as on every other path: the bytes counted where the
             // length was unknown, the length where the last throttled event fell short.
             const bytes = Math.max(downloadedBytes, downloadTotalBytes);
-            guardedDownloadProgress?.({
-              loaded: bytes,
-              total: bytes,
-              progress: 1,
-            });
+            guardedDownloadProgress?.(completeProgressEvent(bytes));
           }
 
           resolve(browserRedirectResponse(responseURL));
@@ -543,11 +542,7 @@ export class XHRAdapter implements HTTPAdapter {
         // Final 100% download progress — skip if a progress event already
         // fired exactly 100% (Content-Length known and final chunk completed it).
         if (!didFireDownload100) {
-          guardedDownloadProgress?.({
-            loaded: body?.length ?? 0,
-            total: body?.length ?? 0,
-            progress: 1,
-          });
+          guardedDownloadProgress?.(completeProgressEvent(body?.length ?? 0));
         }
 
         // A 3xx the browser did not follow - one with no `Location` - or one handed over
