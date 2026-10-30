@@ -534,18 +534,14 @@ export class NodeAdapter implements HTTPAdapter {
         lowerCaseHeaderName(name),
       );
       if (refusalMessage !== undefined) {
-        const refusal = new TypeError(refusalMessage);
-        markNonRetryableAdapterError(refusal);
-        throw refusal;
+        throw optionRefusal(refusalMessage);
       }
     }
 
     if (asciiUppercase(request.method) === 'CONNECT') {
-      const refusal = new TypeError(
+      throw optionRefusal(
         'NodeAdapter does not open tunnels; a CONNECT request is not supported',
       );
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
     }
 
     // Guarded once, at the boundary, so every call site below is covered - including the

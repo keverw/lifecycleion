@@ -10666,3 +10666,77 @@ describe('a file backed by a path on Bun', () => {
     }
   });
 });
+
+describe('a caller signal this runtime did not make', () => {
+  const polyfillSignal = () => {
+    const target = new EventTarget() as EventTarget & {
+      aborted: boolean;
+      reason: unknown;
+    };
+    target.aborted = false;
+    target.reason = undefined;
+    Object.defineProperty(target, Symbol.toStringTag, {
+      value: 'AbortSignal',
+    });
+    return {
+      signal: target as unknown as AbortSignal,
+      abort: (reason: unknown) => {
+        target.aborted = true;
+        target.reason = reason;
+        target.dispatchEvent(new Event('abort'));
+      },
+    };
+  };
+
+  test('runs the request, and its abort cancels it', async () => {
+    let sentSignal: AbortSignal | undefined;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: (request: { signal?: AbortSignal }) => {
+          sentSignal = request.signal;
+          return new Promise((_resolve, reject) => {
+            request.signal?.addEventListener('abort', () => {
+              reject(request.signal?.reason as Error);
+            });
+          });
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+    });
+    const { signal, abort } = polyfillSignal();
+
+    const sent = client.get('/').signal(signal).send();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5);
+    });
+
+    expect(sentSignal).toBeInstanceOf(AbortSignal);
+
+    abort('stop');
+    const response = await sent;
+
+    expect(response.isCancelled).toBe(true);
+  });
+
+  test('already aborted, it cancels without an attempt', async () => {
+    let attempts = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () => {
+          attempts++;
+          return Promise.resolve({ status: 200, headers: {}, body: null });
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+    });
+    const { signal, abort } = polyfillSignal();
+    abort('stop');
+
+    const response = await client.get('/').signal(signal).send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(attempts).toBe(0);
+  });
+});

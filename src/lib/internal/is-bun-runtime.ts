@@ -1,9 +1,8 @@
 /**
- * Whether this is Bun. Read with care, at load: React Native's `process` and a browser
- * bundle's stand-in have no `versions`.
+ * Whether this is Bun, told by its global rather than `process`, which React Native's and a
+ * browser bundle's stand-in leave without `versions`. By the global's `version`, since a
+ * page's own `Bun` variable, or an element with that id, is a global of the name too.
  */
 export const isBunRuntime =
-  typeof process === 'object' &&
-  process !== null &&
-  typeof (process as { versions?: { bun?: unknown } }).versions?.bun ===
-    'string';
+  typeof (globalThis as { Bun?: { version?: unknown } }).Bun?.version ===
+  'string';

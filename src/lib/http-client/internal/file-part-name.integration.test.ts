@@ -5,6 +5,43 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+test('a global that only shares the name Bun is not Bun', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'not-bun-'));
+  try {
+    const build = await Bun.build({
+      entrypoints: [
+        fileURLToPath(
+          new URL('../../internal/is-bun-runtime.ts', import.meta.url),
+        ),
+      ],
+      target: 'node',
+      format: 'esm',
+    });
+    expect(build.success).toBe(true);
+    await writeFile(
+      join(directory, 'is-bun-runtime.mjs'),
+      await build.outputs[0].text(),
+    );
+    const fixture = join(directory, 'fixture.mjs');
+    await writeFile(
+      fixture,
+      `
+        globalThis.Bun = {};
+        const { isBunRuntime } = await import('./is-bun-runtime.mjs');
+        process.exit(isBunRuntime === false ? 0 : 1);
+      `,
+    );
+    const child = spawnSync('node', [fixture], {
+      encoding: 'utf8',
+      timeout: 8000,
+    });
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 15_000);
+
 test('the client loads where process has no versions', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'no-process-versions-'));
   try {

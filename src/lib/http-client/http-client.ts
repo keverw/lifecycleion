@@ -5400,8 +5400,9 @@ export class BaseHTTPClient {
   /**
    * Compose two abort signals into one that aborts when either does.
    *
-   * On a runtime with `AbortSignal.any` that is all this is. The fallback for older
-   * runtimes listens on both sources and mirrors the first abort, and the listeners it
+   * On a runtime with `AbortSignal.any` that is all this is, for its own signals. The
+   * fallback, for older runtimes and a polyfill's signal, listens on both sources and
+   * mirrors the first abort, and the listeners it
    * adds are released through `releasers` - run by `_execute` once the request has
    * ended, since a listener on the caller's own signal, or on the request's cancel
    * signal, otherwise outlives the request it was added for: nothing ever aborts on the
@@ -5423,7 +5424,15 @@ export class BaseHTTPClient {
     releasers: Array<() => void>,
   ): AbortSignal {
     if (typeof AbortSignal.any === 'function') {
-      return AbortSignal.any([a, b]);
+      try {
+        return AbortSignal.any([a, b]);
+      } catch (error) {
+        // It takes this runtime's own signals only. A polyfill's or jsdom's is listened
+        // to below, as axios listens to one; with two of its own, it simply failed.
+        if (a instanceof AbortSignal && b instanceof AbortSignal) {
+          throw error;
+        }
+      }
     }
 
     const controller = new AbortController();

@@ -279,8 +279,8 @@ export class HTTPRequestBuilder<T = unknown> {
     this._assertNotSent('signal');
     // Refused now when it plainly is not one: it is composed with the client's own signal,
     // which needs an `AbortSignal`. Checked by its built-in tag rather than `instanceof`,
-    // so another realm's (an iframe's) signal is accepted, as composing it accepts it. A
-    // value that only claims the tag rejects `send()` instead, at setup.
+    // so another realm's (an iframe's) signal and a polyfill's are accepted, as composing them
+    // accepts them. A value that only claims the tag rejects `send()` instead, at setup.
     const candidate: unknown = abortSignal;
     if (
       typeof candidate !== 'object' ||

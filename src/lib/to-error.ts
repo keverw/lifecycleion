@@ -22,8 +22,8 @@ import { isDOMExceptionInstance } from './internal/dom-exception';
  *
  * Exported so a caller that only needs the *question* answered - `Logger`'s global
  * `'error'` listener, deciding whether to pass a reported payload through or wrap it -
- * asks it the same way `toError` does. A private copy is how that listener came to use a
- * bare `instanceof` and replace a genuine iframe or `vm` error with a wrapper.
+ * asks it the same way `toError` does, so a genuine iframe or `vm` error is not replaced
+ * with a wrapper.
  *
  * Never throws: `instanceof` walks a prototype chain, which a revoked `Proxy` refuses,
  * and this is called from reporting paths that must not raise an error of their own.
@@ -41,8 +41,7 @@ export function isErrorValue(value: unknown): value is Error {
     // A `DOMException` is accepted beside it, by its own internal state. The proposal
     // has `Error.isError` answer `true` for one, and Node does, but Bun 1.4 answers
     // `false` - and every `AbortError` a fetch or an `AbortSignal` produces is a
-    // `DOMException`, so without this the client stopped telling a cancellation from a
-    // failure. Checked through a branded getter rather than `instanceof`, which
+    // `DOMException`, and the client tells a cancellation from a failure by it. Checked through a branded getter rather than `instanceof`, which
     // `Object.create(DOMException.prototype)` would pass exactly as it passes
     // `instanceof Error`: the `code` accessor throws for a receiver with no
     // `DOMException` state behind it, on Bun and Node alike.

@@ -79,12 +79,10 @@ function normalizeParamsBag(
   const copy: Record<string, unknown> = {};
 
   // The walk's cycle guard keys on object identity, and this hands it a *different* object
-  // than the one the payload's own back-edges point at. Unmarked, `const c = { password:
-  // 'secret' }; c.self = c;` walked `copy`, reached `c` through `self`, found it unseen,
-  // and - since no path pointed below `self` - handed the original subtree back by
-  // reference: the renderer printed the secret and `redactedParams.self.password` carried
-  // it to every structured sink. Marked, the walk adds both to `seen` and the back-edge is
-  // recognized as the node it is already inside.
+  // than the one the payload's own back-edges point at. Marked, the walk adds both to
+  // `seen`, so the back-edge of `const c = { password: 'secret' }; c.self = c;` is
+  // recognized as the node it is already inside, rather than handed back by reference as a
+  // subtree no path points below, with its secret in it.
   aliases.set(copy, params);
 
   // Bounded as every nested container's copy is, and for the same reason: this runs
@@ -200,8 +198,7 @@ export function applyRedaction(
   try {
     // Absent, not merely falsy. `undefined` is the caller saying nothing about redaction;
     // `null`, `0`, `''` and `false` are a caller who supplied a list that cannot name a
-    // key, which is the fail-closed case below. Letting every falsy value take this exit
-    // handed those callers their params back untouched, and said nothing about it.
+    // key, which is the fail-closed case below rather than this exit.
     if (redactedKeys === undefined) {
       return params;
     }
