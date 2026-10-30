@@ -24,6 +24,10 @@ import {
 import { describeValue } from '../internal/describe-value';
 import { isNullish } from '../internal/is-nullish';
 import {
+  assertKnownFields,
+  assertOptionsObject,
+} from '../internal/known-fields';
+import {
   asciiLowercase,
   hasNonHTTPWhitespaceEdge,
   trimHTTPWhitespace,
@@ -77,6 +81,42 @@ function copyEntryList(list: unknown, fn: string, argument: string): string[] {
   }
 
   return copy as string[];
+}
+
+/**
+ * Refuses a matcher's options that are not an object, or that hold a field it does not
+ * take: a misspelled `allowProtocolWildcard` would leave protocol wildcards allowed, its
+ * default. `null` is no options, as `undefined` is.
+ */
+function assertMatcherOptions(
+  options: unknown,
+  fields: readonly string[],
+  label: string,
+): void {
+  assertOptionsObject(options, label, true);
+  assertKnownFields(options, fields, label);
+}
+
+/**
+ * A boolean option's value, `isDefault` for `null` or `undefined`. Anything else is refused:
+ * read by truthiness, `allowGlobalWildcard: 'false'` would turn the wildcard on.
+ */
+function readBooleanOption(
+  value: unknown,
+  isDefault: boolean,
+  label: string,
+): boolean {
+  if (isNullish(value)) {
+    return isDefault;
+  }
+
+  if (typeof value !== 'boolean') {
+    throw new TypeError(
+      `${label} must be a boolean (got ${describeValue(value)})`,
+    );
+  }
+
+  return value;
 }
 
 export function safeParseURL(input: string): URL | null {
@@ -948,6 +988,19 @@ export function validateConfigEntry(
   options?: { allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean },
 ): ValidationResult {
   const SCHEME_RE = /^[a-z][a-z0-9+\-.]*$/i;
+  // The caller's code, not an entry from config, so refused rather than answered: any
+  // other context - `'origins'`, `'Domain'` - would check the entry by the origin rules.
+  const candidateContext: unknown = context;
+  if (candidateContext !== 'domain' && candidateContext !== 'origin') {
+    throw new TypeError(
+      `validateConfigEntry: context must be 'domain' or 'origin' (got ${typeof candidateContext === 'string' ? 'an unknown context' : describeValue(candidateContext)})`,
+    );
+  }
+  assertMatcherOptions(
+    options,
+    ['allowGlobalWildcard', 'allowProtocolWildcard'],
+    'validateConfigEntry options',
+  );
   if (typeof entry !== 'string' && !isNullish(entry)) {
     return {
       valid: false,
@@ -968,14 +1021,18 @@ export function validateConfigEntry(
     return { valid: false, info: 'empty entry', wildcardKind: 'none' };
   }
 
-  // Normalize options with secure defaults
+  // Each option read once, its default for `null` or `undefined` as for one left out.
   const opts = {
-    allowGlobalWildcard: false,
-    allowProtocolWildcard: true,
-    ...(options ?? {}),
-  } as Required<NonNullable<typeof options>> & {
-    allowGlobalWildcard: boolean;
-    allowProtocolWildcard: boolean;
+    allowGlobalWildcard: readBooleanOption(
+      options?.allowGlobalWildcard,
+      false,
+      'validateConfigEntry options.allowGlobalWildcard',
+    ),
+    allowProtocolWildcard: readBooleanOption(
+      options?.allowProtocolWildcard,
+      true,
+      'validateConfigEntry options.allowProtocolWildcard',
+    ),
   };
 
   // Helper: validate non-wildcard labels (punycode + DNS limits)
@@ -1674,11 +1731,16 @@ export function matchesOriginList(
     'matchesOriginList',
     'allowedOrigins',
   );
+  assertMatcherOptions(
+    opts,
+    ['treatNoOriginAsAllowed'],
+    'matchesOriginList options',
+  );
   const cleaned = entries.map((s) => readTrimmedEntry(s) ?? '').filter(Boolean);
 
   if (!origin) {
     // Only allow requests without Origin header if explicitly opted in AND "*" is in the list
-    return !!opts.treatNoOriginAsAllowed && cleaned.includes('*');
+    return !!opts?.treatNoOriginAsAllowed && cleaned.includes('*');
   }
 
   const parsedOrigin = parseExactOriginForMatching(origin);
@@ -1753,6 +1815,11 @@ export function matchesCORSCredentialsList(
     'matchesCORSCredentialsList',
     'allowedOrigins',
   );
+  assertMatcherOptions(
+    options,
+    ['allowWildcardSubdomains'],
+    'matchesCORSCredentialsList options',
+  );
   if (!origin) {
     return false;
   }
@@ -1764,7 +1831,7 @@ export function matchesCORSCredentialsList(
 
   const cleaned = entries.map((s) => readTrimmedEntry(s) ?? '').filter(Boolean);
 
-  const allowWildcard = !!options.allowWildcardSubdomains;
+  const allowWildcard = !!options?.allowWildcardSubdomains;
   // The list's own compiled patterns (see `originListPatterns`).
   const matchesWildcard = wildcardOriginMatcher(
     origin,

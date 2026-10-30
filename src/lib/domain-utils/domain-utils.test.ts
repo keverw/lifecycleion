@@ -3958,3 +3958,73 @@ describe('a value that is not a string', () => {
     });
   });
 });
+
+describe('matcher options and the validateConfigEntry context', () => {
+  it('reads null options as none', () => {
+    expect(
+      matchesCORSCredentialsList(
+        'https://a.test',
+        ['https://a.test'],
+        null as never,
+      ),
+    ).toBe(true);
+    expect(matchesOriginList('https://a.test', ['*'], null as never)).toBe(
+      true,
+    );
+    expect(validateConfigEntry('a.test', 'domain', null as never).valid).toBe(
+      true,
+    );
+  });
+
+  it('refuses options that are not an object, or hold a field the matcher does not take', () => {
+    expect(() =>
+      matchesCORSCredentialsList('https://a.test', [], true as never),
+    ).toThrow(
+      'matchesCORSCredentialsList options must be an object (got boolean)',
+    );
+    // Misspelled, the wildcards it meant to allow stay off.
+    expect(() =>
+      matchesCORSCredentialsList('https://a.test', [], {
+        allowWildcardSubdomain: true,
+      } as never),
+    ).toThrow(
+      'matchesCORSCredentialsList options has no "allowWildcardSubdomain" field',
+    );
+    expect(() =>
+      matchesOriginList(undefined, ['*'], { treatNoOrigin: true } as never),
+    ).toThrow('matchesOriginList options has no "treatNoOrigin" field');
+    // Misspelled, protocol wildcards would stay allowed, the default.
+    expect(() =>
+      validateConfigEntry('https://*', 'origin', {
+        allowProtocolWildcards: false,
+      } as never),
+    ).toThrow(
+      'validateConfigEntry options has no "allowProtocolWildcards" field',
+    );
+  });
+
+  it('reads a validateConfigEntry option set to undefined as its default, and refuses one that is not a boolean', () => {
+    expect(
+      validateConfigEntry('https://*', 'origin', {
+        allowProtocolWildcard: undefined,
+      }).valid,
+    ).toBe(true);
+    // Read by truthiness, the string would turn the global wildcard on.
+    expect(() =>
+      validateConfigEntry('*', 'domain', {
+        allowGlobalWildcard: 'false' as never,
+      }),
+    ).toThrow(
+      'validateConfigEntry options.allowGlobalWildcard must be a boolean (got string)',
+    );
+  });
+
+  it('refuses a context other than domain or origin rather than checking by the origin rules', () => {
+    expect(() => validateConfigEntry('a.test', 'origins' as never)).toThrow(
+      "validateConfigEntry: context must be 'domain' or 'origin' (got an unknown context)",
+    );
+    expect(() => validateConfigEntry('a.test', undefined as never)).toThrow(
+      "validateConfigEntry: context must be 'domain' or 'origin' (got undefined)",
+    );
+  });
+});
