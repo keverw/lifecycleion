@@ -650,6 +650,73 @@ describe('CookieJar', () => {
   });
 
   describe('parseSetCookieHeader', () => {
+    test('on an IP address, a cookie naming that address in Domain= is the one it sets without', () => {
+      // Host-only, as browsers keep it: otherwise a session cookie set with
+      // `Domain=127.0.0.1` would survive the same cookie refreshed or deleted without it,
+      // and be sent first, ahead of the new value.
+      for (const host of ['127.0.0.1', '10.0.0.5', '[::1]']) {
+        const ipJar = new CookieJar();
+        const url = `http://${host}/`;
+        // Named as the URL writes the host, IPv6 brackets included, as browsers read it.
+        const domain = host;
+
+        ipJar.parseSetCookieHeader(`sid=one; Path=/; Domain=${domain}`, url);
+        ipJar.parseSetCookieHeader('sid=two; Path=/', url);
+        expect(ipJar.getCookieHeaderString(url)).toBe('sid=two');
+
+        ipJar.parseSetCookieHeader(`sid=three; Path=/; Domain=${domain}`, url);
+        expect(ipJar.getCookieHeaderString(url)).toBe('sid=three');
+
+        ipJar.parseSetCookieHeader('sid=; Path=/; Max-Age=0', url);
+        expect(ipJar.getCookieHeaderString(url)).toBe('');
+      }
+    });
+
+    test('on an IP address, Domain= names only that address as the URL writes it', () => {
+      const ipJar = new CookieJar();
+      for (const [header, url] of [
+        ['a=1; Domain=127.1', 'http://127.0.0.1/'],
+        ['b=2; Domain=0x7f.0.0.1', 'http://127.0.0.1/'],
+        ['c=3; Domain=::1', 'http://[::1]/'],
+        ['d=4; Domain=0:0:0:0:0:0:0:1', 'http://[::1]/'],
+      ]) {
+        ipJar.parseSetCookieHeader(header, url);
+      }
+      expect(ipJar.getAllCookies()).toEqual([]);
+    });
+
+    test('a __Host- cookie may name the IP address it came from in Domain=', () => {
+      const ipJar = new CookieJar();
+      ipJar.parseSetCookieHeader(
+        '__Host-s=1; Secure; Path=/; Domain=127.0.0.1',
+        'https://127.0.0.1/',
+      );
+      expect(ipJar.getCookieHeaderString('https://127.0.0.1/')).toBe(
+        '__Host-s=1',
+      );
+    });
+
+    test("a domain cookie on an IP address saved by 0.1.0 is replaced by the address's own", () => {
+      const ipJar = new CookieJar();
+      const url = 'http://127.0.0.1/';
+      ipJar.fromJSON({
+        cookies: [
+          {
+            name: 'sid',
+            value: 'old',
+            domain: '127.0.0.1',
+            path: '/',
+            hostOnly: false,
+            createdAt: Date.now(),
+          },
+        ],
+      });
+      ipJar.parseSetCookieHeader('sid=new; Path=/', url);
+      expect(ipJar.getCookieHeaderString(url)).toBe('sid=new');
+      ipJar.parseSetCookieHeader('sid=; Path=/; Max-Age=0', url);
+      expect(ipJar.getCookieHeaderString(url)).toBe('');
+    });
+
     test('a header that is not one string is refused as a TypeError', () => {
       // Node's `set-cookie` is an array of lines; `processResponseHeaders` reads one.
       expect(() =>
@@ -3185,8 +3252,10 @@ test('IPv6 domains use a shared canonical form for programmatic, header and rest
   expect(
     jar.setCookie({ name: 'a', value: '1', domain: '0:0:0:0:0:0:0:1' }),
   ).toBe(true);
+  jar.parseSetCookieHeader('b=2; Domain=[::1]; Path=/', 'http://[::1]/');
+  // An address names itself in `Domain=` only as the URL writes it, as browsers read it.
   jar.parseSetCookieHeader(
-    'b=2; Domain=0:0:0:0:0:0:0:1; Path=/',
+    'x=9; Domain=0:0:0:0:0:0:0:1; Path=/',
     'http://[::1]/',
   );
   expect(jar.getCookieHeaderString('http://[::1]/')).toBe('a=1; b=2');

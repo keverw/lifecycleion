@@ -537,11 +537,17 @@ export class CookieJar {
       this.copyIfPresent(input, stored, field);
     }
 
-    // A domain cookie for a public suffix is kept for that host alone, as a `Set-Cookie`
-    // naming the suffix from the host itself is (RFC 6265bis §5.5): stored host-only, and
-    // so filed under the same key as that `Set-Cookie`'s cookie, which replaces and
-    // deletes it. A jar saved under another suffix list can hold one.
-    if (stored.hostOnly !== true && this.isPublicSuffix(domain)) {
+    // A domain cookie for a public suffix or an IP address is kept for that host alone, as
+    // a `Set-Cookie` naming the suffix or address from the host itself is (RFC 6265bis
+    // §5.5, and browsers for an address): stored host-only, and so filed under the same
+    // key as that `Set-Cookie`'s cookie, which replaces and deletes it. A jar saved under
+    // another suffix list can hold one, and so can one saved by 0.1.0, which stored an
+    // address's `Domain=` cookie as a domain cookie.
+    if (
+      stored.hostOnly !== true &&
+      (this.isPublicSuffix(domain) ||
+        this.tryCanonicalIPLiteral(domain) !== null)
+    ) {
       stored.hostOnly = true;
     }
 
@@ -1553,8 +1559,23 @@ export class CookieJar {
     // `Domain=` had been sent. Tracked separately from `parsed.domain` because the
     // attribute *was* sent - the flag below cannot be derived from its absence.
     let isPublicSuffixHostOnly = false;
+    // Set when the request host is an IP address, which a `Domain=` can only name exactly:
+    // the cookie is host-only, as Chrome and Firefox keep it, so it is the same cookie as
+    // one the address sets with no `Domain=` - one replaces or deletes the other.
+    let isIPHostOnly = false;
 
     if (parsed.domain) {
+      // An IP address may name only itself, written as the URL writes its host - an IPv6
+      // one in brackets - as Chrome and Firefox read `Domain=`: `Domain=::1` or
+      // `Domain=127.1` from `http://[::1]/` or `http://127.0.0.1/` is refused.
+      if (this.tryCanonicalIPLiteral(requestHostname) !== null) {
+        if (asciiLowercase(parsed.domain) !== requestHostname) {
+          return;
+        }
+
+        isIPHostOnly = true;
+      }
+
       // A dot the parser left: `Domain=..example.com`, which no host domain-matches. And
       // a non-ASCII one, which RFC 6265bis §5.6.3 ignores: header bytes arrive read as
       // latin1, so `Domain=m\xFCnchen.de` reads as `münchen.de` and IDNA would make it
@@ -1612,7 +1633,7 @@ export class CookieJar {
     // Prefix validation reads the `Path` attribute as sent: `__Host-` needs an explicit
     // `Path=/`, as RFC 6265bis §5.7 and browsers require - an omitted one that would
     // resolve to `/` from a root request does not count.
-    if (!this.hasValidNamePrefix(parsed)) {
+    if (!this.hasValidNamePrefix(parsed, isIPHostOnly)) {
       return;
     }
 
@@ -1640,7 +1661,8 @@ export class CookieJar {
     // `''` and must be host-only like a missing Domain attribute. A `Domain=` naming a
     // public suffix that is the request host is host-only too, per RFC 6265bis §5.5:
     // the cookie is kept, but only for the host that set it.
-    const isHostOnly = !parsed.domain || isPublicSuffixHostOnly;
+    // So is one whose `Domain=` names the IP address it came from.
+    const isHostOnly = !parsed.domain || isPublicSuffixHostOnly || isIPHostOnly;
 
     // Deleted here rather than through `setCookie`: an expired cookie is never stored, so
     // its value need not be one `setCookie` would store - `sid=日本; Max-Age=0` deletes
@@ -1719,17 +1741,25 @@ export class CookieJar {
    *
    * `__Secure-` requires the `Secure` attribute. `__Host-` requires `Secure`, no
    * non-empty `Domain` attribute (so the cookie is host-only; an empty `Domain=` reads
-   * as absent) and `Path=/`. A cookie that claims
+   * as absent) - or one naming the IP address the cookie came from, which keeps it
+   * host-only too (`isIPHostOnly`), as Chrome and Firefox take it - and `Path=/`. A cookie that claims
    * a prefix without meeting its conditions is refused outright rather than stored with
    * the guarantees the prefix promises to a server reading it back. The secure-scheme
    * half of both prefixes is enforced by the `Secure` check in `storeParsed`; the
    * attribute half is checked on `setCookie` as well, since it needs no URL.
    */
-  private hasValidNamePrefix(parsed: ParsedCookie): boolean {
+  private hasValidNamePrefix(
+    parsed: ParsedCookie,
+    isIPHostOnly = false,
+  ): boolean {
     const prefix = cookieNamePrefix(parsed.name);
 
     if (prefix === '__host-') {
-      return parsed.secure === true && !parsed.domain && parsed.path === '/';
+      return (
+        parsed.secure === true &&
+        (!parsed.domain || isIPHostOnly) &&
+        parsed.path === '/'
+      );
     }
 
     return prefix === null || parsed.secure === true;
