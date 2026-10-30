@@ -178,7 +178,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
    */
   private readonly heldWhilePaused: Array<{ event: string; args: unknown[] }> =
     [];
-  /** Raw bytes that arrived before the decoders were attached: the first chunk. */
+  /** `end`, `close`, `error` and `aborted` events held until a reader attaches. */
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
   /** One record per `onFailure` call: active until unsubscribed, told at most once. */
   private readonly failureSubscriptions = new Set<FailureSubscription>();

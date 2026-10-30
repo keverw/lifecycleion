@@ -507,8 +507,12 @@ export class CookieJar {
         name: input.name,
         value: input.value,
         secure: input.secure,
-        // `Domain` absent means host-only; on this path that is the `hostOnly` flag.
-        domain: input.hostOnly === true ? undefined : domain,
+        // `Domain` absent means host-only; on this path that is the `hostOnly` flag, or a
+        // domain that is stored host-only whatever it says (see below).
+        domain:
+          input.hostOnly === true || this.isHostOnlyDomain(domain)
+            ? undefined
+            : domain,
         path,
       })
     ) {
@@ -543,11 +547,7 @@ export class CookieJar {
     // key as that `Set-Cookie`'s cookie, which replaces and deletes it. A jar saved under
     // another suffix list can hold one, and so can one saved by 0.1.0, which stored an
     // address's `Domain=` cookie as a domain cookie.
-    if (
-      stored.hostOnly !== true &&
-      (this.isPublicSuffix(domain) ||
-        this.tryCanonicalIPLiteral(domain) !== null)
-    ) {
+    if (stored.hostOnly !== true && this.isHostOnlyDomain(domain)) {
       stored.hostOnly = true;
     }
 
@@ -1729,6 +1729,13 @@ export class CookieJar {
 
     return (
       (protocol === 'http:' || protocol === 'ws:') && isLoopbackHost(hostname)
+    );
+  }
+
+  /** Whether a cookie for `domain` is kept for that host alone: a public suffix or an IP address. */
+  private isHostOnlyDomain(domain: string): boolean {
+    return (
+      this.isPublicSuffix(domain) || this.tryCanonicalIPLiteral(domain) !== null
     );
   }
 

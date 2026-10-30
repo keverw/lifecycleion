@@ -67,6 +67,13 @@ export interface InterceptorChainOptions {
    */
   isCancelled?: () => boolean;
   /**
+   * What cancels the request, so a cancel does not wait on an interceptor that never
+   * settles - a token refresh that hung - as the attempt does not wait on an adapter that
+   * ignores its abort: `send()` settles as that cancel, and the interceptor's late answer
+   * is ignored.
+   */
+  cancelSignal?: AbortSignal;
+  /**
    * Whether `request` may be an interceptor's result - a parent client's chain's - rather
    * than one the client built, so it is copied before an interceptor here reads it.
    */
@@ -109,6 +116,7 @@ async function runInterceptors(
   context: RequestInterceptorContext,
   {
     isCancelled,
+    cancelSignal,
     isInterceptorResult = false,
     onCopyFailure,
     onInterceptorCalled,
@@ -188,14 +196,17 @@ async function runInterceptors(
       // Adopted, not awaited as it is: an interceptor is caller code, and one returning
       // a native promise with its own `constructor` and a no-op `then` would hang the
       // request. See `adoptPromise()`.
-      ({ value: result } = await adoptPromise(
-        // The context too, its `redirectHistory` with it: one shared per chain would let
-        // an interceptor that pushes to it or rewrites a field change what the next is
-        // told.
-        fn(current, copyCallbackPhase(phase), {
-          ...context,
-          redirectHistory: [...context.redirectHistory],
-        }),
+      ({ value: result } = await untilCancelled(
+        adoptPromise(
+          // The context too, its `redirectHistory` with it: one shared per chain would let
+          // an interceptor that pushes to it or rewrites a field change what the next is
+          // told.
+          fn(current, copyCallbackPhase(phase), {
+            ...context,
+            redirectHistory: [...context.redirectHistory],
+          }),
+        ),
+        cancelSignal,
       ));
     } catch (error) {
       // A cancel made before the interceptor threw - by that interceptor, say - ends the
@@ -253,6 +264,39 @@ async function runInterceptors(
   // and for a cancel made while a result was read as a cancel or not - a `Proxy` whose
   // `has` trap cancels.
   return isCancelled?.() ? makeInterceptorCancel(undefined) : current;
+}
+
+/**
+ * `answer`, or an answer holding nothing once `signal` aborts - which the chain reads as
+ * the cancel it is before looking at the value. A rejection after that is `answer`'s own,
+ * handled here, and dropped as its result would be.
+ */
+function untilCancelled<T>(
+  answer: Promise<{ value: T }>,
+  signal: AbortSignal | undefined,
+): Promise<{ value: T }> {
+  if (signal === undefined) {
+    return answer;
+  }
+
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      resolve({ value: undefined as T });
+    };
+
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    answer
+      .then(resolve, reject)
+      .finally(() => {
+        signal.removeEventListener('abort', onAbort);
+      })
+      .catch(() => undefined);
+  });
 }
 
 /**

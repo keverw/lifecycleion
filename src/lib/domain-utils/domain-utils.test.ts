@@ -4019,6 +4019,23 @@ describe('matcher options and the validateConfigEntry context', () => {
     );
   });
 
+  it('refuses a matcher option that is not a boolean, which truthiness would turn on', () => {
+    expect(() =>
+      matchesCORSCredentialsList('https://a.test', ['*.test'], {
+        allowWildcardSubdomains: 'false' as never,
+      }),
+    ).toThrow(
+      'matchesCORSCredentialsList options.allowWildcardSubdomains must be a boolean (got string)',
+    );
+    expect(() =>
+      matchesOriginList(undefined, ['*'], {
+        treatNoOriginAsAllowed: 'false' as never,
+      }),
+    ).toThrow(
+      'matchesOriginList options.treatNoOriginAsAllowed must be a boolean (got string)',
+    );
+  });
+
   it('refuses a context other than domain or origin rather than checking by the origin rules', () => {
     expect(() => validateConfigEntry('a.test', 'origins' as never)).toThrow(
       "validateConfigEntry: context must be 'domain' or 'origin' (got an unknown context)",

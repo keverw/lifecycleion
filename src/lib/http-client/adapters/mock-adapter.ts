@@ -567,8 +567,8 @@ export class MockAdapter implements HTTPAdapter {
     // otherwise a body the mock cannot serialize (a `Map`) would fail the route as an
     // `adapter_error` instead. A body that cannot be serialized is held, and refused
     // below, after the delay and the checks ahead of it.
-    const simulatedStreamErrorCode = resolveMockStreamErrorCode(
-      mockResponse.streamError,
+    const simulatedStreamErrorCode = asRouteMistake(() =>
+      resolveMockStreamErrorCode(mockResponse.streamError),
     );
     let serializedBody: { bytes: Uint8Array | null } | { error: unknown } = {
       bytes: null,
@@ -646,6 +646,15 @@ export class MockAdapter implements HTTPAdapter {
     // before any of the response-shaped work below — no body, no headers, no
     // cookies, and no terminal progress, exactly as a real one delivers none.
     if (mockResponse.transportError) {
+      // A boolean or its options: `'yes'` would be read as `true`.
+      asRouteMistake(() => {
+        const candidate: unknown = mockResponse.transportError;
+        if (candidate !== true && typeof candidate !== 'object') {
+          throw new TypeError(
+            `MockAdapter route returned an unknown transportError (got ${describeValue(candidate)}); it is a boolean or its options`,
+          );
+        }
+      });
       const options: MockTransportErrorOptions =
         mockResponse.transportError === true ? {} : mockResponse.transportError;
       // Held to the rule the client holds an adapter's status to - an integer from 0 to
@@ -882,11 +891,26 @@ function redirectBaseURL(requestURL: string): string {
 function resolveMockStreamErrorCode(
   streamError: MockResponse['streamError'],
 ): AdapterResponse['streamErrorCode'] {
-  if (streamError === undefined || streamError === false) {
+  // Nullish too, as a route computing `failed ? 'stream_write_error' : null` writes "none".
+  const candidate: unknown = streamError;
+  if (isNullish(candidate) || candidate === false) {
     return undefined;
   }
 
-  return streamError === true ? 'stream_response_error' : streamError;
+  if (candidate === true) {
+    return 'stream_response_error';
+  }
+
+  if (
+    candidate !== 'stream_write_error' &&
+    candidate !== 'stream_response_error'
+  ) {
+    throw new TypeError(
+      `MockAdapter route returned an unknown streamError (got ${typeof candidate === 'string' ? 'an unknown code' : describeValue(candidate)}); it is a boolean, 'stream_write_error' or 'stream_response_error'`,
+    );
+  }
+
+  return candidate;
 }
 
 function buildRoutes(

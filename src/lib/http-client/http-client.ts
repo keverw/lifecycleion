@@ -66,6 +66,7 @@ import {
   reportedRedirectTarget,
   derivedRedirectFields,
   detectedRedirectTarget,
+  locationHeader,
   locationText,
   type AdapterRedirectFields,
   scalarHeader,
@@ -816,12 +817,10 @@ export class BaseHTTPClient {
     //  2. Check pre-aborted signal → early cancel
     //  3. Create AbortController + wire builder.cancel()
     //  4. Run request interceptor chain
-    //  5. Apply cookie jar
-    //  6. Serialize body
-    //  7. Create shared RetryPolicy instance
-    //  8. _dispatchRequestAttempts → retry loop (sends via adapter)
-    //  9. If redirect status → follow redirect (iterative loop, shares retry budget)
-    // 10. Build final response, run observers, freeze timing
+    //  5. Create shared RetryPolicy instance
+    //  6. _dispatchRequestAttempts → retry loop (per attempt: cookie jar, body, adapter)
+    //  7. If redirect status → follow redirect (iterative loop, shares retry budget)
+    //  8. Build final response, run observers, freeze timing
     if (this.isDisabled) {
       throw new Error(
         'HTTPClient is disabled. Call .enable() before sending requests.',
@@ -1156,7 +1155,7 @@ export class BaseHTTPClient {
               requestID,
               attemptNumber: 1,
             },
-            () => cancelSignal.aborted,
+            cancelSignal,
             (failed) => {
               initialRequestCandidate = failed;
             },
@@ -1441,7 +1440,7 @@ export class BaseHTTPClient {
             adapterResponse &&
             !adapterResponse.isTransportError &&
             REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
-            scalarHeader(adapterResponse.headers, 'location')
+            locationHeader(adapterResponse.headers)
           ) {
             response = this._buildResponse<T>({
               // Pass a synthetic status-0 response so wasRedirectDetected is
@@ -1497,10 +1496,7 @@ export class BaseHTTPClient {
             // over the limit.
             // Relative paths (e.g. "/new-path") resolve against the current request URL.
             // Its bytes read as UTF-8, as browsers read them (see `locationText`).
-            const rawLocation = scalarHeader(
-              adapterResponse.headers,
-              'location',
-            );
+            const rawLocation = locationHeader(adapterResponse.headers);
 
             if (!rawLocation) {
               // Redirect status but no Location header — treat as final response
@@ -1830,7 +1826,7 @@ export class BaseHTTPClient {
                   requestID,
                   attemptNumber: lastAttemptNumber + 1,
                 },
-                () => cancelSignal.aborted,
+                cancelSignal,
                 (failed) => {
                   failedRedirectRequest = failed;
                 },
@@ -2959,7 +2955,7 @@ export class BaseHTTPClient {
             },
             retryPhase,
             { initialURL, redirectHistory, requestID, attemptNumber },
-            () => cancelSignal.aborted,
+            cancelSignal,
             (failed) => {
               failedRetryRequest = failed;
             },
@@ -3614,7 +3610,7 @@ export class BaseHTTPClient {
           this._config.followRedirects &&
           adapterResponse.isTransportError !== true &&
           REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
-          scalarHeader(adapterResponse.headers, 'location') &&
+          locationHeader(adapterResponse.headers) &&
           isStatusOnlyStreamError(adapterResponse)
         ) {
           adapterResponse.body = null;
@@ -5027,10 +5023,11 @@ export class BaseHTTPClient {
     phase: InterceptorPhase,
     context: RequestInterceptorContext,
     /**
-     * Whether the request was cancelled, after which no further interceptor runs and a
-     * chain that runs answers a cancel (see `InterceptorChainOptions.isCancelled`).
+     * What cancels the request, after which no further interceptor runs, one running is
+     * not waited for, and a chain that runs answers a cancel (see
+     * `InterceptorChainOptions.isCancelled` and `cancelSignal`).
      */
-    isCancelled: () => boolean,
+    cancelSignal: AbortSignal,
     /**
      * Handed an interceptor's result that could not be copied for the next interceptor,
      * so the phase reports from it as from a chain result its own copy fails on.
@@ -5047,6 +5044,7 @@ export class BaseHTTPClient {
       }
   > {
     const parentManager = this._parentClient?._requestInterceptors;
+    const isCancelled = (): boolean => cancelSignal.aborted;
 
     // Decided from the same registrations the chains below are taken from: nothing
     // between this check and the snapshots runs caller code.
@@ -5081,6 +5079,7 @@ export class BaseHTTPClient {
     if (parentChain) {
       current = await parentChain(request, phase, chainContext, {
         isCancelled,
+        cancelSignal,
         onCopyFailure,
         onInterceptorCalled: () => {
           didParentCallInterceptor = true;
@@ -5105,6 +5104,7 @@ export class BaseHTTPClient {
       // phases - it is the request the client built, with nothing to copy.
       result: await ownChain(current, phase, chainContext, {
         isCancelled,
+        cancelSignal,
         isInterceptorResult: didParentCallInterceptor,
         onCopyFailure,
         onInterceptorCalled: () => {

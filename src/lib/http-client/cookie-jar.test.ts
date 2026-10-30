@@ -672,6 +672,24 @@ describe('CookieJar', () => {
       }
     });
 
+    test('setCookie takes a __Host- cookie for a domain stored host-only, as a Set-Cookie from it is', () => {
+      for (const domain of ['localhost', '127.0.0.1']) {
+        const hostJar = new CookieJar();
+        const url = `https://${domain}/`;
+
+        expect(
+          hostJar.setCookie({
+            name: '__Host-sid',
+            value: '1',
+            domain,
+            secure: true,
+            path: '/',
+          }),
+        ).toBe(true);
+        expect(hostJar.getCookieHeaderString(url)).toBe('__Host-sid=1');
+      }
+    });
+
     test('on an IP address, Domain= names only that address as the URL writes it', () => {
       const ipJar = new CookieJar();
       for (const [header, url] of [

@@ -1736,11 +1736,16 @@ export function matchesOriginList(
     ['treatNoOriginAsAllowed'],
     'matchesOriginList options',
   );
+  const isNoOriginAllowed = readBooleanOption(
+    opts?.treatNoOriginAsAllowed,
+    false,
+    'matchesOriginList options.treatNoOriginAsAllowed',
+  );
   const cleaned = entries.map((s) => readTrimmedEntry(s) ?? '').filter(Boolean);
 
   if (!origin) {
     // Only allow requests without Origin header if explicitly opted in AND "*" is in the list
-    return !!opts?.treatNoOriginAsAllowed && cleaned.includes('*');
+    return isNoOriginAllowed && cleaned.includes('*');
   }
 
   const parsedOrigin = parseExactOriginForMatching(origin);
@@ -1820,6 +1825,11 @@ export function matchesCORSCredentialsList(
     ['allowWildcardSubdomains'],
     'matchesCORSCredentialsList options',
   );
+  const allowWildcard = readBooleanOption(
+    options?.allowWildcardSubdomains,
+    false,
+    'matchesCORSCredentialsList options.allowWildcardSubdomains',
+  );
   if (!origin) {
     return false;
   }
@@ -1831,7 +1841,6 @@ export function matchesCORSCredentialsList(
 
   const cleaned = entries.map((s) => readTrimmedEntry(s) ?? '').filter(Boolean);
 
-  const allowWildcard = !!options?.allowWildcardSubdomains;
   // The list's own compiled patterns (see `originListPatterns`).
   const matchesWildcard = wildcardOriginMatcher(
     origin,

@@ -17123,3 +17123,143 @@ test('a Location sent as raw UTF-8 bytes is followed to the URL it names, on Nod
     server.close();
   }
 });
+
+test('a cancel does not wait on an interceptor that never settles', async () => {
+  // A token refresh that hung: `cancel()` answers that it cancelled the request, so
+  // `send()` settles as that cancel, in each phase the interceptor can hang in.
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request): Promise<AdapterResponse> =>
+      Promise.resolve<AdapterResponse>(
+        request.requestURL.endsWith('/start')
+          ? {
+              status: 302,
+              headers: { location: 'https://a.test/next' },
+              body: null,
+            }
+          : { status: 503, headers: {}, body: null },
+      ),
+  };
+
+  for (const phase of ['initial', 'redirect', 'retry'] as const) {
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    let hung: (() => void) | undefined;
+    const reached = new Promise<void>((resolve) => {
+      hung = resolve;
+    });
+    client.addRequestInterceptor(
+      () => {
+        hung?.();
+        return new Promise<never>(() => undefined);
+      },
+      { phases: [phase] },
+    );
+    const builder = client.get('https://a.test/start');
+    const pending = builder.send();
+    await reached;
+
+    expect(builder.cancel('give up')).toBe('cancelled');
+    const response = await pending;
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.cancelReason).toBe('give up');
+    expect(builder.state).toBe('cancelled');
+    expect(client.listRequests().count).toBe(0);
+  }
+});
+
+test('an interceptor that rejects after the cancel it was not waited for is no unhandled rejection', async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  let fail: ((error: Error) => void) | undefined;
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  client.addRequestInterceptor(
+    () =>
+      new Promise<never>((_resolve, reject) => {
+        fail = reject;
+      }),
+  );
+
+  try {
+    const builder = client.get('https://a.test/x');
+    const pending = builder.send();
+    await sleep(1);
+    builder.cancel();
+    await pending;
+    fail?.(new Error('late'));
+    await sleep(1);
+
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
+test('a Location of nothing but whitespace is no redirect', async () => {
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (): Promise<AdapterResponse> => {
+      sends++;
+      return Promise.resolve({
+        status: 302,
+        headers: { location: ' \t ' },
+        body: null,
+      });
+    },
+  };
+  const client = new HTTPClient({ adapter, followRedirects: true });
+  const response = await client.get('https://a.test/x').send();
+
+  expect(sends).toBe(1);
+  expect(response.status).toBe(302);
+  expect(response.isFailed).toBe(false);
+  expect(response.redirectHistory).toEqual([]);
+});
+
+test('an empty userAgent is refused rather than replaced by the default', () => {
+  expect(
+    () => new HTTPClient({ adapter: new MockAdapter(), userAgent: '' }),
+  ).toThrow('HTTPClient userAgent must not be empty');
+});
+
+test("a mock route's streamError and transportError are held to their types", async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/none', () => ({
+    status: 200,
+    body: 'ok',
+    streamError: null as never,
+  }));
+  adapter.routes.get('/code', () => ({
+    status: 200,
+    body: 'ok',
+    streamError: 'bogus' as never,
+  }));
+  adapter.routes.get('/transport', () => ({
+    status: 200,
+    transportError: 'yes' as never,
+  }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://x.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  });
+
+  const none = await client.get('/none').send();
+  expect(none.isFailed).toBe(false);
+  expect(none.body).toBe('ok');
+
+  for (const path of ['/code', '/transport']) {
+    const builder = client.get(path);
+    await builder.send();
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.attemptCount).toBe(1);
+  }
+});

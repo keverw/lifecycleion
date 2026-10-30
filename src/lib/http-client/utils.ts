@@ -875,6 +875,12 @@ export function assertSupportedAdapterRuntimeAndConfig(
     );
   }
 
+  // Empty - an unset environment variable - would be replaced by the default, with nothing
+  // said.
+  if (userAgent === '') {
+    throw new TypeError('HTTPClient userAgent must not be empty');
+  }
+
   // A jar the client cannot call fails here rather than on every request.
   const jar: unknown = config.cookieJar;
   if (
@@ -1220,6 +1226,21 @@ export function scalarHeader(
 }
 
 /**
+ * A response's `Location`, or `undefined` for none: one of nothing but whitespace names no
+ * target, as an empty one does - resolved, it would be the request's own URL, and a
+ * redirect to itself until the limit.
+ */
+export function locationHeader(
+  headers: Record<string, string | string[]>,
+): string | undefined {
+  const location = scalarHeader(headers, 'location');
+
+  return location === undefined || trimHTTPWhitespace(location) === ''
+    ? undefined
+    : location;
+}
+
+/**
  * A `Location` header's value as the URL it names is written, before it is resolved: its
  * bytes read as UTF-8, as browsers and `fetch` read them. A runtime hands a header value
  * over a character per byte (latin1), so a server's raw `/caf\xC3\xA9` arrives as
@@ -1357,7 +1378,7 @@ export function derivedRedirectFields(
     return { wasRedirectDetected: false };
   }
 
-  const location = scalarHeader(headers, 'location');
+  const location = locationHeader(headers);
   const detectedRedirectURL = location
     ? detectedRedirectTarget(location, requestURL)
     : undefined;

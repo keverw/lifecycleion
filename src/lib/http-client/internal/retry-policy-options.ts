@@ -52,7 +52,7 @@ export function snapshotRetryPolicyOptions(
   if (validatedSnapshots.has(options)) {
     return options;
   }
-  // A misspelled field (`maxRetryAttemps: 0`, meant to turn retries off), or the other
+  // A misspelled field (`maxRetryAttemps: 5`, meant to raise the limit), or the other
   // strategy's (`delayMS` on an exponential policy), would be read as absent and the
   // default applied.
   assertKnownFields(
