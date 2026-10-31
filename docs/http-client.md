@@ -1081,7 +1081,8 @@ const restored = jar.fromJSON(data); // Replaces existing cookies after preparin
 // that is not a finite number, or a name or value the `Cookie` header cannot carry as
 // one pair, is refused, as is an entry with a field that throws when read, so compare
 // against `data.cookies.length` to detect drops. A cookie already expired is left out
-// too. A `null` `expires`, `maxAge` or `createdAt` reads as absent.
+// too. A `null` `expires`, `maxAge` or `createdAt` reads as absent, and a positive `maxAge` with no
+// `createdAt` is refused, as nothing says when it started.
 ```
 
 ## Redirect Handling

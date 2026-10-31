@@ -946,7 +946,9 @@ export class CookieJar {
    * `createdAt + maxAge * 1000` come out `NaN` and the cookie just as immortal, and
    * `maxAge` wins over `expires`, so a sound `expires` beside a corrupt `maxAge` would
    * not save it. `setCookie` refuses those the way it refuses a bad domain.
-   * A `null` `maxAge` or `createdAt` reads as absent, as a `null` `expires` does.
+   * A `null` `maxAge` or `createdAt` reads as absent, as a `null` `expires` does. A positive
+   * `maxAge` with no `createdAt` is refused here: nothing says when it started, and counting from the
+   * restore would bring back a cookie long expired.
    *
    * An entry with a field that cannot be read at all - a getter that throws - is refused
    * the same way. A `Date` is read by its time, whatever `getTime` it carries.
@@ -1031,6 +1033,16 @@ export class CookieJar {
         delete cookie.maxAge;
       }
 
+      // Above zero only: a `maxAge` of zero or less has expired whenever it started, and
+      // deletes its stored twin as `setCookie` has it.
+      if (
+        typeof cookie.maxAge === 'number' &&
+        cookie.maxAge > 0 &&
+        (cookie.createdAt as unknown) === undefined
+      ) {
+        continue;
+      }
+
       // A `null` `path`, flag or `sameSite` reads as absent, as a `null` expiry does; any
       // other value `setCookie` cannot store is refused there, and counted out of the total.
       for (const field of [
@@ -1049,11 +1061,15 @@ export class CookieJar {
         delete cookie.expires;
       } else {
         // A `Date` is read by its time, not a `getTime` it carries itself, and from any
-        // realm; anything else is parsed. One that cannot be read is refused: see above.
+        // realm; a string or number is parsed. Anything else - `new Date(true)` would read
+        // as 1 ms past the epoch - and one that cannot be read is refused: see above.
         let expires: Date;
 
         try {
-          expires = new Date(rawExpires as string | number | Date);
+          expires =
+            typeof rawExpires === 'string' || typeof rawExpires === 'number'
+              ? new Date(rawExpires)
+              : new Date(Date.prototype.getTime.call(rawExpires));
         } catch {
           continue;
         }

@@ -3137,7 +3137,7 @@ describe('CookieJar', () => {
       expect(jar.clearExpiredCookies()).toBe(0);
     });
 
-    test('reads a null maxAge or createdAt as absent', () => {
+    test('reads a null maxAge as absent, and refuses a maxAge with no createdAt', () => {
       const base = { value: 'x', domain: 'example.com', path: '/' };
       const before = Date.now();
 
@@ -3145,6 +3145,8 @@ describe('CookieJar', () => {
         cookies: [
           { ...base, name: 'null-max-age', maxAge: null, createdAt: before },
           { ...base, name: 'null-created-at', maxAge: 60, createdAt: null },
+          { ...base, name: 'no-created-at', maxAge: 60 },
+          { ...base, name: 'session', createdAt: null },
         ],
       } as unknown as Parameters<CookieJar['fromJSON']>[0]);
 
@@ -3157,11 +3159,10 @@ describe('CookieJar', () => {
       expect(nullMaxAge).toBeDefined();
       expect('maxAge' in (nullMaxAge ?? {})).toBe(false);
 
-      const nullCreatedAt = jar.getCookieFor(
-        'null-created-at',
-        'https://example.com',
-      );
-      expect(nullCreatedAt?.createdAt).toBeGreaterThanOrEqual(before);
+      expect(jar.getAllCookies().map((cookie) => cookie.name)).toEqual([
+        'null-max-age',
+        'session',
+      ]);
       expect(jar.clearExpiredCookies()).toBe(0);
     });
 
@@ -4125,6 +4126,40 @@ test('fromJSON refuses an entry it cannot read and reads a Date by its time', ()
     Date.prototype.getTime.call(expires),
   );
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
+});
+
+test('fromJSON reads a maxAge of zero with no createdAt as expired, deleting its twin', () => {
+  const jar = new CookieJar();
+  const base = { name: 'a', domain: 'example.com', path: '/' };
+
+  expect(
+    jar.fromJSON({
+      cookies: [
+        { ...base, value: '1', createdAt: Date.now() },
+        { ...base, value: '2', maxAge: 0 },
+      ],
+    } as unknown as Parameters<CookieJar['fromJSON']>[0]),
+  ).toBe(0);
+});
+
+test('fromJSON refuses an expires that is not a date, string or number, and keeps the earlier entry', () => {
+  const jar = new CookieJar();
+  const base = {
+    name: 'a',
+    value: '1',
+    domain: 'example.com',
+    path: '/',
+    createdAt: Date.now(),
+  };
+
+  for (const expires of [true, false, [2030], { valueOf: () => 1 }]) {
+    expect(
+      jar.fromJSON({
+        cookies: [base, { ...base, value: '2', expires }],
+      } as unknown as Parameters<CookieJar['fromJSON']>[0]),
+    ).toBe(1);
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
+  }
 });
 
 test('fromJSON refuses a payload whose cookies cannot be read', () => {

@@ -2479,10 +2479,6 @@ export class BaseHTTPClient {
       } else {
         delete headers.cookie;
       }
-    } else if (isCrossOriginHop) {
-      // Without a jar, never let a caller-supplied Cookie header survive a
-      // cross-origin redirect or redirect-interceptor rewrite.
-      delete headers.cookie;
     }
 
     return {
