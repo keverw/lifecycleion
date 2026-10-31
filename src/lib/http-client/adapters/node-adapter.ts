@@ -707,11 +707,11 @@ export class NodeAdapter implements HTTPAdapter {
     if (isHTTPS) {
       const httpsOptions = options as https.RequestOptions;
 
-      // Whether this attempt is a redirect hop to an origin the caller never named. The
-      // configured *trust* (`ca`, `mtls.ca`, `crl`, `rejectUnauthorized`) still applies
-      // there - it says which servers to believe, and that is the caller's rule for every
-      // connection this adapter opens. The configured *identity* does not, and neither
-      // does `socketPath` above: see `isCrossOriginHop`.
+      // On a redirect hop to an origin the caller never named, the configured *trust* (`ca`,
+      // `mtls.ca`, `crl`, `rejectUnauthorized`) still applies - it says which servers to
+      // believe, and that is the caller's rule for every connection this adapter opens. The
+      // configured *identity* does not, and neither does `socketPath` above: see
+      // `isCrossOriginHop`.
 
       // Custom CA trust store. An empty one is refused rather than skipped: skipped, it
       // would fall back to the public roots - a client meant to trust one private CA,

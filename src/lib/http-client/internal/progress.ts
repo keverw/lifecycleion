@@ -49,7 +49,7 @@ export function guardProgressCallback(
 /**
  * The byte size of a request body as the browser adapters can know it without reading it:
  * `0` for no body, the encoded length of a string, a binary body's `byteLength`, a `Blob`'s
- * `size`, and `undefined` when it cannot be known up front (a `FormData`, a stream). Their
+ * `size`, and `undefined` when it cannot be known up front (a `FormData`). Their
  * terminal upload event reports it, so `loaded` / `total` mean bytes, as on NodeAdapter,
  * rather than a stand-in `1`.
  */

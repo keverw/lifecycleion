@@ -14,6 +14,7 @@ import {
 } from '../internal/progress';
 import {
   connectRefusal,
+  markNonRetryableAdapterError,
   makeAbortError,
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
@@ -38,6 +39,7 @@ import type {
 import {
   derivedRedirectFields,
   findBrowserPage,
+  isBrowserEnvironment,
   isCrossOrigin,
   keepFirstJoinedLocation,
   resolveBrowserDispatchURL,
@@ -87,6 +89,25 @@ export class XHRAdapter implements HTTPAdapter {
     } = readAdapterRequestFields(request);
     if (asciiUppercase(method) === 'CONNECT') {
       throw connectRefusal('XHRAdapter');
+    }
+
+    // A browser's XHR drops a GET or HEAD body - the XHR standard sends those bodiless - so
+    // the request would go out without it and be answered as though it had been sent.
+    // `HTTPClient` refuses one before this, on the same rule, and hands a JSON body that
+    // serializes to nothing over as `null`. In a browser only: a non-browser XHR (React
+    // Native, a shim) may send the body.
+    const upperMethod = asciiUppercase(method);
+    if (
+      (upperMethod === 'GET' || upperMethod === 'HEAD') &&
+      requestBody !== null &&
+      requestBody !== undefined &&
+      isBrowserEnvironment()
+    ) {
+      const refusal = new Error(
+        `[XHRAdapter] Cannot send a ${upperMethod} request with a body: XMLHttpRequest drops it. Send the body with POST.`,
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
     }
 
     // Resolved once, as the browser resolves it - against the document's base URL, or the

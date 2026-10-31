@@ -1335,6 +1335,8 @@ Progress granularity depends on the adapter:
 | XHRAdapter   | Real per-chunk           | Real per-chunk                   |
 | MockAdapter  | 0% at start, 100% at end | Terminal 100% only (no 0% event) |
 
+The final event's `loaded` and `total` are the body's size in bytes. An upload whose size cannot be known without reading it - a `FormData` through FetchAdapter or MockAdapter, or through XHRAdapter on a runtime with no upload events - ends with `{ loaded: 0, total: 0, progress: 1 }`: `total: 0` there means the size is unknown, not that nothing was sent, so read it before showing bytes or throughput.
+
 XHRAdapter reports the total the runtime gives. A count that passes it - a compressed response counted in decoded bytes against its encoded `Content-Length`, as Chrome counts - reports an unknown length (`progress: -1`, the bytes so far as `total`), as NodeAdapter reports a decoded body, and the final `1` still fires when the body has loaded.
 
 ## Adapters

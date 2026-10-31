@@ -1264,6 +1264,47 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('driven directly in a browser, a GET or HEAD with a body is refused as non-retryable before upload progress', async () => {
+    const browserGlobals = globalThis as {
+      window?: unknown;
+      document?: unknown;
+    };
+    browserGlobals.window = globalThis;
+    browserGlobals.document = {};
+    try {
+      for (const [method, body] of [
+        ['GET', ''],
+        ['HEAD', 'payload'],
+        ['get', new Uint8Array(1)],
+      ] as const) {
+        const uploadEvents: unknown[] = [];
+        lastXHR = undefined as unknown as typeof lastXHR;
+        const outcome = await new XHRAdapter()
+          .send({
+            requestURL: 'https://api.test/echo',
+            method,
+            headers: {},
+            body,
+            onUploadProgress: (event) => uploadEvents.push(event),
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error as Record<PropertyKey, unknown>,
+          );
+
+        expect(outcome).toBeInstanceOf(Error);
+        expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+        expect(String(outcome?.message)).toContain('with a body');
+        expect(String(outcome?.message)).not.toContain('payload');
+        expect(uploadEvents).toEqual([]);
+        expect(lastXHR).toBeUndefined();
+      }
+    } finally {
+      delete browserGlobals.window;
+      delete browserGlobals.document;
+    }
+  });
+
   test('outside a browser an XHR GET with a body is sent', async () => {
     const client = new HTTPClient({
       adapter: new XHRAdapter(),

@@ -8,6 +8,11 @@ import { completeProgressEvent } from './progress';
  */
 export const REQUEST_BODY_CHUNK_SIZE = 16 * 1024;
 
+/** The failure of a body whose stream was destroyed before all of it was written. */
+export function closedBeforeWritten(): Error {
+  return new Error('Request stream closed before the body was fully written');
+}
+
 /**
  * Writes a pre-serialized request body buffer (string or Uint8Array body, not
  * FormData) into a RequestBodyWritable in fixed-size chunks.
@@ -67,7 +72,7 @@ export async function writeRequestBodyChunked(
   // nothing else would report it. A truncated write is a failed write, whichever exit
   // reached it.
   if (uploadedBytes < totalSize) {
-    throw new Error('Request stream closed before the body was fully written');
+    throw closedBeforeWritten();
   }
 }
 
@@ -148,9 +153,7 @@ export function writeChunkWithBackpressure(
       // "some runtimes (e.g. Bun) do not emit 'error' on req.destroy()". In exactly that
       // case this listener is the only one that runs, so it has to be the one that tells
       // the truth. A truncated write is a failed write.
-      reject(
-        new Error('Request stream closed before the body was fully written'),
-      );
+      reject(closedBeforeWritten());
     };
 
     const onError = (error: Error): void => {

@@ -46,6 +46,7 @@ import { filePartNameToSend, formEntries } from './form-entries';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 import {
+  closedBeforeWritten,
   REQUEST_BODY_CHUNK_SIZE,
   writeChunkWithBackpressure,
 } from './request-body-writer';
@@ -205,11 +206,6 @@ function measureMultipartFormData(
   // Final terminating boundary line — note the extra trailing `--`.
   size += Buffer.byteLength(`--${boundary}--\r\n`);
   return { totalSize: size, partSizes };
-}
-
-/** The failure of a body whose stream was destroyed before all of it was written. */
-function closedBeforeWritten(): Error {
-  return new Error('Request stream closed before the body was fully written');
 }
 
 /**

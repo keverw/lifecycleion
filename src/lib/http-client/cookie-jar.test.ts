@@ -4127,6 +4127,19 @@ test('fromJSON refuses an entry it cannot read and reads a Date by its time', ()
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
 });
 
+test('fromJSON refuses a payload whose cookies cannot be read', () => {
+  const jar = new CookieJar();
+  jar.setCookie({ name: 'old', value: '1', domain: 'example.com', path: '/' });
+  const data = {
+    get cookies(): never {
+      throw new RangeError('boom');
+    },
+  };
+
+  expect(() => jar.fromJSON(data)).toThrow(TypeError);
+  expect(jar.getAllCookies().map((c) => c.name)).toEqual(['old']);
+});
+
 test('fromJSON refuses a cookies array whose length cannot be read', () => {
   const jar = new CookieJar();
   jar.setCookie({ name: 'old', value: '1', domain: 'example.com', path: '/' });

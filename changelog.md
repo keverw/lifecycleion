@@ -235,6 +235,8 @@
 - HTTP: a multipart form that lost entries after it was measured is refused before its closing delimiter is written.
 - HTTP: a caller's polyfilled or jsdom `AbortSignal` is listened to where the runtime's `AbortSignal.any` refuses it, as axios does, so `send()` runs the request rather than rejecting at setup.
 - HTTP: `FetchAdapter` refuses `CONNECT`, `TRACE` and `TRACK` itself, and `XHRAdapter` and `MockAdapter` refuse `CONNECT`, when driven directly; Bun's `fetch` sent `CONNECT` and `TRACE`.
+- **BREAKING:** HTTP `XHRAdapter`, driven directly in a browser, refuses a `GET` or `HEAD` with a body as a non-retryable error; 0.1.0 sent the request without it, as `xhr.send` drops one.
+- HTTP CookieJar: `fromJSON()` throws its `TypeError` when reading `data.cookies` throws, rather than the caller's own error.
 - HTTP: a `cancel()` no longer waits on a `redirect` or `retry` phase observer: `send()` answers as cancelled at once, so one that never settles cannot hold it up. That observer carries on by itself, and no later observer of the phase runs.
 - HTTP: a custom adapter's unusable `requestBodySettled`, or one reported for a bodiless hop, no longer wipes the upload failure an earlier redirect hop reported.
 - HTTP: `NodeAdapter` sends a `Uint8Array` subclass's real bytes when driven directly, rather than as many as its own `length` claims.

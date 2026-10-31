@@ -961,12 +961,20 @@ export class CookieJar {
    * @returns How many cookies the jar holds once restored. Compare against
    *          `data.cookies.length` to learn whether any were refused; entries of the same
    *          name, domain, path and host-only flag are one cookie, the last one stored.
-   * @throws {TypeError} When `data.cookies` is not an array, its length cannot be read, or
-   *         it holds a non-object or an element that cannot be read. The jar is left as
-   *         it was.
+   * @throws {TypeError} When `data.cookies` cannot be read or is not an array, its length
+   *         cannot be read, or it holds a non-object or an element that cannot be read. The
+   *         jar is left as it was.
    */
   public fromJSON(data: CookieJarJSON): number {
-    const cookies: unknown = data?.cookies;
+    // In a `try`, as the length and elements below are: `data` is the caller's, and a
+    // `cookies` getter that throws is an unreadable payload, refused as one.
+    let cookies: unknown;
+
+    try {
+      cookies = data?.cookies;
+    } catch {
+      throw new TypeError('CookieJar.fromJSON: data.cookies cannot be read');
+    }
 
     if (!Array.isArray(cookies)) {
       throw new TypeError('CookieJar.fromJSON: data.cookies must be an array');
