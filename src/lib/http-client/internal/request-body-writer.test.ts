@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, test } from 'bun:test';
 import {
   REQUEST_BODY_CHUNK_SIZE,
+  writeChunkWithBackpressure,
   writeRequestBodyChunked,
 } from './request-body-writer';
 import type { RequestBodyWritable } from './request-body-writable';
@@ -183,10 +184,13 @@ describe('writeRequestBodyChunked', () => {
   test('stops writing if req.destroyed becomes true mid-loop', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 3, 0x00);
     let writeCalls = 0;
+    // Destroyed between chunks, once the first was accepted: the loop's own exit, not a
+    // rejection of a chunk still in flight.
+    let isDestroyed = false;
 
     const req: RequestBodyWritable = {
       get destroyed() {
-        return writeCalls >= 1;
+        return isDestroyed;
       },
       setHeader() {},
       write(_data, callback) {
@@ -204,7 +208,9 @@ describe('writeRequestBodyChunked', () => {
 
     let caught: Error | undefined;
     try {
-      await writeRequestBodyChunked(data, req);
+      await writeRequestBodyChunked(data, req, () => {
+        isDestroyed = true;
+      });
     } catch (error) {
       caught = error as Error;
     }
@@ -254,8 +260,8 @@ describe('writeRequestBodyChunked', () => {
     expect(callbackOrder).toEqual([0, 1]);
   });
 
-  test('rejects if req emits close while waiting for drain', async () => {
-    // It used to resolve, and that reported an upload that had not happened. Even here -
+  test('rejects if req emits close while waiting for the write callback', async () => {
+    // Resolving would report an upload that had not happened. Even here -
     // where the first chunk's callback fired, so those bytes were accepted - the second
     // chunk is never written, and `node-adapter` follows a resolve with `req.end()`, so a
     // truncated body is finalized as though it were complete. A truncated write is a
@@ -268,13 +274,8 @@ describe('writeRequestBodyChunked', () => {
     req.destroyed = false;
     req.setHeader = () => {};
 
-    let writeIndex = 0;
-    req.write = (_data, callback) => {
-      const index = writeIndex++;
-      callback?.(null);
-      // First write returns false to trigger backpressure path
-      return index !== 0;
-    };
+    // Backpressured, with the callback held back: the chunk is not yet accepted.
+    req.write = () => false;
 
     const writePromise = writeRequestBodyChunked(data, req);
     await Promise.resolve();
@@ -295,13 +296,14 @@ describe('writeRequestBodyChunked', () => {
   });
 
   test('rejects when the socket dies under a write that was never backpressured', async () => {
-    // The hang this used to be. `'close'` and `'error'` were armed only when `write()`
-    // asked for a drain, so a chunk the buffer took outright - callback pending, no
-    // backpressure - had nothing listening when the socket died. Nothing rejected and
-    // nothing resolved: the promise stayed pending for good, and it is the same promise
-    // `node-adapter` hands the caller as `requestBodySettled`, so `await` on it never
-    // returned. Measured against a real server that answers early and then resets: the
-    // response arrived in 112 ms and the upload outcome never came at all.
+    // `'close'` and `'error'` are armed for every chunk waiting on its callback, not only
+    // when `write()` asks for a drain: a chunk the buffer takes outright - callback
+    // pending, no backpressure - would otherwise have nothing listening when the socket
+    // dies. Nothing would reject and nothing resolve: the promise would stay pending for
+    // good, and it is the same promise `node-adapter` hands the caller as
+    // `requestBodySettled`, so an `await` on it would never return - against a real server
+    // that answers early and then resets, the response arrives and the upload outcome
+    // never does.
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const req = new EventEmitter() as EventEmitter &
       RequestBodyWritable & { destroyed: boolean };
@@ -334,22 +336,16 @@ describe('writeRequestBodyChunked', () => {
     // not the write that armed them was backpressured.
     expect(req.listenerCount('close')).toBe(0);
     expect(req.listenerCount('error')).toBe(0);
-    expect(req.listenerCount('drain')).toBe(0);
   });
 
-  test('rejects if req emits error while waiting for drain', async () => {
+  test('rejects if req emits error while waiting for the write callback', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const req = new EventEmitter() as EventEmitter &
       RequestBodyWritable & { destroyed: boolean };
     req.destroyed = false;
     req.setHeader = () => {};
 
-    let writeIndex = 0;
-    req.write = (_data, callback) => {
-      const index = writeIndex++;
-      callback?.(null);
-      return index !== 0;
-    };
+    req.write = () => false;
 
     const writePromise = writeRequestBodyChunked(data, req);
     await Promise.resolve();
@@ -366,9 +362,10 @@ describe('writeRequestBodyChunked', () => {
     expect(caught?.message).toBe('socket hang up');
   });
 
-  test('waits for drain before writing the next chunk', async () => {
+  test('waits for the write callback before writing the next chunk', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 2, 0xaa);
     const writeOrder: number[] = [];
+    const callbacks: Array<(error?: Error | null) => void> = [];
     const req = new EventEmitter() as EventEmitter &
       RequestBodyWritable & { destroyed: boolean };
     req.destroyed = false;
@@ -376,21 +373,93 @@ describe('writeRequestBodyChunked', () => {
 
     let writeIndex = 0;
     req.write = (_data, callback) => {
-      const index = writeIndex++;
-      writeOrder.push(index);
-      callback?.(null);
-      return index !== 0;
+      writeOrder.push(writeIndex++);
+      if (callback) {
+        callbacks.push(callback);
+      }
+      return true;
     };
 
     const writePromise = writeRequestBodyChunked(data, req);
 
     await Promise.resolve();
 
+    // One chunk in flight until the writable accepts it.
     expect(writeOrder).toEqual([0]);
 
-    req.emit('drain');
-    await writePromise;
+    callbacks[0](null);
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(writeOrder).toEqual([0, 1]);
+
+    callbacks[1](null);
+    await writePromise;
+  });
+
+  test('a backpressured chunk is accepted on its callback, with no drain', async () => {
+    // Node and Bun stop emitting `'drain'` on a request whose early response has ended
+    // while the upload goes on, though the write callbacks keep coming. Waiting for the
+    // drain as well parked the writer for good on the first chunk that asked for one, and
+    // the adapter's stall watchdog then cut short a body the server was still reading.
+    const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 3, 0xaa);
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    let writes = 0;
+    req.write = (_data, callback) => {
+      writes++;
+      // Every write asks for a drain that never comes; the callback still runs.
+      setImmediate(() => callback?.(null));
+      return false;
+    };
+
+    const loaded: number[] = [];
+    const outcome = await Promise.race([
+      writeRequestBodyChunked(data, req, (e) => {
+        loaded.push(e.loaded);
+      }).then(() => 'resolved'),
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 200)),
+    ]);
+
+    expect(outcome).toBe('resolved');
+    expect(writes).toBe(3);
+    expect(loaded.at(-1)).toBe(data.length);
+    expect(req.listenerCount('close')).toBe(0);
+    expect(req.listenerCount('error')).toBe(0);
+  });
+});
+
+describe('writeChunkWithBackpressure', () => {
+  test('an onAccepted that throws rejects the write rather than leaving it pending', async () => {
+    // Settled and with its listeners off before `onAccepted` ran, a throw from it left the
+    // promise pending for good - and, from the write callback, escaped as an uncaught
+    // exception.
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+    // Backpressured, and accepted once the callback runs.
+    let accept: ((error?: Error | null) => void) | undefined;
+    req.write = (_data, callback) => {
+      accept = callback;
+      return false;
+    };
+
+    const failure = new Error('progress counter failed');
+    const writePromise = writeChunkWithBackpressure(req, 'chunk', () => {
+      throw failure;
+    });
+    const outcome = writePromise.then(
+      () => 'resolved',
+      (error: unknown) => error,
+    );
+
+    expect(() => accept?.(null)).not.toThrow();
+    expect(await outcome).toBe(failure);
+    expect(req.listenerCount('close')).toBe(0);
+    expect(req.listenerCount('error')).toBe(0);
   });
 });

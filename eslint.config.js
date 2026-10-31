@@ -12,6 +12,8 @@ export default [
   ...tseslint.configs.recommendedTypeChecked,
   {
     ignores: [
+      // Worktrees the Claude desktop app creates inside the repo, each a full checkout
+      '.claude/**',
       // Build outputs
       '**/dist/**',
       '**/coverage/**',
@@ -416,6 +418,74 @@ export default [
       ...reactHooks.configs.recommended.rules,
       // JSX Accessibility rules
       ...jsxA11y.flatConfigs.recommended.rules,
+    },
+  },
+  {
+    // Wire and config text in the HTTP client and domain utilities is read by ASCII and
+    // HTTP rules, never the Unicode-aware built-ins: `toLowerCase` turns the Kelvin sign
+    // into `k`, and `trim()` takes a no-break space (the last byte of a UTF-8 `à` read as
+    // latin1). The member itself is matched, not only a call through it, so a computed
+    // key (`x['trim']`), `.call` / `.apply`, an alias (assigned or destructured) and
+    // `Reflect.apply` are caught too. Tests and test support are left alone.
+    files: ['src/lib/http-client/**/*.ts', 'src/lib/domain-utils/**/*.ts'],
+    ignores: [
+      '**/*.test.ts',
+      '**/*.browser-script.ts',
+      '**/*test-utils.ts',
+      '**/test-helpers/**',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            'MemberExpression[computed=false][property.name=/^(trim|trimStart|trimEnd|trimLeft|trimRight)$/]',
+          message:
+            'Unicode-aware trim also takes a no-break space. Use trimHTTPWhitespace or trimSpacesAndTabs (src/lib/internal/ascii-text.ts), or isBlankText / hasWhitespaceEdge where any whitespace is meant.',
+        },
+        {
+          selector:
+            "MemberExpression[computed=true][property.type='Literal'][property.value=/^(trim|trimStart|trimEnd|trimLeft|trimRight)$/]",
+          message:
+            'Unicode-aware trim also takes a no-break space. Use trimHTTPWhitespace or trimSpacesAndTabs (src/lib/internal/ascii-text.ts), or isBlankText / hasWhitespaceEdge where any whitespace is meant.',
+        },
+        {
+          selector:
+            "MemberExpression[computed=true][property.type='TemplateLiteral'][property.expressions.length=0][property.quasis.0.value.cooked=/^(trim|trimStart|trimEnd|trimLeft|trimRight)$/]",
+          message:
+            'Unicode-aware trim also takes a no-break space. Use trimHTTPWhitespace or trimSpacesAndTabs (src/lib/internal/ascii-text.ts), or isBlankText / hasWhitespaceEdge where any whitespace is meant.',
+        },
+        {
+          selector:
+            'ObjectPattern > Property[computed=false][key.name=/^(trim|trimStart|trimEnd|trimLeft|trimRight)$/]',
+          message:
+            'Unicode-aware trim also takes a no-break space. Use trimHTTPWhitespace or trimSpacesAndTabs (src/lib/internal/ascii-text.ts), or isBlankText / hasWhitespaceEdge where any whitespace is meant.',
+        },
+        {
+          selector:
+            'MemberExpression[computed=false][property.name=/^(toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase)$/]',
+          message:
+            'Unicode case mapping folds look-alikes into ASCII (the Kelvin sign into k). Use asciiLowercase or asciiUppercase (src/lib/internal/ascii-text.ts).',
+        },
+        {
+          selector:
+            "MemberExpression[computed=true][property.type='Literal'][property.value=/^(toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase)$/]",
+          message:
+            'Unicode case mapping folds look-alikes into ASCII (the Kelvin sign into k). Use asciiLowercase or asciiUppercase (src/lib/internal/ascii-text.ts).',
+        },
+        {
+          selector:
+            "MemberExpression[computed=true][property.type='TemplateLiteral'][property.expressions.length=0][property.quasis.0.value.cooked=/^(toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase)$/]",
+          message:
+            'Unicode case mapping folds look-alikes into ASCII (the Kelvin sign into k). Use asciiLowercase or asciiUppercase (src/lib/internal/ascii-text.ts).',
+        },
+        {
+          selector:
+            'ObjectPattern > Property[computed=false][key.name=/^(toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase)$/]',
+          message:
+            'Unicode case mapping folds look-alikes into ASCII (the Kelvin sign into k). Use asciiLowercase or asciiUppercase (src/lib/internal/ascii-text.ts).',
+        },
+      ],
     },
   },
   {

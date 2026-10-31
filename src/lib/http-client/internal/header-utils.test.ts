@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import {
   assertNoBrowserRestrictedHeaders,
+  describeRefusedHeader,
   isBrowserRestrictedHeader,
-  isJSONContentType,
+  materializeRequestHeaders,
+  requestHeaderPairs,
 } from './header-utils';
+import { errorText } from '../test-helpers/error-text';
 
 describe('isBrowserRestrictedHeader', () => {
   test('detects exact-match browser restricted headers', () => {
@@ -81,6 +84,41 @@ describe('isBrowserRestrictedHeader', () => {
       false,
     );
   });
+
+  test('a method-override value is lowercased and trimmed in ASCII only', () => {
+    // KELVIN SIGN: `toLowerCase` folds it into `k`, a browser does not.
+    expect(isBrowserRestrictedHeader('X-HTTP-Method-Override', 'TRACK')).toBe(
+      false,
+    );
+    // NO-BREAK SPACE is not HTTP whitespace, so it is not trimmed.
+    expect(isBrowserRestrictedHeader('X-HTTP-Method-Override', ' TRACE')).toBe(
+      false,
+    );
+    // HTTP whitespace is.
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', 'GET,\t TRACK \t'),
+    ).toBe(true);
+  });
+
+  test('a method-override value is split as a browser splits it, not inside a quoted string', () => {
+    // One quoted value, not three methods.
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', '"x,TRACE,y"'),
+    ).toBe(false);
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', '"x\\",TRACE"'),
+    ).toBe(false);
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', 'GET, TRACE'),
+    ).toBe(true);
+    expect(
+      isBrowserRestrictedHeader('X-HTTP-Method-Override', '"x,y", TRACE'),
+    ).toBe(true);
+    // The quotes stay part of the value, so a quoted method is not that method.
+    expect(isBrowserRestrictedHeader('X-HTTP-Method-Override', '"TRACE"')).toBe(
+      false,
+    );
+  });
 });
 
 describe('assertNoBrowserRestrictedHeaders', () => {
@@ -90,7 +128,7 @@ describe('assertNoBrowserRestrictedHeaders', () => {
         { 'sec-fetch-site': 'same-origin' },
         'FetchAdapter',
       ),
-    ).toThrow(/browser-restricted header "sec-fetch-site"/);
+    ).toThrow("Cannot set header 'sec-fetch-site': it is browser-restricted");
   });
 
   test('includes the adapter name in the error message', () => {
@@ -113,31 +151,97 @@ describe('assertNoBrowserRestrictedHeaders', () => {
       assertNoBrowserRestrictedHeaders({}, 'FetchAdapter'),
     ).not.toThrow();
   });
+
+  test('a restricted header pasted whole as its name is refused without the name', () => {
+    // Lowercased, it matches the `proxy-` prefix: the name is the credential.
+    let thrown: unknown;
+    try {
+      assertNoBrowserRestrictedHeaders(
+        { 'proxy-authorization: basic c2VjcmV0LXRva2Vu': 'x' },
+        'FetchAdapter',
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain(
+      'Cannot set a header name: it is browser-restricted',
+    );
+    expect(errorText(thrown)).not.toContain('c2VjcmV0LXRva2Vu');
+  });
 });
 
-describe('isJSONContentType', () => {
-  test('returns true for application/json', () => {
-    expect(isJSONContentType('application/json')).toBe(true);
+describe('materializeRequestHeaders', () => {
+  test('joins repeated Cookie headers with RFC cookie delimiters', () => {
+    expect(
+      materializeRequestHeaders({
+        cookie: ['session=abc123', 'theme=dark'],
+      }),
+    ).toEqual({
+      cookie: 'session=abc123; theme=dark',
+    });
   });
 
-  test('returns true for application/json with charset', () => {
-    expect(isJSONContentType('application/json; charset=utf-8')).toBe(true);
+  test('joins non-cookie arrays with comma delimiters', () => {
+    expect(
+      materializeRequestHeaders({
+        accept: ['application/json', 'text/plain'],
+      }),
+    ).toEqual({
+      accept: 'application/json, text/plain',
+    });
+  });
+});
+
+describe('describeRefusedHeader', () => {
+  test('names a token header and the part refused, and never a name that is not a token', () => {
+    expect(describeRefusedHeader('Authorization', 'value')).toBe(
+      "the value of header 'Authorization'",
+    );
+    expect(describeRefusedHeader('x-trace', 'name')).toBe(
+      "the name of header 'x-trace'",
+    );
+    for (const name of [
+      'Authorization: Bearer secret-token',
+      'a b',
+      '',
+      'x\n',
+    ]) {
+      expect(describeRefusedHeader(name, 'value')).toBe('a header name');
+      expect(describeRefusedHeader(name, 'name')).toBe('a header name');
+    }
   });
 
-  test('returns true for +json vendor types', () => {
-    expect(isJSONContentType('application/vnd.api+json')).toBe(true);
+  test('names a token header without a part when the part refused is unknown', () => {
+    expect(describeRefusedHeader('x-trace', 'header')).toBe("header 'x-trace'");
+    expect(
+      describeRefusedHeader('Authorization: Bearer secret-token', 'header'),
+    ).toBe('a header name');
+  });
+});
+
+describe('Cookie joining', () => {
+  test('empty cookie values and items leave no stray separators', () => {
+    const headers = { cookie: '', Cookie: 'a=1', COOKIE: ['b=2', ''] };
+
+    expect(requestHeaderPairs(headers)).toEqual([['Cookie', 'a=1; b=2']]);
+    expect(materializeRequestHeaders(headers)).toEqual({ Cookie: 'a=1; b=2' });
+    expect(
+      materializeRequestHeaders(headers, { isLowercasingNames: true }),
+    ).toEqual({ cookie: 'a=1; b=2' });
   });
 
-  test('returns false for non-JSON types', () => {
-    expect(isJSONContentType('text/plain')).toBe(false);
-    expect(isJSONContentType('application/xml')).toBe(false);
+  test('a whitespace-only cookie value holds no cookie', () => {
+    const headers = { cookie: [' ', 'a=1', '\t'], Cookie: '  ' };
+
+    expect(requestHeaderPairs(headers)).toEqual([['cookie', 'a=1']]);
   });
 
-  test('returns false for undefined', () => {
-    expect(isJSONContentType(undefined)).toBe(false);
-  });
+  test('a cookie header with no cookie in it is not sent at all', () => {
+    const headers = { 'x-a': '1', cookie: '', Cookie: ['', ' '] };
 
-  test('is case-insensitive', () => {
-    expect(isJSONContentType('Application/JSON')).toBe(true);
+    expect(requestHeaderPairs(headers)).toEqual([['x-a', '1']]);
+    expect(materializeRequestHeaders(headers)).toEqual({ 'x-a': '1' });
   });
 });

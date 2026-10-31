@@ -1,13 +1,16 @@
 import type { AdapterProgressEvent } from '../types';
 import { safeHandleCallback } from '../../safe-handle-callback';
+import { readBinaryByteLength } from '../../internal/binary-view';
+import { utf8ByteLength } from './utf8-length';
+import { isNullish } from '../../internal/is-nullish';
 
 /**
  * Wrap a caller's progress callback so a throw from it cannot be mistaken for a transport
  * failure.
  *
  * `onUploadProgress` and `onDownloadProgress` are invoked from inside the adapters' stream
- * handlers, and were called bare. A throw there did not vanish - it propagated out and the
- * adapter classified it as an `adapter_error`, so the caller was told their request had a
+ * handlers. Called bare, a throw there would not vanish - it would propagate out and the
+ * adapter would classify it as an `adapter_error`, telling the caller their request had a
  * network problem when in fact their own progress callback had a bug. That is a worse
  * outcome than silence in one specific way: silence leaves you looking, and a
  * misclassification points you somewhere there is nothing to find.
@@ -17,25 +20,19 @@ import { safeHandleCallback } from '../../safe-handle-callback';
  * global `'error'` channel, where `safeHandleCallback` already sends every other
  * caller-callback failure, and the transfer carries on.
  *
- * The same rule applies to every other purely observational hook, and `onAttemptStart` /
- * `onAttemptEnd` were worse than these: a throw from one of those took the request down to
- * `status: 0` and reported nothing at all.
+ * The same rule applies to every other purely observational hook, `onAttemptStart` /
+ * `onAttemptEnd` included: unguarded, a throw from one of those would take the request down
+ * to `status: 0` and report nothing at all.
  *
  * @returns A guarded callback, or `undefined` when the caller supplied none, so the
- *          `?.()` call sites downstream stay exactly as they were.
+ *          call sites downstream stay plain `?.()` calls.
  */
 export function guardProgressCallback(
   callback: ((event: AdapterProgressEvent) => void) | undefined | null,
   label: string,
 ): ((event: AdapterProgressEvent) => void) | undefined {
-  // `== null`, so `null` is "none" as well as `undefined`. The bare `?.()` call sites this
-  // replaced skipped a `null` hook exactly as they skipped an absent one, and narrowing the
-  // check to `undefined` turned that silent no-op into a `safeHandleCallback` report of a
-  // non-function on the global `'error'` channel - once per progress event, for a JavaScript
-  // caller who simply passed `null`. `BaseHTTPClient` normalizes falsy hooks before they
-  // reach here, so this is the direct-adapter path, but the doc above says "when the caller
-  // supplied none" and `null` is that.
-  if (callback === undefined || callback === null) {
+  // `null` is none too, not a non-function to report on every progress event.
+  if (isNullish(callback)) {
     return undefined;
   }
 
@@ -47,4 +44,56 @@ export function guardProgressCallback(
     // else's function, and it covers a non-function, a throw and a rejection alike.
     safeHandleCallback(label, callback, event);
   };
+}
+
+/**
+ * The byte size of a request body as the browser adapters can know it without reading it:
+ * `0` for no body, the encoded length of a string, a binary body's `byteLength`, a `Blob`'s
+ * `size`, and `undefined` when it cannot be known up front (a `FormData`, a stream). Their
+ * terminal upload event reports it, so `loaded` / `total` mean bytes, as on NodeAdapter,
+ * rather than a stand-in `1`.
+ */
+export function knownBodyByteLength(body: unknown): number | undefined {
+  if (isNullish(body)) {
+    return 0;
+  }
+
+  if (typeof body === 'string') {
+    return utf8ByteLength(body);
+  }
+
+  if (typeof body !== 'object') {
+    return undefined;
+  }
+
+  // Bytes by their internal slot, as the response limit measures them: a buffer of any
+  // kind, from any realm, at its real size rather than the one it reports.
+  const byteLength = readBinaryByteLength(body);
+  if (byteLength !== null) {
+    return byteLength;
+  }
+
+  // Guarded: the body is the caller's, and a Proxy whose `getPrototypeOf` throws would
+  // make this `instanceof` check throw from inside an XHR event listener - an uncaught
+  // exception on the global channel rather than a size that cannot be known.
+  try {
+    if (typeof Blob !== 'undefined' && body instanceof Blob) {
+      return body.size;
+    }
+  } catch {
+    // Unknowable, as for a body of another kind.
+  }
+
+  return undefined;
+}
+
+/** The terminal progress event for a transfer of `byteLength` bytes, or of unknown size. */
+export function completeProgressEvent(byteLength: number | undefined): {
+  loaded: number;
+  total: number;
+  progress: 1;
+} {
+  const bytes = byteLength ?? 0;
+
+  return { loaded: bytes, total: bytes, progress: 1 };
 }

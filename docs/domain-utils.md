@@ -119,7 +119,9 @@ const ok = matchesOriginList(
 - Rejects partial-label wildcards (e.g., `ex*.example.com`)
 - Rejects invalid characters in patterns: ports, paths, fragments, brackets, userinfo, backslashes
 - PSL/IP tail guard: disallows patterns like `*.com` or `**.co.uk`, and forbids wildcarding around IPs
-- Wildcard tails are guarded consistently: public suffixes and the recognized pseudo-TLDs (`localhost`, `local`, `test`, `internal` - this is the complete set) are rejected for patterns like `*.suffix`
+- Wildcard tails are guarded consistently: ICANN public suffixes and the recognized pseudo-TLDs (`localhost`, `local`, `test`, `internal` - this is the complete set) are rejected for patterns like `*.suffix`
+- A tail under a Public Suffix List wildcard rule is refused too: `*.kawasaki.jp` and `*.sch.uk` are rules that make every label beneath the tail a public suffix, so `*.kawasaki.jp` would match the suffix `foo.kawasaki.jp` and the apex `city.kawasaki.jp`
+- Only the ICANN section of the Public Suffix List guards a tail. A private suffix - `github.io`, `vercel.app`, `s3.amazonaws.com` - is an ordinary domain here, so `*.github.io` is valid and matches every tenant's site, `matchesCORSCredentialsList` with `allowWildcardSubdomains` included. Name the tenant (`*.mine.github.io`) unless every tenant is meant
 - Unicode dot normalization (`．。｡` → `.`) to avoid bypasses
 - Step limits and label count caps to avoid pathological inputs
 - Credentials helpers: exact-only and wildcard-enabled variants
@@ -128,7 +130,7 @@ const ok = matchesOriginList(
 
 ### normalizeDomain
 
-Normalizes a domain/hostname for consistent comparison. Handles trim, lowercase, a single trailing-dot FQDN form, NFC normalization, and punycode conversion for IDN safety. Returns the canonical host form without a trailing dot. Returns `""` on invalid input, including repeated trailing dots such as `example.com..`. Strips IPv6 brackets. If you start with a full URL, parse it first and pass `url.hostname`.
+Normalizes a domain/hostname for consistent comparison. Handles trimming spaces, tabs, CRs and LFs, lowercase, a single trailing-dot FQDN form, NFC normalization, and punycode conversion for IDN safety. Returns the canonical host form without a trailing dot. Returns `""` on invalid input, including repeated trailing dots such as `example.com..` and other whitespace left at an end (a no-break space picked up from pasted config). Strips IPv6 brackets. If you start with a full URL, parse it first and pass `url.hostname`.
 
 ```typescript
 normalizeDomain('Example.COM.'); // 'example.com'
@@ -137,6 +139,7 @@ normalizeDomain('münchen.de'); // 'xn--mnchen-3ya.de'
 normalizeDomain('[::1]'); // '::1' (brackets stripped)
 normalizeDomain('0x7f.0.0.1'); // '127.0.0.1'
 normalizeDomain('example.com..'); // ''
+normalizeDomain('example.com\u00A0'); // '' (a no-break space is not trimmed)
 ```
 
 ### safeParseURL
@@ -153,7 +156,7 @@ safeParseURL('not-a-url'); // null
 
 ### normalizeOrigin
 
-Normalizes a bare origin for consistent comparison. Returns the canonical origin form with a normalized hostname, lowercase scheme, no trailing slash, and default ports removed (80 for `http`, 443 for `https`). Returns `""` on invalid input or failed hostname normalization. Preserves the literal `"null"` origin. Like `normalizeDomain()`, it accepts only the canonical bare form plus one optional trailing separator: a single trailing `/` is normalized away, but repeated trailing slashes are rejected.
+Normalizes a bare origin for consistent comparison. Returns the canonical origin form with a normalized hostname, lowercase scheme, no trailing slash, and default ports removed for every special scheme (80 for `http` and `ws`, 443 for `https` and `wss`, 21 for `ftp`). A non-special scheme's host (`chrome-extension://123`) is kept opaque, as the URL parser keeps it: never read as an IPv4 address, its Unicode dots not folded, and not held to the public-suffix rule, so an exact extension origin can be allowlisted. It is compared case-insensitively. An IPv6 literal (`foo://[::1]`) is read as one for every scheme. Returns `""` on invalid input or failed hostname normalization. Preserves the literal `"null"` origin. Like `normalizeDomain()`, it accepts only the canonical bare form plus one optional trailing separator: a single trailing `/` is normalized away, but repeated trailing slashes are rejected.
 
 ```typescript
 normalizeOrigin('HTTPS://Example.COM:443/'); // 'https://example.com'
@@ -165,7 +168,7 @@ normalizeOrigin('https://example.com:'); // ''
 
 ### parseHostHeader
 
-Parses an HTTP `Host` header into `{ domain, port }`. Surrounding whitespace is trimmed before parsing, and IPv6 brackets are stripped from the returned `domain`. Returns `{ domain: '', port: '' }` on malformed input, including empty or whitespace-only values, invalid port strings (non-numeric or outside 0–65535), and bracketed IPv6 addresses that fail validation. The returned `domain` is not normalized. Pass it to `normalizeDomain()` before comparison. See [Parsing Host headers](#parsing-host-headers) for full details.
+Parses an HTTP `Host` header into `{ domain, port }`. Surrounding spaces, tabs, CRs and LFs are trimmed before parsing, and IPv6 brackets are stripped from the returned `domain`. Returns `{ domain: '', port: '' }` on malformed input, including empty or whitespace-only values, a value with other whitespace at an end (a no-break space), invalid port strings (non-numeric or outside 0–65535), and bracketed IPv6 addresses that fail validation. The returned `domain` is not normalized. Pass it to `normalizeDomain()` before comparison. See [Parsing Host headers](#parsing-host-headers) for full details.
 
 ```typescript
 parseHostHeader('example.com:8080'); // { domain: 'example.com', port: '8080' }
@@ -174,7 +177,7 @@ parseHostHeader('[::1]:443'); // { domain: '::1', port: '443' }
 
 ### matchesWildcardDomain
 
-Matches a domain/hostname against a single wildcard pattern. Apex domains never match non-global wildcard patterns. List them explicitly. The global `*` is an exception and matches any valid domain including apex. If you start with a full URL, parse it first and pass `url.hostname`.
+Matches a domain/hostname against a single wildcard pattern. Apex domains never match non-global wildcard patterns. List them explicitly. The global `*` is an exception and matches any valid domain including apex. The domain and pattern are trimmed of spaces, tabs, CRs and LFs; with other whitespace left at an end (a no-break space) either one matches nothing. If you start with a full URL, parse it first and pass `url.hostname`.
 
 ```typescript
 matchesWildcardDomain('api.example.com', '*.example.com'); // true
@@ -205,9 +208,9 @@ matchesWildcardOrigin('https://example.com', '*'); // true
 
 ### matchesDomainList
 
-Checks if a domain/hostname matches any entry in a list. Throws if any entry looks like an origin URL (starts with a scheme followed by `://`). Pre-validate entries with `validateConfigEntry(..., 'domain')`. Empty or invalid domain inputs return `false` without throwing. If you start with a full URL, parse it first and pass `url.hostname`.
+Checks if a domain/hostname matches any entry in a list. Throws if any entry looks like an origin URL (starts with a scheme followed by `://`). Pre-validate entries with `validateConfigEntry(..., 'domain')`. Empty or invalid domain inputs return `false` without throwing. The domain input and each entry are trimmed of spaces, tabs, CRs and LFs; a domain input with other whitespace left at an end (a no-break space) matches nothing, and such an entry is skipped. If you start with a full URL, parse it first and pass `url.hostname`.
 
-Exact entries are normalized before comparison, including canonical IP literal handling (for example, `0x7f.0.0.1` matches `127.0.0.1`). Exact entries that equal a public suffix such as `com` or `co.uk` are never matched. Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries. The global wildcard `"*"` matches any valid domain, so reject it at config time with `validateConfigEntry(..., 'domain', { allowGlobalWildcard: false })` if undesired.
+Exact entries are normalized before comparison, including canonical IP literal handling as the URL parser reads a host (for example, `0x7f.0.0.1` and `2130706433` match `127.0.0.1`). Only a bare address is an IP literal: `127.0.0.1:8080`, `[::1]:8080`, `x@127.0.0.1` or `127.0.0.1/path` normalizes to `""` and matches nothing, as `example.com:8080` does. `validateConfigEntry` reads a domain or origin host whose last label is a number as the URL parser does - as IPv4. One it reads differently from what is written (`192.168.001.010` is the octal `192.168.1.8`, `10.1` is `10.0.0.1`, `0x7f.1` and `2130706433` are `127.0.0.1`, and fullwidth digits are read as ASCII ones) is accepted with an `info` naming the address it is read as; one it cannot read at all (`192.168.1.08`, `999.999.999.999`, `a.2.3.4`) is refused, and normalizes to `""` so it matches nothing. The URL parser itself is asked, so IDNA-mapped digits are read as it reads them, and in a domain entry so are percent-encoded ones (`127.0.0.%31`); an origin entry with a percent-encoded host is refused, as `normalizeOrigin` refuses it. IPv6 spellings of the same address, upper or lower case, are not flagged. Exact entries that equal a public suffix such as `com` or `co.uk` are never matched. Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries. The global wildcard `"*"` matches any valid domain, so reject it at config time with `validateConfigEntry(..., 'domain', { allowGlobalWildcard: false })` if undesired.
 
 The literal string `"null"` is origin-only. It has no special meaning in domain matching and is never matched by `matchesDomainList`, whether passed as the domain input or included in the allowlist.
 
@@ -224,11 +227,11 @@ Checks if an origin matches any entry in a list. The runtime `origin` input must
 
 Invalid inputs are handled internally. Callers do not need to wrap this helper in `try/catch`. Malformed origin strings simply return `false`.
 
-Blank or whitespace-only allowlist entries are trimmed and ignored.
+Allowlist entries are trimmed of spaces, tabs, CRs and LFs, and blank ones are ignored. An entry with other whitespace left at an end - a no-break space picked up from pasted config - never matches, as `validateConfigEntry` refuses it and `normalizeOrigin` refuses the same text.
 
 - Exact origin entries may include a port: `https://example.com:8443`
 - Exact origin and bare-domain entries are normalized before comparison, including canonical IP literal handling
-- Exact origin or bare-domain entries that equal a public suffix such as `com` or `co.uk` are never matched. Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries
+- Exact origin or bare-domain entries that equal a public suffix such as `com` or `co.uk` are never matched - for a special scheme's origin; an opaque host (`foo://com`) is not a domain, and matches as written (see `normalizeOrigin`). Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries
 - Bare-domain entries such as `example.com` match by hostname only and ignore scheme and port
 - Wildcard entries may be:
   - host-only patterns such as `*.example.com` or `**.example.com`
@@ -253,9 +256,9 @@ Credentials-safe origin matching. Exact-only by default, with optional subdomain
 
 Invalid inputs are handled internally. Callers do not need to wrap this helper in `try/catch`. Malformed origin strings simply return `false`.
 
-Blank or whitespace-only allowlist entries are trimmed and ignored.
+Allowlist entries are trimmed of spaces, tabs, CRs and LFs, and blank ones are ignored. An entry with other whitespace left at an end - a no-break space picked up from pasted config - never matches, as `validateConfigEntry` refuses it and `normalizeOrigin` refuses the same text.
 
-Exact origin and bare-domain entries are normalized before comparison, including canonical IP literal handling. Exact origin or bare-domain entries that equal a public suffix such as `com` or `co.uk` are never matched. Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries.
+Exact origin and bare-domain entries are normalized before comparison, including canonical IP literal handling. Exact origin or bare-domain entries that equal a public suffix such as `com` or `co.uk` are never matched - for a special scheme's origin; an opaque host (`foo://com`) matches as written. Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries.
 
 ```typescript
 // Exact match only (default)
@@ -278,6 +281,8 @@ matchesCORSCredentialsList('null', ['null']); // true
 Validates a domain or origin config entry. Non-throwing, returns a result object. Exact origins may include an explicit port, but it must be in the range `0-65535`. See [Configuration & validation](#configuration--validation) for usage guidance.
 
 For exact origins with bracketed hosts, the bracket contents must be a valid IPv6 literal.
+
+An entry is trimmed of spaces, tabs, CRs and LFs, as the matchers trim it. One with other whitespace left at an end - a no-break space picked up from pasted config - is invalid, since no matcher matches it.
 
 ```typescript
 validateConfigEntry('*.example.com', 'domain');
@@ -339,13 +344,13 @@ canonicalizeBracketedIPv6Content('::ffff:192.0.2.128'); // '::ffff:c000:280'
 Validates DNS length constraints for a hostname. Non-throwing. Assumes ASCII input (post-punycode processing).
 
 - Each label must be ≤ 63 octets
-- Total FQDN must be ≤ 255 octets
-- Maximum 127 labels (128+ is rejected)
+- Total name must be ≤ 253 characters, a trailing dot aside (255 octets on the wire, counting each label's length octet and the root)
+- Maximum 127 labels (128+ is rejected); a trailing dot's empty label does not count. Within 253 characters a name has at most 127 labels anyway, so the length limit is the one that decides
 
 ```typescript
 checkDNSLength('example.com'); // true
 checkDNSLength('a'.repeat(64) + '.com'); // false (label > 63)
-checkDNSLength('x.'.repeat(127) + 'com'); // false (128 labels > 127 limit)
+checkDNSLength('x.'.repeat(126) + 'com'); // false (127 labels, but 255 characters > 253)
 ```
 
 ### getDomain
@@ -372,7 +377,7 @@ getSubdomain('localhost'); // null
 
 ### isApexDomain
 
-Returns `true` if a domain/hostname is an apex (registrable) domain with no subdomain. Uses `tldts` to correctly handle multi-part TLDs like `.co.uk` and `.com.au`. Internal pseudo-TLDs (`localhost`, `local`, `test`, `internal`) are treated as apex by definition. A single label under a pseudo-TLD (e.g. `foo.local`, `myapp.test`, `api.internal`) is also considered apex. Returns `false` for IPs, bare public TLDs, and any input that `tldts` cannot resolve to a registrable domain.
+Returns `true` if a domain/hostname is an apex (registrable) domain with no subdomain. Uses `tldts` to correctly handle multi-part TLDs like `.co.uk` and `.com.au`. Internal pseudo-TLDs (`localhost`, `local`, `test`, `internal`) are treated as apex by definition. A single label under a pseudo-TLD (e.g. `foo.local`, `myapp.test`, `api.internal`) is also considered apex. Returns `false` for IPs, bare public TLDs, any input that `tldts` cannot resolve to a registrable domain, and any input `normalizeDomain` refuses (it reads its input through `normalizeDomain`), including one with whitespace other than spaces, tabs, CRs and LFs at an end.
 
 ```typescript
 isApexDomain('example.com'); // true
@@ -385,6 +390,7 @@ isApexDomain('api.example.com'); // false (subdomain)
 isApexDomain('bar.foo.local'); // false (subdomain under foo.local)
 isApexDomain('sub.localhost'); // false (localhost is a hostname, not a TLD suffix)
 isApexDomain('192.168.1.1'); // false (IP)
+isApexDomain('example.com\u00A0'); // false (a no-break space is not trimmed)
 ```
 
 ### Types
@@ -525,7 +531,8 @@ const ok = matchesOriginList(
   - Wildcard origin matching is HTTP(S)-only. Protocol wildcards (e.g., `https://*`) and protocol + host wildcards (e.g., `https://*.example.com`) match only that scheme.
   - Wildcard origin matching ignores ports. Use exact origins when the port matters.
   - The literal string `"null"` is never matched by wildcard patterns. If you intend to allow it, include `"null"` explicitly in the allowlist.
-  - Blank or whitespace-only allowlist entries are ignored.
+  - Allowlist entries and patterns are trimmed of spaces, tabs, CRs and LFs only; blank entries are ignored, and one with other whitespace left at an end (a no-break space, an em space) never matches and is invalid to `validateConfigEntry`.
+- A domain, origin or `Host` value that is not a string - a request header that was never sent reads as `undefined`; an array or a `String` object is no string either - is invalid input, answered as any other: `''` from the normalizers, `{ domain: '', port: '' }` from `parseHostHeader`, `false` from the matchers and the IP and DNS-length checks, and an invalid result from `validateConfigEntry`. A pattern that is not a string, or an allowlist that is not an array of strings (a comma-separated string read from the environment), is a configuration mistake, and the function throws a `TypeError` naming it, whether or not there is a domain or origin to match. So do options that are not an object or hold a field the function does not take (`allowWildcardSubdomain`), with `null` read as no options, a `validateConfigEntry` option that is not a boolean (one set to `null` or `undefined` takes its default), and a `validateConfigEntry` context other than `'domain'` or `'origin'`.
 - Credentials: prefer exact-only matching. Enable wildcard subdomains for credentials only when necessary and after pre-validation.
 - IPv6 zone IDs are intentionally rejected. Plain IPv6 literals such as `"::1"` and `"[2001:db8::1]"` remain supported.
 

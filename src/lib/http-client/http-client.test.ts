@@ -7,6 +7,9 @@ import {
   spyOn,
   test,
 } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { HTTPClient } from './http-client';
 import {
   muteConsoleError,
@@ -16,6 +19,7 @@ import { CookieJar } from './cookie-jar';
 import { startTestServer, type TestServer } from './test-helpers/test-server';
 import { scalarHeader } from './utils';
 import {
+  DEFAULT_MAX_REDIRECTS,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_TIMEOUT_MS,
@@ -27,6 +31,9 @@ import {
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
   XHR_BROWSER_TIMEOUT_FLAG,
+  EFFECTIVE_REQUEST_HEADERS_KEY,
+  STREAM_ABORT_HEADERS_KEY,
+  STREAM_ABORT_STATUS_KEY,
 } from './consts';
 import { MockAdapter } from './adapters/mock-adapter';
 import type {
@@ -34,10 +41,13 @@ import type {
   AdapterResponse,
   HTTPAdapter,
   HTTPClientConfig,
+  InterceptedRequest,
   RedirectHopInfo,
   RequestInterceptorContext,
   SubClientConfig,
 } from './types';
+import { hostileRejections } from '../internal/hostile-promise-test-utils';
+import { sleep } from '../sleep';
 
 let server: TestServer;
 const originalFetch = globalThis.fetch;
@@ -240,7 +250,7 @@ describe('HTTPClient — basic HTTP methods', () => {
         maxRedirects: -1,
       }),
     ).toThrow(
-      /maxRedirects must be greater than or equal to 1 when followRedirects is true/i,
+      /maxRedirects must be an integer greater than or equal to 1 when followRedirects is true/i,
     );
 
     expect(() =>
@@ -249,7 +259,7 @@ describe('HTTPClient — basic HTTP methods', () => {
         maxRedirects: 0,
       }),
     ).toThrow(
-      /maxRedirects must be greater than or equal to 1 when followRedirects is true/i,
+      /maxRedirects must be an integer greater than or equal to 1 when followRedirects is true/i,
     );
   });
 
@@ -436,9 +446,32 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('request_setup_error');
     expect(builder.error?.cause?.message).toMatch(
-      /browser-restricted header "host"/i,
+      /header 'host': it is browser-restricted/i,
     );
     expect(errorCodes).toEqual(['request_setup_error']);
+  });
+
+  test('a browser-forbidden method is refused before dispatch, not retried', async () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).document = {};
+
+    let fetchCalls = 0;
+    globalThis.fetch = (() => {
+      fetchCalls++;
+      return Promise.resolve(new Response('ok'));
+    }) as unknown as typeof fetch;
+
+    const client = new HTTPClient({
+      baseURL: 'https://local.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+    const builder = client.request('TRACE', '/users');
+    const res = await builder.send();
+
+    expect(fetchCalls).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.cause?.message).toMatch(/browsers refuse/);
   });
 
   test('browser-restricted header from interceptor becomes interceptor_error', async () => {
@@ -475,7 +508,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(builder.state).toBe('failed');
     expect(builder.error?.code).toBe('interceptor_error');
     expect(builder.error?.cause?.message).toMatch(
-      /browser-restricted header "host"/i,
+      /header 'host': it is browser-restricted/i,
     );
     expect(errorCodes).toEqual(['interceptor_error']);
   });
@@ -527,6 +560,87 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.body).toEqual({ ok: true });
     expect(await response.requestBodySettled).toBeInstanceOf(Error);
   });
+
+  test.each(hostileRejections)(
+    'fails, not hangs, on an adapter send rejecting with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (): Promise<AdapterResponse> =>
+          make(new Error('adapter rejected')),
+      };
+
+      const outcome = await Promise.race([
+        new HTTPClient({ adapter, baseURL: 'http://example.test' })
+          .get('/x')
+          .send(),
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(outcome).not.toBe('hung');
+      expect((outcome as { isFailed: boolean }).isFailed).toBe(true);
+    },
+  );
+
+  test.each(hostileRejections)(
+    'fails, not hangs, on a request interceptor rejecting with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 200,
+            headers: {},
+            body: new Uint8Array(),
+          }),
+      };
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+      });
+      client.addRequestInterceptor(() =>
+        make(new Error('interceptor rejected')),
+      );
+
+      const outcome = await Promise.race([
+        client.get('/x').send(),
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(outcome).not.toBe('hung');
+      expect((outcome as { isFailed: boolean }).isFailed).toBe(true);
+    },
+  );
+
+  test.each(hostileRejections)(
+    'adopts a `requestBodySettled` rejected promise with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+            body: new TextEncoder().encode('{"ok":true}'),
+            requestBodySettled: make(new Error('upload blew up')),
+          }),
+      };
+
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+      })
+        .post('/upload')
+        .send<{ ok: boolean }>();
+      const settled = await Promise.race([
+        response.requestBodySettled,
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(settled).toBeInstanceOf(Error);
+      expect((settled as Error).message).toContain('upload blew up');
+    },
+  );
 
   test('adopts a rejecting `requestBodySettled` from an adapter that resolves', async () => {
     // `HTTPAdapter` is a public extension point, and the resolve path handed the adapter's
@@ -602,7 +716,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     // Presence first: the documented contract is that a bodied request has the field, and
     // an absent one answers `undefined` through `await` without ever being missing.
     expect(response.requestBodySettled).toBeDefined();
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a followed redirect keeps the upload outcome from the hop that had the body', async () => {
@@ -655,7 +769,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.status).toBe(200);
     expect(response.wasRedirectFollowed).toBe(true);
     expect(response.requestBodySettled).toBeDefined();
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a terminal 3xx with no Location after a bodied hop still carries the upload outcome', async () => {
@@ -701,7 +815,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.status).toBe(302);
     expect(response.wasRedirectFollowed).toBe(true);
     expect(response.requestBodySettled).toBeDefined();
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a throw between hops still carries the upload outcome', async () => {
@@ -744,7 +858,115 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(response.isFailed).toBe(true);
     expect(response.status).toBe(0);
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
+  });
+
+  test('a jar that throws between hops reports the interceptor-rewritten initial URL and the target', async () => {
+    // A throw between hops once reached the `catch` around the whole of `send()`, which
+    // built its response from the request as it was before the initial-phase interceptors
+    // ran, so `initialURL` named a URL that was never sent. The jar failure is now caught
+    // where the redirect is prepared, and reports the target it was preparing.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: '/next' },
+          body: null,
+        }),
+    };
+
+    const jar = new CookieJar();
+
+    jar.getCookieHeaderString = (url: string): string => {
+      if (url.includes('/next')) {
+        throw new Error('jar refused');
+      }
+
+      return '';
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      cookieJar: jar,
+    });
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      requestURL: 'http://example.test/rewritten',
+    }));
+
+    const observedURLs: string[] = [];
+    client.addErrorObserver((_error, request) => {
+      observedURLs.push(request.requestURL);
+    });
+
+    const builder = client.get('/original');
+    const response = await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(response.initialURL).toBe('http://example.test/rewritten');
+    // The redirect target it failed preparing, as the docs have `requestURL`.
+    expect(response.requestURL).toBe('http://example.test/next');
+    expect(observedURLs).toEqual(['http://example.test/next']);
+  });
+
+  test('a throw between later hops reports the redirect it was preparing, after the hop already followed', async () => {
+    // A throw while preparing the second redirect - after one had already been followed -
+    // once read as a failure of the first request: initial URL as `requestURL`, empty
+    // redirect history. It reports the second redirect's target, with the first hop kept
+    // in the history.
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> => {
+        hop++;
+
+        return Promise.resolve({
+          status: 302,
+          headers: { location: hop === 1 ? '/next' : '/third' },
+          body: null,
+        });
+      },
+    };
+
+    const jar = new CookieJar();
+
+    jar.getCookieHeaderString = (url: string): string => {
+      if (url.includes('/third')) {
+        throw new Error('jar refused');
+      }
+
+      return '';
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      cookieJar: jar,
+    });
+
+    const observedURLs: string[] = [];
+    client.addErrorObserver((_error, request) => {
+      observedURLs.push(request.requestURL);
+    });
+
+    const builder = client.get('/first');
+    const response = await builder.send();
+
+    expect(hop).toBe(2);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(response.initialURL).toBe('http://example.test/first');
+    // The redirect target it failed preparing, after the hop already followed.
+    expect(response.requestURL).toBe('http://example.test/third');
+    expect(response.redirectHistory).toEqual([
+      'http://example.test/next',
+      'http://example.test/third',
+    ]);
+    expect(observedURLs).toEqual(['http://example.test/third']);
   });
 
   test("a followed redirect waits for the hop's upload to settle first", async () => {
@@ -938,7 +1160,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       // The timeout error cannot say why; this does, and names the adapter.
       expect(reports).toHaveLength(1);
       expect((reports[0]?.error as Error).message).toContain(
-        "'fetch' adapter's requestBodySettled must settle in bounded time",
+        "'fetch' adapter's requestBodySettled does not settle",
       );
       expect((reports[0]?.error as Error).message).toContain('redirect');
     } finally {
@@ -1232,7 +1454,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       .send();
 
     expect(response.isFailed).toBe(true);
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a timed-out bodied request carries the upload outcome', async () => {
@@ -1266,7 +1488,7 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(response.isTimeout).toBe(true);
     expect(response.requestBodySettled).toBeDefined();
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a requestBodySettled whose thenable check throws does not fail the response', async () => {
@@ -1398,8 +1620,56 @@ describe('HTTPClient — basic HTTP methods', () => {
     };
 
     expect(() => new HTTPClient({ adapter, followRedirects: true })).toThrow(
-      /redirect handling is not supported with XHR adapter/i,
+      /redirect handling is not supported with XHRAdapter/i,
     );
+  });
+
+  test('validates and keeps one read of each constructor config field', () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).document = {};
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'xhr',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+        }),
+    };
+    const reads = { followRedirects: 0, maxRedirects: 0, baseURL: 0 };
+    // Each getter answers differently once it has been read: a client that reads a
+    // field again after validating it keeps a value the validation never saw - here,
+    // redirect following on XHR, which construction exists to refuse.
+    const config = {
+      adapter,
+      get followRedirects(): boolean {
+        return ++reads.followRedirects > 1;
+      },
+      get maxRedirects(): number | undefined {
+        return ++reads.maxRedirects > 1 ? 0 : undefined;
+      },
+      get baseURL(): string {
+        return ++reads.baseURL > 1 ? 'not a url' : 'https://example.com';
+      },
+    };
+
+    const client = new HTTPClient(config);
+    const kept = (
+      client as unknown as {
+        _config: {
+          followRedirects: boolean;
+          maxRedirects: number;
+          baseURL?: string;
+        };
+      }
+    )._config;
+
+    expect(reads).toEqual({ followRedirects: 1, maxRedirects: 1, baseURL: 1 });
+    expect(kept.followRedirects).toBe(false);
+    expect(kept.maxRedirects).toBe(DEFAULT_MAX_REDIRECTS);
+    expect(kept.baseURL).toBe('https://example.com');
   });
 
   test('allows browser XHR adapter when followRedirects is false', () => {
@@ -1467,7 +1737,7 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(
       () => new HTTPClient({ adapter, cookieJar: new CookieJar() }),
-    ).toThrow(/cookieJar is not supported with XHR adapter/i);
+    ).toThrow(/cookieJar is not supported with XHRAdapter/i);
   });
 
   test('rejects userAgent with browser XHR adapter at construction time', () => {
@@ -1487,7 +1757,7 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(
       () => new HTTPClient({ adapter, userAgent: 'test-agent/1.0' }),
-    ).toThrow(/userAgent is not supported with XHR adapter/i);
+    ).toThrow(/userAgent is not supported with XHRAdapter/i);
   });
 
   test('rejects Node adapter in browser environments at construction time', () => {
@@ -2248,11 +2518,11 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
   });
 
   test('a caller signal reused across sends is left with no abort listener when AbortSignal.any is unavailable', async () => {
-    // The fallback composition used to add a `{ once: true }` listener to the caller's
-    // signal per `send()`, and never remove it on success - so a signal reused for the
-    // life of a page or a worker accumulated one listener per request until the
-    // runtime's listener-count warning fired. Every request now releases the listeners
-    // it added when it ends, so the count is measured net of removals.
+    // The fallback composition adds a `{ once: true }` listener to the caller's signal per
+    // `send()`. Left on after a success, a signal reused for the life of a page or a
+    // worker would gather one listener per request until the runtime's listener-count
+    // warning fired. Every request releases the listeners it added when it ends, so the
+    // count is measured net of removals.
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
       send: async (request: AdapterRequest): Promise<AdapterResponse> => {
@@ -2333,12 +2603,12 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
   test('a retry chain leaves no abort listener on any signal when AbortSignal.any is unavailable', async () => {
     // The same release covers the per-attempt composition: every attempt composes the
     // request's cancel signal - itself a composition, so the caller's signal never sees
-    // these - with its own timeout signal, and used to leave one listener per attempt
-    // on that cancel signal for as long as the signal lived. Counted per signal across
-    // the whole send, at the prototype, since the cancel signal is internal, and net of
-    // removals: the old code left fifteen on it, and the request now takes every one
-    // of them off when it ends. Within a request the count still grows by one per
-    // attempt, which is the bounded case this accepts.
+    // these - with its own timeout signal, which would otherwise leave one listener per
+    // attempt on that cancel signal for as long as the signal lived. Counted per signal
+    // across the whole send, at the prototype, since the cancel signal is internal, and
+    // net of removals: the request takes every one of them off when it ends. Within a
+    // request the count still grows by one per attempt, which is the bounded case this
+    // accepts.
     let attempts = 0;
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -2652,8 +2922,8 @@ describe('HTTPClient — adapter marker flags', () => {
 
   /** Response metadata of the kind a genuine tagged abort carries. */
   const staleMetadata = {
-    streamAbortStatus: 503,
-    streamAbortHeaders: { 'set-cookie': ['stale=1; Path=/'] },
+    [STREAM_ABORT_STATUS_KEY]: 503,
+    [STREAM_ABORT_HEADERS_KEY]: { 'set-cookie': ['stale=1; Path=/'] },
   };
 
   test('a marker set to false is not a stream abort, and its cookies are not stored', async () => {
@@ -2749,9 +3019,9 @@ describe('HTTPClient — adapter marker flags', () => {
 
   test('throwing stream metadata getters cannot replace a caller cancellation', async () => {
     const hostileFields = [
-      'streamAbortStatus',
-      'streamAbortHeaders',
-      'effectiveRequestHeaders',
+      STREAM_ABORT_STATUS_KEY,
+      STREAM_ABORT_HEADERS_KEY,
+      EFFECTIVE_REQUEST_HEADERS_KEY,
     ] as const;
 
     for (const hostileField of hostileFields) {
@@ -2759,13 +3029,13 @@ describe('HTTPClient — adapter marker flags', () => {
       const abortError = Object.assign(new Error('Request aborted'), {
         name: 'AbortError',
         [RESPONSE_STREAM_ABORT_FLAG]: true,
-        streamAbortStatus: 200,
-        streamAbortHeaders: {},
+        [STREAM_ABORT_STATUS_KEY]: 200,
+        [STREAM_ABORT_HEADERS_KEY]: {},
       });
 
       Object.defineProperty(abortError, hostileField, {
         get(): never {
-          throw new Error(`hostile ${hostileField} getter`);
+          throw new Error(`hostile ${String(hostileField)} getter`);
         },
         configurable: true,
       });
@@ -2803,8 +3073,8 @@ describe('HTTPClient — adapter marker flags', () => {
     const tagged = Object.assign(new Error('body aborted'), {
       name: 'AbortError',
       [RESPONSE_STREAM_ABORT_FLAG]: true,
-      streamAbortStatus: 503,
-      streamAbortHeaders: hostileHeaders,
+      [STREAM_ABORT_STATUS_KEY]: 503,
+      [STREAM_ABORT_HEADERS_KEY]: hostileHeaders,
     });
     const client = new HTTPClient({
       adapter: makeThrowingAdapter(tagged),
@@ -3267,6 +3537,59 @@ describe('HTTPClient — retry', () => {
       .send();
 
     expect(attempts.length).toBe(1); // retry disabled per-request
+  });
+
+  test('a progress report that arrives after the next attempt began names the attempt it came from', async () => {
+    const uploadEvents: unknown[] = [];
+    const downloadEvents: unknown[] = [];
+    let callCount = 0;
+    let firstRequest: AdapterRequest | undefined;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        callCount++;
+
+        if (callCount === 1) {
+          // Answered at once, its body still going out: the rest of this attempt's
+          // progress arrives once the retry has been dispatched.
+          firstRequest = request;
+          return Promise.resolve({ status: 503, headers: {}, body: null });
+        }
+
+        firstRequest?.onUploadProgress?.({
+          loaded: 10,
+          total: 10,
+          progress: 1,
+        });
+        firstRequest?.onDownloadProgress?.({
+          loaded: 3,
+          total: 3,
+          progress: 1,
+        });
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    const res = await client
+      .put('https://example.com/upload')
+      .text('0123456789')
+      .onUploadProgress((event) => uploadEvents.push(event))
+      .onDownloadProgress((event) => downloadEvents.push(event))
+      .send();
+
+    expect(res.status).toBe(200);
+    expect(callCount).toBe(2);
+    expect(uploadEvents).toEqual([
+      { loaded: 10, total: 10, progress: 1, attemptNumber: 1 },
+    ]);
+    expect(downloadEvents).toEqual([
+      { loaded: 3, total: 3, progress: 1, attemptNumber: 1 },
+    ]);
   });
 });
 
@@ -3789,6 +4112,47 @@ describe('HTTPClient — interceptors', () => {
     expect(errorCodes).toEqual(['interceptor_error']);
   });
 
+  test('request interceptor result without a method becomes interceptor_error', async () => {
+    const adapterCalls: string[] = [];
+    const errorCodes: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        adapterCalls.push(request.requestURL);
+        return Promise.resolve({
+          status: 200,
+          headers: {},
+          body: new Uint8Array(),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    client.addRequestInterceptor(
+      (request) =>
+        ({
+          requestURL: request.requestURL,
+          headers: request.headers,
+          body: request.body,
+        }) as unknown as InterceptedRequest,
+    );
+    client.addErrorObserver((err) => {
+      errorCodes.push(err.code);
+    });
+
+    const builder = client.post('https://example.com/users').json({ a: 1 });
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(builder.error?.cause?.message).toMatch(
+      /method is not a string \(got undefined\)/,
+    );
+    expect(adapterCalls).toEqual([]);
+    expect(errorCodes).toEqual(['interceptor_error']);
+  });
+
   test('initial-phase interceptor throw notifies default (final-phase) error observers', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -3910,11 +4274,11 @@ describe('HTTPClient — timeout resolution', () => {
   // that arms the per-attempt timer *and* the `<= 0` check that disables the
   // upload-settle wait: no timer on the attempt, and a wait that re-armed a `NaN` timer
   // every millisecond and could never expire. `Infinity` fired the attempt timer after
-  // 1 ms, since the timer coerces anything past 2^31 - 1 to 1. `NaN` now takes the
-  // default and `Infinity` disables the timer, on the config and the per-request override.
+  // 1 ms, since the timer coerces anything past 2^31 - 1 to 1. Nullish values take the
+  // default, NaN is rejected, and Infinity disables the timer on config and overrides.
   const observed = async (
-    config: { timeout?: number },
-    perRequest?: number,
+    config: { timeout?: number | null },
+    perRequest?: number | null,
   ): Promise<number | undefined> => {
     const client = makeClient(config);
     let seen: number | undefined;
@@ -3934,9 +4298,46 @@ describe('HTTPClient — timeout resolution', () => {
     return seen;
   };
 
-  test('NaN takes the default, on the config and per request', async () => {
-    expect(await observed({ timeout: Number.NaN })).toBe(DEFAULT_TIMEOUT_MS);
-    expect(await observed({ timeout: 4_321 }, Number.NaN)).toBe(4_321);
+  test('nullish values take the default; invalid explicit values fail', async () => {
+    expect(await observed({})).toBe(DEFAULT_TIMEOUT_MS);
+    expect(await observed({ timeout: null })).toBe(DEFAULT_TIMEOUT_MS);
+    expect(await observed({ timeout: 4_321 }, null)).toBe(4_321);
+    expect(await observed({ timeout: 0 }, null)).toBe(0);
+    for (const value of [Number.NaN, '100' as unknown as number]) {
+      const configError = await observed({ timeout: value }).catch(
+        (error: unknown) => error,
+      );
+      const requestError = await observed({ timeout: 4_321 }, value).catch(
+        (error: unknown) => error,
+      );
+      expect(configError).toBeInstanceOf(TypeError);
+      expect(requestError).toBeInstanceOf(TypeError);
+    }
+  });
+
+  test('invalid per-request options throw from the method helper, before send()', () => {
+    const client = makeClient();
+    // Fail-fast at the call site: not a deferred request_setup_error.
+    expect(() => client.get('/api/users/1', { timeout: Number.NaN })).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      client.get('/api/users/1', {
+        retryPolicy: { strategy: 'fixed', delayMS: Number.NaN },
+      }),
+    ).toThrow(TypeError);
+    expect(client.listRequests().count).toBe(0);
+  });
+
+  test('null request options and builder resets inherit the client timeout', async () => {
+    const client = makeClient({ timeout: 4_321 });
+    const seen: Array<number | undefined> = [];
+    client.addResponseObserver((_response, request) => {
+      seen.push(request.timeout);
+    });
+    await client.get('/api/users/1', { timeout: null }).send();
+    await client.get('/api/users/1').timeout(1).timeout(null).send();
+    expect(seen).toEqual([4_321, 4_321]);
   });
 
   test('Infinity means no timeout, the same as 0', async () => {
@@ -3954,12 +4355,9 @@ describe('HTTPClient — timeout resolution', () => {
     expect(await observed({ timeout: 4_321 }, 0)).toBe(0);
   });
 
-  test('a NaN timeout no longer leaves a never-settling upload wait spinning', async () => {
-    // The redirect variant of the settle-wait test above, under the misconfiguration.
-    // `NaN` is the per-request value here, over a 100ms client default, so the number the
-    // wait runs under is the one `NaN` resolved to: taken literally it re-armed a `NaN`
-    // timer every millisecond and never failed, and this test would hang at its own
-    // deadline rather than fail at 100ms.
+  test('a NaN timeout is rejected before an upload wait starts', () => {
+    // A per-request NaN must fail at the builder boundary, before the adapter
+    // dispatches or starts an upload-settle wait.
     let hop = 0;
 
     const adapter: HTTPAdapter = {
@@ -3986,21 +4384,19 @@ describe('HTTPClient — timeout resolution', () => {
 
     try {
       const startedAt = Date.now();
-      const response = await new HTTPClient({
+      const request = new HTTPClient({
         adapter,
         baseURL: 'http://example.test',
         followRedirects: true,
         timeout: 100,
       })
         .post('/upload')
-        .json({ a: 1 })
-        .timeout(Number.NaN)
-        .send();
+        .json({ a: 1 });
 
       expect(Date.now() - startedAt).toBeLessThan(2000);
-      expect(hop).toBe(1);
-      expect(response.isTimeout).toBe(true);
-      expect(reports).toHaveLength(1);
+      expect(() => request.timeout(Number.NaN)).toThrow(TypeError);
+      expect(hop).toBe(0);
+      expect(reports).toHaveLength(0);
     } finally {
       globalThis.removeEventListener('error', onGlobalError);
     }
@@ -4034,9 +4430,14 @@ describe('HTTPClient — redirect', () => {
     expect(builder.error?.detectedRedirectURL).toBe('https://example.com/next');
   });
 
-  test.each(['https://other.test/next', 'https://user:pass@other.test/next'])(
-    'preserves an unfollowed absolute redirect target %s in the response and error',
-    async (target) => {
+  // Cross-origin, so the target's own userinfo is not reported: no more than the client
+  // would send if it followed the hop.
+  test.each([
+    ['https://other.test/next', 'https://other.test/next'],
+    ['https://user:pass@other.test/next', 'https://other.test/next'],
+  ])(
+    'reports an unfollowed absolute redirect target %s in the response and error as %s',
+    async (target, reported) => {
       const adapter: HTTPAdapter = {
         getType: () => 'node',
         send: (_request: AdapterRequest): Promise<AdapterResponse> =>
@@ -4058,8 +4459,8 @@ describe('HTTPClient — redirect', () => {
       const res = await builder.send();
 
       expect(res.requestURL).toBe('https://example.com/start');
-      expect(res.detectedRedirectURL).toBe(target);
-      expect(builder.error?.detectedRedirectURL).toBe(target);
+      expect(res.detectedRedirectURL).toBe(reported);
+      expect(builder.error?.detectedRedirectURL).toBe(reported);
     },
   );
 
@@ -4393,7 +4794,9 @@ describe('HTTPClient — redirect', () => {
 
     expect(res.isFailed).toBe(true);
     expect(builder.error?.code).toBe('request_setup_error');
-    expect(builder.error?.cause?.message).toContain('file:///etc/passwd');
+    // Named by its scheme; the path stays out of the message.
+    expect(builder.error?.cause?.message).toContain('(got file:)');
+    expect(builder.error?.cause?.message).not.toContain('/etc/passwd');
   });
 
   test('a redirect interceptor still sees a non-http(s) Location and can rescue it', async () => {
@@ -4997,6 +5400,32 @@ describe('HTTPClient — redirect', () => {
     ]);
   });
 
+  test('a redirect not followed reports the URL that would have been followed, its Location read as UTF-8 once', async () => {
+    // The raw UTF-8 bytes of a path that really holds `Ã©`, a character per byte. Read as
+    // UTF-8 twice, the report would name `/caf%C3%A9`, another URL.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: '/caf\u00c3\u0083\u00c2\u00a9' },
+          body: null,
+        }),
+    };
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addRequestInterceptor(() => ({ cancel: true }), {
+      phases: ['redirect'],
+    });
+
+    const response = await client.get('https://a.test/start').send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.redirectHistory).toEqual([
+      'https://a.test/caf%C3%83%C2%A9',
+    ]);
+    expect(response.detectedRedirectURL).toBe('https://a.test/caf%C3%83%C2%A9');
+  });
+
   test('returns redirect_loop when maxRedirects is exceeded', async () => {
     const client = makeClient({ followRedirects: true, maxRedirects: 1 });
     const errorCodes: string[] = [];
@@ -5009,7 +5438,8 @@ describe('HTTPClient — redirect', () => {
     const res = await builder.send();
 
     expect(res.status).toBe(0);
-    expect(res.isNetworkError).toBe(true);
+    // The server answered every hop: not a network error, as for redirect_disabled.
+    expect(res.isNetworkError).toBe(false);
     expect(res.isCancelled).toBe(false);
     expect(res.isTimeout).toBe(false);
     expect(res.isFailed).toBe(true);
@@ -5104,8 +5534,8 @@ describe('HTTPClient — redirect', () => {
 
           throw Object.assign(error, {
             [RESPONSE_STREAM_ABORT_FLAG]: true,
-            streamAbortStatus: 302,
-            streamAbortHeaders: { location: '/next' },
+            [STREAM_ABORT_STATUS_KEY]: 302,
+            [STREAM_ABORT_HEADERS_KEY]: { location: '/next' },
           });
         }
 
@@ -5157,8 +5587,8 @@ describe('HTTPClient — redirect', () => {
 
         throw Object.assign(error, {
           [RESPONSE_STREAM_ABORT_FLAG]: true,
-          streamAbortStatus: 302,
-          streamAbortHeaders: { location: '/next' },
+          [STREAM_ABORT_STATUS_KEY]: 302,
+          [STREAM_ABORT_HEADERS_KEY]: { location: '/next' },
         });
       },
     };
@@ -5370,6 +5800,71 @@ describe('HTTPClient — sub-clients', () => {
     // Use a port nothing is listening on to guarantee a transport failure
     await sub.get('http://127.0.0.1:1').send();
     expect(order).toEqual(['root', 'sub']);
+  });
+
+  test('a sub-client callback registered by a parent callback mid-dispatch waits for the next dispatch', async () => {
+    let isFailing = false;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: () =>
+        isFailing
+          ? Promise.reject(new Error('transport down'))
+          : Promise.resolve({ status: 200, headers: {}, body: null }),
+    };
+    const root = new HTTPClient({ adapter });
+    const sub = root.createSubClient();
+    const calls: string[] = [];
+    const registered = new Set<string>();
+
+    // Each parent callback yields before registering on the sub-client, so a
+    // sub-client list copied only once the parent chain finished would include it.
+    root.addRequestInterceptor(async (request) => {
+      if (!registered.has('interceptor')) {
+        registered.add('interceptor');
+        await Promise.resolve();
+        sub.addRequestInterceptor((subRequest) => {
+          calls.push('interceptor');
+          return subRequest;
+        });
+      }
+      return request;
+    });
+    root.addResponseObserver(async () => {
+      if (!registered.has('response')) {
+        registered.add('response');
+        await Promise.resolve();
+        sub.addResponseObserver(() => {
+          calls.push('response');
+        });
+      }
+    });
+    root.addErrorObserver(async () => {
+      if (!registered.has('error')) {
+        registered.add('error');
+        await Promise.resolve();
+        sub.addErrorObserver(() => {
+          calls.push('error');
+        });
+      }
+    });
+
+    await sub.get('https://example.com/').send();
+    expect(calls).toEqual([]);
+
+    isFailing = true;
+    await sub.get('https://example.com/').send();
+    // The interceptor applies from this dispatch on; the error observer was
+    // registered by this dispatch's own parent error observer.
+    expect(calls).toEqual(['interceptor']);
+
+    calls.length = 0;
+    await sub.get('https://example.com/').send();
+    expect(calls).toEqual(['interceptor', 'error']);
+
+    calls.length = 0;
+    isFailing = false;
+    await sub.get('https://example.com/').send();
+    expect(calls).toEqual(['interceptor', 'response']);
   });
 
   test('sub-client does not expose createSubClient()', () => {
@@ -5644,20 +6139,36 @@ describe('HTTPClient — options shorthand', () => {
 });
 
 describe('HTTPClient — disable/enable', () => {
-  test('disabled client throws on .send()', () => {
+  test('disabled client throws on .send()', async () => {
     const client = makeClient();
     client.disable();
 
-    expect(client.get('/api/test').send()).rejects.toThrow(/disabled/);
+    const rejection = await client
+      .get('/api/test')
+      .send()
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toMatch(/disabled/);
     client.enable();
   });
 
-  test('disabled parent causes sub-client to throw', () => {
+  test('disabled parent causes sub-client to throw', async () => {
     const root = makeClient();
     const sub = root.createSubClient();
     root.disable();
 
-    expect(sub.get('/api/test').send()).rejects.toThrow(/disabled/);
+    const rejection = await sub
+      .get('/api/test')
+      .send()
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toMatch(/disabled/);
     root.enable();
   });
 });
@@ -5798,7 +6309,10 @@ describe('HTTPClient — builder state', () => {
 
     await builder.send();
 
-    expect(builder.elapsedMS).toBeGreaterThanOrEqual(50);
+    // A few ms of slack: `elapsedMS` is whole `Date.now()` milliseconds, the delay is
+    // measured on the monotonic clock, and a timer may fire a millisecond early - a 50 ms
+    // wait has shown up as 49 ms elapsed. Without the wait it would be about 0.
+    expect(builder.elapsedMS).toBeGreaterThanOrEqual(45);
   });
 
   test('cancel during retry delay resolves immediately', async () => {
@@ -5867,7 +6381,7 @@ describe('HTTPClient — builder state', () => {
 
     expect(res.isCancelled).toBe(true);
     expect(res.requestBodySettled).toBeDefined();
-    expect(await res.requestBodySettled).toBe(uploadFailure);
+    expect((await res.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   for (const outcome of ['response', 'throw'] as const) {
@@ -6153,7 +6667,7 @@ describe('HTTPClient — builder state', () => {
 
     expect(res.isCancelled).toBe(true);
     expect(res.requestBodySettled).toBeDefined();
-    expect(await res.requestBodySettled).toBe(uploadFailure);
+    expect((await res.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a retry-phase interceptor throw carries the previous upload outcome', async () => {
@@ -6187,7 +6701,7 @@ describe('HTTPClient — builder state', () => {
 
     expect(res.isFailed).toBe(true);
     expect(res.requestBodySettled).toBeDefined();
-    expect(await res.requestBodySettled).toBe(uploadFailure);
+    expect((await res.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a response with no upload outcome has no requestBodySettled property at all', async () => {
@@ -7975,7 +8489,7 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(errorCodes).toEqual(['interceptor_error']);
   });
 
-  test('unsupported request body gets request_setup_error code', async () => {
+  test('an unsupported request body is refused as it is handed over', async () => {
     let wasAdapterCalled = false;
 
     const adapter: HTTPAdapter = {
@@ -8000,24 +8514,24 @@ describe('HTTPClient — phase-aware interceptors', () => {
       errorCodes.push(err.code);
     });
 
-    const builder = client
-      .post('https://example.com/test')
-      .body(new URLSearchParams({ a: '1' }));
-    const res = await builder.send();
-
-    expect(wasAdapterCalled).toBe(false);
-    expect(res.status).toBe(0);
-    expect(res.isNetworkError).toBe(false);
-    expect(res.isFailed).toBe(true);
-    expect(builder.state).toBe('failed');
-    expect(builder.attemptCount).toBe(0);
-    expect(builder.error?.code).toBe('request_setup_error');
-    expect(builder.error?.message).toBe('Request setup failed');
-    expect(builder.error?.cause?.message).toMatch(
+    // Refused by the setter, as `params()` refuses a query it cannot copy: there is no
+    // copy of the body to take, so nothing is sent and no error is reported.
+    const builder = client.post('https://example.com/test');
+    expect(() => builder.body(new URLSearchParams({ a: '1' }))).toThrow(
       /Unsupported request body type/i,
     );
-    expect(builder.error?.isRetriesExhausted).toBe(false);
-    expect(errorCodes).toEqual(['request_setup_error']);
+    expect(() =>
+      client.post('https://example.com/test', {
+        body: new URLSearchParams({ a: '1' }),
+      }),
+    ).toThrow(TypeError);
+    expect(builder.state).toBe('pending');
+
+    const res = await builder.send();
+
+    expect(res.status).toBe(200);
+    expect(wasAdapterCalled).toBe(true);
+    expect(errorCodes).toEqual([]);
   });
 
   test('error observer receives the effective request timeout on setup failures', async () => {
@@ -8042,10 +8556,11 @@ describe('HTTPClient — phase-aware interceptors', () => {
       observedTimeout = req.timeout;
     });
 
+    // `streamResponse` needs NodeAdapter: refused at setup, before any attempt.
     const res = await client
       .post('https://example.com/test')
       .timeout(6_789)
-      .body(new URLSearchParams({ a: '1' }))
+      .streamResponse(() => null)
       .send();
 
     expect(wasAdapterCalled).toBe(false);
@@ -8568,7 +9083,13 @@ test.each(['query', 'path', 'fragment', 'origin'] as const)(
     expect(response.status).toBe(200);
     expect(requests).toHaveLength(3);
     expect(requests[1].initialURL).toBe('https://original.example/');
-    expect(requests[2].requestURL).not.toBe(requests[1].requestURL);
+    // Only a new host is sent where the interceptor rewrote it: on a hop to an origin the
+    // caller never chose, a rewrite that keeps the server's host is discarded.
+    if (rewrite === 'origin') {
+      expect(requests[2].requestURL).not.toBe(requests[1].requestURL);
+    } else {
+      expect(requests[2].requestURL).toBe(requests[1].requestURL);
+    }
     expect(requests[2].initialURL).toBe(
       rewrite === 'origin'
         ? 'https://caller-selected.example/resource'
@@ -8845,3 +9366,1377 @@ test.each([false, true])(
     }
   },
 );
+
+test('requestBodySettled uses one then read and observes the captured settlement', async () => {
+  let reads = 0;
+  const failure = new Error('upload failed');
+  const settled = {
+    get then() {
+      if (++reads > 1) {
+        return undefined;
+      }
+      return (resolve: (value: Error) => void): void => {
+        resolve(failure);
+      };
+    },
+  } as unknown as Promise<Error | undefined>;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        requestBodySettled: settled,
+      }),
+  };
+  const client = new HTTPClient({ adapter });
+  const response = await client.get('https://example.com').send();
+  expect(response.status).toBe(200);
+  expect((await response.requestBodySettled)?.cause).toBe(failure);
+  expect(reads).toBe(1);
+});
+
+test('a wrapped upload failure stays fulfilled when Error.prototype.name is nonwritable', async () => {
+  const original = Object.getOwnPropertyDescriptor(Error.prototype, 'name');
+  if (original === undefined) {
+    throw new Error('Error.prototype.name descriptor missing');
+  }
+  const uploadFailure = new Error('upload failed');
+  Object.defineProperty(uploadFailure, 'then', {
+    get() {
+      throw new Error('refused then lookup');
+    },
+  });
+  Object.defineProperty(uploadFailure, 'name', { value: 'UploadError' });
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        requestBodySettled: Promise.reject(uploadFailure),
+      }),
+  };
+  Object.defineProperty(Error.prototype, 'name', {
+    ...original,
+    writable: false,
+  });
+  try {
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ value: 1 })
+      .send();
+    const reported = await response.requestBodySettled;
+    expect(reported?.name).toBe('UploadError');
+    expect(reported?.cause).toBe(uploadFailure);
+    expect(reported?.message).toBe('upload failed');
+  } finally {
+    Object.defineProperty(Error.prototype, 'name', original);
+  }
+});
+
+test('a throwing effectiveRequestHeaders getter on an answered response is treated as absent', async () => {
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => {
+      sends++;
+      const raw = { status: 200, headers: {}, body: null };
+      Object.defineProperty(raw, 'effectiveRequestHeaders', {
+        enumerable: true,
+        get() {
+          throw new Error('wire record unreadable');
+        },
+      });
+      return Promise.resolve(raw as AdapterResponse);
+    },
+  };
+  const request = new HTTPClient({ adapter }).get('https://example.com/');
+  const response = await request.send();
+
+  expect(sends).toBe(1);
+  expect(response.status).toBe(200);
+  expect(request.error).toBeNull();
+});
+
+test('a retryable answer whose body cannot be decoded ends its attempt once', async () => {
+  // Building the retry's response decodes the body. A body that is not bytes throws
+  // there, before `onAttemptEnd` announces a retry, so the attempt is reported once, as
+  // not retrying.
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => {
+      sends++;
+      return Promise.resolve({
+        status: 503,
+        headers: { 'content-type': 'text/plain' },
+        body: { notBytes: true } as unknown as Uint8Array,
+      });
+    },
+  };
+  const ends: Array<{ willRetry: boolean; status: number }> = [];
+  const request = new HTTPClient({
+    adapter,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+  })
+    .get('https://example.com/')
+    .onAttemptEnd((event) => {
+      ends.push({ willRetry: event.willRetry, status: event.status });
+    });
+  await request.send();
+
+  expect(sends).toBe(1);
+  expect(ends).toEqual([{ willRetry: false, status: 503 }]);
+  expect(request.error?.code).toBe('adapter_error');
+});
+
+test('an interceptor request carrying cancel: false is sent, not cancelled', async () => {
+  const sent: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request: AdapterRequest) => {
+      sent.push(request.requestURL);
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    requestURL: 'https://example.com/rewritten',
+    cancel: false,
+  }));
+  const request = client.get('https://example.com/');
+  const response = await request.send();
+
+  expect(response.isCancelled).toBe(false);
+  expect(response.status).toBe(200);
+  expect(sent).toEqual(['https://example.com/rewritten']);
+});
+
+describe('an answered response whose body cannot be decoded', () => {
+  // The body is decoded where it is used: inside the attempt when a retry is planned,
+  // and otherwise when the final or redirect-observer response is built, after
+  // `onAttemptEnd` has reported the attempt. Either way the request ends as the
+  // answered response's adapter_error, keeping its status and headers.
+  function undecodableAdapter(
+    status: number,
+    extraHeaders: Record<string, string> = {},
+    redirectFields: Partial<AdapterResponse> = {},
+  ): HTTPAdapter & { sends: number } {
+    const adapter = {
+      sends: 0,
+      getType: () => 'mock' as const,
+      send: () => {
+        adapter.sends++;
+        return Promise.resolve({
+          status,
+          headers: { 'content-type': 'text/plain', ...extraHeaders },
+          body: { notBytes: true } as unknown as Uint8Array,
+          ...redirectFields,
+        });
+      },
+    };
+    return adapter;
+  }
+
+  test.each([200, 503])(
+    'a %d with no retry planned keeps its status and headers',
+    async (status) => {
+      const adapter = undecodableAdapter(status);
+      const statuses: number[] = [];
+      const request = new HTTPClient({ adapter })
+        .get('https://example.com/')
+        .onAttemptEnd((event) => {
+          statuses.push(event.status);
+        });
+      const response = await request.send();
+
+      expect(adapter.sends).toBe(1);
+      expect(request.error?.code).toBe('adapter_error');
+      expect(response.status).toBe(status);
+      expect(response.headers['content-type']).toBe('text/plain');
+      expect(response.isFailed).toBe(true);
+      expect(statuses).toEqual([status]);
+    },
+  );
+
+  test('a 3xx to be followed is not, and reports where it pointed', async () => {
+    // The redirect-phase response observers are handed its body, so it is read.
+    const adapter = undecodableAdapter(
+      302,
+      { location: '/next' },
+      {
+        wasRedirectDetected: true,
+        detectedRedirectURL: 'https://example.com/next',
+      },
+    );
+    const request = new HTTPClient({
+      adapter,
+      followRedirects: true,
+    }).get('https://example.com/');
+    const response = await request.send();
+
+    expect(adapter.sends).toBe(1);
+    expect(request.error?.code).toBe('adapter_error');
+    expect(response.status).toBe(302);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://example.com/next');
+  });
+});
+
+test('an unreadable 3xx keeps its redirect target on the adapter_error response', async () => {
+  const jar = new CookieJar();
+  const refusal = spyOn(jar, 'processResponseHeaders').mockImplementation(
+    () => {
+      throw new Error('jar refused');
+    },
+  );
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () =>
+      Promise.resolve({
+        status: 302,
+        headers: { location: '/next', 'set-cookie': ['a=b'] },
+        body: null,
+        wasRedirectDetected: true,
+        detectedRedirectURL: 'https://example.com/next',
+      }),
+  };
+  try {
+    const request = new HTTPClient({ adapter, cookieJar: jar }).get(
+      'https://example.com/',
+    );
+    const response = await request.send();
+
+    expect(request.error?.code).toBe('adapter_error');
+    expect(response.status).toBe(302);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://example.com/next');
+  } finally {
+    refusal.mockRestore();
+  }
+});
+
+test('an interceptor cancel reason that is not a string is dropped', async () => {
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+  };
+  const client = new HTTPClient({ adapter });
+  client.addRequestInterceptor(() => ({
+    cancel: true as const,
+    reason: 42 as unknown as string,
+  }));
+  const request = client.get('https://example.com/');
+  const response = await request.send();
+
+  expect(response.isCancelled).toBe(true);
+  expect(request.error?.cancelReason).toBeUndefined();
+});
+
+describe('a redirect whose undecodable body is discarded', () => {
+  // The body of a refused redirect, or of one past `maxRedirects`, is never read, so it
+  // is never decoded and cannot turn the redirect outcome into an adapter_error.
+  test('is redirect_disabled when redirects are off', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 302,
+          headers: { 'content-type': 'text/html', location: '/next' },
+          body: { notBytes: true } as unknown as Uint8Array,
+        }),
+    };
+    const request = new HTTPClient({ adapter, followRedirects: false }).get(
+      'https://example.com/',
+    );
+    const response = await request.send();
+
+    expect(request.error?.code).toBe('redirect_disabled');
+    expect(response.wasRedirectDetected).toBe(true);
+  });
+
+  test('is redirect_loop past maxRedirects', async () => {
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: () => {
+        sends++;
+        return Promise.resolve<AdapterResponse>(
+          sends === 1
+            ? { status: 302, headers: { location: '/a' }, body: null }
+            : {
+                status: 302,
+                headers: { location: '/b', 'content-type': 'text/plain' },
+                body: { notBytes: true } as unknown as Uint8Array,
+              },
+        );
+      },
+    };
+    const request = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      maxRedirects: 1,
+    }).get('https://example.com/');
+    await request.send();
+
+    expect(sends).toBe(2);
+    expect(request.error?.code).toBe('redirect_loop');
+  });
+});
+
+test('an AbortError thrown while reading an answered response is an adapter_error, not a cancel', async () => {
+  // Neither the request nor the attempt was aborted, so the answer stands: it is the
+  // adapter_error of an answered response, keeping its status and headers.
+  const jar = new CookieJar();
+  const refusal = spyOn(jar, 'processResponseHeaders').mockImplementation(
+    () => {
+      throw new DOMException('read aborted', 'AbortError');
+    },
+  );
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => {
+      sends++;
+      return Promise.resolve({
+        status: 200,
+        headers: { 'x-answer': 'yes' },
+        body: null,
+      });
+    },
+  };
+  const statuses: number[] = [];
+  try {
+    const request = new HTTPClient({
+      adapter,
+      cookieJar: jar,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+    })
+      .get('https://example.com/')
+      .onAttemptEnd((event) => {
+        statuses.push(event.status);
+      });
+    const response = await request.send();
+
+    expect(sends).toBe(1);
+    expect(request.error?.code).toBe('adapter_error');
+    expect(response.isCancelled).toBe(false);
+    expect(response.status).toBe(200);
+    expect(response.headers['x-answer']).toBe('yes');
+    expect(statuses).toEqual([200]);
+  } finally {
+    refusal.mockRestore();
+  }
+});
+
+describe('redirect fields agree whether the answer is read, undecodable or refused by the jar', () => {
+  // One rule on every path: a resolved response reports its adapter's own fields, as a
+  // healthy one always has.
+  const cases = [
+    {
+      name: '302 without Location, no adapter fields',
+      // Followed, so the response is built from the answer rather than refused.
+      shouldFollowRedirects: true,
+      status: 302,
+      headers: {} as Record<string, string>,
+      fields: {} as Partial<AdapterResponse>,
+    },
+    {
+      name: '200 with Location, adapter says no redirect',
+      shouldFollowRedirects: false,
+      status: 200,
+      headers: { location: '/x' },
+      fields: { wasRedirectDetected: false },
+    },
+    {
+      name: '302 with Location, adapter fields',
+      shouldFollowRedirects: false,
+      status: 302,
+      headers: { location: '/next' },
+      fields: {
+        wasRedirectDetected: true,
+        detectedRedirectURL: 'https://example.com/next',
+      },
+    },
+  ];
+
+  test.each(cases)(
+    '$name',
+    async ({ shouldFollowRedirects, status, headers, fields }) => {
+      const observed: Array<[boolean, string | undefined]> = [];
+
+      for (const mode of ['healthy', 'undecodable', 'jar'] as const) {
+        const jar = new CookieJar();
+        const refusal = spyOn(jar, 'processResponseHeaders');
+        if (mode === 'jar') {
+          refusal.mockImplementation(() => {
+            throw new Error('jar refused');
+          });
+        }
+        const adapter: HTTPAdapter = {
+          getType: () => 'mock',
+          send: () =>
+            Promise.resolve({
+              status,
+              headers: { 'content-type': 'text/plain', ...headers },
+              body:
+                mode === 'undecodable'
+                  ? ({ notBytes: true } as unknown as Uint8Array)
+                  : new TextEncoder().encode('ok'),
+              ...fields,
+            }),
+        };
+        try {
+          const request = new HTTPClient({
+            adapter,
+            cookieJar: jar,
+            followRedirects: shouldFollowRedirects,
+          }).get('https://example.com/');
+          const response = await request.send();
+          observed.push([
+            response.wasRedirectDetected,
+            response.detectedRedirectURL,
+          ]);
+        } finally {
+          refusal.mockRestore();
+        }
+      }
+
+      expect(observed[1]).toEqual(observed[0]);
+      expect(observed[2]).toEqual(observed[0]);
+    },
+  );
+});
+
+test('a followed 3xx whose body cannot be decoded keeps an earlier hop upload outcome', async () => {
+  const failure = new Error('upload cut');
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => {
+      sends++;
+      return Promise.resolve<AdapterResponse>(
+        sends === 1
+          ? {
+              status: 302,
+              headers: { location: '/b' },
+              body: null,
+              requestBodySettled: Promise.resolve(failure),
+            }
+          : {
+              status: 302,
+              headers: { location: '/c', 'content-type': 'text/plain' },
+              body: { notBytes: true } as unknown as Uint8Array,
+            },
+      );
+    },
+  };
+  const request = new HTTPClient({ adapter, followRedirects: true })
+    .post('https://example.com/a')
+    .json({ a: 1 });
+  const response = await request.send();
+
+  expect(sends).toBe(2);
+  expect(request.error?.code).toBe('adapter_error');
+  expect((await response.requestBodySettled)?.cause).toBe(failure);
+});
+
+test('a cookie jar that throws ends the request as an adapter_error naming the jar', async () => {
+  const jar = new CookieJar();
+  const jarFailure = new Error('jar refused');
+  const refusal = spyOn(jar, 'processResponseHeaders').mockImplementation(
+    () => {
+      throw jarFailure;
+    },
+  );
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => {
+      sends++;
+      return Promise.resolve({
+        status: 201,
+        headers: { 'set-cookie': ['a=b'], 'x-answer': 'yes' },
+        body: null,
+      });
+    },
+  };
+  try {
+    const request = new HTTPClient({
+      adapter,
+      cookieJar: jar,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+    }).get('https://example.com/');
+    const response = await request.send();
+
+    expect(sends).toBe(1);
+    expect(request.error?.code).toBe('adapter_error');
+    expect(request.error?.message).toBe(
+      'Cookie jar failed to process response headers',
+    );
+    expect(request.error?.cause).toBe(jarFailure);
+    expect(response.status).toBe(201);
+    expect(response.headers['x-answer']).toBe('yes');
+  } finally {
+    refusal.mockRestore();
+  }
+});
+
+test('a cookie jar that throws on a stream aborted after headers ends as the jar adapter_error', async () => {
+  // The headers arrived before the body was cut short, so the jar is handed them from
+  // the throw. A jar failure there escaped as `request_setup_error` with status 0.
+  const jar = new CookieJar();
+  const jarFailure = new Error('jar refused');
+  const refusal = spyOn(jar, 'processResponseHeaders').mockImplementation(
+    () => {
+      throw jarFailure;
+    },
+  );
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (): Promise<AdapterResponse> => {
+      sends++;
+      return Promise.reject(
+        Object.assign(new Error('terminated'), {
+          [RESPONSE_STREAM_ABORT_FLAG]: true,
+          [STREAM_ABORT_STATUS_KEY]: 200,
+          [STREAM_ABORT_HEADERS_KEY]: {
+            'set-cookie': ['a=b'],
+            'x-answer': 'yes',
+          },
+        }),
+      );
+    },
+  };
+  const statuses: number[] = [];
+  try {
+    const request = new HTTPClient({
+      adapter,
+      cookieJar: jar,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+    })
+      .get('https://example.com/')
+      .onAttemptEnd((event) => {
+        statuses.push(event.status);
+      });
+    const response = await request.send();
+
+    expect(sends).toBe(1);
+    expect(request.error?.code).toBe('adapter_error');
+    expect(request.error?.message).toBe(
+      'Cookie jar failed to process response headers',
+    );
+    expect(request.error?.cause).toBe(jarFailure);
+    expect(response.status).toBe(200);
+    expect(response.headers['x-answer']).toBe('yes');
+    expect(response.isFailed).toBe(true);
+    expect(statuses).toEqual([200]);
+  } finally {
+    refusal.mockRestore();
+  }
+});
+
+describe('a redirect hop the cookie jar fails before it goes out', () => {
+  test("is handed to the error observers without the previous request's credentials", async () => {
+    class FailingJar extends CookieJar {
+      public override getCookieHeaderString(url: string): string {
+        if (url.includes('b.test')) {
+          throw new Error('jar down');
+        }
+        return super.getCookieHeaderString(url);
+      }
+    }
+
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> => {
+        sends++;
+        return Promise.resolve({
+          status: 307,
+          headers: { location: 'https://b.test/x' },
+          body: null,
+        });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      cookieJar: new FailingJar(),
+    });
+    const observed: Array<{ url: string; headers: Record<string, unknown> }> =
+      [];
+    client.addErrorObserver(
+      (_error, request) => {
+        observed.push({ url: request.requestURL, headers: request.headers });
+      },
+      { hosts: ['b.test'] },
+    );
+
+    const builder = client
+      .post('https://a.test/start')
+      .headers({ authorization: 'Bearer secret-for-a', 'x-api-key': 'k-a' })
+      .json({ ok: true });
+    await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(sends).toBe(1);
+    expect(observed).toHaveLength(1);
+    expect(observed[0].url).toBe('https://b.test/x');
+    expect(observed[0].headers).not.toHaveProperty('authorization');
+    expect(observed[0].headers).not.toHaveProperty('x-api-key');
+  });
+
+  test("rewritten by a redirect interceptor to another origin, is reported without that URL's userinfo", async () => {
+    class FailingJar extends CookieJar {
+      public override getCookieHeaderString(url: string): string {
+        if (url.includes('c.test')) {
+          throw new Error('jar down');
+        }
+        return super.getCookieHeaderString(url);
+      }
+    }
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: 'https://b.test/x' },
+          body: null,
+        }),
+    };
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      cookieJar: new FailingJar(),
+    });
+    client.addRequestInterceptor(
+      (request) => ({ ...request, requestURL: 'https://u:p@c.test/x' }),
+      { phases: ['redirect'] },
+    );
+    const observedURLs: string[] = [];
+    client.addErrorObserver((_error, request) => {
+      observedURLs.push(request.requestURL);
+    });
+
+    const builder = client.get('https://a.test/start');
+    const response = await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(response.requestURL).toBe('https://c.test/x');
+    expect(builder.error?.requestURL).toBe('https://c.test/x');
+    expect(observedURLs).toEqual(['https://c.test/x']);
+  });
+
+  test("whose sanitizing fails even without the jar, is reported without another origin's userinfo", async () => {
+    // The hop's first sanitizing runs as usual; every later one throws, as a cookie jar
+    // would and then as nothing should, so the report falls back to the bare request.
+    const original = Reflect.get(
+      HTTPClient.prototype,
+      '_sanitizeRedirectRequest',
+    ) as (...args: unknown[]) => unknown;
+    let calls = 0;
+    const sanitizeSpy = spyOn(
+      HTTPClient.prototype as unknown as Record<
+        string,
+        (...args: unknown[]) => unknown
+      >,
+      '_sanitizeRedirectRequest',
+    ).mockImplementation(function (this: unknown, ...args: unknown[]) {
+      calls++;
+      if (calls === 1) {
+        return Reflect.apply(original, this, args);
+      }
+      throw new Error('sanitizing failed');
+    });
+
+    try {
+      const adapter: HTTPAdapter = {
+        getType: () => 'mock',
+        send: (): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 302,
+            headers: { location: 'https://b.test/x' },
+            body: null,
+          }),
+      };
+      const client = new HTTPClient({ adapter, followRedirects: true });
+      client.addRequestInterceptor(
+        (request) => ({ ...request, requestURL: 'https://u:p@c.test/x' }),
+        { phases: ['redirect'] },
+      );
+      const observedURLs: string[] = [];
+      client.addErrorObserver((_error, request) => {
+        observedURLs.push(request.requestURL);
+      });
+
+      const builder = client.get('https://a.test/start');
+      const response = await builder.send();
+
+      expect(builder.error?.code).toBe('request_setup_error');
+      expect(calls).toBe(3);
+      expect(response.requestURL).toBe('https://c.test/x');
+      expect(observedURLs).toEqual(['https://c.test/x']);
+    } finally {
+      sanitizeSpy.mockRestore();
+    }
+  });
+
+  test('to the same origin, is reported without the Cookie the jar built for the previous URL', async () => {
+    class FailingJar extends CookieJar {
+      public override getCookieHeaderString(url: string): string {
+        if (url.includes('/public')) {
+          throw new Error('jar down');
+        }
+        return super.getCookieHeaderString(url);
+      }
+    }
+
+    const jar = new FailingJar();
+    jar.parseSetCookieHeader('admin=1; Path=/admin', 'https://a.test/admin');
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: '/public' },
+          body: null,
+        }),
+    };
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      cookieJar: jar,
+    });
+    const observed: Array<Record<string, unknown>> = [];
+    client.addErrorObserver((_error, request) => {
+      observed.push(request.headers);
+    });
+
+    const builder = client.get('https://a.test/admin/x');
+    await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).not.toHaveProperty('cookie');
+  });
+});
+
+describe('a cancel or timeout wins over a cookie jar that throws', () => {
+  function throwingJar(failure: unknown = new Error('jar refused')): {
+    jar: CookieJar;
+    restore: () => void;
+  } {
+    const jar = new CookieJar();
+    const spy = spyOn(jar, 'processResponseHeaders').mockImplementation(() => {
+      throw failure;
+    });
+    return { jar, restore: () => spy.mockRestore() };
+  }
+
+  // Rejects mid-body, tagged with the headers that arrived, once the attempt aborts.
+  function midBodyAbortAdapter(): HTTPAdapter {
+    return {
+      getType: () => 'fetch',
+      send: (request: AdapterRequest): Promise<AdapterResponse> =>
+        new Promise((_, reject) => {
+          request.signal?.addEventListener('abort', () => {
+            reject(
+              Object.assign(new Error('aborted'), {
+                name: 'AbortError',
+                [RESPONSE_STREAM_ABORT_FLAG]: true,
+                [STREAM_ABORT_STATUS_KEY]: 200,
+                [STREAM_ABORT_HEADERS_KEY]: { 'set-cookie': ['a=b'] },
+              }),
+            );
+          });
+        }),
+    };
+  }
+
+  test('a cancel mid-body is a cancel', async () => {
+    const { jar, restore } = throwingJar();
+    try {
+      const request = new HTTPClient({
+        adapter: midBodyAbortAdapter(),
+        cookieJar: jar,
+      }).get('https://example.com/');
+      const pending = request.send();
+      setTimeout(() => request.cancel('user gave up'), 5);
+      const response = await pending;
+
+      expect(request.error?.code).toBe('cancelled');
+      expect(request.error?.cancelReason).toBe('user gave up');
+      expect(response.isCancelled).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  test('a per-attempt timeout mid-body is the stream timeout', async () => {
+    const { jar, restore } = throwingJar();
+    try {
+      const request = new HTTPClient({
+        adapter: midBodyAbortAdapter(),
+        cookieJar: jar,
+        timeout: 10,
+      }).get('https://example.com/');
+      const response = await request.send();
+
+      expect(request.error?.code).toBe('stream_response_error');
+      expect(response.isTimeout).toBe(true);
+      expect(response.status).toBe(200);
+    } finally {
+      restore();
+    }
+  });
+
+  test('an attempt that timed out before its answer was read is a timeout, retried', async () => {
+    // The timer fires before the adapter's late answer is read; the jar then throws an
+    // AbortError on it. The attempt timed out, so it is a timeout, not an answered
+    // adapter_error.
+    const { jar, restore } = throwingJar(
+      new DOMException('read aborted', 'AbortError'),
+    );
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: () => {
+        sends++;
+        return new Promise((resolve) =>
+          setTimeout(
+            () => resolve({ status: 200, headers: { x: 'y' }, body: null }),
+            40,
+          ),
+        );
+      },
+    };
+    const ends: Array<{ status: number; willRetry: boolean }> = [];
+    try {
+      const request = new HTTPClient({
+        adapter,
+        cookieJar: jar,
+        timeout: 5,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+      })
+        .get('https://example.com/')
+        .onAttemptEnd((event) => {
+          ends.push({ status: event.status, willRetry: event.willRetry });
+        });
+      const response = await request.send();
+
+      expect(sends).toBe(2);
+      expect(request.error?.code).toBe('timeout');
+      expect(response.isTimeout).toBe(true);
+      expect(response.status).toBe(0);
+      expect(ends).toEqual([
+        { status: 0, willRetry: true },
+        { status: 0, willRetry: false },
+      ]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test('a caller signal whose removeEventListener throws neither rejects a finished request nor keeps the other listeners', async () => {
+  const anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
+  const originalAdd = Object.getOwnPropertyDescriptor(
+    EventTarget.prototype,
+    'addEventListener',
+  )?.value as EventTarget['addEventListener'];
+  const originalRemove = Object.getOwnPropertyDescriptor(
+    EventTarget.prototype,
+    'removeEventListener',
+  )?.value as EventTarget['removeEventListener'];
+  const counts = new Map<AbortSignal, number>();
+  const add = spyOn(
+    EventTarget.prototype,
+    'addEventListener',
+  ).mockImplementation(function (
+    this: EventTarget,
+    ...args: Parameters<typeof originalAdd>
+  ) {
+    if (this instanceof AbortSignal && args[0] === 'abort') {
+      counts.set(this, (counts.get(this) ?? 0) + 1);
+    }
+    Reflect.apply(originalAdd, this, args);
+  });
+  const remove = spyOn(
+    EventTarget.prototype,
+    'removeEventListener',
+  ).mockImplementation(function (
+    this: EventTarget,
+    ...args: Parameters<typeof originalRemove>
+  ) {
+    if (this instanceof AbortSignal && args[0] === 'abort') {
+      counts.set(this, (counts.get(this) ?? 0) - 1);
+    }
+    Reflect.apply(originalRemove, this, args);
+  });
+  Object.defineProperty(AbortSignal, 'any', {
+    value: undefined,
+    configurable: true,
+  });
+  const callerSignal = new AbortController().signal;
+  Object.defineProperty(callerSignal, 'removeEventListener', {
+    value: () => {
+      throw new Error('remove refused');
+    },
+  });
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+  };
+  try {
+    const response = await new HTTPClient({ adapter })
+      .get('https://example.com/')
+      .signal(callerSignal)
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(counts.get(callerSignal)).toBe(1);
+    counts.delete(callerSignal);
+    expect(counts.size).toBeGreaterThanOrEqual(2);
+    expect([...counts.values()].every((count) => count === 0)).toBe(true);
+  } finally {
+    add.mockRestore();
+    remove.mockRestore();
+    if (anyDescriptor) {
+      Object.defineProperty(AbortSignal, 'any', anyDescriptor);
+    } else {
+      Reflect.deleteProperty(AbortSignal, 'any');
+    }
+  }
+});
+
+describe('observers and a request that ends without them', () => {
+  const answering = (type: string, answers: Record<string, unknown>[]) => {
+    let index = 0;
+    return {
+      getType: () => type,
+      send: () =>
+        Promise.resolve(answers[Math.min(index++, answers.length - 1)]),
+    } as unknown as HTTPAdapter;
+  };
+  const settledWithin = <T>(promise: Promise<T>) =>
+    Promise.race([
+      promise,
+      new Promise<'still pending'>((resolve) => {
+        setTimeout(() => resolve('still pending'), 1000);
+      }),
+    ]);
+
+  test.each([
+    {
+      phase: 'redirect',
+      answers: [
+        { status: 302, headers: { location: '/next' }, body: null },
+        { status: 200, headers: {}, body: null },
+      ],
+    },
+    {
+      phase: 'retry',
+      answers: [
+        { status: 503, headers: {}, body: null },
+        { status: 200, headers: {}, body: null },
+      ],
+    },
+  ] as const)(
+    'a cancel does not wait on a $phase observer that never settles',
+    async ({ phase, answers }) => {
+      const client = new HTTPClient({
+        adapter: answering('node', [...answers]),
+        baseURL: 'http://a.test',
+        followRedirects: true,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+      });
+      let isObserved: () => void = () => {};
+      const observed = new Promise<void>((resolve) => {
+        isObserved = resolve;
+      });
+      client.addResponseObserver(
+        () => {
+          isObserved();
+          return new Promise<void>(() => {});
+        },
+        { phases: [phase] },
+      );
+
+      const builder = client.get('/');
+      const sent = builder.send();
+      await observed;
+      builder.cancel('stop');
+
+      const response = await settledWithin(sent);
+
+      expect(response).not.toBe('still pending');
+      expect((response as { isCancelled: boolean }).isCancelled).toBe(true);
+      expect(builder.state).toBe('cancelled');
+      expect(client.listRequests().count).toBe(0);
+    },
+  );
+
+  test('a cancel does not wait on a retry error observer that never settles', async () => {
+    let attempts = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () => {
+          attempts++;
+          return Promise.reject(new Error('down'));
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    let isObserved: () => void = () => {};
+    const observed = new Promise<void>((resolve) => {
+      isObserved = resolve;
+    });
+    client.addErrorObserver(
+      () => {
+        isObserved();
+        return new Promise<void>(() => {});
+      },
+      { phases: ['retry'] },
+    );
+
+    const builder = client.get('/');
+    const sent = builder.send();
+    await observed;
+    builder.cancel('stop');
+
+    const response = await settledWithin(sent);
+
+    expect((response as { isCancelled: boolean }).isCancelled).toBe(true);
+    expect(attempts).toBe(1);
+  });
+
+  test('a cancel while an observer runs leaves the later ones of that phase unrun', async () => {
+    const client = new HTTPClient({
+      adapter: answering('node', [
+        { status: 503, headers: {}, body: null },
+        { status: 200, headers: {}, body: null },
+      ]),
+      baseURL: 'http://a.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    let calls: string[] = [];
+    let release: () => void = () => {};
+    const builder = client.get('/');
+    client.addResponseObserver(
+      () => {
+        calls.push('first');
+        builder.cancel('stop');
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+      { phases: ['retry'] },
+    );
+    client.addResponseObserver(
+      () => {
+        calls.push('second');
+      },
+      { phases: ['retry'] },
+    );
+    client.addErrorObserver(
+      () => {
+        calls.push('final');
+      },
+      { phases: ['final'] },
+    );
+
+    const response = await settledWithin(builder.send());
+    const seenAtAnswer = calls;
+    calls = [...calls];
+    release();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5);
+    });
+
+    expect((response as { isCancelled: boolean }).isCancelled).toBe(true);
+    expect(seenAtAnswer).toEqual(['first', 'final']);
+    expect(calls).toEqual(['first', 'final']);
+  });
+
+  test('a bodiless hop that fails reporting the body went out keeps the earlier upload failure', async () => {
+    let attempts = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () => {
+          attempts++;
+          if (attempts === 1) {
+            return Promise.resolve({
+              status: 302,
+              headers: { location: '/next' },
+              body: null,
+              requestBodySettled: Promise.resolve(new Error('cut')),
+            });
+          }
+          const failure = new Error('down');
+          Object.defineProperty(failure, REQUEST_BODY_SETTLED_KEY, {
+            value: Promise.resolve(undefined),
+          });
+          return Promise.reject(failure);
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+      followRedirects: true,
+    });
+
+    const response = await client.post('/x', { body: 'hi' }).send();
+
+    expect((await response.requestBodySettled)?.message).toBe('cut');
+  });
+
+  test('a bodiless hop that reports the body went out keeps the earlier upload failure', async () => {
+    const client = new HTTPClient({
+      adapter: answering('node', [
+        {
+          status: 302,
+          headers: { location: '/next' },
+          body: null,
+          requestBodySettled: Promise.resolve(new Error('cut')),
+        },
+        {
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.resolve(undefined),
+        },
+      ]),
+      baseURL: 'http://a.test',
+      followRedirects: true,
+    });
+
+    const response = await client.post('/x', { body: 'hi' }).send();
+
+    expect((await response.requestBodySettled)?.message).toBe('cut');
+  });
+
+  test.each([[null], ['nope']])(
+    'an unusable requestBodySettled (%p) on a later hop keeps the earlier upload failure',
+    async (unusable) => {
+      const client = new HTTPClient({
+        adapter: answering('node', [
+          {
+            status: 302,
+            headers: { location: '/next' },
+            body: null,
+            requestBodySettled: Promise.resolve(new Error('cut')),
+          },
+          {
+            status: 200,
+            headers: {},
+            body: null,
+            requestBodySettled: unusable,
+          },
+        ]),
+        baseURL: 'http://a.test',
+        followRedirects: true,
+      });
+
+      const response = await client.post('/x', { body: 'hi' }).send();
+
+      expect((await response.requestBodySettled)?.message).toBe('cut');
+    },
+  );
+
+  test('userAgent is sent with an xhr adapter outside a browser', async () => {
+    const original = (globalThis as { XMLHttpRequest?: unknown })
+      .XMLHttpRequest;
+    (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = class {};
+    try {
+      let sentHeaders: Record<string, unknown> = {};
+      const client = new HTTPClient({
+        adapter: {
+          getType: () => 'xhr',
+          send: (request: { headers: Record<string, unknown> }) => {
+            sentHeaders = request.headers;
+            return Promise.resolve({ status: 200, headers: {}, body: null });
+          },
+        } as unknown as HTTPAdapter,
+        baseURL: 'http://a.test',
+        userAgent: 'mine/1',
+      });
+
+      await client.get('/').send();
+
+      expect(sentHeaders['user-agent']).toBe('mine/1');
+    } finally {
+      (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = original;
+    }
+  });
+});
+
+describe('user-agent header', () => {
+  const sentUserAgent = async (
+    config: Partial<HTTPClientConfig>,
+    headers?: Record<string, string | null>,
+  ) => {
+    let sent: Record<string, unknown> = {};
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: (request: { headers: Record<string, unknown> }) => {
+          sent = request.headers;
+          return Promise.resolve({ status: 200, headers: {}, body: null });
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+      ...config,
+    });
+
+    await client
+      .get('/')
+      .headers(headers ?? {})
+      .send();
+
+    return sent['user-agent'];
+  };
+
+  test('the default, then defaultHeaders, then userAgent, then a request, each win over the last', async () => {
+    expect(await sentUserAgent({})).toBe(DEFAULT_USER_AGENT);
+    expect(
+      await sentUserAgent({ defaultHeaders: { 'User-Agent': 'default/1' } }),
+    ).toBe('default/1');
+    expect(
+      await sentUserAgent({
+        userAgent: 'config/1',
+        defaultHeaders: { 'User-Agent': 'default/1' },
+      }),
+    ).toBe('config/1');
+    expect(
+      await sentUserAgent(
+        {
+          userAgent: 'config/1',
+          defaultHeaders: { 'User-Agent': 'default/1' },
+        },
+        { 'USER-AGENT': 'request/1' },
+      ),
+    ).toBe('request/1');
+  });
+
+  test('a null one on a request sends none', async () => {
+    expect(
+      await sentUserAgent({ userAgent: 'config/1' }, { 'user-agent': null }),
+    ).toBeUndefined();
+  });
+});
+
+describe('a file backed by a path on Bun', () => {
+  test('the form copy a fetch encodes names it by the last segment of its path', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'lc-part-name-'));
+    const path = join(directory, 'report.txt');
+    writeFileSync(path, 'hello');
+    try {
+      let sentBody: unknown;
+      const client = new HTTPClient({
+        adapter: {
+          getType: () => 'mock',
+          send: (request: { body: unknown }) => {
+            sentBody = request.body;
+            return Promise.resolve({ status: 200, headers: {}, body: null });
+          },
+        } as unknown as HTTPAdapter,
+        baseURL: 'http://a.test',
+      });
+      const form = new FormData();
+      form.append('upload', Bun.file(path));
+
+      await client.post('/').formData(form).send();
+
+      const encoded = await new Response(sentBody as FormData).text();
+      expect(encoded).toContain('filename="report.txt"');
+      expect(encoded).not.toContain(directory);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('a caller signal this runtime did not make', () => {
+  const polyfillSignal = () => {
+    const target = new EventTarget() as EventTarget & {
+      aborted: boolean;
+      reason: unknown;
+    };
+    target.aborted = false;
+    target.reason = undefined;
+    Object.defineProperty(target, Symbol.toStringTag, {
+      value: 'AbortSignal',
+    });
+    return {
+      signal: target as unknown as AbortSignal,
+      abort: (reason: unknown) => {
+        target.aborted = true;
+        target.reason = reason;
+        target.dispatchEvent(new Event('abort'));
+      },
+    };
+  };
+
+  test('runs the request, and its abort cancels it', async () => {
+    let sentSignal: AbortSignal | undefined;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: (request: { signal?: AbortSignal }) => {
+          sentSignal = request.signal;
+          return new Promise((_resolve, reject) => {
+            request.signal?.addEventListener('abort', () => {
+              reject(request.signal?.reason as Error);
+            });
+          });
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+    });
+    const { signal, abort } = polyfillSignal();
+
+    const sent = client.get('/').signal(signal).send();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5);
+    });
+
+    expect(sentSignal).toBeInstanceOf(AbortSignal);
+
+    abort('stop');
+    const response = await sent;
+
+    expect(response.isCancelled).toBe(true);
+  });
+
+  test('already aborted, it cancels without an attempt', async () => {
+    let attempts = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () => {
+          attempts++;
+          return Promise.resolve({ status: 200, headers: {}, body: null });
+        },
+      } as unknown as HTTPAdapter,
+      baseURL: 'http://a.test',
+    });
+    const { signal, abort } = polyfillSignal();
+    abort('stop');
+
+    const response = await client.get('/').signal(signal).send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(attempts).toBe(0);
+  });
+});

@@ -5,7 +5,27 @@ import type { RetryPolicyOptions } from '../retry-utils';
 
 export type AdapterType = 'fetch' | 'xhr' | 'node' | 'mock';
 
-export type HTTPMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
+/**
+ * A request method. The standard ones are named for autocompletion, and are sent
+ * uppercase whatever case they are given in; any other RFC 9110 method name - `PROPFIND`,
+ * `purge` - is accepted too, except `CONNECT`, which opens a tunnel and is refused, and
+ * is case-sensitive to the client (its filters and retry rules). What goes on the wire
+ * depends on the transport: Node's `http` (and so `NodeAdapter`) uppercases it, `fetch`
+ * sends it as given. So code switching over a request's method should keep a default
+ * branch.
+ */
+export type HTTPMethod =
+  | 'GET'
+  | 'POST'
+  | 'PUT'
+  | 'PATCH'
+  | 'DELETE'
+  | 'HEAD'
+  | 'OPTIONS'
+  | 'TRACE'
+  // `string & {}` rather than `string`, which would absorb the names above and drop
+  // them from autocompletion.
+  | (string & {});
 
 export type ContentType = 'json' | 'text' | 'binary';
 
@@ -27,7 +47,11 @@ export interface HTTPAdapter {
 export interface AdapterRequest {
   requestURL: string;
   method: HTTPMethod;
-  /** Lowercase-keyed outbound headers for this attempt. Some adapters materialize string[] values at send time. */
+  /**
+   * Lowercase-keyed outbound headers for this attempt. Some adapters materialize string[]
+   * values at send time. A plain object: an adapter driven directly refuses a `Headers` or
+   * `Map` with a non-retryable `TypeError`, and drops an unset (`null`/`undefined`) value.
+   */
   headers: Record<string, string | string[]>;
   body?: string | Uint8Array | FormData | null;
   signal?: AbortSignal;
@@ -35,7 +59,7 @@ export interface AdapterRequest {
   onDownloadProgress?: (event: AdapterProgressEvent) => void;
   /**
    * NodeAdapter only. HTTPClient rejects non-node adapters before dispatch if
-   * this is set. Called after response headers arrive on a 200 response.
+   * this is set. Called after response headers arrive on a 2xx response.
    * Return a writable stream to pipe the body into it, or null to cancel.
    */
   streamResponse?: StreamResponseFactory;
@@ -44,8 +68,9 @@ export interface AdapterRequest {
   /** Passed by the client so NodeAdapter can populate StreamResponseInfo. */
   requestID?: string;
   /**
-   * The resolved URL last selected by the caller, including retry interceptor origin changes,
-   * before any server redirect hop. Passed by the
+   * The resolved URL last selected by the caller, including a retry interceptor's change of
+   * host (a scheme or port change alone keeps the server-chosen host), before any server
+   * redirect hop. Passed by the
    * client so an adapter can tell a hop to another origin from the request the caller
    * addressed. Every network adapter withholds URL userinfo on such a hop, and
    * `NodeAdapter` also withholds its configured client certificate and SNI override
@@ -53,6 +78,21 @@ export interface AdapterRequest {
    * Absent when an adapter is driven directly.
    */
   initialURL?: string;
+  /**
+   * The most bytes of a buffered response body the adapter reads, counted on the body as
+   * it is handed over - decoded, where the adapter decodes. Past it the adapter stops
+   * reading, releases the response, and resolves a stream error with
+   * `streamErrorCode: 'response_too_large'`, keeping the real status and headers.
+   * `NodeAdapter` and `FetchAdapter` also refuse a `Content-Length` already over it
+   * before the body is read, where that length counts the bytes handed over.
+   *
+   * A positive integer, or `Infinity` (or absent) for no limit. Any other value - `0`,
+   * `NaN`, a string - and a getter that throws are refused: the adapter rejects with a
+   * non-retryable error rather than read it as no limit. A body piped to
+   * `streamResponse` is not held, so it is not limited. Set by `HTTPClient` from
+   * `maxResponseBytes`.
+   */
+  maxResponseBytes?: number;
 }
 
 export interface AdapterResponse {
@@ -75,12 +115,24 @@ export interface AdapterResponse {
    * - **XHRAdapter**: the browser always follows redirects with no opt-out.
    *   Detected after the fact by comparing `xhr.responseURL` to the original
    *   URL; resolves as status 0 with `wasRedirectDetected: true`. Same
-   *   HTTPClient routing as FetchAdapter.
+   *   HTTPClient routing as FetchAdapter. A real 3xx the XHR hands over
+   *   unfollowed (no `Location` in a browser, or an XHR that does not follow)
+   *   sets it from the status, as FetchAdapter does.
    */
   wasRedirectDetected?: boolean;
   /**
    * Redirect target when the adapter can determine it, even if the client
-   * does not follow that redirect itself.
+   * does not follow that redirect itself. Where the built-in adapters resolve
+   * the `Location` themselves, they do it against the request URL without its
+   * userinfo, drop userinfo the server wrote into a `Location` on another origin
+   * (keeping it on the request's own, unless it is the request URL's own userinfo),
+   * and leave this unset for a `Location` that does not resolve to a URL. XHRAdapter
+   * reports a redirect the browser followed as `xhr.responseURL`, the URL the browser
+   * followed to.
+   *
+   * A custom adapter's value is held to the same userinfo rule by the client - so one
+   * resolved against the request URL, credentials and all, does not report them - and
+   * one that is not a string is dropped (the target is then derived from `Location`).
    */
   detectedRedirectURL?: string;
   /**
@@ -111,7 +163,8 @@ export interface AdapterResponse {
    *
    * Deliberately separate from {@link AdapterResponse.isRetryable}, which is a
    * hint that says nothing about delivery. The client uses this to decide whether
-   * a `POST` or `PATCH` may be retried after a transport failure, and ignores it
+   * a non-idempotent method (`POST`, `PATCH`, a custom one) may be retried after a
+   * transport failure, and ignores it
    * when a real response came back.
    */
   wasDefinitelyNotSent?: boolean;
@@ -129,6 +182,10 @@ export interface AdapterResponse {
    *
    * Adapters may use any header casing, `HTTPClient` normalizes keys to
    * lowercase before redirect handling, cookies, and the public `HTTPResponse`.
+   *
+   * A plain object: a `Headers` or `Map` (a wrapped `fetch` response's own) is
+   * refused as a non-retryable `adapter_error`, as is a value that is not a
+   * string or finite number - a `set-cookie` line must be a string.
    */
   headers: Record<string, string | string[]>;
   /** Raw response bytes. Higher layers decode/parse based on content-type. */
@@ -142,8 +199,9 @@ export interface AdapterResponse {
    * Set when response-body delivery fails after headers arrive — buffered
    * download truncation, writable errors, upstream response-stream errors.
    * NodeAdapter, FetchAdapter and MockAdapter all report it, and the client
-   * synthesizes it for a per-attempt timeout that strikes mid-body. XHRAdapter
-   * cannot: `XMLHttpRequest` zeroes the status on error.
+   * synthesizes it for a per-attempt timeout that strikes mid-body. XHRAdapter reports
+   * it only for a body past `maxResponseBytes`: `XMLHttpRequest` zeroes the status on
+   * any other error.
    *
    * The client treats this as a terminal stream failure. The real HTTP status is
    * preserved (not zeroed) so observers can tell the server responded but body
@@ -159,7 +217,8 @@ export interface AdapterResponse {
    * more precise `HTTPClientError.code` while keeping `HTTPResponse`
    * transport-agnostic.
    */
-  streamErrorCode?: 'stream_write_error' | 'stream_response_error';
+  streamErrorCode?:
+    'stream_write_error' | 'stream_response_error' | 'response_too_large';
   /**
    * Underlying error for an absorbed adapter failure. Populated for transport
    * failures the adapter resolves instead of throwing, and for streamed-body
@@ -171,13 +230,13 @@ export interface AdapterResponse {
    * arrived while it was still being written. Advisory: it never makes a response
    * a failure, and it never rejects.
    *
-   * Absent for an ordinary REST endpoint, which reads and processes the whole
-   * upload before answering - by then the body is already out. This is for the
-   * uncommon shapes where the answer can come first: early-ack, unbuffered and
-   * duplex endpoints.
+   * Of no interest for an ordinary REST endpoint, which reads and processes the
+   * whole upload before answering - by then the body is already out, and the field
+   * resolves `undefined` at once. This is for the uncommon shapes where the answer
+   * can come first: early-ack, unbuffered and duplex endpoints.
    *
    * An endpoint with request buffering disabled answers while the upload is still
-   * going, and what happens to the body afterwards was invisible to the caller.
+   * going, and what happens to the body afterwards is otherwise invisible to the caller.
    * It can fail - `serializeMultipartFormData` rejects when a `File` yields fewer
    * bytes than its `Blob.size`, putting a body on the wire short of its own
    * `Content-Length` with no transport failure anywhere - or be cut short by the
@@ -188,7 +247,7 @@ export interface AdapterResponse {
    * A promise rather than a plain error field because the answer usually does not
    * exist yet: the response is complete and is delivered immediately, and the
    * upload settles later. Waiting for it before resolving is what this must not
-   * do - it turned a `413` that stopped reading into a network error with the
+   * do - it would turn a `413` that stopped reading into a network error with the
    * server's explanation dropped, and let an abort during the wait discard a
    * response that had already arrived in full.
    *
@@ -216,19 +275,18 @@ export interface AdapterResponse {
    * broken contract is reported on the global `'error'` channel. An upload that
    * keeps reporting progress is never cut, however long it takes. `NodeAdapter`
    * reports progress as it writes and settles through its own stall watchdog; a
-   * custom adapter that reports no progress gets the bound flat, and one that never
-   * settles the field turns every followed `307`/`308` and every retry into a
-   * timeout.
+   * custom adapter that reports no progress gets the bound flat, measured from
+   * dispatch. `XHRAdapter` reports no `requestBodySettled`, so nothing waits on it; a
+   * custom adapter of type `'xhr'` that does report one is handed an `onUploadProgress`
+   * only for a request that asked for upload progress, so on any other its bound is
+   * flat too. One that never settles the field turns every followed redirect and every
+   * retry into a timeout.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }
 
 // --- Response streaming ---
 
-/**
- * Minimal write-capable stream interface. Structurally matches Node.js Writable
- * without importing from 'node:stream', keeping this file isomorphic.
- */
 /**
  * The subset of a Node `Writable` the adapter drives.
  *
@@ -283,12 +341,12 @@ export interface WritableLike {
 }
 
 /**
- * Info passed to a StreamResponseFactory. Status is always 200 — the factory
- * is never called for any other status code.
+ * Info passed to a StreamResponseFactory. Status is a 2xx — the factory is never
+ * called for any other status code.
  */
 export interface StreamResponseInfo {
-  /** Always 200 — factory is not called for any other status. */
-  status: 200;
+  /** The response's status: a 2xx (`200`, `206`) — factory is not called for any other. */
+  status: number;
   /** Response headers for this attempt. Most values are string; set-cookie is string[]. */
   headers: Record<string, string | string[]>;
   /** Fully resolved request URL for this attempt. */
@@ -320,7 +378,9 @@ export interface StreamResponseCancel {
 }
 
 /**
- * Factory called by NodeAdapter after response headers arrive on a 200.
+ * Factory called by NodeAdapter after response headers arrive on a 2xx that may carry a
+ * body (not a `HEAD` answer, a `204` or a `205`); one with `Content-Length: 0` is an empty
+ * body, and the factory is still called.
  * Return a WritableLike to pipe the body into it, null to cancel, or
  * `{ cancel: true, reason?: string }` to cancel with an optional reason string
  * surfaced on HTTPClientError.cancelReason.
@@ -384,25 +444,40 @@ export interface AttemptStartEvent {
 export interface AttemptEndEvent {
   attemptNumber: number;
   isRetry: boolean;
+  /**
+   * Whether a retry was scheduled when this attempt ended. Each attempt reports its end
+   * once, so `true` is not revised: the request can still end before the retry starts -
+   * cancelled during the wait, or failed while waiting for this attempt's upload to
+   * settle - and the response says how it ended.
+   */
   willRetry: boolean;
   /**
    * Why no retry happened, when a retry was genuinely available to suppress — a
    * policy is configured, it has attempts left, and the status alone would have
-   * allowed one. Absent otherwise, since nothing was suppressed.
+   * allowed one. Absent otherwise, since nothing was suppressed - and absent when the
+   * attempt ends as an `adapter_error` (an answer whose body or `Set-Cookie` could not
+   * be processed), whose error code says why.
    *
    * - `adapter_veto` — the adapter reported `isRetryable: false`. Not produced by
    *   a real transport, which pairs that flag with the non-retryable `495`;
    *   reachable from `MockAdapter` and custom adapters.
    * - `stream_error` — the body failed after headers arrived, so the server
    *   received the request and the outcome is unknown.
-   * - `non_idempotent_method` — a `POST` or `PATCH` with no proof the request
+   * - `non_idempotent_method` — a non-idempotent method (`POST`, `PATCH`, any method
+   *   but `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT` and `DELETE`) with no proof the request
    *   went undelivered. Set `retryNonIdempotentMethods` to allow it.
+   * - `upload_unsettled` — the attempt timed out with a body to send, and its adapter
+   *   ignored the abort and had not settled a second later, so the client gave up on
+   *   it while the adapter may still be sending that body: a retry would send it twice.
    *
    * Exists so a suppressed retry is self-explaining: `willRetry: false` alone is
    * indistinguishable from a policy declining.
    */
   retrySuppressedReason?:
-    'adapter_veto' | 'stream_error' | 'non_idempotent_method';
+    | 'adapter_veto'
+    | 'stream_error'
+    | 'non_idempotent_method'
+    | 'upload_unsettled';
   /** Present only when a retry has been scheduled after this attempt. */
   nextRetryDelayMS?: number;
   /** Epoch ms for the scheduled retry, when a retry has been scheduled. */
@@ -430,13 +505,28 @@ export interface HTTPClientConfig {
    * `BaseHTTPClient.request` and `buildURL` in `utils.ts`.
    */
   baseURL?: string;
-  defaultHeaders?: Record<string, string | string[]>;
-  timeout?: number;
+  defaultHeaders?: RequestHeadersInput;
+  /**
+   * Null or undefined selects `DEFAULT_TIMEOUT_MS`. In `createSubClient` overrides,
+   * either inherits the parent client's timeout instead.
+   */
+  timeout?: number | null;
+  /**
+   * The most bytes of a buffered response body this client will hold. A body past it
+   * fails the request as `response_too_large` - unless it is a redirect's the client
+   * follows, whose body is never read. One piped to `streamResponse` is not limited.
+   * Counted as handed over, so a compressed body is counted decoded.
+   *
+   * A positive integer, or `Infinity` for no limit. Null or undefined selects
+   * `DEFAULT_MAX_RESPONSE_BYTES` (64 MiB). In `createSubClient` overrides, either
+   * inherits the parent client's value instead.
+   */
+  maxResponseBytes?: number | null;
   cookieJar?: CookieJar | null;
   retryPolicy?: RetryPolicyOptions;
   /**
-   * Whether a retry policy may replay `POST` and `PATCH`, the methods RFC 9110
-   * does not define as idempotent. Defaults to `false`.
+   * Whether a retry policy may replay a method RFC 9110 does not define as idempotent:
+   * `POST`, `PATCH`, or any custom method. Defaults to `false`.
    *
    * When `false`, such a request is never retried after a real HTTP response —
    * a 500 still means the handler ran and may have committed — and after a
@@ -455,7 +545,14 @@ export interface HTTPClientConfig {
   maxRedirects?: number;
 }
 
-export interface SubClientConfig extends Partial<HTTPClientConfig> {
+export interface SubClientConfig extends Partial<
+  Omit<HTTPClientConfig, 'retryPolicy'>
+> {
+  /**
+   * Overrides the parent's retry policy. Omitted or `undefined` inherits it; `null` turns
+   * retries off for this sub-client.
+   */
+  retryPolicy?: RetryPolicyOptions | null;
   /**
    * How sub-client `defaultHeaders` should interact with inherited defaults.
    * Default: `'replace'`.
@@ -470,11 +567,32 @@ export interface SubClientConfig extends Partial<HTTPClientConfig> {
 
 // --- Request ---
 
+/**
+ * Request headers as a caller supplies them: client `defaultHeaders`, a request's
+ * `headers`, and an interceptor's request. A `null` or `undefined` value, or such an
+ * item in an array, means no header, so it removes one an earlier layer set. Names are
+ * case-insensitive.
+ */
+export type RequestHeadersInput = Record<
+  string,
+  string | Array<string | null | undefined> | null | undefined
+>;
+
 export interface HTTPRequestOptions {
-  headers?: Record<string, string | string[]>;
+  headers?: RequestHeadersInput;
   params?: Record<string, unknown>;
+  /**
+   * Copied when the request is built, as `.body()` copies it: a later change to the value
+   * is not sent. See `HTTPRequestBuilder.body`.
+   */
   body?: unknown;
-  timeout?: number;
+  /** Null or undefined inherits the client's configured `timeout`. */
+  timeout?: number | null;
+  /**
+   * Per-request override for {@link HTTPClientConfig.maxResponseBytes}. Null or
+   * undefined inherits the client's configured value.
+   */
+  maxResponseBytes?: number | null;
   signal?: AbortSignal;
   retryPolicy?: RetryPolicyOptions | null;
   /**
@@ -488,7 +606,7 @@ export interface HTTPRequestOptions {
   onAttemptStart?: (event: AttemptStartEvent) => void;
   onAttemptEnd?: (event: AttemptEndEvent) => void;
   /**
-   * NodeAdapter only. Called after response headers arrive on a 200 response.
+   * NodeAdapter only. Called after response headers arrive on a 2xx response.
    * Return a WritableLike to pipe the body to it, or null to cancel.
    * HTTPClient rejects non-node adapters before dispatch if this is set.
    */
@@ -522,6 +640,16 @@ export interface HTTPResponse<T = unknown> {
    * `isTransportError` is the explicit signal; bare `status: 0` is also
    * treated as a transport failure by the client.
    *
+   * Four failures can carry a nonzero status: a stream error, a
+   * `stream_setup_error` and an `adapter_error` for an answered response the
+   * client could not read keep the real status, and an adapter-reported
+   * `isTransportError` keeps whatever status the adapter gave. Any of them can be
+   * `isFailed: true` with a 2xx or 3xx `status`. A timeout reports `status: 0`;
+   * only a body that timed out mid-stream, or whose stream factory was still
+   * setting up, keeps its status. An answer that arrived
+   * after its attempt's timer fired is handled as any answer is: delivered if
+   * it can be read, an `adapter_error` keeping its status if not.
+   *
    * Ordinary HTTP responses, including HTTP error statuses like 4xx/5xx,
    * remain `false`. This tracks client-level failure handling, not HTTP
    * status class.
@@ -538,14 +666,25 @@ export interface HTTPResponse<T = unknown> {
   initialURL: string;
   /**
    * URL of the request that produced this response (last adapter attempt after redirects).
-   * Equals {@link HTTPResponse.initialURL} when no redirect occurred.
+   * Equals {@link HTTPResponse.initialURL} when no redirect occurred and no retry-phase
+   * interceptor rewrote the URL (a failover to a backup host, say).
    */
   requestURL: string;
   /** True when a redirect response was encountered at any point (followed or not). */
   wasRedirectDetected: boolean;
   /** True when HTTPClient's own redirect loop followed at least one hop. */
   wasRedirectFollowed: boolean;
-  /** Redirect target when known but not followed by the client loop. */
+  /**
+   * Redirect target when known but not followed by the client loop: from the built-in
+   * adapters and the client, the `Location` resolved against the request URL, without the
+   * request URL's userinfo, and unset for a `Location` that does not resolve to a URL (a
+   * custom adapter's own value is passed on as it gave it, but for the userinfo rule).
+   * Userinfo in the target - written by the server into the `Location`, or in a custom
+   * adapter's own report - is kept on a target of the request's own origin, unless it is
+   * the request URL's own userinfo, and dropped on any other, as the client drops it from
+   * a cross-origin hop it follows. For a redirect a browser followed under XHRAdapter,
+   * the URL the browser followed to (`xhr.responseURL`).
+   */
   detectedRedirectURL?: string;
   /**
    * Redirect target URLs recorded during redirect handling, in order.
@@ -579,12 +718,15 @@ export interface HTTPResponse<T = unknown> {
    *
    * Advisory only, and it never rejects: this response succeeded as far as the
    * client is concerned - `isFailed`, `isNetworkError` and the status are
-   * untouched - and a caller that ignores it sees exactly what it saw before. A
+   * untouched - and a caller that ignores it sees exactly what it would without it. A
    * caller that needs to know its upload actually arrived awaits this and checks
    * for an `Error`. Only `NodeAdapter` reports it today: `FetchAdapter` cannot,
    * since `fetch()` exposes neither upload progress nor the moment the body finished,
    * and on an adapter that does not set it the client does not wait before a
-   * followed `307`/`308` hop or a retry.
+   * followed redirect hop or a retry. An attempt that had a body to send (not an empty
+   * string, empty bytes or an empty form) that the client gave up on, its adapter
+   * having ignored the abort, resolves it with an `Error` saying the upload's outcome is
+   * unknown, whatever the adapter.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }
@@ -602,7 +744,8 @@ export type ErrorCode =
   | 'interceptor_error'
   | 'stream_write_error'
   | 'stream_response_error'
-  | 'stream_setup_error';
+  | 'stream_setup_error'
+  | 'response_too_large';
 
 export interface HTTPClientError {
   code: ErrorCode;
@@ -625,7 +768,7 @@ export interface HTTPClientError {
   wasRedirectDetected: boolean;
   /** True when HTTPClient's own redirect loop followed at least one hop before the error. */
   wasRedirectFollowed: boolean;
-  /** Redirect target when known but not followed by the client loop. */
+  /** Same as {@link HTTPResponse.detectedRedirectURL}. */
   detectedRedirectURL?: string;
   /**
    * Redirect target URLs recorded during redirect handling, in order.
@@ -636,14 +779,27 @@ export interface HTTPClientError {
   redirectHistory: string[];
   requestID: string;
   isTimeout: boolean;
-  /** True when a retry policy was active and all attempts were exhausted before a response was received. */
+  /**
+   * True when the last attempt failed in a way the retry policy retries, and the policy
+   * declined because all of its attempts were spent - the request would have been tried
+   * again with budget left. False when the last failure is one no retry follows whatever
+   * the budget (an adapter veto, a stream error other than a buffered body that only
+   * failed to decode or ran past `maxResponseBytes` - none of it reached the caller, so
+   * its status decides - a non-idempotent method, a non-retryable status, an attempt with
+   * a non-empty body given up on after its adapter ignored the abort - see
+   * `retrySuppressedReason: 'upload_unsettled'`). The last attempt may still have
+   * received a response: a retryable status whose body then could not be read ends as an
+   * `adapter_error` with its status.
+   */
   isRetriesExhausted: boolean;
   /**
    * Optional reason string when the request was cancelled with an explicit string reason.
-   * Set by: a request interceptor returning `{ cancel: true, reason: '...' }`, a
-   * StreamResponseFactory returning `{ cancel: true, reason: '...' }`, or an AbortSignal
-   * aborted via `controller.abort('reason')`. Undefined when no explicit string reason
-   * was provided (e.g. `controller.abort()` with no argument, `builder.cancel()`).
+   * Set by: `builder.cancel('...')`, a client cancel (`client.cancel(id, '...')`,
+   * `cancelAll('...')` and the rest), a request interceptor returning
+   * `{ cancel: true, reason: '...' }`, a StreamResponseFactory returning
+   * `{ cancel: true, reason: '...' }`, or an AbortSignal aborted via
+   * `controller.abort('reason')`. Undefined when no explicit string reason was provided
+   * (e.g. `controller.abort()` or `builder.cancel()` with no argument).
    */
   cancelReason?: string;
 }
@@ -706,8 +862,9 @@ export type ErrorObserverPhaseName = 'retry' | 'final';
  *
  * **`from` / `to`:** Intended to be absolute URLs (the {@link InterceptedRequest.requestURL}
  * that received the redirect response, and the next {@link InterceptedRequest.requestURL}).
- * `Location` is resolved against `from`, then normalized with the client `baseURL` when
- * needed. Without a `baseURL`, path-only strings may remain as paths.
+ * `Location` is resolved against `from`, without userinfo when it names another origin. A
+ * `Location` that does not resolve against it stays the raw string the server sent, and
+ * the hop is refused unless a `redirect`-phase interceptor rewrites it.
  */
 export type RedirectHopInfo = {
   hop: number;
@@ -760,11 +917,13 @@ export type ErrorObserverPhase = Extract<
 //                   Because they run before, they can refresh auth tokens, rewrite URLs,
 //                   add headers, or abort entirely.
 //
-//   Observers     = "what DID happen", run after an attempt produces a result, cannot
-//                   modify anything. Because they run after, they are the right place for
-//                   logging, metrics, cache writes, and analytics. A common pattern is
-//                   reading auth tokens or account metadata out of response bodies (or even
-//                   error bodies) and updating client state, without touching the response
+//   Observers     = "what DID happen", run after an attempt produces a result, with no
+//                   say in it. They are handed the response and error themselves, so
+//                   treat them as read-only: a change is what the caller gets back.
+//                   Because they run after, they are the right place for logging,
+//                   metrics, cache writes, and analytics. A common pattern is reading
+//                   auth tokens or account metadata out of response bodies (or even error
+//                   bodies) and updating client state, without touching the response
 //                   itself.
 //
 //   Response observers fire on `retry` (retryable HTTP response before the next attempt),
@@ -786,8 +945,9 @@ interface PhaseFilter {
    * dispatch. `MockAdapter` path-only requests without a client `baseURL`
    * are materialized as `http://localhost/...`, browser adapters resolve
    * against `window.location`, and non-mock adapters still require absolute
-   * URLs at validation time. The scheme check is skipped only when
-   * `requestURL` is absent.
+   * URLs at validation time. For an observer the scheme check is skipped when
+   * `requestURL` is absent. An interceptor is always handed one: an earlier
+   * interceptor's result without it fails the request as `interceptor_error`.
    */
   schemes?: ('http' | 'https')[];
 }
@@ -807,7 +967,7 @@ export interface RequestInterceptorFilter extends PhaseFilter {
    * `retry`, `redirect`. (`final` never reaches interceptors.)
    *
    * Default: `['initial']`. Pass `['initial', 'retry', 'redirect']` to re-run on every attempt.
-   * Pass `[]` to match all phases.
+   * An empty list is refused when the interceptor is added.
    */
   phases?: InterceptorPhaseName[];
   /** Match against the outgoing request body. */
@@ -838,7 +998,8 @@ export interface ResponseObserverFilter extends PhaseFilter {
    * Which events run this observer: **OR** over phase type. Valid values: `retry`,
    * `redirect`, `final`. (`initial` never reaches response observers.)
    *
-   * Default: `['final']`. Pass `[]` to match all phases.
+   * Default: `['final']`. Pass `['retry', 'redirect', 'final']` to match every phase. An
+   * empty list is refused when the observer is added.
    */
   phases?: ResponseObserverPhaseName[];
   statusCodes?: number[];
@@ -884,7 +1045,8 @@ export interface ErrorObserverFilter extends PhaseFilter {
    * observers (redirect errors surface as `final`; retry errors on redirect
    * hops carry `redirect` context inside the `retry` phase).
    *
-   * Default: `['final']`. Pass `[]` to match all phases.
+   * Default: `['final']`. Pass `['retry', 'final']` to match every phase. An empty list
+   * is refused when the observer is added.
    */
   phases?: ErrorObserverPhaseName[];
 }
@@ -948,7 +1110,12 @@ export interface InterceptedRequest {
    */
   requestURL: string;
   method: HTTPMethod;
-  headers: Record<string, string | string[]>;
+  /**
+   * A header set to `undefined` or `null` is removed. An earlier interceptor's result
+   * reaches the next one as the client's copy of it, so a header it removed is absent
+   * there, and every name is lowercase.
+   */
+  headers: RequestHeadersInput;
   body?: unknown;
 }
 
@@ -963,6 +1130,8 @@ export type AttemptRequest = Omit<
   | 'onUploadProgress'
   | 'onDownloadProgress'
   | 'streamResponse'
+  // Never on the snapshot: the credential scope is the adapter's, not an observer's.
+  | 'initialURL'
 > & {
   /**
    * Final request headers visible to response/error observers. These are
@@ -972,8 +1141,23 @@ export type AttemptRequest = Omit<
    */
   headers: Record<string, string | string[]>;
   /**
-   * Post-interceptor body before attempt materialization. This is useful for
-   * observers that need the semantic payload as well as the adapter-facing body.
+   * The body as serialized for the adapter: a JSON body's string, or the string given. A
+   * `Uint8Array` or `FormData` body is a copy of the one sent, taken before the adapter is
+   * handed it - the same copy as `rawBody` - so changing it in place leaves what is
+   * written alone. Built at dispatch, and only when a response or error observer is
+   * registered on the client or its parent; absent otherwise, with `rawBody`.
+   */
+  body?: string | Uint8Array | FormData | null;
+  /**
+   * The attempt's body before serialization, for observers that need the payload as well
+   * as the adapter-facing `body`, built for each attempt from the request's body (after
+   * interceptors), when `body` is. A JSON body is the value sent, parsed back from `body`
+   * (so a `toJSON` is applied and a `Date` is its ISO string); a `Uint8Array` or
+   * `FormData` body is the same copy as `body`, so redacting it in place leaves the bytes
+   * on the wire alone; a string is the string. Changing or replacing it reaches neither
+   * the adapter nor a later attempt. When a body an interceptor returned could not be
+   * copied or built - a JSON body `JSON.stringify` refuses, an unsupported type - `body` is
+   * `null` and this is the value the interceptor returned.
    */
   rawBody?: unknown;
   /** Effective per-attempt timeout in ms. */
@@ -1006,6 +1190,17 @@ export type ErrorObserver = (
 ) => void | Promise<void>;
 
 // --- Builder state ---
+
+/**
+ * What `HTTPRequestBuilder.cancel()` did:
+ * - `'cancelled'`: this call cancelled the request (before `send()`, or in flight), and it
+ *   ends cancelled.
+ * - `'already_cancelled'`: it was cancelled already - by an earlier `cancel()`,
+ *   `client.cancel()`, an interceptor, the stream factory or the caller's signal.
+ * - `'already_settled'`: it had already completed or failed; nothing was cancelled.
+ */
+export type CancelResult =
+  'cancelled' | 'already_cancelled' | 'already_settled';
 
 export type RequestState =
   | 'pending'

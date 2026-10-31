@@ -40,12 +40,12 @@ export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function'
  * message that would have printed it.
  *
  * - A spread and `Object.entries` see only *own enumerable* properties, so a key on the
- *   prototype - a bag built with `Object.create`, or a class instance - was invisible to
- *   redaction while the renderer still resolved it. `for...in` walks the prototype chain,
- *   so both now see it and it is masked and printed as it was before this walk existed.
+ *   prototype - a bag built with `Object.create`, or a class instance - would be invisible
+ *   to redaction while the renderer still resolved it. `for...in` walks the prototype
+ *   chain, so both see it, and it is masked and printed.
  * - Neither sees a *non-enumerable* own property, or one a `Proxy` hides from `ownKeys`,
- *   but property lookup does. Handing the caller's own bag straight to the walk left such
- *   a key unmasked *and* still resolvable, so `{{password}}` rendered a secret the
+ *   but property lookup does. Handing the caller's own bag straight to the walk would leave
+ *   such a key unmasked *and* still resolvable, so `{{password}}` would render a secret the
  *   caller had explicitly named. Copying means the renderer is given this object instead,
  *   which does not carry the key at all: it is neither masked nor printed, which is what
  *   the walk not seeing it has to mean.
@@ -57,16 +57,13 @@ export { REDACTION_FAILED_MARKER } from '../../internal/default-redact-function'
  * object instead of storing the entry.
  *
  * Every value is read inside its own guard, so one throwing accessor marks its own key
- * rather than abandoning the bag. This used to be the second of two passes - an unguarded
- * copy first, this one only if that threw - which read every value twice whenever any of
- * them failed, and let a getter that throws once and then answers be retried until it
- * produced a value. Measured across sixteen hostile bags, the two passes agreed on all
- * but that one case, and marking a getter that threw is the answer redaction should give.
+ * rather than abandoning the bag. It is the only pass: a second read after a failure would
+ * let a getter that throws once and then answers be retried until it produced a value, and
+ * marking a getter that threw is the answer redaction should give.
  *
  * @param unreadable Collects the keys whose read threw, *with the value they threw*, so
  *                   the caller can put the marker back after the walk and report the
- *                   cause. Carrying only the key left this the one redaction failure with
- *                   no channel at all: the marker landed in the output and
+ *                   cause. With only the key, the marker would land in the output with
  *                   `onFormatError` never fired, which is exactly the silence that
  *                   handler exists to end. A key that is *also* named in `redactedKeys`
  *                   reaches the walk already holding the marker, and the walk masks
@@ -82,18 +79,16 @@ function normalizeParamsBag(
   const copy: Record<string, unknown> = {};
 
   // The walk's cycle guard keys on object identity, and this hands it a *different* object
-  // than the one the payload's own back-edges point at. Unmarked, `const c = { password:
-  // 'secret' }; c.self = c;` walked `copy`, reached `c` through `self`, found it unseen,
-  // and - since no path pointed below `self` - handed the original subtree back by
-  // reference: the renderer printed the secret and `redactedParams.self.password` carried
-  // it to every structured sink. Marked, the walk adds both to `seen` and the back-edge is
-  // recognized as the node it is already inside.
+  // than the one the payload's own back-edges point at. Marked, the walk adds both to
+  // `seen`, so the back-edge of `const c = { password: 'secret' }; c.self = c;` is
+  // recognized as the node it is already inside, rather than handed back by reference as a
+  // subtree no path points below, with its secret in it.
   aliases.set(copy, params);
 
   // Bounded as every nested container's copy is, and for the same reason: this runs
   // before the walk the cap exists to bound, and reads every value where the nested copy
   // only forwards to them. A root bag with a million keys - a request body spread into
-  // `params`, or a `Proxy` whose `ownKeys` trap invents them - paid the whole cost the
+  // `params`, or a `Proxy` whose `ownKeys` trap invents them - would pay the whole cost the
   // nested caps refuse, synchronously inside `logger.info()`. Refused outright rather than
   // truncated, as an oversized array is: the thrown error reaches the caller's guard,
   // which reports it and fails the bag closed.
@@ -146,8 +141,8 @@ export function markAllRedactionFailed(
   try {
     // Strings only. The list is untrusted by construction - this runs *because* it could
     // not be used - and `Object.fromEntries` stringifies whatever it is handed, so a hole
-    // in a sparse array or a non-string entry invented a key: `new Array(2)` with one
-    // entry marked produced `{"undefined": "***REDACTION FAILED***"}`, a key name the
+    // in a sparse array or a non-string entry would invent a key: `new Array(2)` with one
+    // entry marked would produce `{"undefined": "***REDACTION FAILED***"}`, a key name the
     // caller never had, reaching every structured sink as though it were one of theirs.
     return Object.fromEntries(
       (redactedKeys as unknown[])
@@ -192,11 +187,10 @@ export function applyRedaction(
   //
   // `redactedKeys` is typed `string[]`, but a JavaScript caller can hand over anything, and
   // `length` is an ordinary property an accessor or a `Proxy` can make throw - or simply
-  // lie about. The lie is the one every guard here used to miss: a `Proxy` over a real
-  // array whose `length` reads `0` passes `Array.isArray`, spreads to `[]`, and reports a
-  // count of zero, so the "nothing was asked for" exit below handed the caller's params
-  // straight back with the very values redaction was asked to hide. No throw, no marker, no
-  // report. `snapshotList` refuses it by the invariant a real array cannot break - an own
+  // lie about. A `Proxy` over a real array whose `length` reads `0` passes `Array.isArray`,
+  // spreads to `[]`, and reports a count of zero, so the "nothing was asked for" exit below
+  // would hand the caller's params straight back with the very values redaction was asked
+  // to hide. No throw, no marker, no report. `snapshotList` refuses it by the invariant a real array cannot break - an own
   // index key at or beyond its own `length` - and returns a plain array otherwise, so
   // everything below reads a snapshot rather than the caller's object.
   let entries: unknown[] | null;
@@ -204,8 +198,7 @@ export function applyRedaction(
   try {
     // Absent, not merely falsy. `undefined` is the caller saying nothing about redaction;
     // `null`, `0`, `''` and `false` are a caller who supplied a list that cannot name a
-    // key, which is the fail-closed case below. Letting every falsy value take this exit
-    // handed those callers their params back untouched, and said nothing about it.
+    // key, which is the fail-closed case below rather than this exit.
     if (redactedKeys === undefined) {
       return params;
     }
@@ -243,16 +236,16 @@ export function applyRedaction(
   // something harmless afterwards passes `snapshotList` here, skips the "nothing was
   // asked for" exit above, and then has the *second* read decide the paths. The walk
   // matches nothing, and the params go back in the clear with no report at all. That is
-  // the whole reason the snapshot exists, and this was the one read that went around it.
+  // the whole reason the snapshot exists.
   //
   // The same goes for every `markAllRedactionFailed` below. Marking cannot leak a value -
   // it only ever writes the marker, and fails to `{}` if the list refuses - but handing it
-  // the caller's object re-entered their traps a second, third and fourth time during an
-  // already-failing pass, and let a lying list decide which keys the failure names.
+  // the caller's object would re-enter their traps during an already-failing pass, and let
+  // a lying list decide which keys the failure names.
   // A path-syntax entry the grammar refuses is reported under the entry as written. It
   // is a config error a caller can act on without the payload - unlike a valid path that
-  // simply misses, which stays silent - and it used to drop the nested reading without a
-  // word, leaving the secret the caller thought they had named in the clear.
+  // simply misses, which stays silent. Dropping the nested reading without a word would
+  // leave the secret the caller thought they had named in the clear.
   const paths = parseRedactPaths(entries, (entry) =>
     report(
       new Error(
@@ -271,15 +264,10 @@ export function applyRedaction(
     return markAllRedactionFailed(entries);
   }
 
-  // No copy is made, and none is probed for either.
-  //
-  // A `deepClone` of the params used to run here purely as a throw-probe, its result
-  // discarded: the theory was that a structure `deepClone` cannot copy - a throwing
-  // getter, a revoked `Proxy` - meant redaction could not be trusted. It was wrong in
-  // both directions. It cost a full deep clone of the params on every redacted log call
-  // for a value nothing read, and it failed closed on payloads the walk itself handles
-  // perfectly well: one unrelated throwing getter anywhere in the bag dropped *every*
-  // param, including the sensitive one that would have masked correctly.
+  // No copy is made, and none is probed for either: a trial `deepClone` would cost a full
+  // clone of the params on every redacted log call, and one unrelated throwing getter
+  // anywhere in the bag would drop *every* param, including the sensitive one that masks
+  // correctly.
   //
   // The walk is the thing that fails closed, per value and where the failure actually is:
   // an unreadable set of keys or an unreadable element yields the failure marker in that
@@ -297,14 +285,11 @@ export function applyRedaction(
   // right for a `URL` or a class instance sitting inside a payload, since that is how it
   // renders, but wrong for the bag being walked, whose entries are the params.
   //
-  // This is now the only thing standing between a non-plain bag and an unmasked log line.
-  // It first went in when a class instance passed as `params` matched "a path points
-  // inside this" at the root and came back as the string `'***REDACTED***'`, against this
-  // function's declared record type. Since a path no longer addresses the root at all,
-  // the failure has changed sides and got quieter: an unnormalized class instance is now
-  // left *entirely alone*, so a key named in `redactedKeys` is never masked and the
-  // renderer prints it. Verified rather than assumed - the walk hands back
-  // `{ password: 'hunter2secret' }` for a `Session` bag redacted on `['password']`.
+  // This is the only thing standing between a non-plain bag and an unmasked log line. A
+  // path does not address the root, so without it an unnormalized class instance would be
+  // left *entirely alone*: a key named in `redactedKeys` is never masked and the renderer
+  // prints it - the walk hands back `{ password: 'hunter2secret' }` for a `Session` bag
+  // redacted on `['password']`.
   // Built here and read only by the walk it is handed to, so the copies below can stand in
   // for the caller's containers without anything being written onto the caller's values.
   // See `ForwardingAliases` for why this is a parameter rather than a mark on the object.
@@ -344,9 +329,8 @@ export function applyRedaction(
 
   // Guarded because a property can be an accessor that throws: copying one key at a time
   // marks that one where it is, and every other param - the sensitive one included - is
-  // still masked and still logged. Dropping them all is what a discarded `deepClone` probe
-  // used to do, and it hid working redaction behind an unrelated getter. Values are copied
-  // by reference, so this stays a shallow copy.
+  // still masked and still logged, rather than working redaction being lost to an unrelated
+  // getter. Values are copied by reference, so this stays a shallow copy.
   let guarded: Record<string, unknown>;
 
   // The keys whose read failed, so the marker can be put back after the walk. Nothing but
@@ -360,10 +344,9 @@ export function applyRedaction(
     // or the bag is past `MAX_REDACTION_ENTRIES`, so there is no key to read safely and
     // nothing to mark but the redacted ones.
     //
-    // Said, not only marked. Every sibling branch here reports its cause, and this was the
-    // one that failed closed in silence: the operator saw `***REDACTION FAILED***` in the
-    // output, `onFormatError` never fired, and there was nothing anywhere to trace it to -
-    // which is the silence the reporter exists to end.
+    // Said, not only marked, as every sibling branch here reports its cause: otherwise the
+    // operator would see `***REDACTION FAILED***` in the output, with `onFormatError` never
+    // fired and nothing to trace it to - which is the silence the reporter exists to end.
     report(error, '<params>');
 
     return markAllRedactionFailed(entries);

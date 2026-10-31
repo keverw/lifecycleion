@@ -1,5 +1,9 @@
 // cspell:ignore résumé
 import { EventEmitter } from 'node:events';
+import * as vm from 'node:vm';
+import { mkdtempSync, openAsBlob, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test, spyOn } from 'bun:test';
 import {
   calculateMultipartFormDataSize,
@@ -8,6 +12,14 @@ import {
   serializeMultipartFormData,
 } from './multipart';
 import type { RequestBodyWritable } from './request-body-writable';
+import { REQUEST_BODY_CHUNK_SIZE } from './request-body-writer';
+import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
+import {
+  scriptFormEntries,
+  useScriptedFormEntries,
+} from '../test-helpers/scripted-form-entries';
+
+useScriptedFormEntries();
 
 interface CapturedWrite {
   data: Buffer;
@@ -189,7 +201,7 @@ describe('serializeMultipartFormData', () => {
     expect(body).toContain('alice');
   });
 
-  test('escapes quoted field names and strips CRLF from multipart headers', async () => {
+  test('percent-encodes quotes and line breaks in field names, as fetch does', async () => {
     const fd = new FormData();
     fd.append('meta"\r\nX-Bad: yes', 'value');
     const { req, getBody } = makeCapture();
@@ -198,7 +210,7 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('name="meta\\" X-Bad: yes"');
+    expect(body).toContain('name="meta%22%0D%0AX-Bad: yes"');
     expect(body).not.toContain('name="meta"\r\nX-Bad: yes"');
   });
 
@@ -232,10 +244,10 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('name="up\\" load"; filename="photo.jpg"');
+    expect(body).toContain('name="up%22%0D%0Aload"; filename="photo.jpg"');
   });
 
-  test('non-ASCII filename uses ASCII fallback plus RFC 5987 filename* form', async () => {
+  test('non-ASCII filename is sent as UTF-8 with no filename* form', async () => {
     const fd = new FormData();
     fd.append(
       'cv',
@@ -248,8 +260,8 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('filename="resume.pdf"');
-    expect(body).toContain("filename*=UTF-8''r%C3%A9sum%C3%A9.pdf");
+    expect(body).toContain('filename="résumé.pdf"');
+    expect(body).not.toContain('filename*=');
   });
 
   test('non-ASCII filename: size matches actual byte length', async () => {
@@ -302,7 +314,7 @@ describe('serializeMultipartFormData', () => {
     expect(body).not.toContain('filename*=UTF-8');
   });
 
-  test('quoted filenames use sanitized fallback plus filename*', async () => {
+  test('quotes in filenames are percent-encoded, as fetch does', async () => {
     const fd = new FormData();
     fd.append(
       'doc',
@@ -315,8 +327,8 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('filename="my_draft_.txt"');
-    expect(body).toContain("filename*=UTF-8''my%20%22draft%22.txt");
+    expect(body).toContain('filename="my %22draft%22.txt"');
+    expect(body).not.toContain('filename*=');
   });
 
   test('file with no type defaults to application/octet-stream', async () => {
@@ -417,12 +429,12 @@ describe('serializeMultipartFormData', () => {
     // `Content-Length` is computed from `Blob.size` in the sizing pass, but the streaming
     // pass writes whatever `Blob.stream()` actually yields. A `File` backed by a file
     // another process is rotating can yield less, and nothing is destroyed - so the inner
-    // loop exits through `isDone`, every delimiter is written, and the body used to go out
+    // loop exits through `isDone`, every delimiter is written, and the body would go out
     // short of the length already on the wire. Node does not check a `ClientRequest` for a
     // shortfall, so the caller hangs on a server waiting for bytes that never come.
-    // A stub rather than a real `FormData`: `append(name, blob, filename)` builds a fresh
-    // `File` from the blob per spec, so a subclass overriding `size` and `stream` does not
-    // survive being put in one. Both passes only ever call `entries()`, then read `name`,
+    // Scripted rather than appended (see `scriptFormEntries`): `append(name, blob,
+    // filename)` builds a fresh `File` from the blob per spec, so a subclass overriding
+    // `size` and `stream` does not survive being put in one. Both passes read only `name`,
     // `type`, `size` and `stream()` off the value.
     const shortFile = {
       name: 'short.bin',
@@ -438,9 +450,9 @@ describe('serializeMultipartFormData', () => {
         }),
     };
 
-    const fd = {
-      entries: () => [['file', shortFile]][Symbol.iterator](),
-    } as unknown as FormData;
+    const fd = scriptFormEntries(new FormData(), () =>
+      [['file', shortFile]][Symbol.iterator](),
+    );
 
     const { req, headers } = makeCapture();
     const boundary = generateMultipartBoundary();
@@ -476,9 +488,9 @@ describe('serializeMultipartFormData', () => {
         }),
     };
 
-    const fd = {
-      entries: () => [['file', longFile]][Symbol.iterator](),
-    } as unknown as FormData;
+    const fd = scriptFormEntries(new FormData(), () =>
+      [['file', longFile]][Symbol.iterator](),
+    );
 
     const { req } = makeCapture();
     const boundary = generateMultipartBoundary();
@@ -548,35 +560,33 @@ describe('serializeMultipartFormData', () => {
     let isDestroyed = false;
     let didSeeFirstBinaryChunk = false;
     let binaryChunkWriteCount = 0;
-    const fd = {
-      *entries() {
-        yield [
-          'upload',
-          {
-            name: 'video.bin',
-            type: 'application/octet-stream',
-            size: chunks.reduce((total, chunk) => total + chunk.length, 0),
-            stream() {
-              return new ReadableStream<Uint8Array>({
-                pull(controller) {
-                  const chunk = chunks[readCount++];
+    const fd = scriptFormEntries(new FormData(), function* () {
+      yield [
+        'upload',
+        {
+          name: 'video.bin',
+          type: 'application/octet-stream',
+          size: chunks.reduce((total, chunk) => total + chunk.length, 0),
+          stream() {
+            return new ReadableStream<Uint8Array>({
+              pull(controller) {
+                const chunk = chunks[readCount++];
 
-                  if (chunk) {
-                    controller.enqueue(chunk);
-                    return;
-                  }
+                if (chunk) {
+                  controller.enqueue(chunk);
+                  return;
+                }
 
-                  controller.close();
-                },
-                cancel() {
-                  cancelCount++;
-                },
-              });
-            },
+                controller.close();
+              },
+              cancel() {
+                cancelCount++;
+              },
+            });
           },
-        ];
-      },
-    } as unknown as FormData;
+        },
+      ];
+    });
 
     const req: RequestBodyWritable = {
       get destroyed() {
@@ -667,7 +677,7 @@ describe('serializeMultipartFormData', () => {
     expect(caught?.message).toBe('Simulated write error');
   });
 
-  test('strips control characters from field names', async () => {
+  test('keeps other control characters in field names, as fetch does', async () => {
     const fd = new FormData();
     fd.append('field\u0000\u0001\u0008name', 'value');
     const { req, getBody } = makeCapture();
@@ -676,12 +686,10 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('name="fieldname"');
-    expect(body).not.toContain('\u0000');
-    expect(body).not.toContain('\u0001');
+    expect(body).toContain('name="field\u0000\u0001\u0008name"');
   });
 
-  test('strips control characters from field names: size matches byte length', async () => {
+  test('control characters in field names: size matches byte length', async () => {
     const fd = new FormData();
     fd.append('field\u0000\u007Fname', 'value');
 
@@ -775,9 +783,9 @@ describe('serializeMultipartFormData', () => {
     expect(callbackOrder).toEqual(writeOrder);
   });
 
-  test('rejects when req emits close during backpressure wait', async () => {
-    // It used to resolve, and that reported parts as written when the stream had not
-    // accepted them - leaving a multipart body without its closing `--boundary--`
+  test('rejects when req emits close while a write waits for its callback', async () => {
+    // Resolving would report parts as written when the stream had not accepted them -
+    // leaving a multipart body without its closing `--boundary--`
     // delimiter while this side called the upload a success. A truncated write is a failed
     // write; the adapter turns the rejection into a transport error.
     const fd = new FormData();
@@ -788,12 +796,8 @@ describe('serializeMultipartFormData', () => {
     req.destroyed = false;
     req.setHeader = () => {};
 
-    let writeIndex = 0;
-    req.write = (_data, callback) => {
-      const index = writeIndex++;
-      callback?.(null);
-      return index !== 0;
-    };
+    // Backpressured, with the callback held back: the write is not yet accepted.
+    req.write = () => false;
 
     const boundary = generateMultipartBoundary();
     const writePromise = serializeMultipartFormData(fd, req, boundary);
@@ -855,18 +859,16 @@ describe('serializeMultipartFormData', () => {
 
     expect(req.listenerCount('close')).toBe(0);
     expect(req.listenerCount('error')).toBe(0);
-    expect(req.listenerCount('drain')).toBe(0);
   });
 
   test('no upload progress is reported after the write has already rejected', async () => {
     // `maybeResolve` does more than resolve: it advances `uploadedBytes` and fires
     // `onProgress`. Its sibling in `request-body-writer` keeps an `isSettled` guard and
     // this one did not, which only started to matter once `onClose` began *rejecting*.
-    // Under backpressure a `'drain'` can arrive before the write callback - so `cleanup`
-    // has not run and the listeners are still attached - then `'close'` rejects the
-    // upload, and the write callback lands afterwards and reports progress for a request
-    // already surfaced to the caller as a transport error, counting bytes the stream
-    // never accepted.
+    // With the write callback still outstanding - so `cleanup` has not run and the
+    // listeners are still attached - `'close'` rejects the upload, and the write callback
+    // lands afterwards and reports progress for a request already surfaced to the caller
+    // as a transport error, counting bytes the stream never accepted.
     const fd = new FormData();
     fd.append('field', 'value');
 
@@ -901,8 +903,7 @@ describe('serializeMultipartFormData', () => {
 
     await Promise.resolve();
 
-    // `'drain'` first, while the write callback is still outstanding.
-    req.emit('drain');
+    // `'close'` while the write callback is still outstanding.
     req.emit('close');
 
     let caught: Error | undefined;
@@ -927,7 +928,7 @@ describe('serializeMultipartFormData', () => {
     expect(progress.length).toBe(afterRejection);
   });
 
-  test('rejects when req emits error during backpressure wait', async () => {
+  test('rejects when req emits error while a write waits for its callback', async () => {
     const fd = new FormData();
     fd.append('field', 'value');
 
@@ -936,12 +937,8 @@ describe('serializeMultipartFormData', () => {
     req.destroyed = false;
     req.setHeader = () => {};
 
-    let writeIndex = 0;
-    req.write = (_data, callback) => {
-      const index = writeIndex++;
-      callback?.(null);
-      return index !== 0;
-    };
+    // Backpressured, with the callback held back: the write is not yet accepted.
+    req.write = () => false;
 
     const boundary = generateMultipartBoundary();
     const writePromise = serializeMultipartFormData(fd, req, boundary);
@@ -960,9 +957,9 @@ describe('serializeMultipartFormData', () => {
     expect(caught?.message).toBe('socket hang up');
   });
 
-  test('rejects immediately when req.destroyed at time drain listeners are registered', async () => {
-    // It used to resolve, and that reported parts as written when the stream had not
-    // accepted them - leaving a multipart body without its closing `--boundary--`
+  test('rejects immediately when req.destroyed at time its listeners are registered', async () => {
+    // Resolving would report parts as written when the stream had not accepted them -
+    // leaving a multipart body without its closing `--boundary--`
     // delimiter while this side called the upload a success. A truncated write is a failed
     // write; the adapter turns the rejection into a transport error.
     const fd = new FormData();
@@ -1068,32 +1065,30 @@ describe('serializeMultipartFormData', () => {
     let cancelCount = 0;
     let isDestroyed = false;
 
-    const fd = {
-      *entries() {
-        yield [
-          'upload',
-          {
-            name: 'data.bin',
-            type: 'application/octet-stream',
-            size: 3,
-            stream() {
-              return new ReadableStream<Uint8Array>({
-                pull(controller) {
-                  readCount++;
-                  // Set destroyed before the chunk value reaches the caller so
-                  // the post-read req.destroyed check (lines 380-382) fires.
-                  isDestroyed = true;
-                  controller.enqueue(new Uint8Array([1, 2, 3]));
-                },
-                cancel() {
-                  cancelCount++;
-                },
-              });
-            },
+    const fd = scriptFormEntries(new FormData(), function* () {
+      yield [
+        'upload',
+        {
+          name: 'data.bin',
+          type: 'application/octet-stream',
+          size: 3,
+          stream() {
+            return new ReadableStream<Uint8Array>({
+              pull(controller) {
+                readCount++;
+                // Set destroyed before the chunk value reaches the caller so
+                // the post-read req.destroyed check (lines 380-382) fires.
+                isDestroyed = true;
+                controller.enqueue(new Uint8Array([1, 2, 3]));
+              },
+              cancel() {
+                cancelCount++;
+              },
+            });
           },
-        ];
-      },
-    } as unknown as FormData;
+        },
+      ];
+    });
 
     const req: RequestBodyWritable = {
       get destroyed() {
@@ -1129,7 +1124,109 @@ describe('serializeMultipartFormData', () => {
     );
   });
 
-  test('waits for drain before writing the next multipart chunk', async () => {
+  test('a stream whose cancel never settles does not hold back how the upload ends', async () => {
+    const CLOSED = 'Request stream closed before the body was fully written';
+    const fileBytes = (data: unknown) =>
+      data instanceof Uint8Array && !Buffer.isBuffer(data);
+
+    const run = async (
+      chunkSize: number,
+      options: {
+        onStream?: () => void;
+        onPull?: () => void;
+        onWrite?: (data: unknown) => Error | null;
+        isDestroyed?: () => boolean;
+      } = {},
+    ) => {
+      let streamCalls = 0;
+      const fd = scriptFormEntries(new FormData(), function* () {
+        yield [
+          'upload',
+          {
+            name: 'data.bin',
+            type: 'application/octet-stream',
+            size: 2,
+            stream() {
+              streamCalls++;
+              options.onStream?.();
+              return new ReadableStream<Uint8Array>({
+                pull(controller) {
+                  options.onPull?.();
+                  controller.enqueue(new Uint8Array(chunkSize));
+                },
+                cancel() {
+                  return new Promise<void>(() => {});
+                },
+              });
+            },
+          },
+        ];
+      });
+      const req = {
+        get destroyed() {
+          return options.isDestroyed?.() ?? false;
+        },
+        setHeader() {},
+        write(data, callback) {
+          callback?.(options.onWrite?.(data) ?? null);
+          return true;
+        },
+        once() {
+          return this;
+        },
+        off() {
+          return this;
+        },
+      } as RequestBodyWritable;
+
+      const outcome = await Promise.race([
+        serializeMultipartFormData(fd, req, generateMultipartBoundary()).then(
+          () => 'resolved',
+          (error: Error) => error.message,
+        ),
+        new Promise<string>((resolve) => {
+          setTimeout(() => resolve('still pending'), 1000);
+        }),
+      ]);
+
+      expect(streamCalls).toBe(1);
+      return outcome;
+    };
+
+    // More than the part measured: the refusal before the write.
+    expect(await run(4)).toContain('did not match its Content-Length');
+
+    // A rejected write, through the `finally` every exit passes.
+    expect(
+      await run(1, {
+        onWrite: (data) => (fileBytes(data) ? new Error('write failed') : null),
+      }),
+    ).toBe('write failed');
+
+    // Destroyed while a read was out: found once the read answers.
+    let isDestroyedOnPull = false;
+    expect(
+      await run(1, {
+        onPull: () => {
+          isDestroyedOnPull = true;
+        },
+        isDestroyed: () => isDestroyedOnPull,
+      }),
+    ).toBe(CLOSED);
+
+    // Destroyed as the source opened: found before the first read.
+    let isDestroyedOnStream = false;
+    expect(
+      await run(1, {
+        onStream: () => {
+          isDestroyedOnStream = true;
+        },
+        isDestroyed: () => isDestroyedOnStream,
+      }),
+    ).toBe(CLOSED);
+  });
+
+  test('waits for the write callback before writing the next multipart chunk', async () => {
     const fd = new FormData();
     fd.append('field', 'value');
 
@@ -1139,13 +1236,15 @@ describe('serializeMultipartFormData', () => {
     req.setHeader = () => {};
 
     const writeOrder: number[] = [];
+    const callbacks: Array<(error?: Error | null) => void> = [];
     let writeIndex = 0;
 
     req.write = (_data, callback) => {
-      const index = writeIndex++;
-      writeOrder.push(index);
-      callback?.(null);
-      return index !== 0;
+      writeOrder.push(writeIndex++);
+      if (callback) {
+        callbacks.push(callback);
+      }
+      return true;
     };
 
     const boundary = generateMultipartBoundary();
@@ -1155,10 +1254,49 @@ describe('serializeMultipartFormData', () => {
 
     expect(writeOrder).toEqual([0]);
 
-    req.emit('drain');
-    await writePromise;
+    // Accept each write as it comes; one is in flight at a time.
+    while (callbacks.length > 0) {
+      const callback = callbacks.shift();
+      callback?.(null);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(callbacks.length).toBeLessThanOrEqual(1);
+    }
 
+    await writePromise;
     expect(writeOrder.length).toBeGreaterThan(1);
+  });
+
+  test('a backpressured File chunk is accepted on its callback, with no drain', async () => {
+    // Every `Blob.stream()` chunk Node yields is larger than a request's high-water mark,
+    // so every one asks for a drain - and Node and Bun stop emitting `'drain'` once an
+    // early response has ended. Waiting for it as well parked the writer on the first
+    // chunk, and the adapter's stall watchdog then cut the upload short.
+    const fd = new FormData();
+    fd.append('file', new File([new Uint8Array(3 * 1024 * 1024)], 'big.bin'));
+
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+
+    const chunks: Buffer[] = [];
+    req.write = (data, callback) => {
+      chunks.push(Buffer.from(data));
+      // Asks for a drain that never comes; the callback still runs.
+      setImmediate(() => callback?.(null));
+      return false;
+    };
+
+    const boundary = generateMultipartBoundary();
+    const outcome = await Promise.race([
+      serializeMultipartFormData(fd, req, boundary).then(() => 'resolved'),
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 500)),
+    ]);
+
+    expect(outcome).toBe('resolved');
+    expect(
+      Buffer.concat(chunks).toString('latin1').endsWith(`--${boundary}--\r\n`),
+    ).toBe(true);
   });
 });
 
@@ -1180,13 +1318,12 @@ test.each([
           },
         }),
     });
-    const form = {
-      entries: () =>
-        [
-          ['first', part(firstSize)],
-          ['second', part(secondSize)],
-        ][Symbol.iterator](),
-    } as unknown as FormData;
+    const form = scriptFormEntries(new FormData(), () =>
+      [
+        ['first', part(firstSize)],
+        ['second', part(secondSize)],
+      ][Symbol.iterator](),
+    );
     const capture = makeCapture();
     let failure: unknown;
     try {
@@ -1219,9 +1356,9 @@ test('uses the original part size even when size changes after the sizing pass',
         },
       }),
   };
-  const form = {
-    entries: () => [['file', file]][Symbol.iterator](),
-  } as unknown as FormData;
+  const form = scriptFormEntries(new FormData(), () =>
+    [['file', file]][Symbol.iterator](),
+  );
   const capture = makeCapture();
   let failure: unknown;
   try {
@@ -1231,4 +1368,704 @@ test('uses the original part size even when size changes after the sizing pass',
   }
   expect(failure).toBeInstanceOf(Error);
   expect(capture.getBody().toString()).not.toContain('AAA');
+});
+
+test('a File named "" is sent as filename="", one with no name as blob', async () => {
+  // Built by hand: Bun's FormData hands back an empty-named File with no `name` at all,
+  // where Node's keeps `''`.
+  const emptyNamed = Object.assign(new Blob(['x']), { name: '' });
+  const unnamed = new Blob(['y']);
+  const fd = scriptFormEntries(new FormData(), () =>
+    [
+      ['empty', emptyNamed],
+      ['unnamed', unnamed],
+    ][Symbol.iterator](),
+  );
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+
+  await serializeMultipartFormData(fd, req, boundary);
+  const body = getBody().toString();
+  expect(body).toContain('name="empty"; filename=""');
+  expect(body).toContain('name="unnamed"; filename="blob"');
+  expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+});
+
+test('a field appended mid-upload is refused before any of its bytes go out', async () => {
+  const fd = new FormData();
+  fd.append('first', 'one');
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+  const write = req.write.bind(req);
+  let didAppend = false;
+  req.write = (data, callback) => {
+    if (!didAppend) {
+      didAppend = true;
+      fd.append('late', 'two');
+    }
+
+    return write(data, callback);
+  };
+
+  let failure: unknown;
+  try {
+    await serializeMultipartFormData(fd, req, boundary);
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toContain('more than its Content-Length');
+  // Only the first part's own delimiter: none of the appended part reached the wire.
+  expect(getBody().toString().split(`--${boundary}\r\n`).length - 1).toBe(1);
+});
+
+test('a File that outgrows its measured size is refused naming that part', async () => {
+  // Claims two bytes; its stream yields six. Nothing else outgrew the body, so the message
+  // names the part's size, not the body's `Content-Length`.
+  const longFile = {
+    name: 'long.bin',
+    type: 'application/octet-stream',
+    size: 2,
+    stream: () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3, 4, 5, 6]));
+          controller.close();
+        },
+      }),
+  };
+  const fd = scriptFormEntries(new FormData(), () =>
+    [['file', longFile]][Symbol.iterator](),
+  );
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+
+  let failure: unknown;
+  try {
+    await serializeMultipartFormData(fd, req, boundary);
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toContain(
+    'part expected 2 bytes, produced more - 0 written and a further 6 refused',
+  );
+  expect((failure as Error).message).not.toContain(
+    'more than its Content-Length',
+  );
+  expect(getBody().includes(Buffer.from([1, 2, 3]))).toBe(false);
+});
+
+test('a chunk within its part but past the body total is refused before it is written', async () => {
+  let wasGrownPartCancelled = false;
+  // The grown part's stream stays open after its chunk, so only a cancel ends it.
+  const blobPart = (name: string, bytes: number[], isLeftOpen = false) => ({
+    name,
+    type: 'application/octet-stream',
+    size: bytes.length,
+    stream: () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(bytes));
+          if (!isLeftOpen) {
+            controller.close();
+          }
+        },
+        cancel() {
+          if (isLeftOpen) {
+            wasGrownPartCancelled = true;
+          }
+        },
+      }),
+  });
+  const parts: [string, unknown][] = [
+    ['first', blobPart('a', [1, 2])],
+    ['second', blobPart('b', [7, 7, 7, 7])],
+  ];
+  // Read live, as a FormData is: the second part is swapped for one whose filename is
+  // three bytes longer once the first part's bytes go out. Its headers still fit in the
+  // bytes its payload was measured at; its payload, the right size for its part, does not.
+  // An array's iterator reads each index as it reaches it.
+  const fd = scriptFormEntries(new FormData(), () => parts[Symbol.iterator]());
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+  const write = req.write.bind(req);
+  req.write = (data, callback) => {
+    if (Buffer.from(data as Uint8Array).equals(Buffer.from([1, 2]))) {
+      parts[1] = ['second', blobPart('bbbb', [7, 7, 7, 7], true)];
+    }
+
+    return write(data, callback);
+  };
+
+  let failure: unknown;
+  try {
+    await serializeMultipartFormData(fd, req, boundary);
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toContain('more than its Content-Length');
+  expect(getBody().toString()).toContain('filename="bbbb"');
+  expect(getBody().includes(Buffer.from([7]))).toBe(false);
+  expect(wasGrownPartCancelled).toBe(true);
+});
+
+describe('caller values the writer cannot use are refused as non-retryable', () => {
+  // A `FormData` yielding the part as it is: Bun's `append` copies a `File` subclass into a
+  // plain `File`, which would leave nothing to misbehave.
+  const formWith = (part: unknown): FormData => {
+    const fd = new FormData();
+
+    scriptFormEntries(fd, function* (): Generator<[string, unknown]> {
+      yield ['file', part];
+    });
+
+    return fd;
+  };
+
+  const failureOf = async (
+    fd: FormData,
+  ): Promise<{ error: Error; written: number }> => {
+    const { req, writes } = makeCapture();
+    let caught: unknown;
+
+    try {
+      await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(
+      (caught as Record<string, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
+
+    return { error: caught as Error, written: writes.length };
+  };
+
+  test('a part whose type getter throws', async () => {
+    const failure = new Error('type getter failed');
+
+    class ThrowingTypeFile extends File {
+      public override get type(): string {
+        throw failure;
+      }
+    }
+
+    const { error, written } = await failureOf(
+      formWith(new ThrowingTypeFile([new Uint8Array(4)], 'a.bin')),
+    );
+
+    // Refused in the sizing pass, before anything was written.
+    expect(written).toBe(0);
+    expect(error.message).toBe('Request body source could not be read');
+    expect(error.cause).toBe(failure);
+  });
+
+  test('a part whose type is not a string', async () => {
+    class NumericTypeFile extends File {
+      public override get type(): string {
+        return 42 as unknown as string;
+      }
+    }
+
+    const { error, written } = await failureOf(
+      formWith(new NumericTypeFile([new Uint8Array(4)], 'a.bin')),
+    );
+
+    expect(written).toBe(0);
+    expect(error.message).toBe('Request body source could not be read');
+    expect(String((error.cause as Error).message)).not.toContain('42');
+  });
+
+  test('a part whose size is not a byte count', async () => {
+    class FractionalSizeFile extends File {
+      public override get size(): number {
+        return 1.5;
+      }
+    }
+
+    const { error, written } = await failureOf(
+      formWith(new FractionalSizeFile([new Uint8Array(4)], 'a.bin')),
+    );
+
+    expect(written).toBe(0);
+    expect(error.message).toBe('Request body source could not be read');
+  });
+
+  test('a form its entries cannot be read from: a Proxy over one', async () => {
+    const { error, written } = await failureOf(new Proxy(new FormData(), {}));
+
+    expect(written).toBe(0);
+    expect(error.cause).toBeInstanceOf(TypeError);
+  });
+
+  test('a stream() that yields a chunk that is not a Uint8Array', async () => {
+    class NumberStreamFile extends File {
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue(42 as unknown as Uint8Array<ArrayBuffer>);
+            controller.close();
+          },
+        });
+      }
+    }
+
+    const { error } = await failureOf(
+      formWith(new NumberStreamFile([new Uint8Array(4)], 'a.bin')),
+    );
+
+    expect(error.message).toBe(
+      'Request body source produced a chunk that is not a Uint8Array',
+    );
+  });
+});
+
+describe('source chunks the writing pass reads', () => {
+  test('a stream() that yields the whole part as one chunk is written in REQUEST_BODY_CHUNK_SIZE slices', async () => {
+    // Node's `Blob.stream()` yields an in-memory `Blob` as a single chunk. Written as one
+    // `req.write`, a 64 MiB `File` reported no progress between 0 and 100%, and the
+    // adapter's stall watchdog - which reads that progress - destroyed an upload the
+    // server had acked early and was still reading.
+    const size = 1024 * 1024 + 7;
+    const source = new Uint8Array(size).map((_, index) => index % 251);
+
+    class OneChunkFile extends File {
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue(source);
+            controller.close();
+          },
+        });
+      }
+    }
+
+    const fd = new FormData();
+
+    scriptFormEntries(fd, function* (): Generator<[string, unknown]> {
+      yield ['file', new OneChunkFile([source], 'one.bin')];
+    });
+
+    const { req, writes, getBody } = makeCapture();
+    const progress: number[] = [];
+
+    await serializeMultipartFormData(
+      fd,
+      req,
+      generateMultipartBoundary(),
+      (e) => {
+        progress.push(e.loaded);
+      },
+    );
+
+    expect(
+      writes.every((write) => write.data.length <= REQUEST_BODY_CHUNK_SIZE),
+    ).toBe(true);
+    expect(progress.length).toBeGreaterThan(size / REQUEST_BODY_CHUNK_SIZE);
+    expect(getBody().includes(Buffer.from(source))).toBe(true);
+  });
+
+  test('a large text field cut off by a destroyed stream fails the body, its remaining slices unwritten', async () => {
+    const value = 'x'.repeat(REQUEST_BODY_CHUNK_SIZE * 4);
+    const fd = new FormData();
+    fd.append('text', value);
+
+    const { req, writes } = makeCapture();
+    const originalWrite = req.write.bind(req);
+    // Destroyed once the field's first slice has been accepted.
+    req.write = (data, callback) => {
+      const isAccepted = originalWrite(data, callback);
+      if (Buffer.byteLength(data) === REQUEST_BODY_CHUNK_SIZE) {
+        (req as { destroyed: boolean }).destroyed = true;
+      }
+      return isAccepted;
+    };
+
+    let failure: unknown;
+    try {
+      await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+    } catch (error) {
+      failure = error;
+    }
+
+    expect((failure as Error).message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+    // The boundary line and one slice: nothing of the field past the destroy.
+    expect(writes).toHaveLength(2);
+  });
+
+  test('a large text field is written in REQUEST_BODY_CHUNK_SIZE slices, as a file is', async () => {
+    // Written as one `req.write`, a 16 MiB text field reported no progress until all of
+    // it was accepted, and the stall watchdog destroyed an upload the server had acked
+    // early and was still reading.
+    const value = 'é'.repeat(REQUEST_BODY_CHUNK_SIZE) + 'tail';
+    const fd = new FormData();
+    fd.append('text', value);
+
+    const { req, writes, getBody, headers } = makeCapture();
+    const progress: number[] = [];
+
+    await serializeMultipartFormData(
+      fd,
+      req,
+      generateMultipartBoundary(),
+      (e) => {
+        progress.push(e.loaded);
+      },
+    );
+
+    expect(
+      writes.every((write) => write.data.length <= REQUEST_BODY_CHUNK_SIZE),
+    ).toBe(true);
+    // The value's UTF-8 bytes are two chunks' worth and more.
+    expect(progress.length).toBeGreaterThan(3);
+    expect(getBody().includes(Buffer.from(value))).toBe(true);
+    expect(getBody().length).toBe(Number(headers['content-length']));
+  });
+
+  test('a chunk made in another realm is written as the bytes it is', async () => {
+    // `instanceof Uint8Array` is false for bytes from another realm - a `vm` context, or
+    // Jest's node environment, whose `Blob.stream()` chunks come from the host - and the
+    // refusal of chunks that are not bytes turned those away too.
+    const foreign = vm.runInNewContext(
+      'new Uint8Array([1, 2, 3])',
+    ) as Uint8Array<ArrayBuffer>;
+
+    expect(foreign instanceof Uint8Array).toBe(false);
+
+    class ForeignChunkFile extends File {
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue(foreign);
+            controller.close();
+          },
+        });
+      }
+    }
+
+    const fd = new FormData();
+
+    scriptFormEntries(fd, function* (): Generator<[string, unknown]> {
+      yield ['file', new ForeignChunkFile([new Uint8Array(3)], 'f.bin')];
+    });
+
+    const { req, getBody } = makeCapture();
+
+    await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+
+    expect(getBody().includes(Buffer.from([1, 2, 3]))).toBe(true);
+  });
+});
+
+describe('source chunks are counted and sliced as the bytes they hold', () => {
+  // A `File` whose `stream()` yields exactly `chunks`, with a `size` of `size`, in a
+  // `FormData` that yields it as it is (Bun's `append` copies a `File` subclass).
+  const formWithChunks = (
+    chunks: Uint8Array[],
+    size = chunks.reduce((total, chunk) => total + chunk.length, 0),
+  ): FormData => {
+    class ChunkedFile extends File {
+      public override get size(): number {
+        return size;
+      }
+
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          start(controller) {
+            for (const chunk of chunks) {
+              controller.enqueue(chunk as Uint8Array<ArrayBuffer>);
+            }
+
+            controller.close();
+          },
+        });
+      }
+    }
+
+    const fd = new FormData();
+
+    scriptFormEntries(fd, function* (): Generator<[string, unknown]> {
+      yield ['file', new ChunkedFile([], 'chunked.bin')];
+    });
+
+    return fd;
+  };
+
+  const send = async (
+    fd: FormData,
+    capture = makeCapture(),
+  ): Promise<{
+    capture: ReturnType<typeof makeCapture>;
+    progress: number[];
+    error: unknown;
+  }> => {
+    const progress: number[] = [];
+    let failure: unknown;
+
+    try {
+      await serializeMultipartFormData(
+        fd,
+        capture.req,
+        generateMultipartBoundary(),
+        (e) => {
+          progress.push(e.loaded);
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    return { capture, progress, error: failure };
+  };
+
+  test.each([
+    ['an exact multiple of the slice size', 2 * REQUEST_BODY_CHUNK_SIZE],
+    ['a single byte', 1],
+    ['one byte past a slice', REQUEST_BODY_CHUNK_SIZE + 1],
+  ])(
+    'a chunk of %s is written whole, in slices, with progress ending at Content-Length',
+    async (_label, length) => {
+      const chunk = new Uint8Array(length).fill(0x7a);
+      const { capture, progress, error } = await send(formWithChunks([chunk]));
+
+      expect(error).toBeUndefined();
+
+      const fileWrites = capture.writes.filter((write) =>
+        write.data.every((byte) => byte === 0x7a),
+      );
+
+      expect(fileWrites.map((write) => write.data.length)).toEqual(
+        Array.from(
+          { length: Math.ceil(length / REQUEST_BODY_CHUNK_SIZE) },
+          (_, index) =>
+            Math.min(
+              REQUEST_BODY_CHUNK_SIZE,
+              length - index * REQUEST_BODY_CHUNK_SIZE,
+            ),
+        ),
+      );
+      expect(progress.at(-1)).toBe(Number(capture.headers['content-length']));
+      expect(capture.getBody().length).toBe(
+        Number(capture.headers['content-length']),
+      );
+    },
+  );
+
+  test('an empty chunk writes nothing and the part still completes', async () => {
+    const { capture, progress, error } = await send(
+      formWithChunks([new Uint8Array(0), new Uint8Array(3).fill(0x7a)]),
+    );
+
+    expect(error).toBeUndefined();
+    expect(capture.writes.some((write) => write.data.length === 0)).toBe(false);
+    expect(progress.at(-1)).toBe(Number(capture.headers['content-length']));
+  });
+
+  test('a stream destroyed between slices stops the part and fails the write', async () => {
+    const capture = makeCapture();
+    const { req } = capture;
+    const write = req.write.bind(req);
+    let fileSlices = 0;
+
+    req.write = (data, callback) => {
+      const isFileSlice =
+        typeof data !== 'string' && data.length === REQUEST_BODY_CHUNK_SIZE;
+
+      const canContinue = write(data, callback);
+
+      if (isFileSlice && ++fileSlices === 1) {
+        (req as { destroyed: boolean }).destroyed = true;
+      }
+
+      return canContinue;
+    };
+
+    const { error } = await send(
+      formWithChunks([new Uint8Array(4 * REQUEST_BODY_CHUNK_SIZE)]),
+      capture,
+    );
+
+    expect((error as Error).message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+    expect(fileSlices).toBe(1);
+  });
+
+  test('a subclass whose subarray throws is still written, from a plain view of its bytes', async () => {
+    const failure = new Error('subarray failed');
+
+    class ThrowingSubarray extends Uint8Array {
+      public override subarray(): Uint8Array<ArrayBuffer> {
+        throw failure;
+      }
+    }
+
+    const { capture, progress, error } = await send(
+      formWithChunks([new ThrowingSubarray(3).fill(0x7a)]),
+    );
+
+    // The chunk's own `subarray` is never called: it is sliced as a plain view.
+    expect(error).toBeUndefined();
+    expect(progress.at(-1)).toBe(Number(capture.headers['content-length']));
+    expect(capture.getBody().includes(Buffer.from('zzz'))).toBe(true);
+  });
+
+  test('a subclass whose byteLength lies is counted by its real bytes', async () => {
+    class ShortLength extends Uint8Array {
+      public override get byteLength(): number {
+        return 1;
+      }
+    }
+
+    const { capture, progress, error } = await send(
+      formWithChunks([new ShortLength(3).fill(0x7a)], 3),
+    );
+
+    expect(error).toBeUndefined();
+    expect(progress.at(-1)).toBe(Number(capture.headers['content-length']));
+    expect(capture.getBody().length).toBe(
+      Number(capture.headers['content-length']),
+    );
+  });
+
+  test('a subclass whose byteLength understates it is refused before a byte past its part', async () => {
+    // Node's `Buffer.byteLength` reads the getter too, so a chunk that said 1 passed the
+    // part's size check and the budget check, and put 16 KiB on the wire past a part of 4.
+    class ShortLength extends Uint8Array {
+      public override get byteLength(): number {
+        return 1;
+      }
+    }
+
+    const { capture, error } = await send(
+      formWithChunks(
+        [new ShortLength(2 * REQUEST_BODY_CHUNK_SIZE).fill(0x7a)],
+        4,
+      ),
+    );
+
+    expect((error as Error).message).toBe(
+      `Request body source did not match its Content-Length: part expected 4 bytes, produced more - 0 written and a further ${String(2 * REQUEST_BODY_CHUNK_SIZE)} refused`,
+    );
+    expect(
+      (error as Record<string, unknown>)[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG],
+    ).toBe(true);
+    expect(capture.getBody().includes(0x7a)).toBe(false);
+  });
+});
+
+test('a form is read through the intrinsic entries, not one it declares', async () => {
+  const reported = (): Iterator<[string, string]> =>
+    [['reported', 'not held'] as [string, string]][Symbol.iterator]();
+  // A subclass's `entries`, and a form's own.
+  class Reporting extends FormData {}
+  Object.defineProperty(Reporting.prototype, 'entries', { value: reported });
+  const subclass = new Reporting();
+  subclass.append('held', 'value');
+  const ownEntries = new FormData();
+  ownEntries.append('held', 'value');
+  Object.defineProperty(ownEntries, 'entries', { value: reported });
+
+  for (const fd of [subclass, ownEntries]) {
+    const { req, headers, getBody } = makeCapture();
+    const boundary = generateMultipartBoundary();
+
+    await serializeMultipartFormData(fd, req, boundary);
+    const body = getBody().toString();
+
+    expect(body).toContain('name="held"\r\n\r\nvalue\r\n');
+    expect(body).not.toContain('reported');
+    expect(headers['content-length']).toBe(String(getBody().length));
+    expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+  }
+});
+
+test('a file part on Bun is written under the last segment of its name, never a path', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lc-part-name-'));
+  const path = join(directory, 'report.txt');
+  writeFileSync(path, 'hello');
+  try {
+    const form = new FormData();
+    form.append('named', Bun.file(path), 'given.txt');
+    form.append('fromNode', await openAsBlob(path));
+    form.append('plain', new File(['x'], 'dir/kept.txt'));
+    form.append('endsInSlash', new File(['x'], 'dir/'));
+    form.append('backslash', new File(['x'], 'a\\b.txt'));
+
+    const { req, getBody } = makeCapture();
+    await serializeMultipartFormData(form, req, generateMultipartBoundary());
+    const written = getBody().toString();
+
+    expect(written).toContain('name="named"; filename="report.txt"');
+    expect(written).toContain('name="fromNode"; filename="report.txt"');
+    // A form's entries do not tell this `File` from one backed by a path.
+    expect(written).toContain('name="plain"; filename="kept.txt"');
+    expect(written).toContain('name="endsInSlash"; filename="dir/"');
+    if (process.platform !== 'win32') {
+      expect(written).toContain('name="backslash"; filename="a\\b.txt"');
+    }
+    expect(written).not.toContain(directory);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a form that loses an entry after sizing is refused before its closing delimiter', async () => {
+  let passes = 0;
+  const fd = scriptFormEntries(new FormData(), function* () {
+    passes++;
+    yield ['kept', 'value'];
+    if (passes === 1) {
+      yield ['lost', 'value'];
+    }
+  });
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+
+  const failure = await serializeMultipartFormData(fd, req, boundary).then(
+    () => undefined,
+    (error: unknown) => error as Error,
+  );
+
+  expect(failure?.message).toContain(
+    'Request body source produced fewer bytes than its Content-Length',
+  );
+
+  expect(getBody().toString()).not.toContain(`--${boundary}--`);
+});
+
+test('a file part name is read once each time it is formatted', async () => {
+  let reads = 0;
+  const fd = scriptFormEntries(new FormData(), function* () {
+    yield [
+      'upload',
+      {
+        get name() {
+          reads++;
+          return 'report.txt';
+        },
+        type: 'text/plain',
+        size: 1,
+        stream() {
+          return new Blob(['x']).stream();
+        },
+      },
+    ];
+  });
+  const { req } = makeCapture();
+
+  await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+
+  // The sizing pass, and the write.
+  expect(reads).toBe(2);
 });

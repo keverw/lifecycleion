@@ -12,6 +12,9 @@ import {
   validateConfigEntry,
   parseHostHeader,
   isApexDomain,
+  isIPv4,
+  isIPv6,
+  canonicalizeBracketedIPv6Content,
 } from './domain-utils';
 import {
   checkDNSLength,
@@ -2698,10 +2701,11 @@ describe('domain-utils', () => {
           wildcardKind: 'none',
         });
 
-        // Invalid IP-like strings are treated as domain names (not IPs), so they may be valid domains
-        // This is consistent with how browsers and DNS work - "999.999.999.999" could theoretically be a domain name
+        // A host whose last label is a number is IPv4 to the URL parser, and one it
+        // cannot read as an address is no URL's host at all, so it can never match.
         expect(validateConfigEntry('999.999.999.999', 'domain')).toEqual({
-          valid: true,
+          valid: false,
+          info: 'IP address is not one the URL parser accepts',
           wildcardKind: 'none',
         });
       });
@@ -3072,10 +3076,10 @@ describe('domain-utils', () => {
       });
 
       it('rejects wildcard patterns with concrete labels that fail IDN normalization', () => {
-        // Underscore is rejected by TR46 useSTD3ASCIIRules — normalizeDomain returns ''
-        // This exercises the nd === '' branch in validateConcreteLabels
+        // A character no host name uses (`!`) normalizes to '' - `_` is allowed, as the URL
+        // standard allows it. This exercises the nd === '' branch in validateConcreteLabels
         const underscoreLabel = validateConfigEntry(
-          '*.foo_bar.example.com',
+          '*.foo!bar.example.com',
           'domain',
         );
         expect(underscoreLabel.valid).toBe(false);
@@ -3083,7 +3087,7 @@ describe('domain-utils', () => {
 
         // Same check in origin context
         const underscoreOrigin = validateConfigEntry(
-          '*.foo_bar.example.com',
+          '*.foo!bar.example.com',
           'origin',
         );
         expect(underscoreOrigin.valid).toBe(false);
@@ -3142,11 +3146,13 @@ describe('domain-utils', () => {
     });
 
     it('rejects an origin whose hostname fails normalization (normalizeOrigin returns empty)', () => {
-      // An exact-origin list entry with an underscore in the hostname parses as a URL
-      // but fails TR46 normalization — normalizeOrigin returns '', so parseExactOriginForMatching returns null
+      // An exact-origin list entry with a `!` in the hostname parses as a URL but fails
+      // hostname normalization (an underscore does not: it is a valid label
+      // character) — normalizeOrigin returns '', so parseExactOriginForMatching returns null
+      expect(normalizeOrigin('https://foo!bar.example.com')).toBe('');
       expect(
         matchesOriginList('https://example.com', [
-          'https://foo_bar.example.com',
+          'https://foo!bar.example.com',
         ]),
       ).toBe(false);
     });
@@ -3183,14 +3189,23 @@ describe('domain-utils', () => {
     });
 
     it('rejects wildcard patterns with concrete labels that fail IDN normalization', () => {
-      // Underscore label fails TR46 — nd === '' branch inside isValidCredentialWildcardHost
+      // A `!` label fails normalization — the nd === '' branch inside
+      // isValidCredentialWildcardHost. (An underscore label is valid, so it does not
+      // reach that branch.) The same pattern with a valid label matches.
       expect(
         matchesCORSCredentialsList(
-          'https://app.example.com',
-          ['*.foo_bar.example.com'],
+          'https://app.foo-bar.example.com',
+          ['*.foo!bar.example.com'],
           { allowWildcardSubdomains: true },
         ),
       ).toBe(false);
+      expect(
+        matchesCORSCredentialsList(
+          'https://app.foo-bar.example.com',
+          ['*.foo-bar.example.com'],
+          { allowWildcardSubdomains: true },
+        ),
+      ).toBe(true);
     });
 
     it('rejects wildcard patterns with a concrete label over 63 chars', () => {
@@ -3325,12 +3340,20 @@ describe('domain-utils', () => {
     });
 
     it('enforces step limit to avoid exponential blowups', () => {
-      const deepDomain =
-        Array.from({ length: 28 }, () => 'a').join('.') + '.example.com';
-      const explosivePattern =
-        Array.from({ length: 20 }, () => '**').join('.') + '.zzz.example.com';
+      // The fixed tails must agree, or the match fails at the tail comparison before
+      // any recursion: `zzz.**.example.com` against `x.a.....example.com` recurses on
+      // every `**` (about 10,000 steps here) and stops at the limit.
+      const deepDomain = `x.${'a.'.repeat(26)}example.com`;
+      const explosivePattern = `x.${'**.'.repeat(12)}zzz.**.example.com`;
       // Should fail without hanging due to step limit guard
       expect(matchesWildcardDomain(deepDomain, explosivePattern)).toBe(false);
+      // The same pattern still matches a domain that holds `zzz`.
+      expect(
+        matchesWildcardDomain(
+          `x.${'a.'.repeat(12)}zzz.a.example.com`,
+          explosivePattern,
+        ),
+      ).toBe(true);
     });
 
     it('covers helper-level DNS and wildcard guard branches', () => {
@@ -3706,5 +3729,319 @@ describe('domain-utils', () => {
       expect(isApexDomain('example.com.')).toBe(true);
       expect(isApexDomain('example.com..')).toBe(false);
     });
+  });
+});
+
+describe('hyphens in labels', () => {
+  it('accepts a -- in a label as the URL parser does, and still refuses a leading or trailing hyphen', () => {
+    expect(normalizeDomain('r3---sn-abc.googlevideo.com')).toBe(
+      'r3---sn-abc.googlevideo.com',
+    );
+    expect(normalizeDomain('ab--cd.example.com')).toBe('ab--cd.example.com');
+    expect(matchesWildcardDomain('ab--cd.example.com', '**.example.com')).toBe(
+      true,
+    );
+    expect(normalizeDomain('-bad.com')).toBe('');
+    expect(normalizeDomain('bad-.com')).toBe('');
+  });
+});
+
+describe('hyphens in IDN labels', () => {
+  it('refuses a Unicode label that starts or ends with a hyphen', () => {
+    expect(normalizeDomain('-ñ.com')).toBe('');
+    expect(normalizeDomain('ñ-.com')).toBe('');
+    expect(normalizeDomain('a-ñ.com')).not.toBe('');
+  });
+});
+
+describe('config entry whitespace and scheme case', () => {
+  const NBSP = '\u00A0';
+
+  it('an entry edged with a no-break space is invalid and never matches, as normalizeOrigin refuses it', () => {
+    expect(normalizeOrigin(`https://example.com${NBSP}`)).toBe('');
+
+    for (const entry of [
+      `https://example.com${NBSP}`,
+      `${NBSP}example.com`,
+      `${NBSP}*.example.com`,
+      `https://${NBSP}*.example.com`,
+      `\u2003https://example.com`,
+    ]) {
+      expect(validateConfigEntry(entry, 'origin').valid).toBe(false);
+      expect(validateConfigEntry(entry, 'origin').info).toContain(
+        'whitespace other than spaces, tabs, CRs and LFs',
+      );
+    }
+    expect(validateConfigEntry(`example.com${NBSP}`, 'domain').valid).toBe(
+      false,
+    );
+    expect(
+      validateConfigEntry(`${NBSP}*`, 'origin', { allowGlobalWildcard: true })
+        .valid,
+    ).toBe(false);
+
+    expect(
+      matchesOriginList('https://example.com', [`https://example.com${NBSP}`]),
+    ).toBe(false);
+    expect(matchesOriginList('https://example.com', [`${NBSP}*`])).toBe(false);
+    expect(
+      matchesOriginList(undefined, [`${NBSP}*`], {
+        treatNoOriginAsAllowed: true,
+      }),
+    ).toBe(false);
+    expect(
+      matchesOriginList('https://a.example.com', [`*.example.com${NBSP}`]),
+    ).toBe(false);
+    expect(
+      matchesCORSCredentialsList('https://example.com', [
+        `https://example.com${NBSP}`,
+      ]),
+    ).toBe(false);
+    expect(
+      matchesCORSCredentialsList(
+        'https://a.example.com',
+        [`https://*.example.com${NBSP}`],
+        { allowWildcardSubdomains: true },
+      ),
+    ).toBe(false);
+    expect(matchesDomainList('example.com', [`example.com${NBSP}`])).toBe(
+      false,
+    );
+    expect(matchesDomainList('a.example.com', [`${NBSP}*.example.com`])).toBe(
+      false,
+    );
+    expect(
+      matchesWildcardOrigin('https://a.example.com', `${NBSP}*.example.com`),
+    ).toBe(false);
+    expect(matchesWildcardDomain('a.example.com', `*.example.com${NBSP}`)).toBe(
+      false,
+    );
+    expect(normalizeDomain(`example.com${NBSP}`)).toBe('');
+    expect(normalizeDomain(`example.com\uFEFF`)).toBe('');
+    expect(parseHostHeader(`example.com:8080${NBSP}`)).toEqual({
+      domain: '',
+      port: '',
+    });
+  });
+
+  it('an entry edged with spaces, tabs, CRs and LFs is trimmed', () => {
+    expect(validateConfigEntry(' https://example.com\t', 'origin')).toEqual({
+      valid: true,
+      wildcardKind: 'none',
+    });
+    expect(validateConfigEntry('\n*.example.com \r', 'domain').valid).toBe(
+      true,
+    );
+    expect(
+      matchesOriginList('https://example.com', [' https://example.com\t']),
+    ).toBe(true);
+    expect(matchesOriginList('https://example.com', ['\t*\n'])).toBe(true);
+    expect(
+      matchesCORSCredentialsList('https://example.com', ['\texample.com ']),
+    ).toBe(true);
+    expect(matchesDomainList('a.example.com', [' *.example.com\t'])).toBe(true);
+    expect(
+      matchesWildcardOrigin(
+        'https://a.example.com',
+        ' https://*.example.com\n',
+      ),
+    ).toBe(true);
+    expect(normalizeDomain('  api.test\t')).toBe('api.test');
+    expect(parseHostHeader(' example.com:8080\t')).toEqual({
+      domain: 'example.com',
+      port: '8080',
+    });
+  });
+
+  it('an origin entry scheme is lowercased in ASCII only', () => {
+    // `toLowerCase` read the Kelvin sign as `k`, a scheme the URL parser never reads.
+    expect(validateConfigEntry('\u212Aa://x.example', 'origin')).toEqual({
+      valid: false,
+      info: 'invalid scheme in origin',
+      wildcardKind: 'none',
+    });
+  });
+});
+
+describe('a value that is not a string', () => {
+  // A request header that was never sent reads as `undefined`.
+  // An array or a `String` object is no string either, though it reads as one's text.
+  const notStrings: unknown[] = [
+    undefined,
+    null,
+    5,
+    {},
+    ['1.2.3.4'],
+    // eslint-disable-next-line unicorn/new-for-builtins
+    new String('1.2.3.4'),
+  ];
+
+  it('is invalid input where a request header is read, not a thrown engine error', () => {
+    for (const value of notStrings) {
+      const text = value as string;
+      expect(parseHostHeader(text)).toEqual({ domain: '', port: '' });
+      expect(normalizeDomain(text)).toBe('');
+      expect(normalizeOrigin(text)).toBe('');
+      expect(isApexDomain(text)).toBe(false);
+      expect(isIPAddress(text)).toBe(false);
+      expect(isIPv4(text)).toBe(false);
+      expect(isIPv6(text)).toBe(false);
+      expect(checkDNSLength(text)).toBe(false);
+      expect(canonicalizeBracketedIPv6Content(text)).toBe('');
+      expect(matchesWildcardDomain(text, '*')).toBe(false);
+      expect(matchesWildcardOrigin(text, '*')).toBe(false);
+      expect(matchesDomainList(text, ['*'])).toBe(false);
+      expect(matchesOriginList(text, ['*'])).toBe(false);
+      expect(matchesCORSCredentialsList(text, ['https://a.test'])).toBe(false);
+    }
+  });
+
+  it('is refused as a pattern or allowlist, naming the function and argument', () => {
+    expect(() => matchesWildcardDomain('a.test', 5 as never)).toThrow(
+      'matchesWildcardDomain: pattern must be a string (got number)',
+    );
+    expect(() =>
+      matchesWildcardOrigin('https://a.test', undefined as never),
+    ).toThrow(
+      'matchesWildcardOrigin: pattern must be a string (got undefined)',
+    );
+    // A comma-separated list read from the environment, not split.
+    expect(() =>
+      matchesOriginList('https://a.test', 'https://a.test' as never),
+    ).toThrow(
+      'matchesOriginList: allowedOrigins must be an array of strings (got string)',
+    );
+    // Checked whether or not there is an origin to match.
+    expect(() =>
+      matchesCORSCredentialsList(undefined, undefined as never),
+    ).toThrow(
+      'matchesCORSCredentialsList: allowedOrigins must be an array of strings (got undefined)',
+    );
+    expect(() => matchesDomainList('a.test', ['a.test', 5] as never)).toThrow(
+      'matchesDomainList: allowedDomains must be an array of strings (an entry is not one)',
+    );
+    // Refused whatever the domain is, an invalid one included.
+    expect(() =>
+      matchesDomainList(undefined as never, 'a.test,b.test' as never),
+    ).toThrow(
+      'matchesDomainList: allowedDomains must be an array of strings (got string)',
+    );
+    // A hole is skipped, as before.
+    // eslint-disable-next-line no-sparse-arrays
+    expect(matchesDomainList('a.test', [, 'a.test'] as never)).toBe(true);
+  });
+
+  it('is checked on the copy the matcher reads, each entry read once', () => {
+    for (const match of [
+      (list: string[]) => matchesDomainList('a.test', list),
+      (list: string[]) => matchesOriginList('https://a.test', list),
+      (list: string[]) => matchesCORSCredentialsList('https://a.test', list),
+    ]) {
+      let reads = 0;
+      const list: string[] = [];
+      // A string on its first read and a number after: read twice, it would pass the
+      // check and reach the matcher as the number.
+      Object.defineProperty(list, 0, {
+        get: () => (reads++ === 0 ? 'nothing.test' : 42),
+        enumerable: true,
+      });
+      expect(match(list)).toBe(false);
+      expect(reads).toBe(1);
+    }
+  });
+
+  it('is an invalid config entry, not a thrown engine error', () => {
+    expect(validateConfigEntry(5 as never, 'domain')).toEqual({
+      valid: false,
+      info: 'entry is not a string',
+      wildcardKind: 'none',
+    });
+  });
+});
+
+describe('matcher options and the validateConfigEntry context', () => {
+  it('reads null options as none', () => {
+    expect(
+      matchesCORSCredentialsList(
+        'https://a.test',
+        ['https://a.test'],
+        null as never,
+      ),
+    ).toBe(true);
+    expect(matchesOriginList('https://a.test', ['*'], null as never)).toBe(
+      true,
+    );
+    expect(validateConfigEntry('a.test', 'domain', null as never).valid).toBe(
+      true,
+    );
+  });
+
+  it('refuses options that are not an object, or hold a field the matcher does not take', () => {
+    expect(() =>
+      matchesCORSCredentialsList('https://a.test', [], true as never),
+    ).toThrow(
+      'matchesCORSCredentialsList options must be an object (got boolean)',
+    );
+    // Misspelled, the wildcards it meant to allow stay off.
+    expect(() =>
+      matchesCORSCredentialsList('https://a.test', [], {
+        allowWildcardSubdomain: true,
+      } as never),
+    ).toThrow(
+      'matchesCORSCredentialsList options has no "allowWildcardSubdomain" field',
+    );
+    expect(() =>
+      matchesOriginList(undefined, ['*'], { treatNoOrigin: true } as never),
+    ).toThrow('matchesOriginList options has no "treatNoOrigin" field');
+    // Misspelled, protocol wildcards would stay allowed, the default.
+    expect(() =>
+      validateConfigEntry('https://*', 'origin', {
+        allowProtocolWildcards: false,
+      } as never),
+    ).toThrow(
+      'validateConfigEntry options has no "allowProtocolWildcards" field',
+    );
+  });
+
+  it('reads a validateConfigEntry option set to undefined as its default, and refuses one that is not a boolean', () => {
+    expect(
+      validateConfigEntry('https://*', 'origin', {
+        allowProtocolWildcard: undefined,
+      }).valid,
+    ).toBe(true);
+    // Read by truthiness, the string would turn the global wildcard on.
+    expect(() =>
+      validateConfigEntry('*', 'domain', {
+        allowGlobalWildcard: 'false' as never,
+      }),
+    ).toThrow(
+      'validateConfigEntry options.allowGlobalWildcard must be a boolean (got string)',
+    );
+  });
+
+  it('refuses a matcher option that is not a boolean, which truthiness would turn on', () => {
+    expect(() =>
+      matchesCORSCredentialsList('https://a.test', ['*.test'], {
+        allowWildcardSubdomains: 'false' as never,
+      }),
+    ).toThrow(
+      'matchesCORSCredentialsList options.allowWildcardSubdomains must be a boolean (got string)',
+    );
+    expect(() =>
+      matchesOriginList(undefined, ['*'], {
+        treatNoOriginAsAllowed: 'false' as never,
+      }),
+    ).toThrow(
+      'matchesOriginList options.treatNoOriginAsAllowed must be a boolean (got string)',
+    );
+  });
+
+  it('refuses a context other than domain or origin rather than checking by the origin rules', () => {
+    expect(() => validateConfigEntry('a.test', 'origins' as never)).toThrow(
+      "validateConfigEntry: context must be 'domain' or 'origin' (got an unknown context)",
+    );
+    expect(() => validateConfigEntry('a.test', undefined as never)).toThrow(
+      "validateConfigEntry: context must be 'domain' or 'origin' (got undefined)",
+    );
   });
 });

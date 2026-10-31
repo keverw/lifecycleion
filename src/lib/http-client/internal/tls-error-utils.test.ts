@@ -335,3 +335,77 @@ describe('isTLSCertificateError cause handling', () => {
     expect(isTLSCertificateError(withStringCause)).toBe(false);
   });
 });
+
+test('an unknown_ca alert is a certificate error; a socket path naming certificates is not', () => {
+  const unknownCA = Object.assign(new Error('tlsv1 alert unknown ca'), {
+    code: 'ERR_SSL_TLSV1_ALERT_UNKNOWN_CA',
+  });
+  const tls12 = Object.assign(
+    new Error(
+      'C0:20:00:00:error:0A000418:SSL routines::tlsv1 alert unknown ca',
+    ),
+    { code: 'EPROTO' },
+  );
+  const socketPath = Object.assign(
+    new Error('connect ENOENT sock/certificates/agent.sock'),
+    { code: 'ENOENT' },
+  );
+  expect(isTLSCertificateError(unknownCA)).toBe(true);
+  expect(isTLSCertificateError(tls12)).toBe(true);
+  expect(isTLSCertificateError(socketPath)).toBe(false);
+});
+
+test('a getaddrinfo EAI_FAIL is a transport failure whatever the host name says', () => {
+  const dns = Object.assign(
+    new Error('getaddrinfo EAI_FAIL certificates.internal.corp'),
+    { code: 'EAI_FAIL' },
+  );
+  expect(isTLSCertificateError(dns)).toBe(false);
+});
+
+test.each([
+  'EAI_SYSTEM',
+  'EAI_MEMORY',
+  'ESERVFAIL',
+  'EREFUSED',
+  'ENODATA',
+  'ETIMEOUT',
+  'EFORMERR',
+  'EBADRESP',
+])(
+  'a resolver failure %s is a transport failure whatever the host name says',
+  (code) => {
+    const error = Object.assign(
+      new Error(`getaddrinfo ${code} certificates.internal.corp`),
+      { code },
+    );
+
+    expect(isTLSCertificateError(error)).toBe(false);
+  },
+);
+
+test.each([
+  ['EBADNAME', 'queryA'],
+  ['ENOTIMP', 'getaddrinfo'],
+  ['ENOTDIR', 'connect'],
+  ['ELOOP', 'connect'],
+])(
+  'a failure resolving or connecting is a transport failure whatever the host name says: %s from %s',
+  (code, syscall) => {
+    const error = Object.assign(
+      new Error(`${syscall} ${code} certificates.internal.corp`),
+      { code, syscall },
+    );
+
+    expect(isTLSCertificateError(error)).toBe(false);
+  },
+);
+
+test('a TLS failure from a write is still read by its message', () => {
+  const error = Object.assign(new Error('bad certificate'), {
+    code: 'EPROTO',
+    syscall: 'write',
+  });
+
+  expect(isTLSCertificateError(error)).toBe(true);
+});

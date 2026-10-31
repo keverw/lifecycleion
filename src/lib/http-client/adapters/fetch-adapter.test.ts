@@ -7,9 +7,17 @@ import {
   test,
 } from 'bun:test';
 import { FetchAdapter } from './fetch-adapter';
+import { materializeRequestHeaders } from '../internal/header-utils';
+import { serializeError } from '../../serialize-error';
 import { HTTPClient } from '../http-client';
 import { startTestServer, type TestServer } from '../test-helpers/test-server';
-import { RESPONSE_STREAM_ABORT_FLAG } from '../consts';
+import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+  RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_HEADERS_KEY,
+} from '../consts';
+import type { AdapterRequest } from '../types';
+import { errorText } from '../test-helpers/error-text';
 
 let server: TestServer;
 const decoder = new TextDecoder();
@@ -93,6 +101,165 @@ describe('FetchAdapter', () => {
     expect(capturedInit?.redirect).toBe('manual');
   });
 
+  test("a form body goes out with fetch's own multipart Content-Type, not a caller's", async () => {
+    let capturedInit: RequestInit | undefined;
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      capturedInit = init;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+    const form = new FormData();
+    form.append('a', '1');
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/upload',
+      method: 'POST',
+      headers: { 'Content-Type': 'multipart/form-data', 'x-kept': 'yes' },
+      body: form,
+    });
+
+    const sent = new Headers(capturedInit?.headers);
+    expect(sent.has('content-type')).toBe(false);
+    expect(sent.get('x-kept')).toBe('yes');
+  });
+
+  test('each header value is read once, so the build check and fetch see the same one', async () => {
+    let capturedInit: RequestInit | undefined;
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      capturedInit = init;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+    let reads = 0;
+    const headers = {
+      get authorization() {
+        reads++;
+        return reads === 1 ? 'Bearer checked' : 'Bearer swapped';
+      },
+    } as unknown as Record<string, string>;
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers,
+    });
+
+    expect(reads).toBe(1);
+    expect(capturedInit?.headers).toEqual({ authorization: 'Bearer checked' });
+  });
+
+  test('a Cookie given under two spellings is joined with "; " whether or not another header is an array', async () => {
+    // Read off what the adapter hands over, as one field: two spellings left for the
+    // runtime to join would be joined with `, ` in Node and browsers (Bun uses `; `).
+    const sent: string[] = [];
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      const given = init?.headers;
+      const fields =
+        given instanceof Headers
+          ? [given.get('cookie')]
+          : Object.entries(given ?? {})
+              .filter(([name]) => name.toLowerCase() === 'cookie')
+              .map(([, value]) => value as string);
+      sent.push(fields.length === 1 ? (fields[0] ?? '') : 'not joined');
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { Cookie: 'a=1', cookie: 'b=2' },
+    });
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { Cookie: 'a=1', cookie: 'b=2', accept: ['x', 'y'] },
+    });
+
+    expect(sent).toEqual(['a=1; b=2', 'a=1; b=2']);
+  });
+
+  test('an empty Cookie part is left out', async () => {
+    let cookie = null as string | null;
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      cookie = new Headers(init?.headers).get('cookie');
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { Cookie: [], cookie: 'b=2' },
+    });
+
+    expect(cookie).toBe('b=2');
+  });
+
+  test('the Cookie header is the one NodeAdapter sends', async () => {
+    for (const headers of [
+      { Cookie: [], cookie: 'b=2' },
+      { cookie: ['a=1', ''] },
+      { Cookie: '', cookie: 'b=2' },
+      { Cookie: 'a=1', cookie: ['b=2', 'c=3'], accept: ['x', 'y'] },
+    ] as Array<Record<string, string | string[]>>) {
+      const expected = Object.entries(materializeRequestHeaders(headers)).find(
+        ([name]) => name.toLowerCase() === 'cookie',
+      )?.[1];
+      let sent = null as string | null;
+      (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+        sent =
+          init?.headers instanceof Headers
+            ? init.headers.get('cookie')
+            : ((Object.entries(init?.headers ?? {}).find(
+                ([name]) => name.toLowerCase() === 'cookie',
+              )?.[1] as string | undefined) ?? null);
+        return Promise.resolve(new Response('ok', { status: 200 }));
+      };
+
+      await new FetchAdapter().send({
+        requestURL: 'https://local.test/users',
+        method: 'GET',
+        headers,
+      });
+
+      // `Headers` trims each value, as fetch sends every header.
+      expect([headers, sent]).toEqual([headers, expected?.trim() ?? null]);
+    }
+  });
+
+  test('an unset cookie is not sent as the text "undefined"', async () => {
+    let init: RequestInit | undefined;
+    (globalThis as any).fetch = (_url: unknown, given?: RequestInit) => {
+      init = given;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { cookie: undefined } as unknown as Record<string, string>,
+    });
+
+    expect(new Headers(init?.headers).get('cookie')).toBeNull();
+  });
+
+  test('a 205 has no body, so no size refusal is read off it', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(null, {
+          status: 205,
+          headers: { 'content-length': '1000' },
+        }),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/reset',
+      method: 'POST',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.streamErrorCode).toBeUndefined();
+  });
+
   test('withholds URL userinfo on a cross-origin hop', async () => {
     let capturedURL = '';
 
@@ -117,6 +284,26 @@ describe('FetchAdapter', () => {
     expect(response.detectedRedirectURL).toBe('https://evil.test/next');
   });
 
+  test('a redirect of a relative request URL reports its target', async () => {
+    (globalThis as any).document = { baseURI: 'https://app.test/dir/page' };
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'next' },
+        }),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'api/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://app.test/dir/api/next');
+  });
+
   test('keeps URL userinfo when the initial and request origins match', async () => {
     let capturedURL = '';
 
@@ -138,6 +325,7 @@ describe('FetchAdapter', () => {
   test('withholds userinfo from a protocol-relative cross-origin URL', async () => {
     let capturedURL = '';
 
+    (globalThis as any).document = { baseURI: 'https://api.example.test/page' };
     (globalThis as any).fetch = (url: string) => {
       capturedURL = url;
       return Promise.resolve(new Response(null, { status: 204 }));
@@ -150,7 +338,498 @@ describe('FetchAdapter', () => {
       headers: {},
     });
 
-    expect(capturedURL).toBe('//evil.test/collect');
+    expect(capturedURL).toBe('https://evil.test/collect');
+  });
+
+  test('userinfo is withheld from a protocol-relative URL that resolves to another origin', async () => {
+    let capturedURL = '';
+    // An `http:` page: `//u:p@api.test/x` is `http://api.test/x`, not the `https:` origin
+    // the request started on.
+    (globalThis as any).document = { baseURI: 'http://api.test/page' };
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    const originalRequest = globalThis.Request;
+    const probedURLs: string[] = [];
+    globalThis.Request = class extends originalRequest {
+      constructor(input: RequestInfo | URL, init?: RequestInit) {
+        super(input, init);
+        probedURLs.push(this.url);
+      }
+    };
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: '//u:p@api.test/x',
+        initialURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.status).toBe(204);
+      expect(capturedURL).toBe('http://api.test/x');
+      // Checked before it was sent, as the URL that was sent.
+      expect(probedURLs).toEqual(['http://api.test/x']);
+    } finally {
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('same-origin userinfo is kept once resolved against the page', async () => {
+    let capturedURL = '';
+    (globalThis as any).document = { baseURI: 'https://api.test/page' };
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    // Bun's `Request` takes a URL with credentials; Node's refuses one, which is not what
+    // this test is about.
+    const originalRequest = globalThis.Request;
+    delete (globalThis as { Request?: unknown }).Request;
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: '//u:p@api.test/x',
+        initialURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.status).toBe(204);
+      expect(capturedURL).toBe('https://u:p@api.test/x');
+    } finally {
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('a network-path URL with no base is refused, not stripped into an absolute one and sent', async () => {
+    // No `document` or `location`: nothing resolves the URL against a page, so it is
+    // refused as a relative URL with no base, not sent as one stripped against the initial
+    // URL into an absolute `https://evil.test/x`.
+    expect((globalThis as any).document).toBeUndefined();
+    expect((globalThis as any).location).toBeUndefined();
+
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: '\\\\u:p@evil.test/x',
+        initialURL: 'https://api.test/',
+        method: 'GET',
+        headers: {},
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect(String(outcome?.message)).toContain(
+      'could not be resolved to an absolute URL',
+    );
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(calls).toBe(0);
+  });
+
+  test('a signal this runtime cannot read is refused as non-retryable, without quoting it', async () => {
+    (globalThis as any).fetch = originalFetch;
+
+    const signal = {
+      aborted: false,
+      addEventListener() {},
+      removeEventListener() {},
+      secret: 'do-not-quote',
+    } as unknown as AbortSignal;
+
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: 'http://127.0.0.1:1/',
+        method: 'GET',
+        headers: {},
+        signal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as unknown as Error).message).toBe(
+      "FetchAdapter request could not be sent: this runtime's fetch refused its signal, which is not a native AbortSignal",
+    );
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(
+      JSON.stringify(serializeError(outcome as unknown as Error)),
+    ).not.toContain('do-not-quote');
+  });
+
+  test('a stubbed fetch that takes a non-native signal still gets it', async () => {
+    const signal = {
+      aborted: false,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+    let received: unknown;
+    (globalThis as any).fetch = (_url: string, init: RequestInit) => {
+      received = init.signal;
+      return Promise.resolve(new Response('ok'));
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'http://example.test/',
+      method: 'GET',
+      headers: {},
+      signal,
+    });
+
+    expect(response.status).toBe(200);
+    expect(received).toBe(signal);
+  });
+
+  test('a network failure with a non-native signal stays a network failure', async () => {
+    const signal = {
+      aborted: false,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+    const failure = new TypeError('Failed to fetch');
+    (globalThis as any).fetch = () => Promise.reject(failure);
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'http://example.test/',
+      method: 'GET',
+      headers: {},
+      signal,
+    });
+
+    expect(response.status).toBe(0);
+    expect(response.errorCause).toBe(failure);
+  });
+
+  test.each(['CONNECT', 'connect', 'TRACE', 'trace', 'TRACK'])(
+    'a %s is refused as non-retryable before it is fetched',
+    async (method) => {
+      let calls = 0;
+      (globalThis as any).fetch = () => {
+        calls++;
+        return Promise.resolve(new Response('ok'));
+      };
+
+      const outcome = await new FetchAdapter()
+        .send({ requestURL: 'http://example.test/', method, headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(calls).toBe(0);
+    },
+  );
+
+  test('a URL that is not http(s) is refused as non-retryable before it is fetched', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response('127.0.0.1 localhost'));
+    };
+
+    for (const requestURL of [
+      'file:///etc/hosts',
+      'data:text/plain,hi',
+      'blob:https://app.test/0b2c',
+      'ftp://files.test/x',
+    ]) {
+      const outcome = await new FetchAdapter()
+        .send({ requestURL, method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as unknown as Error).message).toBe(
+        `FetchAdapter sends http: and https: URLs only (got ${requestURL.slice(0, requestURL.indexOf(':') + 1)})`,
+      );
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test('a relative URL with no base to resolve it against is refused as non-retryable', async () => {
+    // No `document` or `location`: nothing to resolve the URL against.
+    expect((globalThis as any).document).toBeUndefined();
+    expect((globalThis as any).location).toBeUndefined();
+
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    for (const requestURL of [
+      '/relative',
+      '//h.test/x',
+      'api/x',
+      'not a url',
+    ]) {
+      const outcome = await new FetchAdapter()
+        .send({ requestURL, method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as unknown as Error).message).toBe(
+        'FetchAdapter request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)',
+      );
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test('a relative initial URL is resolved against the page before credentials are judged', async () => {
+    let capturedURL = '';
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    // Bun's `Request` takes a URL with credentials; Node's refuses one, which is not what
+    // this test is about.
+    const originalRequest = globalThis.Request;
+    delete (globalThis as { Request?: unknown }).Request;
+
+    const sentURL = async (requestURL: string): Promise<string> => {
+      await new FetchAdapter().send({
+        requestURL,
+        initialURL: '/start',
+        method: 'GET',
+        headers: {},
+      });
+      return capturedURL;
+    };
+
+    try {
+      (globalThis as any).document = { baseURI: 'https://api.test/page' };
+      // `/start` on this page is `https://api.test/start`: same origin, kept.
+      expect(await sentURL('https://u:p@api.test/x')).toBe(
+        'https://u:p@api.test/x',
+      );
+      // Another origin than the page's: withheld.
+      expect(await sentURL('https://u:p@evil.test/x')).toBe(
+        'https://evil.test/x',
+      );
+
+      // No base: the initial URL cannot be resolved, so it still fails closed.
+      delete (globalThis as any).document;
+      expect(await sentURL('https://u:p@api.test/x')).toBe(
+        'https://api.test/x',
+      );
+    } finally {
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('an initial URL that names no origin fails closed rather than naming the page', async () => {
+    // Resolved against the page, `''`, `#top`, `?q` or `start` is the page itself: the
+    // request URL's userinfo was kept with nothing to show it belonged to that origin. A
+    // root- or protocol-relative one names an origin, and is resolved.
+    let capturedURL = '';
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    // Bun's `Request` takes a URL with credentials; Node's refuses one, which is not what
+    // this test is about.
+    const originalRequest = globalThis.Request;
+    delete (globalThis as { Request?: unknown }).Request;
+    const previousDocument = (globalThis as any).document;
+
+    const sentURL = async (initialURL: string): Promise<string> => {
+      await new FetchAdapter().send({
+        requestURL: 'https://u:p@app.test/x',
+        initialURL,
+        method: 'GET',
+        headers: {},
+      });
+      return capturedURL;
+    };
+
+    try {
+      (globalThis as any).document = { baseURI: 'https://app.test/page' };
+
+      for (const initialURL of ['', ' \t\n', '#top', '?q', '.', 'start']) {
+        expect(await sentURL(initialURL)).toBe('https://app.test/x');
+      }
+
+      for (const initialURL of ['/start', '//app.test/start']) {
+        expect(await sentURL(initialURL)).toBe('https://u:p@app.test/x');
+      }
+    } finally {
+      if (previousDocument === undefined) {
+        delete (globalThis as any).document;
+      } else {
+        (globalThis as any).document = previousDocument;
+      }
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('a request refused before it is sent reports no upload start', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    const refusals: Array<Partial<AdapterRequest>> = [
+      // Refused by the `Request` probe: a header name `fetch` will not take.
+      { headers: { 'bad name': 'x' } },
+      // Refused as its signal is read.
+      {
+        signal: {
+          get aborted(): boolean {
+            throw new Error('aborted getter failed');
+          },
+        } as unknown as AbortSignal,
+      },
+    ];
+
+    for (const refusal of refusals) {
+      const events: unknown[] = [];
+      const outcome = await new FetchAdapter()
+        .send({
+          requestURL: 'https://api.test/upload',
+          method: 'POST',
+          headers: {},
+          body: 'hello',
+          onUploadProgress: (event) => events.push(event),
+          ...refusal,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(events).toEqual([]);
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test("a request the runtime refuses to build is reported without the runtime's error, which quotes the value", async () => {
+    const secret = 'secret-token';
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+    const send = (request: Partial<AdapterRequest>) =>
+      new FetchAdapter()
+        .send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+          ...request,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+    // This runtime's own refusal: Bun quotes a header value it will not take.
+    const header = await send({
+      headers: { authorization: `Bearer ${secret}\u0000x` },
+    });
+    expect(String(header?.message)).toBe(
+      "FetchAdapter request could not be built: the runtime refused the value of header 'authorization'",
+    );
+    expect(header?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(errorText(header)).not.toContain(secret);
+
+    // A name that is not a token - a whole header line pasted in as one - is not written.
+    const name = await send({
+      headers: { [`Authorization: Bearer ${secret}`]: 'x' },
+    });
+    expect(String(name?.message)).toBe(
+      'FetchAdapter request could not be built: the runtime refused a header name',
+    );
+    expect(errorText(name)).not.toContain(secret);
+
+    // Node's refusal of a URL with credentials, which quotes the URL.
+    const OriginalRequest = globalThis.Request;
+    globalThis.Request = class {
+      constructor(url: string) {
+        throw Object.assign(
+          new TypeError(
+            `Request cannot be constructed from a URL that includes credentials: ${url}`,
+          ),
+          { input: url },
+        );
+      }
+    } as unknown as typeof Request;
+    try {
+      const url = await send({
+        requestURL: `https://user:${secret}@api.test/x?token=${secret}`,
+      });
+      expect(String(url?.message)).toBe(
+        'FetchAdapter request could not be built: the runtime refused its URL or method',
+      );
+      expect(errorText(url)).not.toContain(secret);
+    } finally {
+      globalThis.Request = OriginalRequest;
+    }
+
+    expect(calls).toBe(0);
+  });
+
+  test("without a global Request, a header Headers refuses is refused before fetch, without the runtime's error", async () => {
+    const secret = 'secret-token';
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+    const OriginalRequest = globalThis.Request;
+    delete (globalThis as Record<string, unknown>).Request;
+    try {
+      // A repeated header is appended to a `Headers`; a single one checked by one.
+      for (const headers of [
+        { authorization: ['Bearer a', `Bearer ${secret}\u0000x`] },
+        { authorization: `Bearer ${secret}\u0000x` },
+      ]) {
+        const outcome = await new FetchAdapter()
+          .send({ requestURL: 'https://api.test/x', method: 'GET', headers })
+          .then(
+            () => undefined,
+            (error: unknown) => error as Record<PropertyKey, unknown>,
+          );
+
+        expect(String(outcome?.message)).toBe(
+          "FetchAdapter request could not be built: the runtime refused the value of header 'authorization'",
+        );
+        expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+        expect(errorText(outcome)).not.toContain(secret);
+      }
+    } finally {
+      globalThis.Request = OriginalRequest;
+    }
+
+    expect(calls).toBe(0);
   });
 
   test('materializes repeated request headers with Headers.append', async () => {
@@ -179,6 +858,46 @@ describe('FetchAdapter', () => {
     expect((capturedInit?.headers as Headers).get('accept')).toBe(
       'application/json, text/plain',
     );
+  });
+
+  test('joins a repeated request header with `, `, in any case, where the runtime has no Headers', async () => {
+    let capturedInit: RequestInit | undefined;
+
+    (globalThis as any).fetch = (
+      _url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      capturedInit = init;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    const OriginalHeaders = globalThis.Headers;
+    const OriginalRequest = globalThis.Request;
+    let response: Awaited<ReturnType<FetchAdapter['send']>>;
+
+    delete (globalThis as Record<string, unknown>).Headers;
+    delete (globalThis as Record<string, unknown>).Request;
+    try {
+      response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/users',
+        method: 'GET',
+        headers: {
+          accept: ['application/json', 'text/plain'],
+          Accept: 'text/html',
+          'x-one': 'a',
+        },
+      });
+    } finally {
+      globalThis.Headers = OriginalHeaders;
+      globalThis.Request = OriginalRequest;
+    }
+
+    expect(response.status).toBe(200);
+    // One field per name, in any case, as a `Headers` would send it.
+    expect(capturedInit?.headers).toEqual({
+      accept: 'application/json, text/plain, text/html',
+      'x-one': 'a',
+    });
   });
 
   test('materializes single and repeated headers together', async () => {
@@ -236,10 +955,11 @@ describe('FetchAdapter', () => {
       headers: { cookie: ['session=abc123', 'theme=dark'] },
     });
 
-    expect(capturedInit?.headers).toBeInstanceOf(Headers);
-    expect((capturedInit?.headers as Headers).get('cookie')).toBe(
-      'session=abc123; theme=dark',
-    );
+    // Joined into one field before it is handed over, so no name repeats and it goes as
+    // a record.
+    expect(capturedInit?.headers).toEqual({
+      cookie: 'session=abc123; theme=dark',
+    });
   });
 
   test('uses manual redirect mode for fetch requests', async () => {
@@ -303,7 +1023,8 @@ describe('FetchAdapter', () => {
     expect(response.detectedRedirectURL).toBeUndefined();
     expect(uploadEvents).toEqual([
       { loaded: 0, total: 0, progress: 0 },
-      { loaded: 1, total: 1, progress: 1 },
+      // No body: zero bytes, as NodeAdapter reports it.
+      { loaded: 0, total: 0, progress: 1 },
     ]);
     expect(downloadEvents).toEqual([{ loaded: 0, total: 0, progress: 1 }]);
   });
@@ -532,7 +1253,8 @@ describe('FetchAdapter', () => {
 
     expect(uploadEvents).toEqual([
       { loaded: 0, total: 0, progress: 0 },
-      { loaded: 1, total: 1, progress: 1 },
+      // No body: zero bytes, as NodeAdapter reports it.
+      { loaded: 0, total: 0, progress: 1 },
     ]);
 
     expect(downloadEvents).toEqual([{ loaded: 5, total: 5, progress: 1 }]);
@@ -1263,7 +1985,7 @@ describe('FetchAdapter aborts while reading the body', () => {
     // A signal hands the same reason to every consumer, so tagging it in place
     // would let concurrent requests overwrite each other's response metadata.
     expect(RESPONSE_STREAM_ABORT_FLAG in sharedReason).toBe(false);
-    expect('streamAbortHeaders' in sharedReason).toBe(false);
+    expect(STREAM_ABORT_HEADERS_KEY in sharedReason).toBe(false);
   }, 15_000);
 
   test('survives a frozen abort reason', async () => {
@@ -1314,4 +2036,688 @@ describe('FetchAdapter aborts while reading the body', () => {
     expect(response.isCancelled).toBe(true);
     expect(response.isStreamError).toBe(false);
   }, 15_000);
+});
+
+describe('FetchAdapter - cut-off responses and unbuildable requests', () => {
+  test("a cut-off response's Set-Cookie is not written by serializeError", async () => {
+    (globalThis as any).fetch = (_url: string, init?: RequestInit) =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              init?.signal?.addEventListener('abort', () => {
+                controller.error(new DOMException('aborted', 'AbortError'));
+              });
+            },
+          }),
+          { status: 200, headers: { 'set-cookie': 'session=SECRET123' } },
+        ),
+      );
+    const builder = new HTTPClient({
+      adapter: new FetchAdapter(),
+      timeout: 30,
+    }).get('http://api.test/x');
+
+    await builder.send();
+
+    expect(builder.error?.code).toBe('stream_response_error');
+    expect(JSON.stringify(serializeError(builder.error?.cause))).not.toContain(
+      'SECRET123',
+    );
+  });
+
+  test('a request fetch refuses to build fails once as adapter_error, not a retried network error', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    };
+    const builder = new HTTPClient({
+      adapter: new FetchAdapter(),
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 0 },
+    })
+      .get('http://api.test/x')
+      .headers({ 'x-bad': 'a\nb' });
+
+    const response = await builder.send();
+
+    expect(calls).toBe(0);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(response.isNetworkError).toBe(false);
+    expect(builder.attemptCount).toBe(1);
+  });
+});
+
+test('FetchAdapter still sends where Request or URL.canParse is missing', async () => {
+  let calls = 0;
+  (globalThis as any).fetch = () => {
+    calls++;
+    return Promise.resolve(new Response(null, { status: 200 }));
+  };
+  const originalRequest = globalThis.Request;
+  const canParseDescriptor = Object.getOwnPropertyDescriptor(URL, 'canParse');
+  try {
+    delete (globalThis as { Request?: unknown }).Request;
+    (URL as { canParse?: unknown }).canParse = undefined;
+
+    const response = await new HTTPClient({ adapter: new FetchAdapter() })
+      .get('http://api.test/x')
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(calls).toBe(1);
+  } finally {
+    globalThis.Request = originalRequest;
+    if (canParseDescriptor) {
+      Object.defineProperty(URL, 'canParse', canParseDescriptor);
+    }
+  }
+});
+
+test('FetchAdapter refuses a method the runtime fetch would rewrite, rather than sending it as another', async () => {
+  // Bun's Request reads an unknown method as GET; where the runtime keeps it, there is
+  // nothing to refuse.
+  if (
+    new Request('http://a.test', { method: 'APPROVE' }).method === 'APPROVE'
+  ) {
+    return;
+  }
+  let calls = 0;
+  (globalThis as any).fetch = () => {
+    calls++;
+    return Promise.resolve(new Response(null, { status: 200 }));
+  };
+  const builder = new HTTPClient({ adapter: new FetchAdapter() }).request(
+    'APPROVE',
+    'http://api.test/x',
+  );
+
+  await builder.send();
+
+  expect(calls).toBe(0);
+  expect(builder.error?.code).toBe('adapter_error');
+});
+
+test('FetchAdapter refuses a fetch that uppercases a custom method, which is case-sensitive', async () => {
+  let calls = 0;
+  (globalThis as any).fetch = () => {
+    calls++;
+    return Promise.resolve(new Response(null, { status: 200 }));
+  };
+  const originalRequest = globalThis.Request;
+  // A polyfill that uppercases every method, as `fetch` does only the standard six.
+  globalThis.Request = class {
+    public readonly method: string;
+
+    constructor(_input: RequestInfo | URL, init?: RequestInit) {
+      this.method = (init?.method ?? 'GET').toUpperCase();
+    }
+  } as unknown as typeof Request;
+
+  try {
+    let thrown: unknown;
+    try {
+      await new FetchAdapter().send({
+        requestURL: 'http://api.test/x',
+        method: 'purge',
+        headers: {},
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(calls).toBe(0);
+    expect((thrown as Error).message).toBe(
+      "[FetchAdapter] This runtime's fetch would send the purge request as PURGE. Use NodeAdapter for it.",
+    );
+  } finally {
+    globalThis.Request = originalRequest;
+  }
+});
+
+test('an empty document.baseURI falls back to location, as the client resolves', async () => {
+  const locationDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis,
+    'location',
+  );
+  (globalThis as any).document = { baseURI: '' };
+  Object.defineProperty(globalThis, 'location', {
+    value: { href: 'https://app.test/dir/page' },
+    configurable: true,
+    writable: true,
+  });
+  (globalThis as any).fetch = () =>
+    Promise.resolve(
+      new Response(null, { status: 302, headers: { location: 'next' } }),
+    );
+
+  try {
+    const response = await new FetchAdapter().send({
+      requestURL: 'api/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.detectedRedirectURL).toBe('https://app.test/dir/api/next');
+  } finally {
+    if (locationDescriptor === undefined) {
+      delete (globalThis as any).location;
+    } else {
+      Object.defineProperty(globalThis, 'location', locationDescriptor);
+    }
+  }
+});
+
+describe('FetchAdapter - joining body chunks', () => {
+  /** A `fetch` answering with a stream of `chunks`, read under a response limit. */
+  async function readChunks(chunks: Uint8Array[]): Promise<Uint8Array> {
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              for (const chunk of chunks) {
+                controller.enqueue(chunk);
+              }
+              controller.close();
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+    });
+
+    return response.body as Uint8Array;
+  }
+
+  test('a lone chunk that owns its buffer is the body as it is, not copied', async () => {
+    const chunk = new Uint8Array([1, 2, 3]);
+    const body = await readChunks([chunk]);
+
+    expect(body).toBe(chunk);
+  });
+
+  test('a lone chunk that shares its buffer, or is a Buffer, is copied into a plain array of its own', async () => {
+    const shared = new Uint8Array([9, 1, 2, 3, 9]);
+    for (const chunk of [shared.subarray(1, 4), Buffer.from([1, 2, 3])]) {
+      const body = await readChunks([chunk]);
+
+      expect(body).not.toBe(chunk);
+      expect(Object.getPrototypeOf(body)).toBe(Uint8Array.prototype);
+      expect(body.buffer.byteLength).toBe(3);
+      expect([...body]).toEqual([1, 2, 3]);
+    }
+  });
+
+  test('several chunks are joined in order', async () => {
+    const body = await readChunks([
+      new Uint8Array([1, 2]),
+      new Uint8Array([3]),
+      new Uint8Array([4, 5]),
+    ]);
+
+    expect([...body]).toEqual([1, 2, 3, 4, 5]);
+  });
+});
+
+describe('FetchAdapter - body chunk types and sizes', () => {
+  /** A `fetch` answering with a web stream of `chunks`, read under `maxResponseBytes`. */
+  async function sendStreamed(chunks: unknown[], maxResponseBytes: number) {
+    let isCancelled = false;
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              for (const chunk of chunks) {
+                controller.enqueue(chunk);
+              }
+              controller.close();
+            },
+            cancel() {
+              isCancelled = true;
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes,
+    });
+
+    return { response, isCancelled };
+  }
+
+  test('a chunk that is not a Uint8Array fails the body read as arrayBuffer() does, not as zeros', async () => {
+    // How the unlimited path fails for the same stream where `arrayBuffer()` follows the
+    // Fetch standard (Node's undici, browsers): it rejects with a `TypeError`.
+    (globalThis as any).fetch = () => {
+      const response = new Response('', { status: 200 });
+      Object.defineProperty(response, 'arrayBuffer', {
+        value: () =>
+          Promise.reject(new TypeError('Received non-Uint8Array chunk')),
+      });
+      return Promise.resolve(response);
+    };
+    const unlimited = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(unlimited.isStreamError).toBe(true);
+    expect(unlimited.streamErrorCode).toBe('stream_response_error');
+    expect(unlimited.errorCause).toBeInstanceOf(TypeError);
+
+    for (const chunk of [
+      new Uint8Array([1, 2, 3]).buffer,
+      new DataView(new Uint8Array([1, 2, 3]).buffer),
+      new Uint16Array([1, 2]),
+      'abc',
+      { byteLength: 3 },
+    ]) {
+      // A chunk after it, so the stream is still open to be let go of.
+      const { response, isCancelled } = await sendStreamed(
+        [new Uint8Array([9]), chunk, new Uint8Array([9])],
+        100,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBeNull();
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe(unlimited.streamErrorCode);
+      expect(response.errorCause).toBeInstanceOf(TypeError);
+      expect(isCancelled).toBe(true);
+    }
+  });
+
+  test('a chunk is counted by the bytes it holds, not the byteLength it reports', async () => {
+    class Understated extends Uint8Array {
+      public override get byteLength(): number {
+        return 0;
+      }
+    }
+
+    const { response } = await sendStreamed([new Understated(200)], 100);
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+
+    const joined = await sendStreamed(
+      [new Understated([1, 2]), new Uint8Array([3])],
+      100,
+    );
+
+    expect([...(joined.response.body as Uint8Array)]).toEqual([1, 2, 3]);
+  });
+
+  test.each([
+    ['grows', 5],
+    ['shrinks', 1],
+  ])(
+    'a chunk whose buffer %s after it is read fails the body read, not as a corrupt body',
+    async (_label, newLength) => {
+      const buffer = new ArrayBuffer(3, { maxByteLength: 8 });
+      const chunk = new Uint8Array(buffer);
+      chunk.set([1, 2, 3]);
+      let pulls = 0;
+      (globalThis as any).fetch = () =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream(
+              {
+                pull(controller) {
+                  pulls++;
+
+                  if (pulls === 1) {
+                    controller.enqueue(chunk);
+                  } else {
+                    buffer.resize(newLength);
+                    controller.close();
+                  }
+                },
+              },
+              // Pulled only when read: the chunk is counted before it is resized.
+              { highWaterMark: 0 },
+            ),
+            { status: 200 },
+          ),
+        );
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 100,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBeNull();
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_response_error');
+      expect(response.errorCause).toBeInstanceOf(TypeError);
+    },
+  );
+
+  test('a Uint8Array chunk from another realm is read as one', async () => {
+    const { runInNewContext } = await import('node:vm');
+    const foreign = runInNewContext('new Uint8Array([4, 5, 6])') as Uint8Array;
+    const { response } = await sendStreamed([foreign], 100);
+
+    expect([...(response.body as Uint8Array)]).toEqual([4, 5, 6]);
+  });
+
+  test("a polyfilled fetch's Readable that yields text is still read as its UTF-8 bytes", async () => {
+    const { Readable } = await import('node:stream');
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body: Readable.from(['hé', 'llo']),
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+    });
+
+    expect(decoder.decode(response.body as Uint8Array)).toBe('héllo');
+  });
+
+  test('a body whose Symbol.asyncIterator throws when read is read whole through arrayBuffer()', async () => {
+    const body = {
+      get [Symbol.asyncIterator](): never {
+        throw new TypeError('not iterable');
+      },
+    };
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body,
+        arrayBuffer: () => Promise.resolve(new Uint8Array([7, 8]).buffer),
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+    });
+
+    expect([...(response.body as Uint8Array)]).toEqual([7, 8]);
+  });
+
+  test('a response whose body getter throws is read whole through arrayBuffer()', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        get body(): never {
+          throw new TypeError('body unreadable');
+        },
+        arrayBuffer: () => Promise.resolve(new Uint8Array([7, 8]).buffer),
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+    });
+
+    expect([...(response.body as Uint8Array)]).toEqual([7, 8]);
+  });
+
+  test.each([
+    ['Symbol.asyncIterator', Symbol.asyncIterator],
+    ['getReader', 'getReader'],
+  ] as const)(
+    'a body whose %s getter answers once is read through the method it answered',
+    async (_name, key) => {
+      const { Readable } = await import('node:stream');
+      const source =
+        key === 'getReader'
+          ? (new Response(new Uint8Array([1, 2, 3]))
+              .body as ReadableStream<Uint8Array>)
+          : Readable.from([new Uint8Array([1, 2, 3])]);
+      const method = (source as any)[key] as () => unknown;
+      let reads = 0;
+      const body = {
+        get [key](): unknown {
+          reads++;
+          if (reads > 1) {
+            throw new TypeError('read again');
+          }
+          return (...args: unknown[]) => Reflect.apply(method, source, args);
+        },
+      };
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          type: 'basic',
+          headers: new Headers(),
+          body,
+          arrayBuffer: () => Promise.reject(new Error('not read whole')),
+        });
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 100,
+      });
+
+      expect([...(response.body as Uint8Array)]).toEqual([1, 2, 3]);
+      expect(reads).toBe(1);
+    },
+  );
+});
+
+describe('FetchAdapter - request body copy', () => {
+  test("the bytes it is handed are copied by the runtime's fetch before send() returns, so a change made after it reaches nothing sent", async () => {
+    const received: number[][] = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch: async (request) => {
+        received.push([...new Uint8Array(await request.arrayBuffer())]);
+        return new Response('ok');
+      },
+    });
+
+    try {
+      const body = new Uint8Array([1, 2, 3, 4]);
+      const sending = new FetchAdapter().send({
+        requestURL: `http://127.0.0.1:${server.port}/upload`,
+        method: 'POST',
+        headers: {},
+        body,
+      });
+      // The client hands a built-in adapter the request's bytes uncopied, relying on this.
+      body.fill(9);
+
+      expect((await sending).status).toBe(200);
+      expect(received).toEqual([[1, 2, 3, 4]]);
+    } finally {
+      await server.stop(true);
+    }
+  });
+});
+
+describe('FetchAdapter - body cancel() rejecting from another realm', () => {
+  test("a body whose cancel() answers with another realm's rejecting promise leaves no unhandled rejection", async () => {
+    const { runInNewContext } = await import('node:vm');
+    let cancels = 0;
+    (globalThis as any).fetch = () => {
+      const response = new Response('x'.repeat(1000), {
+        status: 200,
+        headers: { 'content-length': '1000' },
+      });
+      // Refused by its declared length, so the body is let go of unread.
+      Object.defineProperty(response, 'body', {
+        value: {
+          getReader() {
+            throw new Error('not read');
+          },
+          cancel() {
+            cancels++;
+            return runInNewContext(
+              'Promise.reject(new Error("cancel failed"))',
+            ) as unknown;
+          },
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 10,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(response.streamErrorCode).toBe('response_too_large');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    expect(cancels).toBe(1);
+    expect(unhandled).toEqual([]);
+  });
+});
+
+describe('FetchAdapter - reader cancel() that throws or returns nothing', () => {
+  /** A `fetch` answering with a body whose reader yields `chunks` and cancels with `cancel`. */
+  async function sendWithReader(chunks: unknown[], cancel: () => unknown) {
+    let cancels = 0;
+    (globalThis as any).fetch = () => {
+      const response = new Response(null, { status: 200 });
+      const pending = [...chunks];
+      Object.defineProperty(response, 'body', {
+        value: {
+          getReader() {
+            return {
+              read() {
+                return Promise.resolve(
+                  pending.length > 0
+                    ? { done: false, value: pending.shift() }
+                    : { done: true, value: undefined },
+                );
+              },
+              cancel() {
+                cancels++;
+                return cancel();
+              },
+            };
+          },
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+
+    return { response, cancels };
+  }
+
+  test("a body over the limit is refused as too large when its reader's cancel() answers with nothing or throws", async () => {
+    for (const cancel of [
+      () => undefined,
+      () => {
+        throw new Error('cancel failed');
+      },
+    ]) {
+      const { response, cancels } = await sendWithReader(
+        [new Uint8Array(8), new Uint8Array(8)],
+        cancel,
+      );
+
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('response_too_large');
+      expect(cancels).toBe(1);
+    }
+  });
+
+  test("a chunk that is not a Uint8Array keeps its TypeError when the reader's cancel() throws", async () => {
+    const { response, cancels } = await sendWithReader(['abc'], () => {
+      throw new Error('cancel failed');
+    });
+
+    expect(response.isStreamError).toBe(true);
+    expect(response.streamErrorCode).toBe('stream_response_error');
+    expect(response.errorCause).toBeInstanceOf(TypeError);
+    expect((response.errorCause as Error).message).toContain(
+      'not a Uint8Array',
+    );
+    expect(cancels).toBe(1);
+  });
+});
+
+describe('FetchAdapter - GET and HEAD bodies', () => {
+  test('a GET or HEAD with any body, an empty string included, is refused as non-retryable before fetch or upload progress', async () => {
+    let fetches = 0;
+    (globalThis as any).fetch = () => {
+      fetches++;
+      return Promise.reject(
+        new TypeError('Request with GET/HEAD method cannot have body.'),
+      );
+    };
+
+    for (const [method, body] of [
+      ['GET', ''],
+      ['HEAD', 'payload'],
+      ['get', new Uint8Array(1)],
+    ] as const) {
+      const uploadEvents: unknown[] = [];
+      const outcome = await new FetchAdapter()
+        .send({
+          requestURL: 'https://local.test/data',
+          method,
+          headers: {},
+          body,
+          onUploadProgress: (event) => uploadEvents.push(event),
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(String(outcome?.message)).toContain('with a body');
+      expect(String(outcome?.message)).not.toContain('payload');
+      expect(uploadEvents).toEqual([]);
+    }
+
+    expect(fetches).toBe(0);
+  });
 });

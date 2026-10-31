@@ -1,0 +1,219 @@
+import { isRequestBodyBytes, UNSUPPORTED_REQUEST_BODY_MESSAGE } from '../utils';
+import { isPlainRecord } from './plain-record';
+import { isBunRuntime } from '../../internal/is-bun-runtime';
+import { filePartNameToSend, formEntries, isFormData } from './form-entries';
+
+/**
+ * The text each JSON body copy was read back from - exactly the text it serializes to, its
+ * own `toJSON` wrapper's included, or `undefined` for one that serializes to nothing - by
+ * the copy. Only a copy no caller holds is here: one is forgotten as it is handed to an
+ * interceptor (see `releaseRequestBody`), and nothing else hands a request's body to
+ * caller code - an attempt's observers are handed their own, parsed back from the text
+ * sent.
+ */
+const jsonTextByCopy = new WeakMap<object, string | undefined>();
+
+/**
+ * A request body as a value the client owns, which no caller holds: taken when a body is
+ * handed over - to a builder's body setter, or as an interceptor's result - so a change
+ * the caller makes afterwards reaches nothing the request sends or reports.
+ *
+ * - A JSON body (a plain object or an array) is the data it serializes to, read back:
+ *   serialized once, by `JSON.stringify` - so every nested `toJSON` is applied and what
+ *   JSON reads from prototypes is honored, where a structural copy would lose them - and
+ *   parsed back. A `Date` is its ISO string, a class instance a plain object, an
+ *   `undefined` member dropped. A top-level `toJSON` that answers something other than an
+ *   object or an array - `null`, a string, a number, nothing - reads back as that value,
+ *   which is no JSON body: a string is sent as text, `null` as no body at all, and a
+ *   number is refused. Such a copy is wrapped as a plain object whose own `toJSON`
+ *   answers it, so it is still a JSON body and serializes to exactly the text the
+ *   caller's does.
+ * - Bytes are copied, into this realm; a `Buffer` as a `Buffer` (see `copyBytes`).
+ * - Form data - told by `FormData`'s own methods (see `isFormData`) - is a new form with
+ *   the same entries; a `Blob` or `File` entry is kept as it is, being
+ *   immutable.
+ * - A string, `null` or `undefined` cannot be changed in place and is returned as it is.
+ *
+ * Each kind is told once, and the value read as that kind, so a `Proxy` whose prototype
+ * answers differently on a second look cannot be passed on uncopied. Throws on a body of
+ * any other type - a `Proxy` over a form among them - and on a read that throws: a getter
+ * or a `toJSON`, a `BigInt` or a circular reference in a JSON body.
+ */
+export function copyRequestBody(body: unknown): unknown {
+  if (body === undefined || body === null || typeof body === 'string') {
+    return body;
+  }
+
+  if (isRequestBodyBytes(body)) {
+    return copyBytes(body);
+  }
+
+  if (isFormData(body)) {
+    return copyFormData(body);
+  }
+
+  if (Array.isArray(body) || isPlainRecord(body)) {
+    // A copy of a copy is read back from the text it was read from.
+    const text = jsonTextOf(body);
+
+    // A top-level `toJSON` that answers `undefined` serializes to nothing.
+    if (text === undefined) {
+      const copy = { toJSON: () => undefined };
+      jsonTextByCopy.set(copy, undefined);
+      return copy;
+    }
+
+    const parsed: unknown = JSON.parse(text);
+    const copy: object =
+      Array.isArray(parsed) || isPlainRecord(parsed)
+        ? parsed
+        : { toJSON: () => parsed };
+
+    jsonTextByCopy.set(copy, text);
+    return copy;
+  }
+
+  // Refused as `params()` refuses a query it cannot copy: by type, when it is handed over.
+  throw new TypeError(UNSUPPORTED_REQUEST_BODY_MESSAGE);
+}
+
+/**
+ * The JSON text a JSON body copy serializes to, when it is one `copyRequestBody` returned
+ * that no interceptor has been handed (see `jsonTextByCopy`), so it is sent - or copied
+ * again - without being serialized a second time; `undefined` for any other value.
+ */
+export function copiedJSONText(body: unknown): string | undefined {
+  return typeof body === 'object' && body !== null
+    ? jsonTextByCopy.get(body)
+    : undefined;
+}
+
+/**
+ * Whether `body` is a JSON body copy, not yet handed to an interceptor, that serializes to
+ * nothing (a top-level `toJSON` that answers `undefined`). Read from the copy's own record
+ * (see `jsonTextByCopy`) rather than by serializing, so a value an interceptor returned -
+ * whose `toJSON` may answer differently the next time - is never asked.
+ */
+export function isCopySerializingToNothing(body: unknown): boolean {
+  return typeof body === 'object' && body !== null && isRecordedAsNothing(body);
+}
+
+/** Whether `jsonTextByCopy` records `body` as a copy that serializes to nothing. */
+function isRecordedAsNothing(body: object): boolean {
+  return jsonTextByCopy.has(body) && jsonTextByCopy.get(body) === undefined;
+}
+
+/**
+ * The text a JSON body - a plain object or an array - serializes to, or `undefined` when
+ * it serializes to nothing (a top-level `toJSON` that answers `undefined`): a copy's own
+ * (see `jsonTextByCopy`), or serialized now for any other value. Throws as
+ * `JSON.stringify` throws on it.
+ */
+function jsonTextOf(body: object): string | undefined {
+  if (jsonTextByCopy.has(body)) {
+    return jsonTextByCopy.get(body);
+  }
+
+  const text: unknown = JSON.stringify(body);
+  return typeof text === 'string' ? text : undefined;
+}
+
+/**
+ * Whether a JSON body - a plain object or an array - serializes to nothing, as
+ * `JSON.stringify(body) === undefined` would answer, without serializing it: a copy's own
+ * record (see `jsonTextByCopy`), or for any other value its top-level `toJSON`, own or
+ * inherited, read once and called once with the key `''`, as `JSON.stringify` calls it.
+ * Only an answer `JSON.stringify` writes nothing for - `undefined`, a symbol or a function
+ * - serializes to nothing; a body with no `toJSON`, or one answering anything else, is
+ * serialized to text or throws, and is not read further. Throws as reading or calling its
+ * `toJSON` throws.
+ */
+export function serializesToNothing(body: object): boolean {
+  if (jsonTextByCopy.has(body)) {
+    return isRecordedAsNothing(body);
+  }
+
+  const toJSON: unknown = (body as { toJSON?: unknown }).toJSON;
+  if (typeof toJSON !== 'function') {
+    return false;
+  }
+
+  const value: unknown = Reflect.apply(toJSON, body, ['']);
+  return (
+    typeof value === 'undefined' ||
+    typeof value === 'symbol' ||
+    typeof value === 'function'
+  );
+}
+
+/**
+ * Called as a request's body is handed to caller code - an interceptor - which may keep
+ * it and change it in place: a copy's text no longer says what it serializes to, so it is
+ * forgotten, and the copy is serialized from then on as any other value is.
+ */
+export function releaseRequestBody(body: unknown): void {
+  if (typeof body === 'object' && body !== null) {
+    jsonTextByCopy.delete(body);
+  }
+}
+
+/**
+ * Bytes or form data as a copy of the client's own - bytes read through their internal
+ * slots, so another realm's are copied into this one's - and any other value as it is.
+ */
+export function cloneBodyValue(body: unknown): unknown {
+  if (isFormData(body)) {
+    return copyFormData(body);
+  } else if (isRequestBodyBytes(body)) {
+    return copyBytes(body);
+  }
+
+  return body;
+}
+
+function copyFormData(form: FormData): FormData {
+  const cloned = new FormData();
+
+  for (const [key, value] of formEntries(form)) {
+    // Under the name it is sent by, on Bun as on NodeAdapter: Bun's own encoding of a file
+    // backed by a path, appended under none, would send the path.
+    if (!isBunRuntime || typeof value === 'string') {
+      cloned.append(key, value);
+      continue;
+    }
+
+    const name: unknown = (value as File).name;
+    const nameToSend = filePartNameToSend(name);
+
+    if (typeof nameToSend !== 'string' || nameToSend === name) {
+      cloned.append(key, value);
+    } else {
+      cloned.append(key, value as unknown as File, nameToSend);
+    }
+  }
+
+  return cloned;
+}
+
+/**
+ * Bytes copied into this realm, read through their internal slots so another realm's are
+ * copied too. This realm's `Buffer` stays a `Buffer` - a view over the copy, so nothing of
+ * the caller's, not its `valueOf` or `length`, is consulted - so an interceptor's
+ * `toString('base64')` reads the bytes; any other `Uint8Array`, another realm's `Buffer`
+ * or a subclass among them, is a plain `Uint8Array`. A `Buffer` is told by its prototype
+ * being `Buffer.prototype` itself, not by `Buffer.isBuffer`, whose `instanceof` walks a
+ * prototype chain the caller may have put a `Proxy` in (and a polyfill's reads a
+ * property). Where there is no `Buffer`, as in a browser, every copy is a plain one.
+ */
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(bytes);
+
+  if (
+    typeof Buffer !== 'undefined' &&
+    Object.getPrototypeOf(bytes) === Buffer.prototype
+  ) {
+    return Buffer.from(copy.buffer, copy.byteOffset, copy.byteLength);
+  }
+
+  return copy;
+}

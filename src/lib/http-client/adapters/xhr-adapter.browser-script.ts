@@ -145,8 +145,9 @@ async function runTests(): Promise<void> {
       caught = error;
     }
 
-    browserExpect(caught).toBeInstanceOf(DOMException);
-    browserExpect((caught as DOMException).name).toBe('AbortError');
+    browserExpect(caught).toBeInstanceOf(Error);
+    browserExpect(caught instanceof DOMException).toBe(false);
+    browserExpect((caught as Error).name).toBe('AbortError');
   });
 
   await test('adapter: upload progress 0% first then 100% last', async () => {
