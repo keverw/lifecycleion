@@ -423,7 +423,9 @@ export interface NodeAdapterConfig {
    *
    * `false` hands over every body exactly as it arrived - to save a server's `.gz` as
    * sent, say - and sends no `Accept-Encoding` of its own (a request's own still goes
-   * out). `maxResponseBytes` then counts the bytes as received.
+   * out). `maxResponseBytes` then counts the bytes as received. The client still reads a
+   * buffered body by its `Content-Type`, so the compressed bytes of a JSON or text
+   * response are decoded as UTF-8 text; use `streamResponse` to keep them.
    */
   decompress?: boolean;
 

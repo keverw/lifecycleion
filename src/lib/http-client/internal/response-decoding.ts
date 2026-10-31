@@ -3,9 +3,11 @@
  *
  * `fetch` (undici, Bun) and browsers decode a compressed response before handing over its
  * body, and so do axios and got on Node; Node's own `http.request` does not. NodeAdapter
- * decodes as they do, so the same request yields the same body on every adapter: otherwise
- * a server or CDN that sends `Content-Encoding: gzip` would give NodeAdapter callers the
- * raw gzip bytes - a JSON response that fails to parse - where FetchAdapter gives the JSON.
+ * decodes as they do, so a well-formed compressed body is the same on every adapter:
+ * otherwise a server or CDN that sends `Content-Encoding: gzip` would give NodeAdapter
+ * callers the raw gzip bytes - a JSON response that fails to parse - where FetchAdapter
+ * gives the JSON. A malformed one can differ: decoding here is strict, and a runtime's
+ * `fetch` is more lenient in places.
  *
  * The decoded body is offered through the same events the raw `IncomingMessage` emits -
  * `data`, `end`, `error`, `aborted`, `close` - and its `pause` / `resume`, so the buffered
