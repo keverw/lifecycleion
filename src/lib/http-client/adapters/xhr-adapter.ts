@@ -87,7 +87,8 @@ export class XHRAdapter implements HTTPAdapter {
       requestURL,
       initialURL,
     } = readAdapterRequestFields(request);
-    if (asciiUppercase(method) === 'CONNECT') {
+    const upperMethod = asciiUppercase(method);
+    if (upperMethod === 'CONNECT') {
       throw connectRefusal('XHRAdapter');
     }
 
@@ -96,7 +97,6 @@ export class XHRAdapter implements HTTPAdapter {
     // `HTTPClient` refuses one before this, on the same rule, and hands a JSON body that
     // serializes to nothing over as `null`. In a browser only: a non-browser XHR (React
     // Native, a shim) may send the body.
-    const upperMethod = asciiUppercase(method);
     if (
       (upperMethod === 'GET' || upperMethod === 'HEAD') &&
       requestBody !== null &&

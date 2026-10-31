@@ -385,8 +385,8 @@ export class CookieJar {
    * 6265bis keeps it), or a value holding `;` or a control character other than a tab,
    * or a name and value together longer than 4096 characters, the limit a `Set-Cookie`
    * is held to. A name may be
-   * empty - a nameless cookie, sent as its value alone - when the value is not empty,
-   * holds no `=` and does not start with `__Secure-` / `__Host-`. The header is
+   * empty - a nameless cookie, sent as its value alone - when the value is not empty and
+   * does not start with `__Secure-` / `__Host-`. The header is
    * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` would be
    * sent as two cookies, and a CR LF would be a header injection. The Set-Cookie parser
    * cannot produce these - it splits on `;` first - so this covers the programmatic path
@@ -1972,13 +1972,13 @@ export class CookieJar {
 
     // A name holds no `=` (its own delimiter). It may be empty - a nameless
     // cookie, sent as its value alone (RFC 6265bis) - when the value is not: and then the
-    // value holds no `=`, or it would be read back as a name, and does not pose as a
-    // `__Secure-` / `__Host-` cookie, which RFC 6265bis refuses.
+    // value does not pose as a `__Secure-` / `__Host-` cookie, which RFC 6265bis refuses,
+    // read as a server reads it: with the spaces and tabs at its edges trimmed.
+    // It may hold an `=`, though a server reads `=a=b` back as `a=b`, as browsers keep it.
     if (name === '') {
       return (
         value !== '' &&
-        !value.includes('=') &&
-        cookieNamePrefix(value) === null &&
+        cookieNamePrefix(trimSpacesAndTabs(value)) === null &&
         isHeaderSafeCookieText(value, '')
       );
     }

@@ -5526,11 +5526,11 @@ export class BaseHTTPClient {
     // `_assertRequestShapeIsSupported`).
     // XHR in a browser only, as the TRACE refusal there: a non-browser XHR (React Native,
     // a shim) may send the body.
+    const method = asciiUppercase(request.method);
     if (
       (adapterType === 'fetch' ||
         (adapterType === 'xhr' && this._isBrowserRuntime)) &&
-      (asciiUppercase(request.method) === 'GET' ||
-        asciiUppercase(request.method) === 'HEAD') &&
+      (method === 'GET' || method === 'HEAD') &&
       hasRequestBody(request.body)
     ) {
       throw methodRefusal(

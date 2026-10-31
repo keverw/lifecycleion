@@ -386,11 +386,9 @@ describe('CookieJar', () => {
       expect(jar.setCookie({ ...base, name: 'sid', value: 'bell\u0007' })).toBe(
         false,
       );
-      // A nameless cookie is fine; a nameless one with nothing in it, or with an `=` that
-      // would read back as a name, is not.
+      // A nameless cookie is fine; a nameless one with nothing in it is not.
       expect(jar.setCookie({ ...base, name: '', value: 'x' })).toBe(true);
       expect(jar.setCookie({ ...base, name: '', value: '' })).toBe(false);
-      expect(jar.setCookie({ ...base, name: '', value: 'a=b' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a=b', value: 'x' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a;b', value: 'x' })).toBe(false);
       // A space at a name's edge is trimmed off the name a server reads back.
@@ -4126,6 +4124,29 @@ test('fromJSON refuses an entry it cannot read and reads a Date by its time', ()
     Date.prototype.getTime.call(expires),
   );
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
+});
+
+test('a nameless Set-Cookie keeps the = in its value, as browsers do', () => {
+  const url = 'https://example.com/';
+  const read = (...lines: string[]): string => {
+    const jar = new CookieJar();
+
+    for (const line of lines) {
+      jar.parseSetCookieHeader(line, url);
+    }
+
+    return jar.getCookieHeaderString(url);
+  };
+
+  expect(read('=test=2')).toBe('test=2');
+  expect(read('===test=2b')).toBe('==test=2b');
+  expect(read('=test=11', 'test11')).toBe('test11');
+  expect(read('=__Secure-abc=123', '=__HoSt-abc=123')).toBe('');
+
+  const jar = new CookieJar();
+  const base = { name: '', domain: 'example.com', path: '/' };
+  expect(jar.setCookie({ ...base, value: ' __Host-sid=evil' })).toBe(false);
+  expect(jar.setCookie({ ...base, value: '\t__Secure-sid=evil' })).toBe(false);
 });
 
 test('fromJSON reads a maxAge of zero with no createdAt as expired, deleting its twin', () => {
