@@ -221,6 +221,15 @@ export function typedArrayNameOf(value: object): string | undefined {
   }
 }
 
+/** Whether `value` is a `Uint8Array`, told by its internal slot, so from any realm. */
+export function isUint8ArrayValue(value: unknown): value is Uint8Array {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typedArrayNameOf(value) === 'Uint8Array'
+  );
+}
+
 /**
  * Whether `value` is an `ArrayBuffer` or `SharedArrayBuffer` - the backing store itself
  * rather than a view over one.

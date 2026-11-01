@@ -53,7 +53,7 @@ import { noop, observeRejection } from '../../internal/promise-reactions';
 import { isObjectLike } from '../../internal/is-object-like';
 import {
   readBinaryByteLength,
-  typedArrayNameOf,
+  isUint8ArrayValue,
 } from '../../internal/binary-view';
 import { asciiLowercase } from '../../internal/ascii-text';
 import { BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES } from '../consts';
@@ -521,54 +521,82 @@ async function readBodyWithin(
   let loadedBytes = 0;
   let encoder: TextEncoder | undefined;
 
-  for await (const value of source) {
-    const chunk =
-      isTextChunkAccepted && typeof value === 'string'
-        ? (encoder ??= new TextEncoder()).encode(value)
-        : value;
-    const byteLength =
-      typeof chunk === 'object' &&
-      chunk !== null &&
-      typedArrayNameOf(chunk) === 'Uint8Array'
+  // The body is let go of on an abort, not only when a chunk next arrives: a polyfill's stream need not
+  // heed the signal, and would otherwise hold its socket with a read stalled, or go on
+  // being read and kept after the request had ended.
+  let didLetGo = false;
+  const letGo = (): void => {
+    if (!didLetGo) {
+      didLetGo = true;
+      cancel();
+    }
+  };
+  const throwIfAborted = (): void => {
+    if (isSignalAbortedQuietly(signal)) {
+      letGo();
+      throw makeAbortError();
+    }
+  };
+
+  throwIfAborted();
+
+  try {
+    signal?.addEventListener('abort', letGo, { once: true });
+  } catch {
+    // Unusable as a listener target; the check on each chunk still stops the read.
+  }
+
+  try {
+    for await (const value of source) {
+      throwIfAborted();
+
+      const chunk =
+        isTextChunkAccepted && typeof value === 'string'
+          ? (encoder ??= new TextEncoder()).encode(value)
+          : value;
+      const byteLength = isUint8ArrayValue(chunk)
         ? readBinaryByteLength(chunk)
         : null;
 
-    if (byteLength === null) {
-      cancel();
-      throw new TypeError(
-        'FetchAdapter response body yielded a chunk that is not a Uint8Array',
-      );
-    }
-
-    // No bytes to count or keep, and no limit they could reach: a stream that keeps
-    // answering with them from microtasks alone would otherwise starve every timer, the
-    // attempt timeout's included. `setTimeout`, as this adapter also runs in browsers.
-    // The abort is checked here as such a stream need not heed it, and the read would
-    // go on polling it after the request had ended.
-    if (byteLength === 0) {
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 0);
-      });
-
-      if (isSignalAbortedQuietly(signal)) {
-        cancel();
-        throw makeAbortError();
+      if (byteLength === null) {
+        letGo();
+        throw new TypeError(
+          'FetchAdapter response body yielded a chunk that is not a Uint8Array',
+        );
       }
 
-      continue;
+      // No bytes to count or keep, and no limit they could reach: a stream that keeps
+      // answering with them from microtasks alone would otherwise starve every timer, the
+      // attempt timeout's included. `setTimeout`, as this adapter also runs in browsers.
+      if (byteLength === 0) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
+
+        continue;
+      }
+
+      loadedBytes += byteLength;
+
+      if (loadedBytes > maxResponseBytes) {
+        letGo();
+        return RESPONSE_TOO_LARGE;
+      }
+
+      chunks.push(chunk as Uint8Array);
     }
 
-    loadedBytes += byteLength;
+    // A cancel can end the stream as if finished; what it read is not the whole body.
+    throwIfAborted();
 
-    if (loadedBytes > maxResponseBytes) {
-      cancel();
-      return RESPONSE_TOO_LARGE;
+    return concatChunks(chunks, loadedBytes);
+  } finally {
+    try {
+      signal?.removeEventListener('abort', letGo);
+    } catch {
+      // The listener stays; `once` bounds it to one call, and `letGo` to one cancel.
     }
-
-    chunks.push(chunk as Uint8Array);
   }
-
-  return concatChunks(chunks, loadedBytes);
 }
 
 /**

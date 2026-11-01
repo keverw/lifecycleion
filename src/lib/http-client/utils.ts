@@ -17,7 +17,7 @@ import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { copyArrayValue } from './internal/array-copy';
 import { isFormData } from './internal/form-entries';
 import { readUnknownMember } from '../internal/read-member';
-import { typedArrayNameOf } from '../internal/binary-view';
+import { isUint8ArrayValue } from '../internal/binary-view';
 import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
 import {
   lowerCaseHeaderName,
@@ -1509,11 +1509,7 @@ export function assertSupportedRequestBody(body: unknown): void {
  * slot, and nothing could copy its bytes, so it is not.
  */
 export function isRequestBodyBytes(body: unknown): body is Uint8Array {
-  return (
-    typeof body === 'object' &&
-    body !== null &&
-    typedArrayNameOf(body) === 'Uint8Array'
-  );
+  return isUint8ArrayValue(body);
 }
 
 /**

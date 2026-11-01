@@ -2340,6 +2340,76 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     expect(response.body?.length).toBe(0);
   });
 
+  test.each([
+    ['chunks that ignore it', false],
+    ['a read that stalls until cancelled', true],
+  ] as const)(
+    'an abort ends a read of %s and lets the stream go',
+    async (_name, doesStall) => {
+      const controller = new AbortController();
+      let reads = 0;
+      let cancels = 0;
+      let endStalledRead = (): void => {};
+
+      (globalThis as any).fetch = () => {
+        const response = new Response('', { status: 200 });
+        Object.defineProperty(response, 'body', {
+          value: {
+            getReader: () => ({
+              read: () => {
+                reads++;
+
+                if (doesStall && reads === 2) {
+                  setTimeout(() => {
+                    controller.abort();
+                  }, 0);
+
+                  return new Promise((resolve) => {
+                    endStalledRead = () => {
+                      resolve({ done: true, value: undefined });
+                    };
+                  });
+                }
+
+                if (reads === 2) {
+                  controller.abort();
+                }
+
+                return Promise.resolve({
+                  done: false,
+                  value: new Uint8Array(1),
+                });
+              },
+              cancel: () => {
+                cancels++;
+                endStalledRead();
+                return Promise.resolve();
+              },
+            }),
+          },
+        });
+        return Promise.resolve(response);
+      };
+
+      let failure: any;
+      try {
+        await new FetchAdapter().send({
+          requestURL: 'https://local.test/data',
+          method: 'GET',
+          headers: {},
+          maxResponseBytes: 100,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure?.name).toBe('AbortError');
+      expect(cancels).toBe(1);
+      expect(reads).toBe(2);
+    },
+  );
+
   test('a timeout ends a read of endless empty chunks, keeps the status and lets the stream go', async () => {
     let reads = 0;
     let cancels = 0;

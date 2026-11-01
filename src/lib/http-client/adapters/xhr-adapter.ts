@@ -121,7 +121,13 @@ export class XHRAdapter implements HTTPAdapter {
       'XHRAdapter',
     );
 
-    return await new Promise((resolve, reject) => {
+    /** Takes the abort listener off the signal; set once it is on. */
+    let removeAbortListener = (): void => {};
+
+    const startRequest = (
+      resolve: (response: AdapterResponse) => void,
+      reject: (reason: unknown) => void,
+    ): void => {
       // Refused the same way on every attempt - a method or header value `open` or
       // `setRequestHeader` will not take - so failed once as non-retryable, as the other
       // adapters fail a request their transport refuses to build.
@@ -216,8 +222,6 @@ export class XHRAdapter implements HTTPAdapter {
       // The signal is the caller's: one whose `aborted` or `addEventListener` throws is
       // refused as non-retryable, as every other field they hand over is, rather than
       // rejecting with the raw error and being retried as a network failure.
-      /** Takes the abort listener off the signal; set once it is on. */
-      let removeAbortListener = (): void => {};
       if (signal) {
         if (isSignalAborted(signal)) {
           reject(makeAbortError());
@@ -292,16 +296,11 @@ export class XHRAdapter implements HTTPAdapter {
       // Real per-chunk upload progress — the main advantage over FetchAdapter,
       // which has no streaming upload and can only fire 0% then 100%.
       // Deduplication guard — upload.progress and upload.load can both report
-      // 100% (see upload.load listener below for details).
+      // 100%, and an environment that skips upload.load gets its 100% as the request
+      // ends. It fires as soon as all bytes are sent, always before xhr.load per spec.
       let didFireUpload100 = false;
       let uploadedBytes = 0;
       let uploadTotalBytes = 0;
-
-      // 100% upload fires as soon as all bytes are sent, always before xhr.load
-      // per spec. Skip if upload.progress already reported 100% to avoid a
-      // duplicate event. We still track whether this fired so xhr.load can use
-      // it as a fallback for environments that skip upload.load entirely.
-      let didUploadComplete = false;
 
       // The size of a body that is not text, read once, so a value of the caller's (a
       // `Blob`'s `size`) is read at most once: `0` for none or an empty one, `undefined`
@@ -322,7 +321,8 @@ export class XHRAdapter implements HTTPAdapter {
           ? requestBody !== ''
           : binaryBodyByteLength !== 0);
 
-      // The one final upload event, however the upload ends: the bytes the browser
+      // The one final upload event, on every way the request ends with an answer, a refused
+      // one too, and however the upload ends: the bytes the browser
       // reported, or the body's own size where it reported none - `0` for an empty
       // string, as FetchAdapter reports it - not a stand-in `1`.
       const emitFinalUpload = (): void => {
@@ -376,8 +376,6 @@ export class XHRAdapter implements HTTPAdapter {
           });
 
           upload.addEventListener('load', (event) => {
-            didUploadComplete = true;
-
             uploadedBytes = Math.max(uploadedBytes, event.loaded);
             uploadTotalBytes = Math.max(
               uploadTotalBytes,
@@ -411,15 +409,6 @@ export class XHRAdapter implements HTTPAdapter {
       // read once, when they first pass the limit.
       let isBodyKnownUncoded: boolean | undefined;
 
-      // Fallback: upload.load didn't fire (no request body, or the browser skipped the
-      // event). Callers always see a 100% upload event, unless upload.progress already
-      // reported it - on every way the request ends with an answer, a refused one too.
-      const finishUploadProgress = (): void => {
-        if (!didUploadComplete) {
-          emitFinalUpload();
-        }
-      };
-
       /**
        * Fail a body past `maxResponseBytes` as a stream error with the real status and
        * `headers` (parsed by the caller), and stop the download. Both are read before
@@ -434,7 +423,7 @@ export class XHRAdapter implements HTTPAdapter {
         // reset this XHR, wiping its URL, status and headers.
         const responseURL = xhr.responseURL;
         const status = xhr.status;
-        finishUploadProgress();
+        emitFinalUpload();
 
         if (responseURL && didBrowserFollowRedirect(responseURL, answeredURL)) {
           resolve(browserRedirectResponse(responseURL));
@@ -514,7 +503,7 @@ export class XHRAdapter implements HTTPAdapter {
           // though the client will treat the result as redirect_disabled, so
           // emit terminal progress before returning the synthetic redirect
           // response.
-          finishUploadProgress();
+          emitFinalUpload();
 
           if (!didFireDownload100) {
             // One number for both, as on every other path: the bytes counted where the
@@ -536,7 +525,7 @@ export class XHRAdapter implements HTTPAdapter {
         const body = readResponseBody(method, xhr);
 
         // Before the refusal below, so a refused body sees it too.
-        finishUploadProgress();
+        emitFinalUpload();
 
         // The server answered and what failed is taking delivery, so a stream error with
         // the real status, as FetchAdapter reports a body it could not read. Left as no
@@ -633,7 +622,7 @@ export class XHRAdapter implements HTTPAdapter {
 
         if (followedRedirectBeforeAbort !== undefined) {
           // An answer, as on `load`: the final upload event fires for it there too.
-          finishUploadProgress();
+          emitFinalUpload();
           resolve(browserRedirectResponse(followedRedirectBeforeAbort));
           return;
         }
@@ -678,6 +667,18 @@ export class XHRAdapter implements HTTPAdapter {
       } catch (error) {
         removeAbortListener();
         refuse(error);
+      }
+    };
+
+    return await new Promise((resolve, reject) => {
+      // A constructor or `addEventListener` of an XHR outside a browser that throws fails
+      // the same way on every attempt, so it is refused as non-retryable too, and, never
+      // sent, takes the abort listener off itself.
+      try {
+        startRequest(resolve, reject);
+      } catch (error) {
+        removeAbortListener();
+        reject(nonRetryableAdapterErrorFrom(error));
       }
     });
   }

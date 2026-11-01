@@ -579,6 +579,76 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toBe(1);
   });
 
+  test('an XHR constructor that throws is refused as non-retryable', async () => {
+    const original = globalThis.XMLHttpRequest;
+    (globalThis as any).XMLHttpRequest = class {
+      constructor() {
+        throw new Error('no XHR here');
+      }
+    };
+
+    try {
+      const failure = await new XHRAdapter()
+        .send({ requestURL: 'https://api.test/x', method: 'GET', headers: {} })
+        .catch((error: unknown) => error);
+
+      expect(errorText(failure)).toContain('no XHR here');
+      expect((failure as any)[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(
+        true,
+      );
+    } finally {
+      globalThis.XMLHttpRequest = original;
+    }
+  });
+
+  test('an addEventListener that throws is refused as non-retryable and takes the abort listener off the signal', async () => {
+    const original = globalThis.XMLHttpRequest;
+    (globalThis as any).XMLHttpRequest = class extends FakeXHR {
+      public override addEventListener(
+        type: string,
+        handler: (event: unknown) => void,
+      ) {
+        if (type === 'load') {
+          throw new Error('no load event');
+        }
+        super.addEventListener(type, handler);
+      }
+    };
+    const { signal } = new AbortController();
+    const added: unknown[] = [];
+    const removed: unknown[] = [];
+    const add = signal.addEventListener.bind(signal);
+    const remove = signal.removeEventListener.bind(signal);
+    signal.addEventListener = ((type: string, listener: any, options: any) => {
+      added.push(listener);
+      add(type, listener, options);
+    }) as never;
+    signal.removeEventListener = ((type: string, listener: any) => {
+      removed.push(listener);
+      remove(type, listener);
+    }) as never;
+
+    try {
+      const failure = await new XHRAdapter()
+        .send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+          signal,
+        })
+        .catch((error: unknown) => error);
+
+      expect(errorText(failure)).toContain('no load event');
+      expect((failure as any)[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(
+        true,
+      );
+      expect(added.length).toBe(1);
+      expect(removed).toEqual(added);
+    } finally {
+      globalThis.XMLHttpRequest = original;
+    }
+  });
+
   test('a response an XHR handed over as text is read as UTF-8 bytes and held to the limit', async () => {
     const send = (maxResponseBytes: number) => {
       const promise = new XHRAdapter().send({

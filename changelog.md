@@ -607,4 +607,6 @@
 - **BREAKING:** XHRAdapter: a response an XHR outside a browser hands over as text is read as UTF-8 bytes, and one in no readable form fails as a `stream_response_error` with the real status, rather than reading as a healthy empty answer.
 - FetchAdapter: a body stream answering empty chunks from microtasks alone no longer starves timers, and its read stops and lets the stream go once the attempt is aborted, reporting the real status.
 - A request leaves `listRequests()`, and the client's listeners leave the caller's signal, as it settles, before its `final` observers run, so one that never settles keeps neither. A chunk whose write callback succeeded stays accepted if the stream is destroyed before `write` returns.
+- FetchAdapter: an abort cancels a polyfilled `fetch`'s body at once, rather than reading on after the request has ended; a stalled read ends if the stream's cancel ends it.
+- XHRAdapter: an XHR constructor or `addEventListener` that throws is refused as a non-retryable `adapter_error`, and takes the abort listener off the signal.
 - FetchAdapter: a polyfilled `fetch`'s response body is released on a bodiless answer (HEAD, 204, 205, 304) rather than left unread.
