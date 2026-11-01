@@ -162,8 +162,9 @@ function topLevelKeyOf(key: string): string {
  * `path`, or one that is only a query or fragment, is added to `baseURL` as written.
  *
  * **Absolute / protocol-relative `path` (escape hatch)** — If `path` is a full
- * `http:` or `https:` URL, it is **not** prefixed with `baseURL` (after
- * normalization via `URL#href`). The same applies to protocol-relative URLs
+ * `http://` or `https://` URL, it is **not** prefixed with `baseURL` (after
+ * normalization via `URL#href`). With no `baseURL` to stay on, the parser's slashless
+ * spellings (`http:host/x`) are read as URLs too. The same applies to protocol-relative URLs
  * (`//cdn.example/x`): they are left for {@link resolveAbsoluteURL} to resolve
  * using the client `baseURL`’s scheme. Use this for one-off cross-origin calls,
  * CDN assets, or URLs returned by APIs; for strict per-origin clients, prefer
@@ -182,7 +183,12 @@ export function buildURL(
 ): string {
   let url: string;
 
-  const absoluteHref = tryAbsoluteWebHref(path);
+  // With a base, only a URL that says `scheme://` skips the join: the parser also reads
+  // `http:evil.test` as a host, a spelling that passes a check for `://` or a leading `//`.
+  const absoluteHref =
+    baseURL && !path.slice(path.indexOf(':') + 1).startsWith('//')
+      ? null
+      : tryAbsoluteWebHref(path);
 
   if (baseURL && absoluteHref === null && !path.startsWith('//')) {
     if (path === '' || path.startsWith('?') || path.startsWith('#')) {
@@ -753,7 +759,9 @@ export function normalizeFilterMethods(
  * Later objects win on conflict. Array values replace earlier scalars/arrays
  * wholesale, and single-item arrays are collapsed back to a plain string. A later
  * `null` or `undefined` value removes the header an earlier object set - a request
- * dropping a client default such as `authorization` - rather than being sent.
+ * dropping a client default such as `authorization` - rather than being sent. Names that
+ * differ only in case, in one object or several, are that same conflict: the last wins, so
+ * `{ ...defaults, 'content-type': type }` replaces a default `Content-Type`.
  */
 export function mergeHeaders(
   ...headerSets: Array<RequestHeadersInput | undefined>
@@ -929,7 +937,6 @@ export function assertSupportedAdapterRuntimeAndConfig(
   }
 
   if (
-    config.followRedirects === true &&
     config.maxRedirects !== undefined &&
     // A whole number, as every other count option is: `1.5` would otherwise be accepted
     // and act as 1.

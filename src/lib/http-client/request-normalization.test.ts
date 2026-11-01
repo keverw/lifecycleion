@@ -8587,6 +8587,27 @@ test('a throwing failure listener stays contained; a body torn down by one holds
   expect(source.heldError?.()).toBeUndefined();
 });
 
+test("a decoding failure from another realm's Error is heard and held as any other", async () => {
+  const zlib = await import('node:zlib');
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'gzip');
+  const told: Error[] = [];
+  source.onFailure?.((error) => told.push(error));
+
+  (res as unknown as PassThrough).write(zlib.gzipSync('hello').subarray(0, 4));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const foreign = vm.runInNewContext('new Error("corrupt")') as Error;
+  expect(foreign instanceof Error).toBe(false);
+  (source as unknown as { decoders: PassThrough[] }).decoders[0]?.emit(
+    'error',
+    foreign,
+  );
+
+  expect(told).toEqual([foreign]);
+  expect(source.heldError?.()).toBe(foreign);
+});
+
 test('an empty inner layer fails as a stream that ends early, whichever its coding', async () => {
   const zlib = await import('node:zlib');
 

@@ -342,11 +342,12 @@ export interface CookieJarOptions {
  * Growth is bounded as Chromium bounds it: past 180 cookies in a site, or 3300 in the jar,
  * expired cookies go first and then the least recently used, non-`Secure` before `Secure`,
  * down to 150 and 3000. Any store can evict a `Secure` cookie once no non-`Secure` one is
- * left to go, as in Chromium, so `Secure` cookies cannot fill the jar and lock others out,
- * and a flood of non-`Secure` cookies pushes them no lower than 150 and 3000. It differs in
- * one way: cookies used in the last 30 days are not exempt from the jar-wide limit, as a
+ * left to go, as in Chromium, so `Secure` cookies cannot fill the jar and lock others out.
+ * Within one limit a flood of non-`Secure` cookies pushes them no lower than its target: 150
+ * in a site, 3000 in the jar, whose limit can take one site's below 150. It differs in two
+ * ways: cookies used in the last 30 days are not exempt from the jar-wide limit, as a
  * long-running service can reach thousands of sites inside that window, and the limit would
- * not bound it.
+ * not bound it; and `Priority` is not read, every cookie evicting as Chromium's default does.
  *
  * IPs are never treated as public suffixes. A bare single-label hostname - `localhost`,
  * `myapp` - is, so a cookie may not span one; per RFC 6265bis §5.5 a `Domain=` naming the
@@ -416,8 +417,8 @@ export class CookieJar {
    * under the jar's list is stored host-only, as a `Set-Cookie` naming the suffix from
    * that host itself is, and replaces the cookie such a `Set-Cookie` stored.
    *
-   * Also returns false for a non-`Secure` cookie when `Secure` cookies alone fill the
-   * limit, since it may not evict them: it is the cookie that goes. See {@link CookieJar}.
+   * Also returns false for a cookie the limits evict as it is stored: a non-`Secure` one
+   * beside 150 or more `Secure` ones in a site goes before they do. See {@link CookieJar}.
    *
    * The jar stores its own copy of the cookie. To change a stored cookie - its value,
    * say - call `setCookie` again with the same name, domain, path and `hostOnly`.
@@ -930,7 +931,8 @@ export class CookieJar {
    * Serializes copies of the stored cookies.
    *
    * A replaced cookie's place in the `Cookie` header - its first creation time - is not
-   * saved: after a restore, cookies of equal path length are ordered by `createdAt`.
+   * saved: after a restore, cookies of equal path length are ordered by `createdAt`, and
+   * those that share one by the order listed here.
    * Least recently used first: a restore counts recency by payload order, so a restored
    * jar evicts as this one would. The times themselves are not saved.
    */
@@ -1783,7 +1785,7 @@ export class CookieJar {
 
     // RFC 6265bis §5.7 "Leave Secure Cookies Alone": a non-Secure cookie from a
     // non-secure request cannot replace, shadow or evict a stored Secure cookie of the
-    // same name whose scope covers it. Checked before the expiry-driven deletions
+    // same name whose scope covers it, while one is stored. Checked before the expiry-driven deletions
     // below on purpose - `Max-Age=0` over `http:` is otherwise a one-line eviction of
     // the `https:` session, and a fresh one planted beside it would then be the only
     // `session` cookie left to send.

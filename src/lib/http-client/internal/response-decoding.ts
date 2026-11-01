@@ -21,6 +21,7 @@ import * as zlib from 'node:zlib';
 import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
 import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 import { reportCallbackError } from '../../safe-handle-callback';
+import { isErrorValue } from '../../to-error';
 
 /** The encodings NodeAdapter asks for and decodes, as `fetch` asks for them. */
 export const ACCEPTED_CONTENT_ENCODINGS = 'gzip, deflate, br';
@@ -566,7 +567,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     for (const queue of [this.held, this.heldWhilePaused]) {
       for (const { event, args } of queue) {
         const error: unknown = args[0];
-        if (event === 'error' && error instanceof Error && matches(error)) {
+        if (event === 'error' && isErrorValue(error) && matches(error)) {
           return error;
         }
       }
@@ -603,7 +604,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     const failure: unknown = args[0];
     if (
       event === 'error' &&
-      failure instanceof Error &&
+      isErrorValue(failure) &&
       isDecodeFailure(failure)
     ) {
       // Once per subscription, as the replay is: a second decoder's error queued in the
@@ -671,7 +672,9 @@ function createDecoder(
       return zlib.createGunzip({ flush: zlib.constants.Z_SYNC_FLUSH });
     case 'deflate':
       // An inner coding's first bytes are not known yet, nor two of an outer one whose
-      // first chunk holds one: told apart once the decoder has two.
+      // first chunk holds one: told apart once the decoder has two. An inflater known from
+      // the start stays bare: `attachDecoders` reads trailing bytes off its `'end'`, which
+      // settles a response that never ends, where `SniffingInflate` would wait for a flush.
       if (firstChunk === undefined || firstChunk.length < 2) {
         return new SniffingInflate();
       }

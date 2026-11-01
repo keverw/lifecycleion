@@ -315,7 +315,8 @@ export function materializeRequestHeaders(
   const result: Record<string, string> = {};
   // Names that differ only in case are one header, joined under the first spelling, as
   // `fetch`'s `Headers` joins them: Node's `http` would lowercase the names and keep only
-  // the last.
+  // the last. For an adapter driven directly: the client's `mergeHeaders` has already
+  // settled them, the last spelling winning.
   const spellings = new Map<string, string>();
   const isLowercasingNames = options.isLowercasingNames === true;
   const entries = Object.entries(headers);

@@ -1727,6 +1727,24 @@ export class BaseHTTPClient {
             // a `Location` nobody fixed fails, and it fails as the server's fault.
             const wasLocationUnsupported = !isAbsoluteWebURL(redirectURL);
 
+            // A hop that failed before it went out, as every such failure reports it.
+            const buildUnsentHopResponse = (requestURL: string) =>
+              this._buildResponse<T>({
+                adapterResponse: null,
+                requestID,
+                wasCancelled: false,
+                wasTimeout: false,
+                adapterType: this._adapterType,
+                initialURL: initialRequestURL,
+                requestURL,
+                redirectHistory: nextRedirectHistory,
+                undispatchedRedirect: {
+                  url: detectedTargetURL,
+                  isRecorded: true,
+                },
+                isNetworkErrorOverride: false,
+              });
+
             // Only the fields a request interceptor is handed in the other phases: the
             // attempt that answered carries its own (`rawBody`, `timeout`, the attempt
             // header for the attempt that is over), which are rebuilt for the next one.
@@ -1765,21 +1783,7 @@ export class BaseHTTPClient {
                 attemptLimits,
                 requestID,
               );
-              response = this._buildResponse<T>({
-                adapterResponse: null,
-                requestID,
-                wasCancelled: false,
-                wasTimeout: false,
-                adapterType: this._adapterType,
-                initialURL: initialRequestURL,
-                requestURL: redirectURL,
-                redirectHistory: nextRedirectHistory,
-                undispatchedRedirect: {
-                  url: detectedTargetURL,
-                  isRecorded: true,
-                },
-                isNetworkErrorOverride: false,
-              });
+              response = buildUnsentHopResponse(redirectURL);
               errorCode = 'request_setup_error';
               adapterCause = normalizeError(error);
 
@@ -1879,26 +1883,14 @@ export class BaseHTTPClient {
                   // See the initial phase's.
                   redirectBodyCopy.didFail ? 'unbuildable' : undefined,
                 );
-                response = this._buildResponse<T>({
-                  adapterResponse: null,
-                  requestID,
-                  wasCancelled: false,
-                  wasTimeout: false,
-                  adapterType: this._adapterType,
-                  initialURL: initialRequestURL,
-                  // The interceptor's request may be what failed; see the initial phase.
-                  requestURL: readStringMember(
+                // The interceptor's request may be what failed; see the initial phase.
+                response = buildUnsentHopResponse(
+                  readStringMember(
                     failedRedirectRequest,
                     'requestURL',
                     redirectURL,
                   ),
-                  redirectHistory: nextRedirectHistory,
-                  undispatchedRedirect: {
-                    url: detectedTargetURL,
-                    isRecorded: true,
-                  },
-                  isNetworkErrorOverride: false,
-                });
+                );
 
                 // A body that could not be copied is the body's failure; see
                 // `isBodyCopyFailure`.
@@ -1963,21 +1955,7 @@ export class BaseHTTPClient {
                 attemptLimits,
                 requestID,
               );
-              response = this._buildResponse<T>({
-                adapterResponse: null,
-                requestID,
-                wasCancelled: false,
-                wasTimeout: false,
-                adapterType: this._adapterType,
-                initialURL: initialRequestURL,
-                requestURL: redirectInterceptURL,
-                redirectHistory: nextRedirectHistory,
-                undispatchedRedirect: {
-                  url: detectedTargetURL,
-                  isRecorded: true,
-                },
-                isNetworkErrorOverride: false,
-              });
+              response = buildUnsentHopResponse(redirectInterceptURL);
 
               errorCode = 'request_setup_error';
               // Named by its scheme alone, as the adapters name a URL they refuse: an
@@ -2033,21 +2011,7 @@ export class BaseHTTPClient {
                 attemptLimits,
                 requestID,
               );
-              response = this._buildResponse<T>({
-                adapterResponse: null,
-                requestID,
-                wasCancelled: false,
-                wasTimeout: false,
-                adapterType: this._adapterType,
-                initialURL: initialRequestURL,
-                requestURL: unsentRequest.requestURL,
-                redirectHistory: nextRedirectHistory,
-                undispatchedRedirect: {
-                  url: detectedTargetURL,
-                  isRecorded: true,
-                },
-                isNetworkErrorOverride: false,
-              });
+              response = buildUnsentHopResponse(unsentRequest.requestURL);
               errorCode = 'request_setup_error';
               adapterCause = normalizeError(error);
 

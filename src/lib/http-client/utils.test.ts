@@ -69,6 +69,24 @@ afterEach(() => {
 });
 
 describe('buildURL', () => {
+  test('with a base, only a scheme followed by // leaves it', () => {
+    for (const path of [
+      'http:evil.test/x',
+      'https:evil.test/x',
+      'http:/evil.test/x',
+      'http:\\\\evil.test/x',
+    ]) {
+      expect(buildURL('https://a.test', path)).toBe(`https://a.test/${path}`);
+    }
+
+    expect(buildURL('https://a.test', 'HTTP://other.test/x')).toBe(
+      'http://other.test/x',
+    );
+    expect(buildURL(undefined, 'http://other.test/x')).toBe(
+      'http://other.test/x',
+    );
+  });
+
   test('adds no slash when there is no path to join', () => {
     expect(buildURL('https://api.test/v1', '')).toBe('https://api.test/v1');
     expect(buildURL('https://api.test/v1', '?page=2')).toBe(
@@ -412,6 +430,12 @@ describe('mergeHeaders', () => {
         { 'content-type': 'application/json' },
       ),
     ).toEqual({ 'content-type': 'application/json' });
+  });
+
+  test('names differing only in case are one conflict: the last wins', () => {
+    expect(
+      mergeHeaders({ 'Content-Type': 'text/plain', 'content-type': 'a/b' }),
+    ).toEqual({ 'content-type': 'a/b' });
   });
 
   test('lowercases keys from all sets', () => {
