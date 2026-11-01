@@ -196,6 +196,10 @@ export function writeChunkWithBackpressure(
     });
     hasWriteReturned = true;
 
+    // Before the listeners and their `req.destroyed` check: a chunk the callback already
+    // accepted stays accepted, whatever happened to the stream before `write` returned.
+    maybeResolve();
+
     // Armed for every chunk still waiting on its callback. A socket that dies while a chunk
     // sits in the buffer never calls it: with nothing listening, nothing would reject and
     // nothing resolve, so the writer's promise would stay pending for good. That is the
@@ -218,7 +222,5 @@ export function writeChunkWithBackpressure(
         onClose();
       }
     }
-
-    maybeResolve();
   });
 }

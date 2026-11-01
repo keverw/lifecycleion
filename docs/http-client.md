@@ -681,7 +681,7 @@ interface RequestInterceptorContext {
 
 ## Response Observers
 
-Observers run **after** an adapter attempt and have no say in the outcome: what they return is ignored, and a throw is reported, not raised. They are handed the response, request and error themselves, not copies - a final observer's change to the response is what `send()` returns and the next observer sees - so treat them as read-only. They are the right place for logging, metrics, cache writes, and reading token state out of response bodies. The request waits for them in order, with no timeout, so one that never settles holds it up. In the `redirect` and `retry` phases a cancel stops that wait: `send()` answers at once, the observer it was waiting on carries on by itself, and no later observer of that phase runs. A `final` observer runs after the request has settled, so `send()` waits for it regardless.
+Observers run **after** an adapter attempt and have no say in the outcome: what they return is ignored, and a throw is reported, not raised. They are handed the response, request and error themselves, not copies - a final observer's change to the response is what `send()` returns and the next observer sees - so treat them as read-only. They are the right place for logging, metrics, cache writes, and reading token state out of response bodies. The request waits for them in order, with no timeout, so one that never settles holds it up. In the `redirect` and `retry` phases a cancel stops that wait: `send()` answers at once, the observer it was waiting on carries on by itself, and no later observer of that phase runs. A `final` observer runs after the request has settled, so `send()` waits for it regardless; the request has by then left `listRequests()` and the client's listeners have left your signal, so one that never settles holds up only that `send()`.
 
 ```typescript
 const removeObserver = client.addResponseObserver(
@@ -1568,6 +1568,8 @@ A caller's `Content-Length` is not sent: the XHR frames the body itself, as `fet
 
 The adapter resolves the request URL to an absolute URL once, as the browser does - a relative one against the document's base URL, or the worker's `location` - and opens the XHR with that URL. It resolves it with `new URL`, as FetchAdapter does, so the query is encoded as UTF-8: on a page in a legacy encoding, a raw non-ASCII query is sent as UTF-8 rather than in the page's encoding. URL userinfo is withheld from that resolved URL when it is cross-origin to the initial URL, so `//user:pass@api.test/x` on an `http:` page, for a request that started on `https://api.test/`, is opened without its credentials. Only an initial URL that starts with `/` - root-relative (`/start`) or protocol-relative (`//host/start`) - is resolved against the same base first. Any other relative initial URL is treated as cross-origin, as one that cannot be resolved is: `''`, `#top`, `?q` and `start` name no origin of their own, and other spellings a browser reads as root- or protocol-relative (`\\host/start`, a leading space or tab) are not resolved either. The client always sends an absolute `http:` or `https:` URL. Driven directly with a URL of any other scheme (`file:`, `data:`, `blob:`, ...), or with a relative request URL where there is nothing to resolve it against (no document or `location`, as outside a browser), the adapter refuses it before opening the XHR with a non-retryable `TypeError`, as NodeAdapter refuses a URL it cannot send.
 
+A body is read from `xhr.response`. An XHR outside a browser that does not honor `responseType = 'arraybuffer'` and hands over a string has it taken as UTF-8 bytes; one that hands over anything else fails as a `stream_response_error` with the real status, rather than reading as an empty answer.
+
 Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, after the request completes, the adapter compares `xhr.responseURL` to the absolute URL it opened to detect whether a redirect occurred. If one is detected the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`. A `3xx` the XHR hands over without following - in a browser, one with no `Location`; outside one, an `XMLHttpRequest` that does not follow redirects - reports `wasRedirectDetected` from its status, and `detectedRedirectURL` where its `Location` resolves against that absolute URL, as FetchAdapter and NodeAdapter report a real `3xx`.
 
 ### MockAdapter (Testing)
@@ -1923,12 +1925,12 @@ Two things deliberately do **not** set the flag. A caller's own `AbortSignal` fi
 
 #### Adapter Support
 
-| Adapter        | `isStreamError` | Notes                                                                                                                                                     |
-| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                            |
-| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. Always reports `stream_response_error` because `fetch` buffers the body, so there is no per-chunk delivery to inspect |
-| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                 |
-| `XHRAdapter`   | Timeouts only   | A per-attempt timeout after the headers keeps the real status; a network error mid-body cannot, as `XMLHttpRequest` discards the status                   |
+| Adapter        | `isStreamError` | Notes                                                                                                                                                      |
+| -------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                             |
+| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. Always reports `stream_response_error` because `fetch` buffers the body, so there is no per-chunk delivery to inspect  |
+| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                  |
+| `XHRAdapter`   | Limited         | A per-attempt timeout after the headers, or a body it cannot read, keeps the real status; a network error mid-body cannot, as `XMLHttpRequest` discards it |
 
 Every adapter, `XHRAdapter` included, also reports `response_too_large` as a stream error for a buffered body past `maxResponseBytes` (see [Response Size Limit](#response-size-limit)): there the adapter itself stops the read, while the headers are still in hand.
 

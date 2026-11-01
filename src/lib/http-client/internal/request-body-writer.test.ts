@@ -462,4 +462,24 @@ describe('writeChunkWithBackpressure', () => {
     expect(req.listenerCount('close')).toBe(0);
     expect(req.listenerCount('error')).toBe(0);
   });
+
+  test('a chunk accepted inside write stays accepted when the stream is destroyed before write returns', async () => {
+    const req = new EventEmitter() as EventEmitter & RequestBodyWritable;
+    let isDestroyed = false;
+    Object.defineProperty(req, 'destroyed', { get: () => isDestroyed });
+    req.write = (_data, callback) => {
+      callback?.(null);
+      isDestroyed = true;
+      return true;
+    };
+
+    let accepted = 0;
+    await writeChunkWithBackpressure(req, 'chunk', () => {
+      accepted++;
+    });
+
+    expect(accepted).toBe(1);
+    expect(req.listenerCount('close')).toBe(0);
+    expect(req.listenerCount('error')).toBe(0);
+  });
 });

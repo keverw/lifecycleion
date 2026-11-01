@@ -2298,6 +2298,90 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     return { response, isCancelled };
   }
 
+  test('empty chunks answered from microtasks alone yield to timers', async () => {
+    // Capped, so a read that starves the timer ends rather than hanging the run.
+    const readCap = 100_000;
+    let reads = 0;
+    let didTimerFire = false;
+    setTimeout(() => {
+      didTimerFire = true;
+    }, 0);
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('', { status: 200 });
+      Object.defineProperty(response, 'body', {
+        value: {
+          getReader: () => ({
+            read: () => {
+              reads++;
+              return Promise.resolve(
+                didTimerFire || reads >= readCap
+                  ? { done: true, value: undefined }
+                  : { done: false, value: new Uint8Array(0) },
+              );
+            },
+            cancel: () => Promise.resolve(),
+          }),
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+
+    expect(didTimerFire).toBe(true);
+    expect(reads).toBeLessThan(readCap);
+    expect(response.isStreamError).toBeUndefined();
+    expect(response.body?.length).toBe(0);
+  });
+
+  test('a timeout ends a read of endless empty chunks, keeps the status and lets the stream go', async () => {
+    let reads = 0;
+    let cancels = 0;
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('', { status: 200 });
+      Object.defineProperty(response, 'body', {
+        value: {
+          getReader: () => ({
+            read: () => {
+              reads++;
+              return Promise.resolve({
+                done: false,
+                value: new Uint8Array(0),
+              });
+            },
+            cancel: () => {
+              cancels++;
+              return Promise.resolve();
+            },
+          }),
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'https://local.test',
+      timeout: 30,
+      maxResponseBytes: 10,
+    });
+    const response = await client.get('/data').retryPolicy(null).send();
+    const readsAtSettle = reads;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(response.status).toBe(200);
+    expect(response.isTimeout).toBe(true);
+    expect(cancels).toBe(1);
+    expect(reads).toBe(readsAtSettle);
+  });
+
   test('a chunk that is not a Uint8Array fails the body read as arrayBuffer() does, not as zeros', async () => {
     // How the unlimited path fails for the same stream where `arrayBuffer()` follows the
     // Fetch standard (Node's undici, browsers): it rejects with a `TypeError`.

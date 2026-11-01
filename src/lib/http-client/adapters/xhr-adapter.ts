@@ -538,6 +538,24 @@ export class XHRAdapter implements HTTPAdapter {
         // Before the refusal below, so a refused body sees it too.
         finishUploadProgress();
 
+        // The server answered and what failed is taking delivery, so a stream error with
+        // the real status, as FetchAdapter reports a body it could not read. Left as no
+        // body, an XHR that kept it elsewhere would read as a healthy empty answer.
+        if (body === RESPONSE_UNREADABLE) {
+          resolve({
+            status,
+            ...derivedRedirectFields(answeredURL, status, responseHeaders),
+            headers: responseHeaders,
+            body: null,
+            isStreamError: true,
+            streamErrorCode: 'stream_response_error',
+            errorCause: new TypeError(
+              'XHRAdapter response body was neither an ArrayBuffer nor text',
+            ),
+          });
+          return;
+        }
+
         // The body as handed over can be larger than the bytes progress counted - a
         // runtime may count a compressed response encoded there, and a body that is or
         // may be compressed is not stopped on them - and a runtime need not report
@@ -748,6 +766,9 @@ function readProgressEvent(event: {
     : { progress: -1, total: event.loaded };
 }
 
+/** What `readResponseBody` answers for a body an XHR handed over in no form it can read. */
+const RESPONSE_UNREADABLE = Symbol('response unreadable');
+
 /**
  * The response for a redirect the browser followed on its own: `status: 0` with the
  * final URL, which the client reports as `redirect_disabled`. A `responseURL` that does
@@ -776,12 +797,13 @@ function browserRedirectResponse(responseURL: string): AdapterResponse {
 
 /**
  * Returns the response body as a Uint8Array, or null for response types that
- * carry no body (HEAD, 204, 205, 304 and 1xx - see `hasResponseBody`).
+ * carry no body (HEAD, 204, 205, 304 and 1xx - see `hasResponseBody`), or
+ * `RESPONSE_UNREADABLE` for a body in no form it can read.
  */
 function readResponseBody(
   method: string,
   xhr: XMLHttpRequest,
-): Uint8Array | null {
+): Uint8Array | null | typeof RESPONSE_UNREADABLE {
   // The shared rule, so a `205` or `1xx` is bodiless here as in the other adapters.
   if (!hasResponseBody(method, xhr.status)) {
     return null;
@@ -798,7 +820,14 @@ function readResponseBody(
     return new Uint8Array(response as ArrayBuffer);
   }
 
-  return null;
+  // An XHR outside a browser may not honor `responseType`; its text is taken as UTF-8 bytes,
+  // as FetchAdapter takes a polyfilled body's. A browser answers `null` only when it could
+  // not allocate the buffer.
+  if (typeof response === 'string') {
+    return new TextEncoder().encode(response);
+  }
+
+  return RESPONSE_UNREADABLE;
 }
 
 /**

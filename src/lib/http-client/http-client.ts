@@ -981,11 +981,42 @@ export class BaseHTTPClient {
     };
     this._tracker.add(trackedRequest);
 
+    // Every composition of a signal made for this request - the caller's and one per
+    // attempt - registers how to release its listeners here; see `_composeSignals`.
+    const signalReleasers: Array<() => void> = [];
+
+    // Run as the request settles, not when `send()` answers: a `final` observer is waited
+    // for with no timeout, and one that never settles must not keep a finished request
+    // listed or its listeners on a caller's long-lived signal. The `finally` below runs it
+    // for a request that ends by throwing.
+    const releaseRequest = (): void => {
+      this._tracker.remove(requestID);
+
+      // Each guarded: a caller's signal whose `removeEventListener` throws would reject a
+      // request that has already ended, and skip the releasers after it. The listener it
+      // keeps is `once`, and inert now the request is over.
+      for (const release of signalReleasers.splice(0)) {
+        try {
+          release();
+        } catch {
+          // Nothing more to do for that signal.
+        }
+      }
+    };
+
     const trackedCallbacks: BuilderCallbacks<T> = {
       ...callbacks,
       setState: (state) => {
         callbacks.setState(state);
         this._tracker.updateState(requestID, state);
+
+        if (
+          state === 'completed' ||
+          state === 'failed' ||
+          state === 'cancelled'
+        ) {
+          releaseRequest();
+        }
       },
     };
 
@@ -1000,10 +1031,7 @@ export class BaseHTTPClient {
       cancelTrackedRequest(trackedRequest, reason),
     );
 
-    // Compose user signal with our internal abort controller. Every composition made
-    // for this request - this one and one per attempt - registers how to release its
-    // listeners here, and the request's `finally` runs them; see `_composeSignals`.
-    const signalReleasers: Array<() => void> = [];
+    // Compose user signal with our internal abort controller.
     let cancelSignal: AbortSignal = abortController.signal;
 
     try {
@@ -2311,18 +2339,7 @@ export class BaseHTTPClient {
       }
       throw error;
     } finally {
-      this._tracker.remove(requestID);
-
-      // Each guarded: a caller's signal whose `removeEventListener` throws would reject a
-      // request that has already ended, and skip the releasers after it. The listener it
-      // keeps is `once`, and inert now the request is over.
-      for (const release of signalReleasers) {
-        try {
-          release();
-        } catch {
-          // Nothing more to do for that signal.
-        }
-      }
+      releaseRequest();
     }
   }
 
@@ -5286,18 +5303,18 @@ export class BaseHTTPClient {
    * fallback, for older runtimes and a polyfill's signal, listens on both sources and
    * mirrors the first abort, and the listeners it
    * adds are released through `releasers` - run by `_execute` once the request has
-   * ended, since a listener on the caller's own signal, or on the request's cancel
+   * settled, since a listener on the caller's own signal, or on the request's cancel
    * signal, otherwise outlives the request it was added for: nothing ever aborts on the
    * success path, so a `{ once: true }` listener never fires and is never removed. A
    * caller's signal reused across requests would accumulate one listener per request
    * until the runtime warns of a leak.
    *
-   * Released when the request ends rather than when the attempt does: an attempt's
+   * Released when the request settles rather than when the attempt does: an attempt's
    * signal stays in an adapter's hands after `send()` resolves - `NodeAdapter` listens
    * on it for the settle-deadline teardown of an early-ack upload - and the attempt loop
    * has several exits, where the request has one. What the fallback gives up by that is
-   * only a cancel arriving *after* the response was handed back, which would no longer
-   * reach an upload still trailing on that attempt's socket; the adapter's own stall
+   * only a cancel arriving *after* the request settled, from a `final` observer or once
+   * the response was handed back, which would no longer reach an upload still trailing on that attempt's socket; the adapter's own stall
    * watchdog ends such an upload regardless.
    */
   private _composeSignals(

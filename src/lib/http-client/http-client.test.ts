@@ -5995,6 +5995,69 @@ describe('HTTPClient — sub-clients', () => {
 });
 
 describe('HTTPClient — listRequests', () => {
+  test.each([
+    ['completed', 'addResponseObserver'],
+    ['failed', 'addErrorObserver'],
+  ] as const)(
+    'a %s request is released before a final observer that never settles',
+    async (state, addObserver) => {
+      const adapter = new MockAdapter();
+      adapter.routes.get('/x', () =>
+        state === 'failed'
+          ? { status: 0, transportError: true }
+          : { status: 200 },
+      );
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'http://api.test',
+      });
+      const { signal } = new AbortController();
+      const removeSpy = spyOn(signal, 'removeEventListener');
+      const listedInObserver: number[] = [];
+      const releasesInObserver: number[] = [];
+
+      let enter = (): void => {};
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      client[addObserver](
+        () => {
+          listedInObserver.push(client.listRequests().count);
+          releasesInObserver.push(removeSpy.mock.calls.length);
+          enter();
+          return new Promise<void>(() => {});
+        },
+        { phases: ['final'] },
+      );
+
+      // The composition that listens to the caller's signal itself, whose listeners are
+      // the ones a long-lived signal would keep.
+      const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+        AbortSignal,
+        'any',
+      );
+      Object.defineProperty(AbortSignal, 'any', {
+        value: undefined,
+        configurable: true,
+      });
+
+      try {
+        const builder = client.get('/x').signal(signal).retryPolicy(null);
+        void builder.send();
+        await entered;
+
+        expect(listedInObserver).toEqual([0]);
+        expect(releasesInObserver[0]).toBeGreaterThan(0);
+        expect(client.cancelAll()).toBe(0);
+        expect(builder.cancel()).toBe('already_settled');
+      } finally {
+        if (originalAnyDescriptor) {
+          Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+        }
+      }
+    },
+  );
+
   test('listRequests() defaults to own scope', async () => {
     const root = makeClient();
     const sub = root.createSubClient();

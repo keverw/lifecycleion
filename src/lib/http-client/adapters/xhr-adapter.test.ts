@@ -48,7 +48,7 @@ class FakeXHR {
   public responseType: XMLHttpRequestResponseType = '';
   public timeout = 0;
   public status = 0;
-  public response: ArrayBuffer | null = null;
+  public response: unknown = new ArrayBuffer(0);
   public responseURL = '';
 
   public readonly upload = new FakeXHRUpload();
@@ -577,6 +577,65 @@ describe('XHRAdapter', () => {
 
     expect(response.streamErrorCode).toBe('response_too_large');
     expect(uploads.at(-1)).toBe(1);
+  });
+
+  test('a response an XHR handed over as text is read as UTF-8 bytes and held to the limit', async () => {
+    const send = (maxResponseBytes: number) => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/text',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes,
+      });
+      lastXHR.status = 200;
+      lastXHR.response = 'héllo';
+      lastXHR.simulateLoad();
+      return promise;
+    };
+
+    const response = await send(100);
+    expect(response.isStreamError).toBeUndefined();
+    expect(new TextDecoder().decode(response.body ?? undefined)).toBe('héllo');
+
+    expect((await send(5)).streamErrorCode).toBe('response_too_large');
+  });
+
+  test.each([[undefined], [null], [{ length: 3 }]])(
+    'a response body of %p fails as a stream error with the real status, not as no body',
+    async (body) => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/odd',
+        method: 'GET',
+        headers: {},
+      });
+      lastXHR.status = 200;
+      lastXHR.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+      lastXHR.response = body;
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toBe('text/plain');
+      expect(response.body).toBeNull();
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_response_error');
+      expect(response.errorCause).toBeInstanceOf(TypeError);
+    },
+  );
+
+  test('a bodiless answer does not read the response, whatever it holds', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/none',
+      method: 'GET',
+      headers: {},
+    });
+    lastXHR.status = 204;
+    lastXHR.response = undefined;
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.isStreamError).toBeUndefined();
+    expect(response.body).toBeNull();
   });
 
   test('a body refused mid-download still ends with the final upload event', async () => {
@@ -1580,24 +1639,6 @@ describe('XHRAdapter', () => {
     const response = await promise;
 
     expect(response.status).toBe(304);
-    expect(response.body).toBeNull();
-  });
-
-  test('returns null body when xhr.response is null for a non-empty status', async () => {
-    // Covers the readResponseBody fallback: method is not HEAD, status is not
-    // 204/304, but response is null (e.g. browser populated no body).
-    const adapter = new XHRAdapter();
-    const promise = adapter.send({
-      requestURL: 'https://api.test/data',
-      method: 'GET',
-      headers: {},
-    });
-
-    lastXHR.status = 200;
-    // Intentionally leave lastXHR.response as null
-    lastXHR.simulateLoad();
-
-    const response = await promise;
     expect(response.body).toBeNull();
   });
 

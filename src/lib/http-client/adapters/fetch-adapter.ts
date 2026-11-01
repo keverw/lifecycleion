@@ -13,6 +13,7 @@ import {
 } from '../internal/request-fields';
 import {
   isAbortError,
+  makeAbortError,
   markResponseStreamAbort,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
@@ -293,7 +294,12 @@ export class FetchAdapter implements HTTPAdapter {
     let rawBody: Uint8Array | null | typeof RESPONSE_TOO_LARGE;
 
     try {
-      rawBody = await readResponseBody(method, response, maxResponseBytes);
+      rawBody = await readResponseBody(
+        method,
+        response,
+        maxResponseBytes,
+        signal,
+      );
     } catch (error) {
       // Headers already arrived, so the status is real and the body transfer is
       // what failed. Resolve with isStreamError rather than throwing, which would
@@ -384,6 +390,7 @@ async function readResponseBody(
   method: string,
   response: Response,
   maxResponseBytes: number,
+  signal: AbortSignal | undefined,
 ): Promise<Uint8Array | null | typeof RESPONSE_TOO_LARGE> {
   if (!hasResponseBody(method, response.status)) {
     // Native `fetch` hands over no body here, but a polyfill's Node `Readable` would hold
@@ -447,6 +454,7 @@ async function readResponseBody(
           cancelBodyQuietly(body);
         },
         true,
+        signal,
       );
     }
 
@@ -470,6 +478,7 @@ async function readResponseBody(
       cancelBodyQuietly(reader);
     },
     false,
+    signal,
   );
 }
 
@@ -506,6 +515,7 @@ async function readBodyWithin(
   maxResponseBytes: number,
   cancel: () => void,
   isTextChunkAccepted: boolean,
+  signal: AbortSignal | undefined,
 ): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
   const chunks: Uint8Array[] = [];
   let loadedBytes = 0;
@@ -528,6 +538,24 @@ async function readBodyWithin(
       throw new TypeError(
         'FetchAdapter response body yielded a chunk that is not a Uint8Array',
       );
+    }
+
+    // No bytes to count or keep, and no limit they could reach: a stream that keeps
+    // answering with them from microtasks alone would otherwise starve every timer, the
+    // attempt timeout's included. `setTimeout`, as this adapter also runs in browsers.
+    // The abort is checked here as such a stream need not heed it, and the read would
+    // go on polling it after the request had ended.
+    if (byteLength === 0) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+
+      if (isSignalAbortedQuietly(signal)) {
+        cancel();
+        throw makeAbortError();
+      }
+
+      continue;
     }
 
     loadedBytes += byteLength;
