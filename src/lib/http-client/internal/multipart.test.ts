@@ -1606,6 +1606,26 @@ describe('caller values the writer cannot use are refused as non-retryable', () 
     expect(error.cause).toBeInstanceOf(TypeError);
   });
 
+  test('a stream() that keeps answering undefined is refused rather than read forever', async () => {
+    class UndefinedStreamFile extends File {
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          pull(controller) {
+            controller.enqueue(undefined);
+          },
+        });
+      }
+    }
+
+    const { error } = await failureOf(
+      formWith(new UndefinedStreamFile([new Uint8Array(4)], 'a.bin')),
+    );
+
+    expect(error.message).toBe(
+      'Request body source produced a chunk that is not a Uint8Array',
+    );
+  });
+
   test('a stream() that yields a chunk that is not a Uint8Array', async () => {
     class NumberStreamFile extends File {
       public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {

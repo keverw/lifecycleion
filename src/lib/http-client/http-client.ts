@@ -140,7 +140,7 @@ import type { CookieJar } from './cookie-jar';
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
 // original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../to-error';
-import { readUnknownMember as readObjectMember } from '../internal/read-member';
+import { readUnknownMember } from '../internal/read-member';
 import {
   hasResponseBody,
   isAnsweredBodyOverLimit,
@@ -442,8 +442,8 @@ export class BaseHTTPClient {
     if (
       !isNullish(adapterCandidate) &&
       (typeof adapterCandidate !== 'object' ||
-        typeof readObjectMember(adapterCandidate, 'getType') !== 'function' ||
-        typeof readObjectMember(adapterCandidate, 'send') !== 'function')
+        typeof readUnknownMember(adapterCandidate, 'getType') !== 'function' ||
+        typeof readUnknownMember(adapterCandidate, 'send') !== 'function')
     ) {
       throw new TypeError(
         `HTTPClient adapter must be an object with getType() and send() methods (got ${describeValue(adapterCandidate)})`,
@@ -843,7 +843,7 @@ export class BaseHTTPClient {
     const effectiveBaseURL =
       this._config.baseURL ??
       (this._adapterType === 'mock'
-        ? !/^[a-z][a-z0-9+\-.]*:/i.test(path)
+        ? !/^[a-z][a-z0-9+\-.]*:/i.test(path) && !isAbsoluteWebURL(path)
           ? MOCK_ADAPTER_DEFAULT_BASE_URL
           : undefined
         : undefined);
@@ -1238,7 +1238,7 @@ export class BaseHTTPClient {
                 callerMethod &&
               (!bodyMethodRefusals.has(error as Error) ||
                 hasRequestBody(
-                  readObjectMember(initialRequestCandidate, 'body'),
+                  readUnknownMember(initialRequestCandidate, 'body'),
                 ) === hasCallerBody);
             // So is a body the interceptors returned that cannot be copied (see
             // `isBodyCopyFailure`).
@@ -2620,7 +2620,7 @@ export class BaseHTTPClient {
       /**
        * Emit the attempt-end event, filling in everything that is the same at
        * every exit. Callers pass only what differs between one ending and
-       * another, so a new field cannot be missed at one of the fourteen exits.
+       * another, so a new field cannot be missed at one of the exits.
        */
       const emitAttemptEnd = (outcome: {
         willRetry: boolean;
@@ -2964,7 +2964,7 @@ export class BaseHTTPClient {
             // server chose. The URL is read once and the one read is reported, so a getter
             // answering differently on a second read cannot name the hop with what the
             // interceptors added.
-            const failedRetryURL = readObjectMember(
+            const failedRetryURL = readUnknownMember(
               failedRetryRequest,
               'requestURL',
             );
@@ -3248,7 +3248,7 @@ export class BaseHTTPClient {
                     return null;
                   }
                   didCallStreamFactory = true;
-                  const announcedStatus = readObjectMember(args[0], 'status');
+                  const announcedStatus = readUnknownMember(args[0], 'status');
                   if (
                     typeof announcedStatus === 'number' &&
                     Number.isInteger(announcedStatus) &&
@@ -3372,7 +3372,7 @@ export class BaseHTTPClient {
           attemptSignal,
           () =>
             cancelSignal.aborted
-              ? readObjectMember(cancelSignal, 'reason')
+              ? readUnknownMember(cancelSignal, 'reason')
               : timeoutController.signal.reason,
           () => {
             isAbandoned = true;
@@ -3399,7 +3399,7 @@ export class BaseHTTPClient {
             void adapterPromise.then(
               ({ value }) => {
                 void adoptRequestBodySettled(
-                  readObjectMember(value, 'requestBodySettled'),
+                  readUnknownMember(value, 'requestBodySettled'),
                 );
               },
               (error: unknown) => {
@@ -3414,7 +3414,7 @@ export class BaseHTTPClient {
         // throw. Keep it outside this try so failures still expose the upload outcome.
         // Advisory metadata: an accessor that throws is treated as absent, as an
         // unreadable return is, rather than failing (and retrying) an answered request.
-        const rawUploadOutcome = readObjectMember(
+        const rawUploadOutcome = readUnknownMember(
           rawAdapterResponse,
           'requestBodySettled',
         );
@@ -3432,7 +3432,7 @@ export class BaseHTTPClient {
         const headers = rawAdapterResponse.headers;
         // Advisory as well, and read under the same rule: it only feeds observers (see
         // `snapshotHeaderRecord` below), so a throwing accessor means absent.
-        const effectiveRequestHeaders = readObjectMember(
+        const effectiveRequestHeaders = readUnknownMember(
           rawAdapterResponse,
           'effectiveRequestHeaders',
         );
@@ -3662,8 +3662,6 @@ export class BaseHTTPClient {
         ) {
           emitAttemptEnd({
             willRetry: false,
-            nextRetryDelayMS: undefined,
-            nextRetryAt: undefined,
             status: 0,
           });
 
@@ -3825,8 +3823,6 @@ export class BaseHTTPClient {
           emitAttemptEnd({
             willRetry: false,
             ...(retrySuppressedReason ? { retrySuppressedReason } : {}),
-            nextRetryDelayMS: undefined,
-            nextRetryAt: undefined,
             status: adapterResponse.status,
           });
         }
@@ -3956,7 +3952,7 @@ export class BaseHTTPClient {
         // is, and a setup failure reports its status. The tag alone is not the gate - the
         // factory's own markers are, as the stream-abort marker is above.
         const isFactoryCancel =
-          readObjectMember(error, STREAM_FACTORY_CANCEL_KEY) !== undefined;
+          readUnknownMember(error, STREAM_FACTORY_CANCEL_KEY) !== undefined;
         const factoryAnsweredResponse =
           abortedResponse === undefined &&
           (isFactoryCancel ||
@@ -3985,8 +3981,6 @@ export class BaseHTTPClient {
               // resolved path - not as a stream error, and never re-sent.
               emitAttemptEnd({
                 willRetry: false,
-                nextRetryDelayMS: undefined,
-                nextRetryAt: undefined,
                 status: answeredBeforeFailure.status,
               });
 
@@ -4034,8 +4028,6 @@ export class BaseHTTPClient {
         const endCancelled = (reported: AttemptRequest) => {
           emitAttemptEnd({
             willRetry: false,
-            nextRetryDelayMS: undefined,
-            nextRetryAt: undefined,
             status: answeredStatus,
           });
 
@@ -4081,8 +4073,6 @@ export class BaseHTTPClient {
             RETRYABLE_STATUS_CODES.has(streamFactoryStatus)
               ? { retrySuppressedReason: 'stream_error' as const }
               : {}),
-            nextRetryDelayMS: undefined,
-            nextRetryAt: undefined,
             status: streamFactoryStatus,
           });
 
@@ -4121,15 +4111,6 @@ export class BaseHTTPClient {
           // the gate, so it does not imply an `Error`.
           const streamCause = normalizeError(error);
 
-          const streamSuppressionReason = (
-            status: number,
-          ): 'stream_error' | undefined =>
-            isRetryAvailable() &&
-            RETRYABLE_STATUS_CODES.has(status) &&
-            !isCancelOutcome()
-              ? 'stream_error'
-              : undefined;
-
           if (isCancelOutcome()) {
             return endCancelled(
               sentRequestForObservedAdapterError(
@@ -4140,68 +4121,16 @@ export class BaseHTTPClient {
             );
           }
 
-          if (isTimedOut && abortedResponse) {
-            const suppressedReason = streamSuppressionReason(
-              abortedResponse.status,
-            );
-
-            emitAttemptEnd({
-              willRetry: false,
-              ...(suppressedReason
-                ? { retrySuppressedReason: suppressedReason }
-                : {}),
-              nextRetryDelayMS: undefined,
-              nextRetryAt: undefined,
-              status: abortedResponse.status,
-            });
-
-            return {
-              adapterResponse: {
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-                status: abortedResponse.status,
-                ...derivedRedirectFields(
-                  sentRequest.requestURL,
-                  abortedResponse.status,
-                  abortedResponse.headers,
-                ),
-                headers: abortedResponse.headers,
-                body: null,
-                isStreamError: true,
-                streamErrorCode: 'stream_response_error',
-                errorCause: streamCause,
-                effectiveRequestHeaders:
-                  getEffectiveRequestHeadersFromError(error),
-              },
-              sentRequest: sentRequestForObservedAdapterError(
-                sentRequest,
-                error,
-                observedSentRequest,
-              ),
-              attemptCount: attemptNumber,
-              wasCancelled: false,
-              wasTimeout: true,
-              isRetriesExhausted: false,
-              errorCode: 'stream_response_error',
-              adapterCause: streamCause,
-            };
-          }
-
-          const fallbackSuppressedReason = streamSuppressionReason(
-            abortedResponse?.status ?? 0,
-          );
+          const fallbackStatus = abortedResponse?.status ?? 0;
+          const fallbackHeaders = abortedResponse?.headers ?? {};
 
           emitAttemptEnd({
             willRetry: false,
-            ...(fallbackSuppressedReason
-              ? { retrySuppressedReason: fallbackSuppressedReason }
+            ...(isRetryAvailable() && RETRYABLE_STATUS_CODES.has(fallbackStatus)
+              ? { retrySuppressedReason: 'stream_error' as const }
               : {}),
-            nextRetryDelayMS: undefined,
-            nextRetryAt: undefined,
-            status: abortedResponse?.status ?? 0,
+            status: fallbackStatus,
           });
-
-          const fallbackStatus = abortedResponse?.status ?? 0;
-          const fallbackHeaders = abortedResponse?.headers ?? {};
 
           return {
             adapterResponse: {
@@ -4239,7 +4168,7 @@ export class BaseHTTPClient {
         // only a factory's `null` or `{ cancel: true }` carries the cancel tag.
         const isFactoryOwnAbort =
           hasAdapterMarker(error, STREAM_FACTORY_ERROR_FLAG) &&
-          readObjectMember(error, STREAM_FACTORY_CANCEL_KEY) === undefined &&
+          readUnknownMember(error, STREAM_FACTORY_CANCEL_KEY) === undefined &&
           !isCancelOutcome() &&
           !isTimedOut;
 
@@ -4276,7 +4205,7 @@ export class BaseHTTPClient {
             } else {
               // AbortError without our timeout flag — treat as non-retryable cancel.
               // This path includes StreamResponseFactory returning null / { cancel: true }.
-              const factoryCancelValue = readObjectMember(
+              const factoryCancelValue = readUnknownMember(
                 error,
                 STREAM_FACTORY_CANCEL_KEY,
               );
@@ -4288,8 +4217,6 @@ export class BaseHTTPClient {
 
               emitAttemptEnd({
                 willRetry: false,
-                nextRetryDelayMS: undefined,
-                nextRetryAt: undefined,
                 status: 0,
               });
 
@@ -4337,8 +4264,6 @@ export class BaseHTTPClient {
         ) {
           emitAttemptEnd({
             willRetry: false,
-            nextRetryDelayMS: undefined,
-            nextRetryAt: undefined,
             status: factoryAnsweredResponse?.status ?? answeredStatus,
           });
 
@@ -4404,8 +4329,8 @@ export class BaseHTTPClient {
             // `nonRetryableAdapterErrorFrom`) reports that error too.
             adapterCause: normalizeError(
               isStreamFactoryError ||
-                readObjectMember(error, ADAPTER_ERROR_CARRIER_KEY) === true
-                ? (readObjectMember(error, 'cause') ?? error)
+                readUnknownMember(error, ADAPTER_ERROR_CARRIER_KEY) === true
+                ? (readUnknownMember(error, 'cause') ?? error)
                 : error,
             ),
           };
@@ -4534,8 +4459,6 @@ export class BaseHTTPClient {
           emitAttemptEnd({
             willRetry: false,
             ...(retrySuppressedReason ? { retrySuppressedReason } : {}),
-            nextRetryDelayMS: undefined,
-            nextRetryAt: undefined,
             status: 0,
           });
         }
@@ -5274,7 +5197,7 @@ export class BaseHTTPClient {
     if (knownBodies !== undefined && knownBodies !== 'unbuildable') {
       observed = knownBodies.observed;
     } else if (this._hasAttemptRequestObservers()) {
-      const rawBody = readObjectMember(request, 'body');
+      const rawBody = readUnknownMember(request, 'body');
 
       // A body the dispatch path already failed to build is not validated and cloned a
       // second time; it is reported as it came, as one that fails to build here is.
@@ -5404,7 +5327,7 @@ export class BaseHTTPClient {
      * exactly what a bare `abort()` produces.
      */
     const abort = (signal: AbortSignal) =>
-      controller.abort(readObjectMember(signal, 'reason'));
+      controller.abort(readUnknownMember(signal, 'reason'));
 
     // By the rule `send()` reads the caller's signal with: exactly `true`, and a getter
     // that throws as not aborted (see `isSignalAbortedQuietly`).
@@ -5600,7 +5523,7 @@ function readStringMember(
   key: 'requestURL' | 'method',
   fallback: string,
 ): string {
-  const value = readObjectMember(source, key);
+  const value = readUnknownMember(source, key);
 
   return typeof value === 'string' ? value : fallback;
 }
@@ -5817,11 +5740,11 @@ function isBodyDecodeFailure(response: AdapterResponse): boolean {
     depth < 4 && cause !== undefined && cause !== null;
     depth++
   ) {
-    if (readObjectMember(cause, RESPONSE_DECODE_ERROR_KEY) === true) {
+    if (readUnknownMember(cause, RESPONSE_DECODE_ERROR_KEY) === true) {
       return true;
     }
 
-    cause = readObjectMember(cause, 'cause');
+    cause = readUnknownMember(cause, 'cause');
   }
 
   return false;
@@ -5853,7 +5776,7 @@ function getEffectiveRequestHeadersFromError(
   error: unknown,
 ): Record<string, string | string[]> | undefined {
   return snapshotHeaderRecord(
-    readObjectMember(error, EFFECTIVE_REQUEST_HEADERS_KEY),
+    readUnknownMember(error, EFFECTIVE_REQUEST_HEADERS_KEY),
   );
 }
 
@@ -5914,7 +5837,7 @@ function snapshotHeaderRecord(
  * the literal `true`. The read is guarded; unreadable is untagged.
  */
 function hasAdapterMarker(err: unknown, flag: string): boolean {
-  return readObjectMember(err, flag) === true;
+  return readUnknownMember(err, flag) === true;
 }
 
 /**
@@ -5935,7 +5858,7 @@ function isXHRBrowserTimeout(err: unknown): boolean {
 function getResponseStreamAbortInfo(
   err: unknown,
 ): { status: number; headers: Record<string, string | string[]> } | undefined {
-  const status = readObjectMember(err, STREAM_ABORT_STATUS_KEY);
+  const status = readUnknownMember(err, STREAM_ABORT_STATUS_KEY);
 
   // Held to the rule a resolved answer's status is: an integer from 0 to 999.
   if (
@@ -5948,7 +5871,7 @@ function getResponseStreamAbortInfo(
   }
 
   const headers = snapshotHeaderRecord(
-    readObjectMember(err, STREAM_ABORT_HEADERS_KEY),
+    readUnknownMember(err, STREAM_ABORT_HEADERS_KEY),
   );
 
   if (headers === undefined) {
@@ -5984,9 +5907,9 @@ function getResponseStreamAbortInfo(
 function getRequestBodySettled(
   err: unknown,
 ): Promise<Error | undefined> | undefined {
-  const settled = readObjectMember(err, REQUEST_BODY_SETTLED_KEY);
+  const settled = readUnknownMember(err, REQUEST_BODY_SETTLED_KEY);
 
-  // Adopted rather than handed over as it arrived. `readObjectMember` guards the read of
+  // Adopted rather than handed over as it arrived. `readUnknownMember` guards the read of
   // the tag, and `adoptRequestBodySettled` classifies what came back from a single
   // guarded read of its `then`: a tag whose `then` cannot be read, or that is not a
   // thenable at all, is treated as absent. `HTTPAdapter` is a public extension point, so
@@ -6074,12 +5997,12 @@ function stableUploadError(value: unknown): Error {
     return normalizeError(value);
   }
   const error = value;
-  const message = readObjectMember(error, 'message');
+  const message = readUnknownMember(error, 'message');
   const wrapped = new Error(
     typeof message === 'string' ? message : 'Upload failed',
     { cause: error },
   );
-  const name = readObjectMember(error, 'name');
+  const name = readUnknownMember(error, 'name');
   if (typeof name === 'string') {
     Object.defineProperty(wrapped, 'name', {
       value: name,
@@ -6094,7 +6017,7 @@ function stableUploadError(value: unknown): Error {
   // arbitrary properties would run unrelated getters and could copy `then` back in.
   // Define own data properties so inherited setters cannot intercept the copies.
   for (const field of UPLOAD_ERROR_FIELDS) {
-    const fieldValue = readObjectMember(error, field);
+    const fieldValue = readUnknownMember(error, field);
     if (fieldValue !== undefined) {
       defineEntry(
         wrapped as unknown as Record<string, unknown>,
@@ -6104,7 +6027,7 @@ function stableUploadError(value: unknown): Error {
     }
   }
   // Not `defineEntry`: `stack` stays non-enumerable, as a native Error's own is.
-  const stack = readObjectMember(error, 'stack');
+  const stack = readUnknownMember(error, 'stack');
   if (typeof stack === 'string') {
     Object.defineProperty(wrapped, 'stack', {
       value: stack,
@@ -6183,15 +6106,15 @@ function watchStreamFactoryAnswer(
  * (`pending`). Read only here, once the adapter that ignored the abort is given up on.
  */
 function tearDownStreamFactoryAnswer(answer: object): StreamFactoryState {
-  if (readObjectMember(answer, 'cancel') === true) {
+  if (readUnknownMember(answer, 'cancel') === true) {
     return 'none';
   }
 
-  if (typeof readObjectMember(answer, 'then') === 'function') {
+  if (typeof readUnknownMember(answer, 'then') === 'function') {
     return 'pending';
   }
 
-  const destroy = readObjectMember(answer, 'destroy');
+  const destroy = readUnknownMember(answer, 'destroy');
   if (typeof destroy === 'function') {
     try {
       const result: unknown = Reflect.apply(destroy, answer, []);
@@ -6518,7 +6441,7 @@ async function observedUntilCancelled(
  * AbortError reason set by the runtime when no explicit reason is provided.
  */
 function getSignalCancelReason(signal: AbortSignal): string | undefined {
-  const reason = readObjectMember(signal, 'reason');
+  const reason = readUnknownMember(signal, 'reason');
 
   return typeof reason === 'string' ? reason : undefined;
 }

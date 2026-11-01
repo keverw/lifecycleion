@@ -72,7 +72,7 @@ import type {
 } from '../types';
 import { isErrorValue } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
-import { readUnknownMember as readObjectMember } from '../../internal/read-member';
+import { readUnknownMember } from '../../internal/read-member';
 import {
   isTimeoutValidationError,
   resolveTimeoutMS,
@@ -976,7 +976,7 @@ function buildRoutes(
 }
 
 function isDuplicateRouteRegistrationError(error: unknown): error is Error {
-  const message = readObjectMember(error, 'message');
+  const message = readUnknownMember(error, 'message');
 
   return (
     isErrorValue(error) &&

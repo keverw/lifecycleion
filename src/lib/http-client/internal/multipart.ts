@@ -441,64 +441,64 @@ export async function serializeMultipartFormData(
           // Read by its internal slot rather than `instanceof`, so bytes made in another
           // realm - a `vm` context, Jest's node environment, whose `Blob.stream()` chunks
           // come from the host - are not mistaken for something else.
-          if (chunk !== undefined && !types.isUint8Array(chunk)) {
+          // `undefined` included: a stream that keeps answering it would otherwise read on
+          // forever, with no bytes to report and no response yet to arm a watchdog.
+          if (!types.isUint8Array(chunk)) {
             throw sourceMismatch(
               'Request body source produced a chunk that is not a Uint8Array',
             );
           }
 
-          if (chunk !== undefined) {
-            // Every count, check and slice below is made on a plain view of the chunk's
-            // bytes, never on the chunk: a `Uint8Array` subclass from a custom `stream()`
-            // can answer `byteLength` with anything - Node's `Buffer.byteLength` reads it
-            // too, so a chunk that said 1 would pass its part's size check and put its real
-            // bytes on the wire past the `Content-Length` - and can override `subarray`.
-            let bytes: Uint8Array;
+          // Every count, check and slice below is made on a plain view of the chunk's
+          // bytes, never on the chunk: a `Uint8Array` subclass from a custom `stream()`
+          // can answer `byteLength` with anything - Node's `Buffer.byteLength` reads it
+          // too, so a chunk that said 1 would pass its part's size check and put its real
+          // bytes on the wire past the `Content-Length` - and can override `subarray`.
+          let bytes: Uint8Array;
 
-            try {
-              bytes = plainBytesView(chunk);
-            } catch (error) {
-              throw sourceReadFailure(error);
-            }
+          try {
+            bytes = plainBytesView(chunk);
+          } catch (error) {
+            throw sourceReadFailure(error);
+          }
 
-            // Refused *before* the write, not counted after it: a `File` that grew after
-            // the sizing pass would otherwise have its surplus on the wire past a
-            // `Content-Length` the server reads as the start of the next request, and no
-            // later check could take those bytes back. Held to this part's own measured
-            // size, so the message names the part that outgrew it; `write` holds the
-            // chunk to `partsBudget` as well. The shortfall check below the loop has no
-            // equivalent problem - bytes that were never written need no undoing.
-            if (partBytes + bytes.byteLength > partSize) {
-              void cancelReaderQuietly(reader);
+          // Refused *before* the write, not counted after it: a `File` that grew after
+          // the sizing pass would otherwise have its surplus on the wire past a
+          // `Content-Length` the server reads as the start of the next request, and no
+          // later check could take those bytes back. Held to this part's own measured
+          // size, so the message names the part that outgrew it; `write` holds the
+          // chunk to `partsBudget` as well. The shortfall check below the loop has no
+          // equivalent problem - bytes that were never written need no undoing.
+          if (partBytes + bytes.byteLength > partSize) {
+            void cancelReaderQuietly(reader);
 
-              // What actually went on the wire, and the chunk that was refused, kept
-              // apart: counting the refused chunk into the written total would name up to
-              // a whole chunk that never left this process.
-              throw sourceMismatch(
-                `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, produced more - ${String(partBytes)} written and a further ${String(bytes.byteLength)} refused`,
-              );
-            }
+            // What actually went on the wire, and the chunk that was refused, kept
+            // apart: counting the refused chunk into the written total would name up to
+            // a whole chunk that never left this process.
+            throw sourceMismatch(
+              `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, produced more - ${String(partBytes)} written and a further ${String(bytes.byteLength)} refused`,
+            );
+          }
 
-            // Written in slices of the size the bytes writer uses, each awaited. Node's
-            // `Blob.stream()` yields an in-memory `Blob` as one chunk - a whole 64 MiB
-            // `File` in a single write - and progress is counted on a write's callback,
-            // so written whole that upload would report nothing between 0 and 100%, and
-            // the stall watchdog, which reads that progress, would destroy an upload the
-            // server had acked early and was still reading. The slices are views, not
-            // copies.
-            for (
-              let offset = 0;
-              offset < bytes.byteLength && !req.destroyed;
-              offset += REQUEST_BODY_CHUNK_SIZE
-            ) {
-              const slice = bytes.subarray(
-                offset,
-                offset + REQUEST_BODY_CHUNK_SIZE,
-              );
+          // Written in slices of the size the bytes writer uses, each awaited. Node's
+          // `Blob.stream()` yields an in-memory `Blob` as one chunk - a whole 64 MiB
+          // `File` in a single write - and progress is counted on a write's callback,
+          // so written whole that upload would report nothing between 0 and 100%, and
+          // the stall watchdog, which reads that progress, would destroy an upload the
+          // server had acked early and was still reading. The slices are views, not
+          // copies.
+          for (
+            let offset = 0;
+            offset < bytes.byteLength && !req.destroyed;
+            offset += REQUEST_BODY_CHUNK_SIZE
+          ) {
+            const slice = bytes.subarray(
+              offset,
+              offset + REQUEST_BODY_CHUNK_SIZE,
+            );
 
-              await write(slice);
-              partBytes += slice.byteLength;
-            }
+            await write(slice);
+            partBytes += slice.byteLength;
           }
         }
       } finally {

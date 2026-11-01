@@ -9151,6 +9151,32 @@ test('a string body is measured as UTF-8 without being encoded', () => {
   }
 });
 
+test('a request with an aborted signal reports no upload start', async () => {
+  for (const adapter of [new NodeAdapter(), new FetchAdapter()]) {
+    const controller = new AbortController();
+    controller.abort();
+    const progress: unknown[] = [];
+
+    let didReject = false;
+
+    await adapter
+      .send({
+        requestURL: 'http://127.0.0.1:9/x',
+        method: 'POST',
+        headers: {},
+        body: 'x',
+        signal: controller.signal,
+        onUploadProgress: (event) => progress.push(event),
+      })
+      .catch(() => {
+        didReject = true;
+      });
+
+    expect(didReject).toBe(true);
+    expect(progress).toEqual([]);
+  }
+});
+
 test('a binary request body is measured by its slot for upload progress', () => {
   class Understated extends Uint8Array {
     public override get byteLength(): number {

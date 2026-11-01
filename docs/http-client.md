@@ -210,7 +210,7 @@ client.request<T>(method, path, options?)
 **Path resolution:**
 
 - Relative paths (`/v1/users`, `v1/users`) are appended to `baseURL`. An empty path, or one that is only a query or fragment (`?page=2`), is added to `baseURL` as written, with no slash inserted.
-- Absolute `http(s)://` URLs bypass `baseURL` entirely and work with or without a `baseURL`. With a `baseURL`, a scheme not followed by `//` (`http:evil.test/x`) is a relative path like any other, though the URL parser alone would read a host from it.
+- Absolute `http(s)://` URLs bypass `baseURL` entirely and work with or without a `baseURL`. With a `baseURL`, a path must start `scheme://` to do this: `http:evil.test/x` and ` https://evil.test/x` are relative paths like any other, though the URL parser alone would read a host from them.
 - In a browser runtime, a URL still relative after `baseURL` - every relative path when `baseURL` is omitted (MockAdapter aside, see below), or one joined to a relative `baseURL` (`/api`, `api`) - is resolved against the document's base URL (a worker's location), as `fetch` and XHR resolve it: from a page at `https://app.test/dir/page`, `v1/users` is `https://app.test/dir/v1/users`, and `users` under `baseURL: 'api'` is `https://app.test/dir/api/users`. Unlike a configured `baseURL`, the page URL is not treated as a directory.
 - Protocol-relative `//host/path` URLs also bypass `baseURL` as a path prefix. If `baseURL` is configured, they are resolved using its scheme. If `baseURL` is omitted, browser runtimes resolve them against the current page/worker scheme, `MockAdapter` materializes them as `http://host/...`, and other server-side adapters cannot resolve them so the request fails at send time as a configuration error.
 
@@ -1030,10 +1030,11 @@ const jar = new CookieJar();
 // or if the name or value cannot be sent as one `name=value` pair: a name that holds
 // `=`, `;` or a control character other than a tab (U+0000-U+001F, U+007F) or starts or
 // ends with a space or tab (`my cookie` is kept, as RFC 6265bis keeps it), or a value
-// holding `;` or such a control character other than a tab. A name may be empty (a nameless cookie, sent as its value alone) when the
+// holding `;` or such a control character other than a tab, or starting or ending with a
+// space or tab. A name may be empty (a nameless cookie, sent as its value alone) when the
 // value is not empty and does not start with `__Secure-` / `__Host-`; `=a=b` is sent as `a=b`, as browsers send it. Looser than RFC 6265's cookie-octet grammar on purpose: spaces,
 // commas, quotes and backslashes in a value are accepted, as browsers accept them,
-// because real servers send them. Only what would change the header's framing is refused.
+// because real servers send them. Spaces and tabs at a value's edges are refused, as a server reads the value trimmed; otherwise only what would change the header's framing is refused.
 // Also false for a cookie already expired: it is not stored, and it deletes the stored
 // cookie of the same name, domain, path and host-only flag. And false for a cookie the
 // limits above evict as it is stored.

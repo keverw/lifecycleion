@@ -298,6 +298,14 @@ describe('HTTPClient — basic HTTP methods', () => {
     ).not.toThrow();
   });
 
+  test('MockAdapter with no baseURL reads an absolute URL as the other adapters do', async () => {
+    const response = await new HTTPClient({ adapter: new MockAdapter() })
+      .get(' https://other.test/x')
+      .send();
+
+    expect(response.requestURL).toBe('https://other.test/x');
+  });
+
   test('MockAdapter rejects relative baseURL prefixes', () => {
     expect(
       () => new HTTPClient({ adapter: new MockAdapter(), baseURL: '/api' }),

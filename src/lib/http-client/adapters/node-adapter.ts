@@ -102,7 +102,7 @@ import { toError as normalizeError, describeError } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { guardAbortListeners } from '../../internal/guarded-abort-signal';
 import { reportToHost } from '../../internal/report-to-host';
-import { readUnknownMember as readObjectMember } from '../../internal/read-member';
+import { readUnknownMember } from '../../internal/read-member';
 
 // The pending-error absorber, in one place, because the shape of it is easy to misread.
 //
@@ -458,7 +458,7 @@ export class NodeAdapter implements HTTPAdapter {
     assertOptionsObject(config, 'NodeAdapter config');
     assertKnownFields(config, NODE_ADAPTER_CONFIG_FIELDS, 'NodeAdapter config');
     assertKnownFields(
-      readObjectMember(config, 'mtls'),
+      readUnknownMember(config, 'mtls'),
       fieldNames<NonNullable<NodeAdapterConfig['mtls']>>({
         cert: true,
         key: true,
@@ -1710,9 +1710,6 @@ export class NodeAdapter implements HTTPAdapter {
           guardedUploadProgress?.(event);
         };
 
-        // 0% upload progress before any bytes leave the process
-        reportUploadProgress({ loaded: 0, total: 0, progress: 0 });
-
         // The http callback is typed as (res: IncomingMessage) => void, so we
         // cannot make it async directly. We use a void IIFE that routes any
         // unhandled rejections back to the outer promise's reject.
@@ -2014,7 +2011,7 @@ export class NodeAdapter implements HTTPAdapter {
                 // factory run.
                 const cancelReason =
                   writable !== null
-                    ? readObjectMember(writable, 'reason')
+                    ? readUnknownMember(writable, 'reason')
                     : undefined;
 
                 tearDownAfterResponse();
@@ -2546,6 +2543,15 @@ export class NodeAdapter implements HTTPAdapter {
           });
         }
 
+        // 0% upload progress before any bytes leave the process, once a signal already
+        // aborted has been refused above: no upload starts for it. One that cancels here
+        // reaches the listener above, which destroys the request.
+        reportUploadProgress({ loaded: 0, total: 0, progress: 0 });
+
+        if (req.destroyed) {
+          return;
+        }
+
         const onBodyWriteFailure = (error: unknown): void => {
           endBodyWrite(error);
 
@@ -2587,7 +2593,7 @@ export class NodeAdapter implements HTTPAdapter {
           // same again: thrown as the non-retryable error it is tagged as, not settled as a
           // transport failure to retry.
           if (
-            readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
+            readUnknownMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
             true
           ) {
             failRequest(normalizeError(error));
@@ -2675,7 +2681,7 @@ export class NodeAdapter implements HTTPAdapter {
         // This adapter's own refusal goes out as it is; anything else may be the caller's
         // (a header value's `toString`, a hostile signal) and goes out on a carrier.
         if (
-          readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
+          readUnknownMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
           true
         ) {
           throw error;
@@ -2851,7 +2857,7 @@ async function streamResponseBody(
     // before calling that callback.
     const onWritableClose = (): void => {
       if (didReceiveEnd) {
-        const finished = readObjectMember(writable, 'writableFinished');
+        const finished = readUnknownMember(writable, 'writableFinished');
 
         if (finished === true || typeof finished !== 'boolean') {
           return;
@@ -2979,7 +2985,7 @@ async function streamResponseBody(
           // than narrowed to `Error` here: a runtime that records a failure as something
           // other than an `Error` would have its broken download settled as a success.
           const writeFailure =
-            endError ?? readObjectMember(writable, 'errored');
+            endError ?? readUnknownMember(writable, 'errored');
 
           if (writeFailure) {
             claimWritableError(writeFailure);
@@ -3055,7 +3061,7 @@ async function streamResponseBody(
     // before that error's `nextTick` emit - absorbs it without reporting it again.
     // Truthy, as the end-of-stream read of the same field takes it: a sink that reports
     // `errored: false` is a healthy one.
-    const erroredAtStart: unknown = readObjectMember(writable, 'errored');
+    const erroredAtStart: unknown = readUnknownMember(writable, 'errored');
     if (erroredAtStart) {
       claimWritableError(erroredAtStart);
       settle({
@@ -4353,7 +4359,7 @@ const PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
 
 /** Whether an error proves the request never left for a connected peer. */
 function isPreConnectionError(error: unknown): boolean {
-  const code = readObjectMember(error, 'code');
+  const code = readUnknownMember(error, 'code');
 
   return typeof code === 'string' && PRE_CONNECTION_ERROR_CODES.has(code);
 }
@@ -4399,7 +4405,7 @@ function markStreamFactoryError(
     { cause: error },
   );
 
-  const originalName = readObjectMember(normalized, 'name');
+  const originalName = readUnknownMember(normalized, 'name');
 
   if (typeof originalName === 'string') {
     carrier.name = originalName;
@@ -4412,7 +4418,7 @@ function markStreamFactoryError(
 
 /** `message` is an ordinary property, so a frozen or exotic error may not yield one. */
 function readErrorMessage(error: Error): string | undefined {
-  const message = readObjectMember(error, 'message');
+  const message = readUnknownMember(error, 'message');
 
   return typeof message === 'string' && message.length > 0
     ? message
@@ -4449,7 +4455,7 @@ function makeResponseStreamAbortError(
 }
 
 function isStreamResponseCancel(value: unknown): value is StreamResponseCancel {
-  return readObjectMember(value, 'cancel') === true;
+  return readUnknownMember(value, 'cancel') === true;
 }
 
 /**
@@ -4460,8 +4466,8 @@ function isStreamResponseCancel(value: unknown): value is StreamResponseCancel {
  */
 function isWritableShaped(value: unknown): value is WritableLike {
   return (
-    typeof readObjectMember(value, 'write') === 'function' &&
-    typeof readObjectMember(value, 'end') === 'function'
+    typeof readUnknownMember(value, 'write') === 'function' &&
+    typeof readUnknownMember(value, 'end') === 'function'
   );
 }
 

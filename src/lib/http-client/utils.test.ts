@@ -75,6 +75,9 @@ describe('buildURL', () => {
       'https:evil.test/x',
       'http:/evil.test/x',
       'http:\\\\evil.test/x',
+      ' https://evil.test/x',
+      '\thttps://evil.test/x',
+      'ht\ttps://evil.test/x',
     ]) {
       expect(buildURL('https://a.test', path)).toBe(`https://a.test/${path}`);
     }

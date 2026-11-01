@@ -200,9 +200,11 @@ export class FetchAdapter implements HTTPAdapter {
     const wasAbortedAtDispatch = isSignalAborted(signal);
 
     // Fire 0% upload progress - once every refusal above has passed, so a request refused
-    // before anything is sent reports no upload start. One that cancels here aborts the
-    // signal `fetch` is handed, which rejects with it.
-    guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+    // before anything is sent, an aborted one included, reports no upload start. One that
+    // cancels here aborts the signal `fetch` is handed, which rejects with it.
+    if (!wasAbortedAtDispatch) {
+      guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+    }
 
     let response: Response;
 

@@ -7,7 +7,7 @@ import {
   STREAM_ABORT_STATUS_KEY,
 } from '../consts';
 import { isErrorValue } from '../../to-error';
-import { readUnknownMember as readObjectMember } from '../../internal/read-member';
+import { readUnknownMember } from '../../internal/read-member';
 
 /**
  * A non-retryable adapter error for a failure that may be the caller's own error - one a
@@ -25,14 +25,14 @@ export function nonRetryableAdapterErrorFrom(error: unknown): Error {
     return error;
   }
 
-  const message = readObjectMember(error, 'message');
+  const message = readUnknownMember(error, 'message');
   const carrier = new Error(
     typeof message === 'string' && message.length > 0
       ? message
       : 'Adapter failure',
     { cause: error },
   );
-  const name = readObjectMember(error, 'name');
+  const name = readUnknownMember(error, 'name');
 
   // Not an `AbortError`: the client reads that name as a cancel or a timeout before it
   // reads the flag, so a caller's own one - a `throwIfAborted()` on an unrelated signal,
@@ -127,7 +127,7 @@ export function makeAbortError(message = 'Request aborted'): Error {
  */
 export function isAbortError(error: unknown): error is Error {
   return (
-    isErrorValue(error) && readObjectMember(error, 'name') === 'AbortError'
+    isErrorValue(error) && readUnknownMember(error, 'name') === 'AbortError'
   );
 }
 
@@ -157,7 +157,7 @@ export function markNonRetryableAdapterError(error: unknown): void {
 
 /**
  * Define `tags` on `target` as own, non-enumerable data properties: read back by name
- * (`readObjectMember`), but left out of `JSON.stringify`, `Object.keys` and spreads.
+ * (`readUnknownMember`), but left out of `JSON.stringify`, `Object.keys` and spreads.
  * Throws as `Object.defineProperty` does on a frozen or sealed target.
  */
 export function defineHiddenTags(
@@ -200,9 +200,9 @@ export function markResponseStreamAbort(
   // `name` is copied because the client routes on it.
   const original = isErrorValue(error) ? error : undefined;
   const originalMessage =
-    original === undefined ? undefined : readObjectMember(original, 'message');
+    original === undefined ? undefined : readUnknownMember(original, 'message');
   const originalName =
-    original === undefined ? undefined : readObjectMember(original, 'name');
+    original === undefined ? undefined : readUnknownMember(original, 'name');
   const tagged = new Error(
     typeof originalMessage === 'string' ? originalMessage : 'Request aborted',
   );

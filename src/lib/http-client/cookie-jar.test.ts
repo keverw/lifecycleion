@@ -4183,6 +4183,22 @@ test('a nameless Set-Cookie keeps the = in its value, as browsers do', () => {
   expect(jar.setCookie({ ...base, value: '\t__Secure-sid=evil' })).toBe(false);
 });
 
+test('a value with a space or tab at its edge is refused, as such a name is', () => {
+  const jar = new CookieJar();
+  const base = { name: 'a', domain: 'example.com', path: '/' };
+
+  for (const value of [' 1', '1 ', '\t1', '1\t', ' ']) {
+    expect(jar.setCookie({ ...base, value })).toBe(false);
+    expect(jar.setCookie({ ...base, name: '', value })).toBe(false);
+  }
+
+  expect(jar.fromJSON({ cookies: [{ ...base, value: ' 1 ' }] } as never)).toBe(
+    0,
+  );
+  expect(jar.setCookie({ ...base, value: '1 2' })).toBe(true);
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1 2');
+});
+
 test('fromJSON reads a maxAge of zero with no createdAt as expired, deleting its twin', () => {
   const jar = new CookieJar();
   const base = { name: 'a', domain: 'example.com', path: '/' };

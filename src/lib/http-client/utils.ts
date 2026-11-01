@@ -183,10 +183,11 @@ export function buildURL(
 ): string {
   let url: string;
 
-  // With a base, only a URL that says `scheme://` skips the join: the parser also reads
-  // `http:evil.test` as a host, a spelling that passes a check for `://` or a leading `//`.
+  // With a base, an http(s) URL skips the join only if it starts `scheme://`: the parser also reads a
+  // host from `http:evil.test` and ` http://evil.test`, spellings that pass a caller's check
+  // for `://`, a leading `//` or a leading `http`.
   const absoluteHref =
-    baseURL && !path.slice(path.indexOf(':') + 1).startsWith('//')
+    baseURL && !/^[a-z][a-z0-9+.-]*:\/\//i.test(path)
       ? null
       : tryAbsoluteWebHref(path);
 

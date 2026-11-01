@@ -398,8 +398,8 @@ export class CookieJar {
    * Also returns false for a name or value that cannot be written into a `Cookie`
    * header as one cookie-pair: a name that holds `=`, `;` or a control character other
    * than a tab, or starts or ends with a space or tab (one inside it is kept, as RFC
-   * 6265bis keeps it), or a value holding `;` or a control character other than a tab,
-   * or a name and value together longer than 4096 characters, the limit a `Set-Cookie`
+   * 6265bis keeps it), or a value holding `;` or a control character other than a tab
+   * or starting or ending with a space or tab, or a name and value together longer than 4096 characters, the limit a `Set-Cookie`
    * is held to. A name may be
    * empty - a nameless cookie, sent as its value alone - when the value is not empty and
    * does not start with `__Secure-` / `__Host-`. The header is
@@ -2077,23 +2077,24 @@ export class CookieJar {
 
     // A name holds no `=` (its own delimiter). It may be empty - a nameless
     // cookie, sent as its value alone (RFC 6265bis) - when the value is not: and then the
-    // value does not pose as a `__Secure-` / `__Host-` cookie, which RFC 6265bis refuses,
-    // read as a server reads it: with the spaces and tabs at its edges trimmed.
+    // value does not pose as a `__Secure-` / `__Host-` cookie, which RFC 6265bis refuses.
     // It may hold an `=`, though a server reads `=a=b` back as `a=b`, as browsers keep it.
     if (name === '') {
       return (
         value !== '' &&
-        cookieNamePrefix(trimSpacesAndTabs(value)) === null &&
+        trimSpacesAndTabs(value) === value &&
+        cookieNamePrefix(value) === null &&
         isHeaderSafeCookieText(value, '')
       );
     }
 
     // Spaces and tabs inside a name are kept, as RFC 6265bis keeps them (browsers keep a
-    // space; Chrome refuses a tab, Firefox keeps it); at its edges they would be trimmed
-    // off the name a server reads back.
+    // space; Chrome refuses a tab, Firefox keeps it); at the edges of a name or a value
+    // they would be trimmed off what a server reads back.
     return (
       isHeaderSafeCookieText(name, '=') &&
       trimSpacesAndTabs(name) === name &&
+      trimSpacesAndTabs(value) === value &&
       isHeaderSafeCookieText(value, '')
     );
   }
