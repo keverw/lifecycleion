@@ -4248,6 +4248,101 @@ test('fromJSON refuses a cookies array whose length cannot be read', () => {
 });
 
 describe('jar limits', () => {
+  test('the jar-wide count stays true through every way a cookie is added or removed', () => {
+    const jar = new CookieJar({ publicSuffixes: { remove: ['uk', 'co.uk'] } });
+    const internals = jar as unknown as {
+      cookieCount: number;
+      buckets: Map<string, Map<string, unknown>>;
+    };
+    const expectTrueCount = (expected?: number): void => {
+      let total = 0;
+      for (const bucket of internals.buckets.values()) {
+        total += bucket.size;
+      }
+      expect(internals.cookieCount).toBe(total);
+      if (expected !== undefined) {
+        expect(total).toBe(expected);
+      }
+    };
+    const store = (name: string, domain: string, maxAge?: number): boolean =>
+      jar.setCookie({
+        name,
+        value: '1',
+        domain,
+        path: '/',
+        ...(maxAge === undefined ? {} : { maxAge, createdAt: Date.now() }),
+      });
+    const start = Date.now();
+
+    // A new cookie, and one replaced.
+    store('a', 'one.test');
+    store('a', 'one.test');
+    expectTrueCount(1);
+
+    // One stored already expired deletes its twin.
+    store('a', 'one.test', 0);
+    expectTrueCount(0);
+
+    // An expired `Set-Cookie` line.
+    jar.processResponseHeaders(
+      { 'set-cookie': ['b=1; Path=/'] },
+      'https://two.test/',
+    );
+    jar.processResponseHeaders(
+      { 'set-cookie': ['b=1; Path=/; Max-Age=0'] },
+      'https://two.test/',
+    );
+    expectTrueCount(0);
+
+    // Purged by clearExpiredCookies, and by a request reading them.
+    store('c', 'three.test', 1);
+    store('d', 'four.test', 1);
+    setSystemTime(new Date(start + 5000));
+    jar.clearExpiredCookies();
+    expectTrueCount(0);
+    store('c', 'three.test', 1);
+    setSystemTime(new Date(start + 10_000));
+    jar.getCookieHeaderString('https://three.test/');
+    expectTrueCount(0);
+
+    // Each scope of clear().
+    store('e', 'five.test');
+    store('e', 'six.five.test');
+    jar.clear('five.test', 'hostname');
+    expectTrueCount(1);
+    jar.clear('five.test', 'domain');
+    expectTrueCount(0);
+    store('f', 'a.github.io');
+    store('f', 'b.github.io');
+    jar.clear('github.io', 'domain');
+    expectTrueCount(0);
+    store('g', 'example.co.uk');
+    store('g', 'example.uk');
+    jar.clear('co.uk', 'domain');
+    expectTrueCount(1);
+    jar.clear();
+    expectTrueCount(0);
+
+    // Evicted by the site limit, an expired one among them.
+    store('h', 'seven.test', 1);
+    setSystemTime(new Date(start + 15_000));
+    for (let index = 0; index <= 180; index++) {
+      store(`n${index}`, 'seven.test');
+    }
+    expectTrueCount(150);
+
+    // A restore starts over, and the jar-wide limit evicts by this count.
+    const saved = jar.toJSON();
+    jar.fromJSON(saved);
+    expectTrueCount(150);
+
+    // 150 + 3151 crosses 3300 and trims to 3000.
+    for (let index = 0; index < 3151; index++) {
+      store('i', `s${index}.test`);
+    }
+    expectTrueCount(3000);
+  });
+
   const fill = (
     jar: CookieJar,
     count: number,

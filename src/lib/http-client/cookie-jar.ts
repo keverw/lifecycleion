@@ -363,6 +363,9 @@ export class CookieJar {
   // Inner key: `cookieKey`'s JSON of [name, domain, path, hostOnly], for deduplication.
   private buckets: Map<string, Map<string, StoredCookie>> = new Map();
 
+  /** Every cookie in `buckets`, for the jar-wide limit: each store reads it. */
+  private cookieCount = 0;
+
   /**
    * The list this jar scopes with. Held per-jar rather than reached for as a module
    * singleton so two jars in one process can disagree about a suffix, and so the
@@ -580,7 +583,7 @@ export class CookieJar {
     // expired `Set-Cookie` deletes it (RFC 6265 §5.3 step 11). `false`, so `fromJSON`
     // counts it out of what it restored.
     if (now >= lifetime.expiresAt) {
-      this.buckets.get(site)?.delete(key);
+      this.deleteStored(this.buckets.get(site), key);
       this.pruneEmptyBucket(site);
       return false;
     }
@@ -596,7 +599,13 @@ export class CookieJar {
         ? createdAt
         : replaced.creationTime;
 
-    this.getOrCreateBucket(site).set(key, {
+    const bucket = this.getOrCreateBucket(site);
+
+    if (!bucket.has(key)) {
+      this.cookieCount++;
+    }
+
+    bucket.set(key, {
       cookie: stored,
       domain,
       preparedDomain: this.prepareHost(domain),
@@ -785,7 +794,7 @@ export class CookieJar {
     for (const [site, bucket] of this.buckets) {
       for (const [key, stored] of bucket) {
         if (this.isExpired(stored, now)) {
-          bucket.delete(key);
+          this.deleteStored(bucket, key);
           count++;
         }
       }
@@ -830,11 +839,9 @@ export class CookieJar {
     ...args: [] | [host: string, scope: 'hostname' | 'domain']
   ): number {
     if (args.length === 0) {
-      let count = 0;
-      for (const bucket of this.buckets.values()) {
-        count += bucket.size;
-      }
+      const count = this.cookieCount;
       this.buckets.clear();
+      this.cookieCount = 0;
       return count;
     }
 
@@ -882,6 +889,7 @@ export class CookieJar {
       if (!isRemovedSuffixClear && !this.isPublicSuffix(site)) {
         const count = this.buckets.get(site)?.size ?? 0;
         this.buckets.delete(site);
+        this.cookieCount -= count;
         return count;
       }
 
@@ -894,6 +902,7 @@ export class CookieJar {
       for (const [key, bucket] of this.buckets) {
         if (key === domain || key.endsWith(`.${domain}`)) {
           count += bucket.size;
+          this.cookieCount -= bucket.size;
           this.buckets.delete(key);
         }
       }
@@ -917,7 +926,7 @@ export class CookieJar {
 
       for (const [key, stored] of bucket) {
         if (stored.domain === normalizedHost) {
-          bucket.delete(key);
+          this.deleteStored(bucket, key);
           count++;
         }
       }
@@ -1127,6 +1136,7 @@ export class CookieJar {
     }
 
     this.buckets.clear();
+    this.cookieCount = 0;
 
     for (const cookie of prepared) {
       this.setCookie(cookie);
@@ -1135,13 +1145,7 @@ export class CookieJar {
     // What the jar holds once every entry is stored, not each entry `setCookie` took: a
     // later entry of the same identity replaces an earlier one, or deletes it when it has
     // expired, and neither leaves two cookies behind.
-    let restored = 0;
-
-    for (const bucket of this.buckets.values()) {
-      restored += bucket.size;
-    }
-
-    return restored;
+    return this.cookieCount;
   }
 
   // --- Private helpers ---
@@ -1213,7 +1217,7 @@ export class CookieJar {
         // Removed, not only passed over, as Chromium removes one it comes across: nothing
         // else would, for as long as the site's bucket stays under its limit.
         if (this.isExpired(stored, now)) {
-          siteBucket.delete(key);
+          this.deleteStored(siteBucket, key);
           continue;
         }
 
@@ -1482,7 +1486,7 @@ export class CookieJar {
 
     for (const [key, stored] of bucket) {
       if (stored.domain === domain || stored.domain.endsWith(`.${domain}`)) {
-        bucket.delete(key);
+        this.deleteStored(bucket, key);
         count++;
       }
     }
@@ -1499,13 +1503,7 @@ export class CookieJar {
       this.evict([site], MAX_COOKIES_PER_SITE, COOKIES_PER_SITE_AFTER_EVICTION);
     }
 
-    let total = 0;
-
-    for (const bucket of this.buckets.values()) {
-      total += bucket.size;
-    }
-
-    if (total > MAX_COOKIES_IN_JAR) {
+    if (this.cookieCount > MAX_COOKIES_IN_JAR) {
       this.evict(
         Array.from(this.buckets.keys()),
         MAX_COOKIES_IN_JAR,
@@ -1527,7 +1525,7 @@ export class CookieJar {
 
       for (const [key, stored] of bucket ?? []) {
         if (this.isExpired(stored, now)) {
-          bucket?.delete(key);
+          this.deleteStored(bucket, key);
         } else {
           live.push({ site, key, stored });
         }
@@ -1546,12 +1544,21 @@ export class CookieJar {
       ];
 
       for (const { site, key } of candidates.slice(0, live.length - target)) {
-        this.buckets.get(site)?.delete(key);
+        this.deleteStored(this.buckets.get(site), key);
       }
     }
 
     for (const site of sites) {
       this.pruneEmptyBucket(site);
+    }
+  }
+
+  private deleteStored(
+    bucket: Map<string, StoredCookie> | undefined,
+    key: string,
+  ): void {
+    if (bucket?.delete(key) === true) {
+      this.cookieCount--;
     }
   }
 
@@ -1569,9 +1576,10 @@ export class CookieJar {
   ): void {
     domain = this.normalizeStoredDomain(domain);
     const site = this.siteFor(domain);
-    this.buckets
-      .get(site)
-      ?.delete(this.cookieKey(name, domain, path, isHostOnly));
+    this.deleteStored(
+      this.buckets.get(site),
+      this.cookieKey(name, domain, path, isHostOnly),
+    );
     this.pruneEmptyBucket(site);
   }
 
