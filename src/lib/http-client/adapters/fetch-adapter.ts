@@ -386,6 +386,9 @@ async function readResponseBody(
   maxResponseBytes: number,
 ): Promise<Uint8Array | null | typeof RESPONSE_TOO_LARGE> {
   if (!hasResponseBody(method, response.status)) {
+    // Native `fetch` hands over no body here, but a polyfill's Node `Readable` would hold
+    // its socket until the server closed it.
+    cancelBodyQuietly(readUnknownMember(response, 'body'));
     return null;
   }
 

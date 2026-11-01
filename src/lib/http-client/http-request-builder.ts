@@ -6,7 +6,7 @@ import { generateID } from '../id-helpers';
 import { validateMaxResponseBytes, validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { defineEntry } from '../internal/define-entry';
-import { lowerCaseHeaderName } from './utils';
+import { lowerCaseHeaderName } from './internal/header-utils';
 import { isBlankText } from '../internal/ascii-text';
 import { copyRequestBody } from './internal/request-body-copy';
 import { isFormData } from './internal/form-entries';

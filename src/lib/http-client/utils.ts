@@ -42,7 +42,6 @@ import type {
   AdapterResponse,
 } from './types';
 
-export { lowerCaseHeaderName } from './internal/header-utils';
 /**
  * If `path` is an absolute HTTP(S) URL, returns its canonical `href` (normalized
  * scheme/host casing). Otherwise `null`. Protocol-relative `//host` is handled
@@ -1404,19 +1403,10 @@ export function derivedRedirectFields(
   };
 }
 
-export function assertValidBaseURL(
-  baseURL: string,
-  fieldName = 'baseURL',
-): void {
-  try {
-    const url = new URL(baseURL);
-
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      throw new Error('unsupported protocol');
-    }
-  } catch {
+export function assertValidBaseURL(baseURL: string): void {
+  if (!isAbsoluteWebURL(baseURL)) {
     throw new Error(
-      `HTTPClient ${fieldName} must be an absolute http(s) URL (for example "https://api.example.com").`,
+      'HTTPClient baseURL must be an absolute http(s) URL (for example "https://api.example.com").',
     );
   }
 }

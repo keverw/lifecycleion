@@ -604,3 +604,4 @@
 - HTTP client: a `File` whose `stream()` keeps answering with empty chunks from microtasks alone no longer starves the event loop during a NodeAdapter multipart upload, so the attempt timeout and a cancel can end it.
 - HTTP client: `maxRedirects: null` reads as unset, as `followRedirects: null` and `userAgent: null` do, rather than throwing.
 - HTTP client: an error with no code whose message only quotes a dotted host, a `host:port` or a path holding `certificate` or `altname` (`lookup failed for certificates.internal.corp`) is no longer classified as a permanent TLS certificate failure.
+- FetchAdapter: a polyfilled `fetch`'s response body is released on a bodiless answer (HEAD, 204, 205, 304) rather than left unread.

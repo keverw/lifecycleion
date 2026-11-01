@@ -562,8 +562,8 @@ export class CookieJar {
     // a `Set-Cookie` naming the suffix or address from the host itself is (RFC 6265bis
     // §5.5, and browsers for an address): stored host-only, and so filed under the same
     // key as that `Set-Cookie`'s cookie, which replaces and deletes it. A jar saved under
-    // another suffix list can hold one, and so can one saved by 0.1.0, which stored an
-    // address's `Domain=` cookie as a domain cookie.
+    // another suffix list can hold one, and any persisted jar can hold an address's
+    // `Domain=` cookie as a domain cookie.
     if (isHostOnly) {
       stored.hostOnly = true;
     }
@@ -1166,6 +1166,11 @@ export class CookieJar {
    * those named `name`: the others are passed over before they are matched.
    */
   private collectCookies(url: string, name?: string): StoredCookie[] {
+    // Nothing to match, so no URL parse or suffix lookups for a jar that holds nothing.
+    if (this.cookieCount === 0) {
+      return [];
+    }
+
     let hostname: string;
     let pathname: string;
 

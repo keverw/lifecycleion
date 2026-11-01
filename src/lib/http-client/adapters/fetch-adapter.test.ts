@@ -2416,6 +2416,35 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     expect([...(response.body as Uint8Array)]).toEqual([4, 5, 6]);
   });
 
+  test.each([
+    ['HEAD', 200],
+    ['GET', 304],
+    ['GET', 204],
+  ] as const)(
+    "a polyfilled fetch's Readable is released on a bodiless answer: %s %i",
+    async (method, status) => {
+      const { Readable } = await import('node:stream');
+      const body = Readable.from(['unread']);
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status,
+          type: 'basic',
+          headers: new Headers(),
+          body,
+        });
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method,
+        headers: {},
+        maxResponseBytes: 100,
+      });
+
+      expect(response.body).toBeNull();
+      expect(body.destroyed).toBe(true);
+    },
+  );
+
   test("a polyfilled fetch's Readable that yields text is still read as its UTF-8 bytes", async () => {
     const { Readable } = await import('node:stream');
     (globalThis as any).fetch = () =>
