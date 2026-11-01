@@ -604,7 +604,7 @@
 - HTTP client: a `File` whose `stream()` keeps answering with empty chunks from microtasks alone no longer starves the event loop during a NodeAdapter multipart upload, so the attempt timeout and a cancel can end it.
 - HTTP client: `maxRedirects: null` reads as unset, as `followRedirects: null` and `userAgent: null` do, rather than throwing.
 - HTTP client: an error with no code whose message only quotes a dotted host, a `host:port` or a path holding `certificate` or `altname` (`lookup failed for certificates.internal.corp`) is no longer classified as a permanent TLS certificate failure.
-- **BREAKING** XHRAdapter: a response an XHR outside a browser hands over as text is read as UTF-8 bytes, and one in no readable form fails as a `stream_response_error` with the real status, rather than reading as a healthy empty answer.
+- **BREAKING:** XHRAdapter: a response an XHR outside a browser hands over as text is read as UTF-8 bytes, and one in no readable form fails as a `stream_response_error` with the real status, rather than reading as a healthy empty answer.
 - FetchAdapter: a body stream answering empty chunks from microtasks alone no longer starves timers, and its read stops and lets the stream go once the attempt is aborted, reporting the real status.
 - A request leaves `listRequests()`, and the client's listeners leave the caller's signal, as it settles, before its `final` observers run, so one that never settles keeps neither. A chunk whose write callback succeeded stays accepted if the stream is destroyed before `write` returns.
 - FetchAdapter: a polyfilled `fetch`'s response body is released on a bodiless answer (HEAD, 204, 205, 304) rather than left unread.
