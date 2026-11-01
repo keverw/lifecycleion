@@ -907,6 +907,8 @@ A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265
 
 Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `domain: 'münchen.de'` given to `setCookie()` or restored through `fromJSON()` matches the request host `xn--mnchen-3ya.de`, and so does a request to `https://münchen.de/`. The same normalization applies to hosts passed to `clear()`. A `Set-Cookie` header's `Domain` is ASCII or the cookie is ignored, as RFC 6265bis has it - whether the header came off the wire (where its bytes are read as latin1) or as a string passed to `processResponseHeaders()` / `parseSetCookieHeader()`; servers send the `xn--` form. The last `SameSite` attribute wins, an unrecognized value reading as the default. The last `Domain` attribute wins too, an empty one included: `Domain=example.com; Domain=` is host-only, as Chrome and Firefox store it (RFC 6265bis would ignore the empty one and widen the cookie to every subdomain). A `Domain` with two leading dots (`..example.com`) names no host, and its cookie is ignored. A `SameSite=None` cookie without `Secure` is ignored, as browsers ignore it. Invalid domain scopes are rejected. A trailing dot is part of the host, as RFC 6265bis compares hosts and browsers keep them apart: `example.com.` and `example.com` are different hosts to the jar, so a cookie set by one is never sent to the other. A `Domain` attribute must be a suffix of the request host as written - `Domain=example.com` from `www.example.com.` is ignored, and that host scopes a cookie with `Domain=example.com.` - and the public-suffix checks apply to either form (`Domain=com.` is refused). Two trailing dots name no host. An IPv4 address with a trailing dot is no cookie domain: the URL parser reads `127.0.0.1.` as `127.0.0.1`, so cookies set from it are that address's, and `domain: '127.0.0.1.'` or `Domain=127.0.0.1.` is refused (and `clear('127.0.0.1.', ...)` clears nothing). `setCookie()`, `fromJSON()`, `clear()` and `getStoredDomains()` keep the two forms apart as well: a restored `domain: 'example.com.'` is sent only to `example.com.` and its subdomains, and `clear('example.com', 'domain')` leaves it.
 
+The jar is bounded as Chromium bounds its store. Past 180 cookies in a site (a registrable domain, subdomains included), expired cookies are removed and then the least recently used, non-`Secure` before `Secure`, down to 150; past 3300 in the jar, the same down to 3000. Sending or reading a cookie counts as using it. Any store can evict a `Secure` cookie once no non-`Secure` one is left to go, as in Chromium. So a non-`Secure` cookie stored beside 150 or more `Secure` ones in a site can be evicted at once, and `setCookie()` then returns `false`, but `Secure` cookies cannot lock others out, and a flood of non-`Secure` cookies pushes them no lower than 150 and 3000. It differs from Chromium in one way: cookies used in the last 30 days are not exempt from the jar-wide limit, since a long-running service can reach thousands of sites inside that window. `toJSON()` lists cookies least recently used first, so a restored jar evicts in the same order. These limits bound memory rather than header size: a site's 180 cookies of up to 4 KB each can still make a `Cookie` header a server refuses. Expired cookies are also removed as a request reads the sites it scans; `clearExpiredCookies()` purges the rest.
+
 Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.
 On legacy implementations without it, the fallback accepts a single unambiguous
 cookie, including Expires date commas. If a comma is followed by text containing
@@ -1060,7 +1062,7 @@ jar.processResponseHeaders(response.headers, 'https://example.com/');
 const cookieHeader = jar.getCookieHeaderString('https://api.example.com/users');
 
 // Maintenance
-jar.clearExpiredCookies(); // Returns count removed
+jar.clearExpiredCookies(); // Returns count removed, for sites no longer requested
 jar.clear(); // Remove all cookies - returns count removed
 jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only - returns count removed
 jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (any host's registrable domain is cleared this way) - returns count removed. A site behind a nested private suffix (bucket.s3.amazonaws.com under amazonaws.com) is its own domain and stays
@@ -1069,7 +1071,7 @@ jar.clear('github.io', 'domain'); // On a public suffix or bare name, every site
 // A host that is not a non-empty string, or a missing or unknown scope, throws: only clear() with no arguments clears everything.
 
 // Inspection
-jar.getAllCookies(); // Copies of every stored cookie, including expired ones
+jar.getAllCookies(); // Copies of every stored cookie, including expired ones not yet removed
 jar.getStoredDomains(); // [{ domain, count }]
 
 // Serialization

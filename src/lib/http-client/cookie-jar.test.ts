@@ -4012,7 +4012,7 @@ test('a cookie past the 400-day cap is sent until the cap and purged there', () 
 
   setSystemTime(new Date(start + capMS));
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('');
-  expect(jar.clearExpiredCookies()).toBe(3);
+  expect(jar.getAllCookies()).toEqual([]);
 });
 
 test('the 400-day cap reads a Date by its time, not a getTime it carries', () => {
@@ -4245,4 +4245,325 @@ test('fromJSON refuses a cookies array whose length cannot be read', () => {
 
   expect(() => jar.fromJSON({ cookies })).toThrow(TypeError);
   expect(jar.getAllCookies().map((c) => c.name)).toEqual(['old']);
+});
+
+describe('jar limits', () => {
+  const fill = (
+    jar: CookieJar,
+    count: number,
+    options: { prefix?: string; domain?: string; isSecure?: boolean } = {},
+  ): void => {
+    const { prefix = 'c', domain = 'example.com', isSecure = false } = options;
+
+    for (let index = 0; index < count; index++) {
+      jar.setCookie({
+        name: `${prefix}${index}`,
+        value: 'v',
+        domain,
+        path: '/',
+        secure: isSecure,
+      });
+    }
+  };
+  const names = (jar: CookieJar): string[] =>
+    jar.getAllCookies().map((cookie) => cookie.name);
+
+  test('a site past 180 cookies is evicted to 150, least recently stored first', () => {
+    const jar = new CookieJar();
+    fill(jar, 181);
+
+    const kept = names(jar);
+    expect(kept).toHaveLength(150);
+    expect(kept).not.toContain('c30');
+    expect(kept).toContain('c31');
+    expect(kept).toContain('c180');
+  });
+
+  test('a site holding exactly 180 is left alone, and replacing one adds nothing', () => {
+    const jar = new CookieJar();
+    fill(jar, 180);
+    fill(jar, 1);
+
+    expect(names(jar)).toHaveLength(180);
+  });
+
+  test('a cookie read for a request is kept over ones not read since', () => {
+    const jar = new CookieJar();
+    fill(jar, 1);
+    fill(jar, 1, { prefix: 'scoped', domain: 'a.example.com' });
+    fill(jar, 178, { prefix: 'later', domain: 'b.example.com' });
+
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('c0=v');
+    fill(jar, 1, { prefix: 'last', domain: 'b.example.com' });
+
+    const kept = names(jar);
+    expect(kept).toContain('c0');
+    expect(kept).not.toContain('scoped0');
+  });
+
+  test('subdomains count toward their site, and other sites are untouched', () => {
+    const jar = new CookieJar();
+    fill(jar, 5, { prefix: 'other', domain: 'other.test' });
+    fill(jar, 100, { prefix: 'a', domain: 'a.example.com' });
+    fill(jar, 81, { prefix: 'b', domain: 'b.example.com' });
+
+    const kept = names(jar);
+    expect(kept.filter((name) => name.startsWith('other'))).toHaveLength(5);
+    expect(kept).toHaveLength(155);
+  });
+
+  test('a Secure cookie being stored evicts non-Secure ones first', () => {
+    const jar = new CookieJar();
+    fill(jar, 100, { prefix: 'old-secure', isSecure: true });
+    fill(jar, 80, { prefix: 'plain' });
+    fill(jar, 1, { prefix: 'new-secure', isSecure: true });
+
+    const kept = names(jar);
+    expect(kept).toHaveLength(150);
+    expect(kept.filter((name) => name.startsWith('old-secure'))).toHaveLength(
+      100,
+    );
+    expect(kept.filter((name) => name.startsWith('plain'))).toHaveLength(49);
+  });
+
+  test('with too few non-Secure cookies, a Secure store evicts the oldest Secure ones', () => {
+    const jar = new CookieJar();
+    fill(jar, 170, { prefix: 'secure', isSecure: true });
+    fill(jar, 10, { prefix: 'plain' });
+    fill(jar, 1, { prefix: 'new', isSecure: true });
+
+    const kept = names(jar);
+    expect(kept).toHaveLength(150);
+    expect(kept.some((name) => name.startsWith('plain'))).toBe(false);
+    expect(kept).not.toContain('secure20');
+    expect(kept).toContain('secure21');
+    expect(kept).toContain('new0');
+  });
+
+  test('a flood of non-Secure cookies over http pushes Secure ones no lower than 150', () => {
+    const jar = new CookieJar();
+    fill(jar, 170, { prefix: 'secure', isSecure: true });
+
+    for (let index = 0; index < 500; index++) {
+      jar.parseSetCookieHeader(
+        `flood${index}=v; Domain=example.com; Path=/`,
+        'http://evil.example.com/',
+      );
+    }
+
+    const kept = names(jar);
+    expect(kept.filter((name) => name.startsWith('secure'))).toHaveLength(150);
+    expect(kept).not.toContain('secure19');
+    expect(kept).toContain('secure20');
+    expect(kept).not.toContain('flood475');
+    expect(kept).toContain('flood476');
+    expect(kept).toContain('flood499');
+  });
+
+  test('a non-Secure cookie stored beside 180 Secure ones is evicted, and the next one fits', () => {
+    const jar = new CookieJar();
+    fill(jar, 180, { prefix: 'secure', isSecure: true });
+
+    const store = (name: string): boolean =>
+      jar.setCookie({ name, value: 'v', domain: 'example.com', path: '/' });
+
+    expect(store('first')).toBe(false);
+    expect(names(jar)).toHaveLength(150);
+    expect(store('second')).toBe(true);
+    expect(names(jar)).toContain('second');
+  });
+
+  test('a jar full of Secure cookies does not lock out a site it has not seen', () => {
+    const jar = new CookieJar();
+
+    for (let site = 0; site < 33; site++) {
+      fill(jar, 100, {
+        prefix: 'secure',
+        domain: `secure${site}.test`,
+        isSecure: true,
+      });
+    }
+
+    const store = (name: string): boolean =>
+      jar.setCookie({ name, value: 'v', domain: 'bank.test', path: '/' });
+
+    expect(store('first')).toBe(false);
+    expect(store('session')).toBe(true);
+    expect(jar.getCookieHeaderString('https://bank.test/')).toBe('session=v');
+    expect(names(jar)).toHaveLength(3001);
+  });
+
+  test('a restored jar evicts in the order the saved one would', () => {
+    const jar = new CookieJar();
+    fill(jar, 1, { prefix: 'read', domain: 'a.example.com' });
+    fill(jar, 1, { prefix: 'unread', domain: 'b.example.com' });
+    fill(jar, 178, { prefix: 'filler', domain: 'c.example.com' });
+    expect(jar.getCookieHeaderString('https://a.example.com/')).toBe('read0=v');
+
+    const restored = new CookieJar();
+    restored.fromJSON(jar.toJSON());
+    fill(restored, 1, { prefix: 'new' });
+
+    const kept = names(restored);
+    expect(kept).not.toContain('unread0');
+    expect(kept).toContain('read0');
+  });
+
+  test('a jar of Secure cookies alone is held to the jar limit by a Secure store', () => {
+    const jar = new CookieJar();
+
+    for (let site = 0; site < 33; site++) {
+      fill(jar, 100, {
+        domain: `site${site}.test`,
+        isSecure: true,
+      });
+    }
+
+    fill(jar, 1, { prefix: 'new', domain: 'last.test', isSecure: true });
+
+    expect(names(jar)).toHaveLength(3000);
+    expect(names(jar)).toContain('new0');
+  });
+
+  test('replacing a cookie counts as using it', () => {
+    const jar = new CookieJar();
+    fill(jar, 180);
+    fill(jar, 1);
+    fill(jar, 1, { prefix: 'new' });
+
+    const kept = names(jar);
+    expect(kept).toContain('c0');
+    expect(kept).not.toContain('c1');
+  });
+
+  test('a cookie whose path does not match a read does not count as used', () => {
+    const jar = new CookieJar();
+    jar.setCookie({
+      name: 'deep',
+      value: 'v',
+      domain: 'example.com',
+      path: '/deep',
+    });
+    fill(jar, 179, { prefix: 'filler', domain: 'a.example.com' });
+
+    jar.getCookieHeaderString('https://example.com/');
+    fill(jar, 1, { prefix: 'new' });
+
+    expect(names(jar)).not.toContain('deep');
+  });
+
+  test('getCookieFor marks only the cookie it returns as used', () => {
+    const jar = new CookieJar();
+
+    for (const path of ['/', '/x']) {
+      jar.setCookie({
+        name: 'a',
+        value: 'v',
+        domain: 'example.com',
+        path,
+      });
+    }
+
+    fill(jar, 178, { prefix: 'filler' });
+    expect(jar.getCookieFor('a', 'https://example.com/x/y')?.path).toBe('/x');
+    fill(jar, 1, { prefix: 'new' });
+
+    const paths = jar
+      .getAllCookies()
+      .filter((cookie) => cookie.name === 'a')
+      .map((cookie) => cookie.path);
+    expect(paths).toEqual(['/x']);
+  });
+
+  test('a Secure cookie withheld from an http read does not count as used', () => {
+    const jar = new CookieJar();
+    fill(jar, 1, { prefix: 'withheld', isSecure: true });
+    fill(jar, 179, { prefix: 'filler', isSecure: true });
+
+    expect(jar.getCookieHeaderString('http://example.com/')).toBe('');
+    fill(jar, 1, { prefix: 'new', isSecure: true });
+
+    expect(names(jar)).not.toContain('withheld0');
+  });
+
+  test('expired cookies go before any live one is evicted', () => {
+    const jar = new CookieJar();
+    const start = Date.now();
+    setSystemTime(new Date(start));
+
+    for (let index = 0; index < 40; index++) {
+      jar.setCookie({
+        name: `short${index}`,
+        value: 'v',
+        domain: 'example.com',
+        path: '/',
+        maxAge: 1,
+      });
+    }
+
+    fill(jar, 140);
+    setSystemTime(new Date(start + 2000));
+    fill(jar, 1, { prefix: 'new' });
+
+    const kept = names(jar);
+    expect(kept).toHaveLength(141);
+    expect(kept.some((name) => name.startsWith('short'))).toBe(false);
+    expect(kept).toContain('c0');
+  });
+
+  test('the jar past 3300 cookies is evicted to 3000 across sites', () => {
+    const jar = new CookieJar();
+
+    for (let site = 0; site < 33; site++) {
+      fill(jar, 100, { domain: `site${site}.test` });
+    }
+
+    expect(names(jar)).toHaveLength(3300);
+    fill(jar, 1, { prefix: 'new', domain: 'last.test' });
+
+    const domains = jar.getStoredDomains();
+    expect(domains.reduce((sum, { count }) => sum + count, 0)).toBe(3000);
+    expect(domains.map(({ domain }) => domain)).not.toContain('site0.test');
+    expect(domains).toContainEqual({ domain: 'last.test', count: 1 });
+  });
+
+  test('fromJSON holds a payload to the limits and reports the short count', () => {
+    const jar = new CookieJar();
+    const cookies = Array.from({ length: 200 }, (_, index) => ({
+      name: `c${index}`,
+      value: 'v',
+      domain: 'example.com',
+      path: '/',
+      createdAt: Date.now(),
+    }));
+
+    expect(jar.fromJSON({ cookies })).toBe(169);
+    expect(names(jar)).toContain('c199');
+    expect(names(jar)).not.toContain('c0');
+  });
+
+  test('reading a URL removes expired cookies of its sites, whatever their names', () => {
+    const jar = new CookieJar();
+    const start = Date.now();
+    setSystemTime(new Date(start));
+
+    for (const domain of ['example.com', 'other.test']) {
+      jar.setCookie({
+        name: 'short',
+        value: 'v',
+        domain,
+        path: '/admin',
+        maxAge: 1,
+      });
+    }
+
+    setSystemTime(new Date(start + 2000));
+
+    expect(jar.getCookieFor('unrelated', 'https://example.com/')).toBe(
+      undefined,
+    );
+    expect(jar.getStoredDomains()).toEqual([
+      { domain: 'other.test', count: 1 },
+    ]);
+  });
 });

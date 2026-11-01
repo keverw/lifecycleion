@@ -171,6 +171,8 @@ interface StoredCookie {
   preparedDomain: PreparedHost;
   /** When the cookie's identity was first stored; orders the `Cookie` header. */
   creationTime: number;
+  /** The jar's access clock when the cookie was last stored or read; orders eviction. */
+  lastAccess: number;
   /** When the cookie expires, from its capped lifetime; `Infinity` for a session cookie. */
   expiresAt: number;
 }
@@ -191,6 +193,13 @@ const MAX_AGE_PATTERN = /^-?\d+$/;
 
 /** RFC 6265bis §5.6: a cookie whose name and value together pass this is ignored. */
 const MAX_COOKIE_NAME_VALUE_BYTES = 4096;
+
+// The limits Chromium keeps (`CookieMonster`): past the maximum, cookies are evicted down
+// to the target, so a burst of `Set-Cookie` lines is not an eviction per line.
+const MAX_COOKIES_PER_SITE = 180;
+const COOKIES_PER_SITE_AFTER_EVICTION = 150;
+const MAX_COOKIES_IN_JAR = 3300;
+const COOKIES_IN_JAR_AFTER_EVICTION = 3000;
 
 /**
  * The RFC 6265bis §4.1.3 name prefix `text` starts with, matched ASCII
@@ -330,6 +339,15 @@ export interface CookieJarOptions {
  *   (RFC 6265bis "Leave Secure Cookies Alone")
  * - Enforces the `__Secure-` and `__Host-` name prefixes (RFC 6265bis)
  *
+ * Growth is bounded as Chromium bounds it: past 180 cookies in a site, or 3300 in the jar,
+ * expired cookies go first and then the least recently used, non-`Secure` before `Secure`,
+ * down to 150 and 3000. Any store can evict a `Secure` cookie once no non-`Secure` one is
+ * left to go, as in Chromium, so `Secure` cookies cannot fill the jar and lock others out,
+ * and a flood of non-`Secure` cookies pushes them no lower than 150 and 3000. It differs in
+ * one way: cookies used in the last 30 days are not exempt from the jar-wide limit, as a
+ * long-running service can reach thousands of sites inside that window, and the limit would
+ * not bound it.
+ *
  * IPs are never treated as public suffixes. A bare single-label hostname - `localhost`,
  * `myapp` - is, so a cookie may not span one; per RFC 6265bis §5.5 a `Domain=` naming the
  * request host itself is still accepted, host-only, so a server on `http://localhost/`
@@ -350,6 +368,9 @@ export class CookieJar {
    * override lists are validated once at construction instead of on every store.
    */
   private readonly publicSuffixes: PublicSuffixResolver;
+
+  /** Counts stores and reads, so recency has a strict order within one millisecond. */
+  private accessClock = 0;
 
   constructor(options?: CookieJarOptions) {
     assertOptionsObject(options, 'CookieJar options', true);
@@ -394,6 +415,9 @@ export class CookieJar {
    * expired `Set-Cookie` deletes it. A domain cookie whose domain is a public suffix
    * under the jar's list is stored host-only, as a `Set-Cookie` naming the suffix from
    * that host itself is, and replaces the cookie such a `Set-Cookie` stored.
+   *
+   * Also returns false for a non-`Secure` cookie when `Secure` cookies alone fill the
+   * limit, since it may not evict them: it is the cookie that goes. See {@link CookieJar}.
    *
    * The jar stores its own copy of the cookie. To change a stored cookie - its value,
    * say - call `setCookie` again with the same name, domain, path and `hostOnly`.
@@ -576,10 +600,13 @@ export class CookieJar {
       domain,
       preparedDomain: this.prepareHost(domain),
       creationTime,
+      lastAccess: ++this.accessClock,
       expiresAt: lifetime.expiresAt,
     });
 
-    return true;
+    this.enforceLimits(site);
+
+    return this.buckets.get(site)?.has(key) === true;
   }
 
   /**
@@ -614,7 +641,14 @@ export class CookieJar {
     }
 
     const [first] = this.collectCookies(url, name);
-    return first === undefined ? undefined : copyCookie(first.cookie);
+
+    if (first === undefined) {
+      return undefined;
+    }
+
+    first.lastAccess = ++this.accessClock;
+
+    return copyCookie(first.cookie);
   }
 
   /**
@@ -720,7 +754,7 @@ export class CookieJar {
    * `setCookie` to update a stored cookie.
    */
   public getCookiesFor(url: string): Cookie[] {
-    return this.collectCookies(url).map((stored) => copyCookie(stored.cookie));
+    return this.readCookies(url).map((stored) => copyCookie(stored.cookie));
   }
 
   /**
@@ -731,7 +765,7 @@ export class CookieJar {
   public getCookieHeaderString(url: string): string {
     // Read from the stored cookies, not copies: only their names and values are used.
     // A nameless cookie goes out as its value alone, as browsers send it.
-    return this.collectCookies(url)
+    return this.readCookies(url)
       .map(({ cookie }) =>
         cookie.name === '' ? cookie.value : `${cookie.name}=${cookie.value}`,
       )
@@ -739,7 +773,9 @@ export class CookieJar {
   }
 
   /**
-   * Removes expired cookies. Returns the number of cookies removed.
+   * Removes expired cookies. Returns the number of cookies removed. Reading a URL's
+   * cookies removes the expired ones in the sites it scans, and the jar's limits remove
+   * them when reached, so this is only needed to purge the sites no longer requested.
    */
   public clearExpiredCookies(): number {
     const now = Date.now();
@@ -895,9 +931,19 @@ export class CookieJar {
    *
    * A replaced cookie's place in the `Cookie` header - its first creation time - is not
    * saved: after a restore, cookies of equal path length are ordered by `createdAt`.
+   * Least recently used first: a restore counts recency by payload order, so a restored
+   * jar evicts as this one would. The times themselves are not saved.
    */
   public toJSON(): CookieJarJSON {
-    return { cookies: this.getAllCookies() };
+    const stored: StoredCookie[] = [];
+
+    for (const bucket of this.buckets.values()) {
+      stored.push(...bucket.values());
+    }
+
+    stored.sort((a, b) => a.lastAccess - b.lastAccess);
+
+    return { cookies: stored.map((entry) => copyCookie(entry.cookie)) };
   }
 
   /**
@@ -950,6 +996,9 @@ export class CookieJar {
    *
    * A cookie that has expired by the time it is restored is left out of the jar and out
    * of the count, as `setCookie` leaves it out.
+   *
+   * The jar's limits apply as each cookie is stored, in payload order, so a payload past
+   * them comes back short (see {@link CookieJar}).
    *
    * @returns How many cookies the jar holds once restored. Compare against
    *          `data.cookies.length` to learn whether any were refused; entries of the same
@@ -1095,6 +1144,18 @@ export class CookieJar {
 
   // --- Private helpers ---
 
+  /** {@link collectCookies} for a caller handing all of them over: they count as used. */
+  private readCookies(url: string): StoredCookie[] {
+    const cookies = this.collectCookies(url);
+    const access = ++this.accessClock;
+
+    for (const stored of cookies) {
+      stored.lastAccess = access;
+    }
+
+    return cookies;
+  }
+
   /**
    * The stored cookies {@link getCookiesFor} returns copies of, in header order, or only
    * those named `name`: the others are passed over before they are matched.
@@ -1144,8 +1205,15 @@ export class CookieJar {
       if (!siteBucket) {
         continue;
       }
-      for (const stored of siteBucket.values()) {
+      for (const [key, stored] of siteBucket) {
         const { cookie } = stored;
+
+        // Removed, not only passed over, as Chromium removes one it comes across: nothing
+        // else would, for as long as the site's bucket stays under its limit.
+        if (this.isExpired(stored, now)) {
+          siteBucket.delete(key);
+          continue;
+        }
 
         if (name !== undefined && cookie.name !== name) {
           continue;
@@ -1170,12 +1238,10 @@ export class CookieJar {
           continue;
         }
 
-        if (this.isExpired(stored, now)) {
-          continue;
-        }
-
         result.push(stored);
       }
+
+      this.pruneEmptyBucket(candidate);
     }
 
     result.sort((a, b) => {
@@ -1421,6 +1487,70 @@ export class CookieJar {
 
     this.pruneEmptyBucket(site);
     return count;
+  }
+
+  /**
+   * Holds `site`, then the jar, to their limits after a store. See {@link CookieJar}.
+   */
+  private enforceLimits(site: string): void {
+    if ((this.buckets.get(site)?.size ?? 0) > MAX_COOKIES_PER_SITE) {
+      this.evict([site], MAX_COOKIES_PER_SITE, COOKIES_PER_SITE_AFTER_EVICTION);
+    }
+
+    let total = 0;
+
+    for (const bucket of this.buckets.values()) {
+      total += bucket.size;
+    }
+
+    if (total > MAX_COOKIES_IN_JAR) {
+      this.evict(
+        Array.from(this.buckets.keys()),
+        MAX_COOKIES_IN_JAR,
+        COOKIES_IN_JAR_AFTER_EVICTION,
+      );
+    }
+  }
+
+  /**
+   * Removes the expired cookies of `sites`, then, if more than `limit` remain, the least
+   * recently used down to `target`: non-`Secure` first, then `Secure`.
+   */
+  private evict(sites: string[], limit: number, target: number): void {
+    const now = Date.now();
+    const live: Array<{ site: string; key: string; stored: StoredCookie }> = [];
+
+    for (const site of sites) {
+      const bucket = this.buckets.get(site);
+
+      for (const [key, stored] of bucket ?? []) {
+        if (this.isExpired(stored, now)) {
+          bucket?.delete(key);
+        } else {
+          live.push({ site, key, stored });
+        }
+      }
+    }
+
+    if (live.length > limit) {
+      const isSecure = (entry: { stored: StoredCookie }): boolean =>
+        entry.stored.cookie.secure === true;
+      const oldestFirst = live.sort(
+        (a, b) => a.stored.lastAccess - b.stored.lastAccess,
+      );
+      const candidates = [
+        ...oldestFirst.filter((entry) => !isSecure(entry)),
+        ...oldestFirst.filter(isSecure),
+      ];
+
+      for (const { site, key } of candidates.slice(0, live.length - target)) {
+        this.buckets.get(site)?.delete(key);
+      }
+    }
+
+    for (const site of sites) {
+      this.pruneEmptyBucket(site);
+    }
   }
 
   private pruneEmptyBucket(site: string): void {
