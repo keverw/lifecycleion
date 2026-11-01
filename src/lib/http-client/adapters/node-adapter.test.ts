@@ -3213,7 +3213,11 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     });
   }
 
-  for (const source of ['empty reads', 'a read that never answers'] as const) {
+  for (const source of [
+    'empty reads',
+    'empty reads answered from microtasks',
+    'a read that never answers',
+  ] as const) {
     test(`the stall watchdog settles an upload whose source moves nothing at the end of the source grace: ${source}`, async () => {
       // The source grace runs from the first wait since the socket last accepted bytes:
       // reads that come back with nothing - a `stream()` yielding empty chunks - give the
@@ -3257,6 +3261,11 @@ describe('NodeAdapter.send() — unit branches without server', () => {
             pull(controller) {
               if (source === 'a read that never answers') {
                 return new Promise<void>(() => {});
+              }
+
+              if (source === 'empty reads answered from microtasks') {
+                controller.enqueue(new Uint8Array(0));
+                return;
               }
 
               return new Promise<void>((resolve) => {

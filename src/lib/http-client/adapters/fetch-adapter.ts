@@ -1,11 +1,10 @@
 import {
-  deleteHeader,
   describeRefusedHeader,
+  dropTransportFramedHeaders,
   materializeRequestHeaders,
   requestHeaderPairs,
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
-import { isFormData } from '../internal/form-entries';
 import { concatChunks } from '../internal/concat-chunks';
 import {
   isSignalAborted,
@@ -111,17 +110,7 @@ export class FetchAdapter implements HTTPAdapter {
       throw refusal;
     }
 
-    // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
-    // browsers refuse to send one, and Node's undici, given one that disagrees with the
-    // body, would wait for bytes that never come until the attempt times out - on every
-    // retry. Taken off the adapter's own copy, in place.
-    deleteHeader(headers, 'content-length');
-    // A form's `Content-Type` is the transport's own, with the boundary it writes - as
-    // NodeAdapter writes its own: a caller's `multipart/form-data` names no boundary, and
-    // would go out in its place, a body the server cannot split into parts.
-    if (isFormData(body)) {
-      deleteHeader(headers, 'content-type');
-    }
+    dropTransportFramedHeaders(headers, body);
 
     // `fetch` refuses a GET or HEAD with any body that is not `null`, an empty string
     // included, on every attempt - a `TypeError` with no code, which would be retried as a

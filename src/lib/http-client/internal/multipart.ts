@@ -316,13 +316,16 @@ export async function serializeMultipartFormData(
 
     return bytes.byteLength <= REQUEST_BODY_CHUNK_SIZE
       ? writeToRequest(bytes)
-      : writeInSlices(bytes);
+      : writeInSlices(bytes, writeToRequest);
   };
 
-  // A part head larger than a slice, written slice by slice once `writePartHead` has held
-  // it to the budget as a whole. A stream destroyed between slices fails it, as it fails
-  // the whole body below, rather than leaving a part cut short to read as written.
-  const writeInSlices = async (bytes: Buffer): Promise<void> => {
+  // Bytes written slice by slice, each awaited; the slices are views, not copies. A stream
+  // destroyed between slices fails the write, as it fails the whole body below, rather
+  // than leaving a part cut short to read as written.
+  const writeInSlices = async (
+    bytes: Uint8Array,
+    writeSlice: (slice: Uint8Array) => Promise<void>,
+  ): Promise<void> => {
     for (
       let offset = 0;
       offset < bytes.byteLength;
@@ -332,7 +335,7 @@ export async function serializeMultipartFormData(
         throw closedBeforeWritten();
       }
 
-      await writeToRequest(
+      await writeSlice(
         bytes.subarray(offset, offset + REQUEST_BODY_CHUNK_SIZE),
       );
     }
@@ -462,6 +465,21 @@ export async function serializeMultipartFormData(
             throw sourceReadFailure(error);
           }
 
+          // An empty chunk is legal, but with no bytes there is no write to wait on, and a
+          // stream that keeps answering with them from microtasks alone would starve every
+          // timer: the attempt timeout could not fire, nor the process do anything else.
+          // Yielding to the event loop leaves such a source reading until a timeout or
+          // cancel ends it. Still a wait on the source while yielded: a stall watchdog's
+          // timer lands here, and must not read it as a wait on the socket.
+          if (bytes.byteLength === 0) {
+            onSourceWait?.(true);
+            await new Promise<void>((resolve) => {
+              setImmediate(resolve);
+            });
+            onSourceWait?.(false);
+            continue;
+          }
+
           // Refused *before* the write, not counted after it: a `File` that grew after
           // the sizing pass would otherwise have its surplus on the wire past a
           // `Content-Length` the server reads as the start of the next request, and no
@@ -485,21 +503,9 @@ export async function serializeMultipartFormData(
           // `File` in a single write - and progress is counted on a write's callback,
           // so written whole that upload would report nothing between 0 and 100%, and
           // the stall watchdog, which reads that progress, would destroy an upload the
-          // server had acked early and was still reading. The slices are views, not
-          // copies.
-          for (
-            let offset = 0;
-            offset < bytes.byteLength && !req.destroyed;
-            offset += REQUEST_BODY_CHUNK_SIZE
-          ) {
-            const slice = bytes.subarray(
-              offset,
-              offset + REQUEST_BODY_CHUNK_SIZE,
-            );
-
-            await write(slice);
-            partBytes += slice.byteLength;
-          }
+          // server had acked early and was still reading.
+          await writeInSlices(bytes, write);
+          partBytes += bytes.byteLength;
         }
       } finally {
         // Unconditionally, not only when the stream was destroyed. `await write(chunk)`

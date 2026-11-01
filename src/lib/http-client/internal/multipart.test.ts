@@ -1649,6 +1649,51 @@ describe('caller values the writer cannot use are refused as non-retryable', () 
 });
 
 describe('source chunks the writing pass reads', () => {
+  test('a stream() that keeps answering empty chunks lets timers run, and ends when the request is destroyed', async () => {
+    const { req: readonlyReq } = makeCapture();
+    const req = readonlyReq as RequestBodyWritable & { destroyed: boolean };
+    let reads = 0;
+
+    class EmptyChunksFile extends File {
+      public override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+        return new ReadableStream({
+          pull(controller) {
+            reads++;
+            // Bounded so a starved timer fails this test rather than hanging the run.
+            if (reads > 500_000) {
+              controller.error(new Error('timers were starved'));
+            } else {
+              controller.enqueue(new Uint8Array(0));
+            }
+          },
+        });
+      }
+    }
+
+    // As the attempt timeout does: a timer destroys the request.
+    setTimeout(() => {
+      req.destroyed = true;
+    }, 1);
+
+    const fd = new FormData();
+
+    scriptFormEntries(fd, function* (): Generator<[string, unknown]> {
+      yield ['file', new EmptyChunksFile([new Uint8Array(4)], 'a.bin')];
+    });
+
+    let caught: Error | undefined;
+
+    try {
+      await serializeMultipartFormData(fd, req, 'test-boundary');
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe(
+      'Request stream closed before the body was fully written',
+    );
+  });
+
   test('a stream() that yields the whole part as one chunk is written in REQUEST_BODY_CHUNK_SIZE slices', async () => {
     // Node's `Blob.stream()` yields an in-memory `Blob` as a single chunk. Written as one
     // `req.write`, a 64 MiB `File` reported no progress between 0 and 100%, and the

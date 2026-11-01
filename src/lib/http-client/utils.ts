@@ -933,12 +933,13 @@ export function assertSupportedAdapterRuntimeAndConfig(
     assertValidBaseURL(config.baseURL);
   }
 
-  if (config.maxRedirects !== undefined && config.followRedirects !== true) {
+  // Nullish reads as unset, as for `followRedirects` above.
+  if (!isNullish(config.maxRedirects) && config.followRedirects !== true) {
     throw new Error('HTTPClient maxRedirects requires followRedirects: true.');
   }
 
   if (
-    config.maxRedirects !== undefined &&
+    !isNullish(config.maxRedirects) &&
     // A whole number, as every other count option is: `1.5` would otherwise be accepted
     // and act as 1.
     (!Number.isInteger(config.maxRedirects) || config.maxRedirects < 1)

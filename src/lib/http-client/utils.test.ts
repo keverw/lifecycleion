@@ -659,6 +659,22 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
       ).toThrow(/maxRedirects requires followRedirects: true/i);
     });
 
+    test.each([true, false, undefined])(
+      'accepts a null maxRedirects as unset when followRedirects is %p',
+      (shouldFollowRedirects) => {
+        expect(() =>
+          assertSupportedAdapterRuntimeAndConfig(
+            {
+              followRedirects: shouldFollowRedirects,
+              maxRedirects: null as unknown as undefined,
+            },
+            'mock',
+            false,
+          ),
+        ).not.toThrow();
+      },
+    );
+
     test('rejects non-positive maxRedirects when followRedirects is true', () => {
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig(

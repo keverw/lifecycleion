@@ -6,6 +6,7 @@ import {
 } from '../consts';
 import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
+import { isFormData } from './form-entries';
 import { isHTTPToken } from './http-token';
 import { copyArrayValue } from './array-copy';
 import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
@@ -77,6 +78,29 @@ export function deleteHeader(
     if (lowerCaseHeaderName(key) === name) {
       delete headers[key];
     }
+  }
+}
+
+/**
+ * Remove, in place, the headers a browser adapter's transport frames itself from its own
+ * copy of a request's headers.
+ *
+ * A caller's `Content-Length`: a browser refuses to send one, and outside a browser one
+ * that disagrees with the body leaves the other side waiting for bytes that never come,
+ * until the attempt times out - on every retry.
+ *
+ * A form's `Content-Type`, which carries the boundary the transport writes, as NodeAdapter
+ * writes its own: a caller's `multipart/form-data` names no boundary, and would go out in
+ * its place, a body the server cannot split into parts.
+ */
+export function dropTransportFramedHeaders(
+  headers: Record<string, string | string[]>,
+  body: unknown,
+): void {
+  deleteHeader(headers, 'content-length');
+
+  if (isFormData(body)) {
+    deleteHeader(headers, 'content-type');
   }
 }
 
