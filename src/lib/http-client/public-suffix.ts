@@ -113,9 +113,9 @@ function normalizeSuffix(
     // Overrides are hostname suffixes, not URLs or arbitrary match strings. Keeping the
     // accepted form deliberately narrow also prevents a typo such as a scheme, slash or
     // whitespace from silently installing a rule that can never match a request host.
-    // As narrow as the hosts the jar stores, and no narrower: letters, digits, `_` and
-    // hyphens, an edge hyphen included, so a `my_net` the jar keeps cookies for can be
-    // declared a suffix to isolate its tenants.
+    // Narrower than the hosts the jar stores, which may hold any punctuation the URL parser
+    // allows: letters, digits, `_` and hyphens, an edge hyphen included, so a `my_net` the
+    // jar keeps cookies for can be declared a suffix to isolate its tenants.
     if (label.length > 63 || !/^[a-z0-9_-]+$/.test(label)) {
       throw new TypeError(`${entryName} is not a valid hostname suffix`);
     }

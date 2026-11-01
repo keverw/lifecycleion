@@ -4126,6 +4126,40 @@ test('fromJSON refuses an entry it cannot read and reads a Date by its time', ()
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
 });
 
+test('a host the URL parser accepts keeps its cookies, within its own site', () => {
+  const jar = new CookieJar();
+  const url = 'http://a!b.example.com/';
+
+  jar.parseSetCookieHeader('own=1', url);
+  expect(jar.getCookieHeaderString(url)).toBe('own=1');
+  expect(jar.getCookieHeaderString('http://example.com/')).toBe('');
+
+  jar.parseSetCookieHeader('shared=1; Domain=example.com', url);
+  expect(jar.getCookieHeaderString('http://example.com/')).toBe('shared=1');
+
+  jar.parseSetCookieHeader('wide=1; Domain=com', 'http://a!b.com/');
+  expect(jar.getCookieHeaderString('http://other.com/')).toBe('');
+
+  jar.parseSetCookieHeader('site=1; Domain=a!b.com', 'http://x.a!b.com/');
+  expect(jar.getCookieHeaderString('http://a!b.com/')).toBe('site=1');
+  expect(jar.getCookieHeaderString('http://other.com/')).toBe('');
+
+  expect(
+    jar.setCookie({ name: 'a', value: '1', domain: 'a b.test', path: '/' }),
+  ).toBe(false);
+  expect(
+    jar.setCookie({ name: 'a', value: '1', domain: 'a/b.test', path: '/' }),
+  ).toBe(false);
+
+  jar.parseSetCookieHeader(
+    'bracket=1; Domain=[example.com]',
+    'http://example.com/',
+  );
+  expect(jar.getCookieHeaderString('http://www.example.com/')).not.toContain(
+    'bracket',
+  );
+});
+
 test('a nameless Set-Cookie keeps the = in its value, as browsers do', () => {
   const url = 'https://example.com/';
   const read = (...lines: string[]): string => {

@@ -4,7 +4,6 @@ import {
   fieldNames,
 } from '../internal/known-fields';
 import { MAX_COOKIE_LIFETIME_SECONDS } from './consts';
-import { parse } from 'tldts';
 import { toASCII } from 'tr46';
 import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
 import { describeValue } from '../internal/describe-value';
@@ -19,14 +18,6 @@ import {
 } from '../internal/ascii-text';
 import { isNullish } from '../internal/is-nullish';
 import { isHeaderSafeCookieText } from './internal/cookie-text';
-
-// Matches bare hostnames like 'localhost', 'myapp', 'my-app' that tldts
-// won't assign a registered domain to but are still valid cookie domains.
-// `_` and a hyphen anywhere in a label are allowed as the URL parser allows them, and as
-// `normalizeStoredDomain` keeps them: docker-compose service names (`my_service`) and
-// hosts like `-edge.example.com` set cookies the jar would otherwise discard.
-// One trailing dot is allowed, as `normalizeStoredDomain` keeps it (`localhost.`).
-const HOSTNAME_PATTERN = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*\.?$/;
 
 /** {@link MAX_COOKIE_LIFETIME_SECONDS} in milliseconds. */
 const MAX_COOKIE_LIFETIME_MS = MAX_COOKIE_LIFETIME_SECONDS * 1000;
@@ -429,7 +420,7 @@ export class CookieJar {
 
     const domain = this.normalizeStoredDomain(rawDomain);
 
-    if (!this.isSyntaxValidDomain(domain)) {
+    if (domain === '') {
       return false;
     }
 
@@ -1253,7 +1244,7 @@ export class CookieJar {
         // Neither lowercased nor NFC-normalized first: TR46 maps case and then
         // normalizes, as the URL parser does - `toLowerCase` makes a word-final `Σ` the
         // final sigma `ς`, another domain (see `normalizeHostText` in domain-utils).
-        this.unbracketHost(raw),
+        raw,
         {
           useSTD3ASCIIRules: false,
           checkHyphens: false,
@@ -1902,32 +1893,6 @@ export class CookieJar {
       return host.slice(1, -1);
     }
     return host;
-  }
-
-  /** Validates domain syntax for setCookie. Accepts hostnames (example.com,
-   *  localhost, myapp.test), IPv4, and bracketed IPv6 ([::1]). Rejects empty
-   *  strings, spaces, and other garbage. Does NOT enforce PSL — use
-   *  parseSetCookieHeader for server responses. */
-  private isSyntaxValidDomain(domain: string): boolean {
-    if (!domain) {
-      return false;
-    }
-
-    if (this.tryCanonicalIPLiteral(domain) !== null) {
-      return true;
-    }
-
-    const result = parse(domain);
-
-    if (result.isIp) {
-      return true;
-    } else if (result.domain !== null) {
-      return true;
-    } else {
-      // Bare hosts and public suffix hosts can both be syntactically valid.
-      // Domain scope is enforced separately in storeParsed.
-      return HOSTNAME_PATTERN.test(domain);
-    }
   }
 
   /**

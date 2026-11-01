@@ -4878,7 +4878,6 @@ export class BaseHTTPClient {
 
     if ((contentType === 'json' || contentType === 'text') && rawBody) {
       // A custom adapter's string body is already text: decoding it as bytes would throw.
-      const answered: unknown = rawBody;
       decodedTextBody =
         typeof answered === 'string'
           ? answered
@@ -5642,8 +5641,7 @@ function readStringMember(
   return typeof value === 'string' ? value : fallback;
 }
 
-/** The fields an {@link HTTPClientConfig} takes; any other is refused as misspelled. */
-const HTTP_CLIENT_CONFIG_FIELDS = fieldNames<HTTPClientConfig>({
+const CLIENT_CONFIG_FIELD_RECORD: Record<keyof HTTPClientConfig, true> = {
   adapter: true,
   baseURL: true,
   defaultHeaders: true,
@@ -5657,13 +5655,16 @@ const HTTP_CLIENT_CONFIG_FIELDS = fieldNames<HTTPClientConfig>({
   userAgent: true,
   followRedirects: true,
   maxRedirects: true,
-});
+};
+
+/** The fields an {@link HTTPClientConfig} takes; any other is refused as misspelled. */
+const HTTP_CLIENT_CONFIG_FIELDS = fieldNames<HTTPClientConfig>(
+  CLIENT_CONFIG_FIELD_RECORD,
+);
 
 /** The fields a {@link SubClientConfig} takes: the client's, and `defaultHeadersStrategy`. */
 const SUB_CLIENT_CONFIG_FIELDS = fieldNames<SubClientConfig>({
-  ...(Object.fromEntries(
-    HTTP_CLIENT_CONFIG_FIELDS.map((field) => [field, true]),
-  ) as Record<keyof HTTPClientConfig, true>),
+  ...CLIENT_CONFIG_FIELD_RECORD,
   defaultHeadersStrategy: true,
 });
 
