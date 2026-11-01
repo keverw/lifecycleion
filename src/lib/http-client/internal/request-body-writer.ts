@@ -100,6 +100,8 @@ export function writeChunkWithBackpressure(
   onAccepted?: () => void,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    // Held until `req.write` returns: a callback that runs inside it leaves `onAccepted`,
+    // which runs the caller's progress callback, for then rather than re-entering the write.
     let hasWriteReturned = false;
     let isWriteCallbackDone = false;
     let isSettled = false;

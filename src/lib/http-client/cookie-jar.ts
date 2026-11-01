@@ -165,9 +165,7 @@ export interface CookieJarJSON {
  */
 interface StoredCookie {
   cookie: Cookie;
-  /** `cookie`'s domain, which every stored cookie has. */
-  domain: string;
-  /** `domain` prepared for matching, so a send does not read it again per cookie. */
+  /** `cookie`'s domain prepared for matching, so a send does not read it again per cookie. */
   preparedDomain: PreparedHost;
   /** When the cookie's identity was first stored; orders the `Cookie` header. */
   creationTime: number;
@@ -517,6 +515,9 @@ export class CookieJar {
         ? input.path
         : '/';
 
+    // Read once: it runs the public-suffix lookup and an IP literal parse.
+    const isHostOnly = input.hostOnly === true || this.isHostOnlyDomain(domain);
+
     // The prefix rules need no request URL, so they hold here too: a `__Host-session`
     // with `hostOnly` cleared - a persisted jar tampered with - would otherwise be
     // restored through `fromJSON` and sent to every subdomain, carrying a name that
@@ -528,10 +529,7 @@ export class CookieJar {
         secure: input.secure,
         // `Domain` absent means host-only; on this path that is the `hostOnly` flag, or a
         // domain that is stored host-only whatever it says (see below).
-        domain:
-          input.hostOnly === true || this.isHostOnlyDomain(domain)
-            ? undefined
-            : domain,
+        domain: isHostOnly ? undefined : domain,
         path,
       })
     ) {
@@ -566,7 +564,7 @@ export class CookieJar {
     // key as that `Set-Cookie`'s cookie, which replaces and deletes it. A jar saved under
     // another suffix list can hold one, and so can one saved by 0.1.0, which stored an
     // address's `Domain=` cookie as a domain cookie.
-    if (stored.hostOnly !== true && this.isHostOnlyDomain(domain)) {
+    if (isHostOnly) {
       stored.hostOnly = true;
     }
 
@@ -607,7 +605,6 @@ export class CookieJar {
 
     bucket.set(key, {
       cookie: stored,
-      domain,
       preparedDomain: this.prepareHost(domain),
       creationTime,
       lastAccess: ++this.accessClock,
@@ -670,8 +667,10 @@ export class CookieJar {
     const counts = new Map<string, number>();
 
     for (const bucket of this.buckets.values()) {
-      for (const { domain } of bucket.values()) {
-        counts.set(domain, (counts.get(domain) ?? 0) + 1);
+      for (const { preparedDomain } of bucket.values()) {
+        const { host } = preparedDomain;
+
+        counts.set(host, (counts.get(host) ?? 0) + 1);
       }
     }
 
@@ -925,7 +924,7 @@ export class CookieJar {
       let count = 0;
 
       for (const [key, stored] of bucket) {
-        if (stored.domain === normalizedHost) {
+        if (stored.preparedDomain.host === normalizedHost) {
           this.deleteStored(bucket, key);
           count++;
         }
@@ -1485,7 +1484,9 @@ export class CookieJar {
     let count = 0;
 
     for (const [key, stored] of bucket) {
-      if (stored.domain === domain || stored.domain.endsWith(`.${domain}`)) {
+      const storedDomain = stored.preparedDomain.host;
+
+      if (storedDomain === domain || storedDomain.endsWith(`.${domain}`)) {
         this.deleteStored(bucket, key);
         count++;
       }
