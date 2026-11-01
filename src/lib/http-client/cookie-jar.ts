@@ -1421,7 +1421,7 @@ export class CookieJar {
           }
           case 'path': {
             // The last Path attribute wins. An invalid value resets any earlier
-            // path so resolvedCookiePath applies the request's default (RFC 6265 §5.2.4).
+            // path so storeParsed applies the request's default (RFC 6265 §5.2.4).
             if (attrValue.startsWith('/')) {
               cookie.path = attrValue;
             } else {
@@ -1598,14 +1598,6 @@ export class CookieJar {
     return lastSlash === 0 ? '/' : pathname.slice(0, lastSlash);
   }
 
-  /** Path from Set-Cookie when present (the parser keeps only `/...`); otherwise §5.1.4 default-path. */
-  private resolvedCookiePath(
-    parsed: ParsedCookie,
-    requestPathname: string,
-  ): string {
-    return parsed.path ?? this.defaultCookiePathFromPathname(requestPathname);
-  }
-
   /** The bucket key for `hostname`: its site, the registrable domain under this jar's
    *  suffix rules (see {@link PublicSuffixResolver.registrableDomainFor}).
    *  Falls back to hostname for IPs and local hostnames like localhost.
@@ -1613,9 +1605,17 @@ export class CookieJar {
    *  a trailing-dot host's cookies are a domain of their own, as they are on the send
    *  path, and `clear()` by `domain` reaches one form and not the other. */
   private siteFor(hostname: string): string {
-    return this.inHostForm(hostname, (host) =>
-      this.publicSuffixes.registrableDomainFor(host),
-    );
+    const ip = this.tryCanonicalIPLiteral(hostname);
+
+    if (ip !== null) {
+      return ip;
+    }
+
+    const domain = this.publicSuffixes.registrableDomainFor(hostname);
+
+    return hostname.endsWith('.') && domain !== '' && !domain.endsWith('.')
+      ? `${domain}.`
+      : domain;
   }
 
   /** Whether `hostname` is a suffix this jar's `publicSuffixes.remove` opts out (see
@@ -1625,25 +1625,6 @@ export class CookieJar {
       this.tryCanonicalIPLiteral(hostname) === null &&
       this.publicSuffixes.isRemovedSuffix(hostname)
     );
-  }
-
-  /** `resolve`'s answer for `hostname`, a canonical IP literal standing for itself and a
-   *  trailing dot carried over onto the answer. */
-  private inHostForm(
-    hostname: string,
-    resolve: (host: string) => string,
-  ): string {
-    const ip = this.tryCanonicalIPLiteral(hostname);
-
-    if (ip !== null) {
-      return ip;
-    }
-
-    const domain = resolve(hostname);
-
-    return hostname.endsWith('.') && domain !== '' && !domain.endsWith('.')
-      ? `${domain}.`
-      : domain;
   }
 
   private getOrCreateBucket(site: string): Map<string, StoredCookie> {
@@ -1776,7 +1757,9 @@ export class CookieJar {
       domain = requestHostname;
     }
 
-    const path = this.resolvedCookiePath(parsed, address.pathname);
+    // The parser keeps only a `/...` path; otherwise §5.1.4's default-path.
+    const path =
+      parsed.path ?? this.defaultCookiePathFromPathname(address.pathname);
 
     // Prefix validation reads the `Path` attribute as sent: `__Host-` needs an explicit
     // `Path=/`, as RFC 6265bis §5.7 and browsers require - an omitted one that would

@@ -185,10 +185,15 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
   // why the fallback cannot be dropped for any error carrying one. OpenSSL has
   // more permanent verification failures than the set names (UNABLE_TO_GET_ISSUER_CERT,
   // CERT_CHAIN_TOO_LONG, …), and a runtime may report one with no code at all.
+  //
+  // `certificate` and `altname` count as words of the text, not as part of a dotted host,
+  // a `host:port` or a path the message quotes: an error with no code, from a custom lookup
+  // or agent, can name `certificates.internal.corp` too. A bare name, `certificates`
+  // alone, reads the same as the word and still matches.
   const message = readMember(error, 'message');
 
   return typeof message === 'string'
-    ? /certificate|self signed|unable to verify|altname|subtree violation|critical extension|path length constraint|issuer public key|alert unknown ca/i.test(
+    ? /(?<![a-z0-9./\\-])(?:certificate|altname)s?(?![a-z0-9/\\-]|\.[a-z0-9]|:\d)|self signed|unable to verify|subtree violation|critical extension|path length constraint|issuer public key|alert unknown ca/i.test(
         message,
       )
     : false;

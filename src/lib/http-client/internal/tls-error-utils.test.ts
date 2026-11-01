@@ -98,6 +98,38 @@ describe('isTLSCertificateError', () => {
   });
 });
 
+describe('isTLSCertificateError on an error with no code', () => {
+  test.each([
+    'lookup failed for certificates.internal.corp',
+    'lookup failed for api.certificate.corp',
+    'lookup failed for my-certificate.corp',
+    'connect failed: sock/certificates/agent.sock',
+    'lookup failed for altname.internal',
+    'lookup failed for certificates:443',
+    'connect failed: C:\\certs\\certificates\\agent.sock',
+  ])(
+    'a message that only quotes a host or path is no TLS failure: %s',
+    (message) => {
+      expect(isTLSCertificateError(new Error(message))).toBe(false);
+    },
+  );
+
+  test.each([
+    'certificate verify failed',
+    'error:0A000086:SSL routines::certificate verify failed',
+    'SSL routines:ssl3_get_server_certificate:CERTIFICATE_VERIFY_FAILED',
+    'x509: certificate signed by unknown authority',
+    'self signed certificate in certificate chain',
+    'unable to get local issuer certificate',
+    "Hostname/IP does not match certificate's altnames: Host: a.test",
+    'certificate has expired',
+    'sslv3 alert bad certificate',
+    'Invalid certificate.',
+  ])('a certificate failure in words is one: %s', (message) => {
+    expect(isTLSCertificateError(new Error(message))).toBe(true);
+  });
+});
+
 describe('isTLSCertificateError cause handling', () => {
   test('classifies a wrapped cause, as Node reports it from fetch', () => {
     // Node rejects with `TypeError: fetch failed` and hangs the real error off

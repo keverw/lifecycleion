@@ -21,7 +21,7 @@
  * optionally Content-Type), followed by a blank line, then the value.
  *
  * This module uses a two-pass approach:
- *   Pass 1 — calculateMultipartFormDataSize: walk all fields, count exact byte length.
+ *   Pass 1 — measureMultipartFormData: walk all fields, count exact byte length.
  *   Pass 2 — serializeMultipartFormData: write boundary + headers + value for each field.
  *
  * Knowing the total size upfront lets us set an exact Content-Length header,
@@ -145,14 +145,7 @@ export function generateMultipartBoundary(): string {
  * we can set Content-Length up front and report real 0–100% progress during
  * serialization instead of guesswork.
  */
-export function calculateMultipartFormDataSize(
-  formData: FormData,
-  boundary: string,
-): number {
-  return measureMultipartFormData(formData, boundary).totalSize;
-}
-
-function measureMultipartFormData(
+export function measureMultipartFormData(
   formData: FormData,
   boundary: string,
 ): { totalSize: number; partSizes: number[] } {

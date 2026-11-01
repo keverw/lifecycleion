@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test, spyOn } from 'bun:test';
 import {
-  calculateMultipartFormDataSize,
+  measureMultipartFormData,
   generateMultipartBoundary,
   sanitizeContentType,
   serializeMultipartFormData,
@@ -112,7 +112,7 @@ describe('generateMultipartBoundary', () => {
   });
 });
 
-describe('calculateMultipartFormDataSize', () => {
+describe('measureMultipartFormData', () => {
   test('size matches actual serialized byte length for string fields', async () => {
     const fd = new FormData();
 
@@ -123,7 +123,9 @@ describe('calculateMultipartFormDataSize', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+      getBody().length,
+    );
   });
 
   test('size matches actual serialized byte length for a file entry', async () => {
@@ -138,7 +140,9 @@ describe('calculateMultipartFormDataSize', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+      getBody().length,
+    );
   });
 
   test('size matches for mixed string and file fields', async () => {
@@ -154,13 +158,15 @@ describe('calculateMultipartFormDataSize', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+      getBody().length,
+    );
   });
 
   test('returns just the closing boundary line for empty FormData', () => {
     const fd = new FormData();
     const boundary = generateMultipartBoundary();
-    const size = calculateMultipartFormDataSize(fd, boundary);
+    const size = measureMultipartFormData(fd, boundary).totalSize;
     expect(size).toBe(Buffer.byteLength(`--${boundary}--\r\n`));
   });
 });
@@ -275,7 +281,9 @@ describe('serializeMultipartFormData', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+      getBody().length,
+    );
   });
 
   test('ASCII filename uses simple filename= form only (no filename*)', async () => {
@@ -697,7 +705,9 @@ describe('serializeMultipartFormData', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+      getBody().length,
+    );
   });
 
   test('sanitizes CR/LF in a Content-Type to prevent header injection', () => {
@@ -742,7 +752,9 @@ describe('serializeMultipartFormData', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+      getBody().length,
+    );
   });
 
   test('write callbacks are awaited — writes are sequential not concurrent', async () => {
@@ -1388,7 +1400,9 @@ test('a File named "" is sent as filename="", one with no name as blob', async (
   const body = getBody().toString();
   expect(body).toContain('name="empty"; filename=""');
   expect(body).toContain('name="unnamed"; filename="blob"');
-  expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+  expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+    getBody().length,
+  );
 });
 
 test('a field appended mid-upload is refused before any of its bytes go out', async () => {
@@ -2051,7 +2065,9 @@ test('a form is read through the intrinsic entries, not one it declares', async 
     expect(body).toContain('name="held"\r\n\r\nvalue\r\n');
     expect(body).not.toContain('reported');
     expect(headers['content-length']).toBe(String(getBody().length));
-    expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+      getBody().length,
+    );
   }
 });
 
