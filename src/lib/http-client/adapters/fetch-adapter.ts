@@ -210,11 +210,7 @@ export class FetchAdapter implements HTTPAdapter {
       // Re-throw AbortErrors and any error thrown when the signal is already
       // aborted. When abort(string) is called, fetch rejects with the string
       // itself (not an AbortError), so checking signal.aborted covers that case.
-      if (
-        isAbortError(error) ||
-        wasAbortedAtDispatch ||
-        isSignalAbortedQuietly(signal)
-      ) {
+      if (isAbortError(error) || isSignalAbortedQuietly(signal)) {
         throw error; // preserve cancellation / timeout classification
       }
 
@@ -311,11 +307,7 @@ export class FetchAdapter implements HTTPAdapter {
       // out with the error, the way NodeAdapter tags its aborts, and the client
       // sorts it: cancel stays cancelled, a post-header timeout becomes a
       // terminal stream error with the real status.
-      if (
-        isAbortError(error) ||
-        wasAbortedAtDispatch ||
-        isSignalAbortedQuietly(signal)
-      ) {
+      if (isAbortError(error) || isSignalAbortedQuietly(signal)) {
         throw markResponseStreamAbort(
           error,
           response.status,
@@ -400,8 +392,23 @@ async function readResponseBody(
   }
 
   if (maxResponseBytes === Number.POSITIVE_INFINITY) {
-    const buffer = await response.arrayBuffer();
-    return new Uint8Array(buffer);
+    const unlimitedBody = readUnknownMember(response, 'body');
+    const stopWatching = letGoOnAbort(signal, () => {
+      cancelBodyQuietly(unlimitedBody);
+    });
+
+    try {
+      const buffer = await response.arrayBuffer();
+
+      // A cancel can end the read as if finished; what it read is not the whole body.
+      if (isSignalAbortedQuietly(signal)) {
+        throw makeAbortError();
+      }
+
+      return new Uint8Array(buffer);
+    } finally {
+      stopWatching();
+    }
   }
 
   // Refused before reading when the body says up front it is over the limit - only where
@@ -498,6 +505,37 @@ async function* readerChunks(
 }
 
 /**
+ * Runs `letGo` on an abort, at once if the signal has aborted already, until the returned
+ * function is called. For a body being read: a polyfill's stream need not heed the signal,
+ * and would otherwise hold its socket with a read stalled, or go on being read after the
+ * request had ended. A signal that cannot be listened on, or refuses the removal, is
+ * ignored: `once` bounds the listener to one call.
+ */
+function letGoOnAbort(
+  signal: AbortSignal | undefined,
+  letGo: () => void,
+): () => void {
+  if (isSignalAbortedQuietly(signal)) {
+    letGo();
+    return () => {};
+  }
+
+  try {
+    signal?.addEventListener('abort', letGo, { once: true });
+  } catch {
+    // Nothing to remove, and nothing more to do for that signal.
+  }
+
+  return () => {
+    try {
+      signal?.removeEventListener('abort', letGo);
+    } catch {
+      // The listener stays.
+    }
+  };
+}
+
+/**
  * A body read a chunk at a time - a web stream's, through its reader, or a polyfilled
  * `fetch`'s async-iterable Node `Readable` - counted as it comes, and let go through
  * `cancel` the moment it passes the limit: counted before the chunk is kept, so a body
@@ -540,11 +578,7 @@ async function readBodyWithin(
 
   throwIfAborted();
 
-  try {
-    signal?.addEventListener('abort', letGo, { once: true });
-  } catch {
-    // Unusable as a listener target; the check on each chunk still stops the read.
-  }
+  const stopWatching = letGoOnAbort(signal, letGo);
 
   try {
     for await (const value of source) {
@@ -591,11 +625,7 @@ async function readBodyWithin(
 
     return concatChunks(chunks, loadedBytes);
   } finally {
-    try {
-      signal?.removeEventListener('abort', letGo);
-    } catch {
-      // The listener stays; `once` bounds it to one call, and `letGo` to one cancel.
-    }
+    stopWatching();
   }
 }
 

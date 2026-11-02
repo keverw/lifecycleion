@@ -579,6 +579,38 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toBe(1);
   });
 
+  test('an abort still stops the transfer when reading the answer throws', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+    });
+    void promise.catch(() => {});
+    lastXHR.readyState = 3;
+    lastXHR.status = 200;
+    lastXHR.getAllResponseHeaders = () => {
+      throw new Error('no headers here');
+    };
+
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+    try {
+      controller.abort();
+      await Promise.resolve();
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(lastXHR.abortCalled).toBe(true);
+    expect(reports).toHaveLength(0);
+  });
+
   test('an XHR constructor that throws is refused as non-retryable', async () => {
     const original = globalThis.XMLHttpRequest;
     (globalThis as any).XMLHttpRequest = class {

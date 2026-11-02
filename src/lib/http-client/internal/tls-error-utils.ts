@@ -119,7 +119,18 @@ export function isTLSCertificateError(error: Error): boolean {
   // to follow, so this stays a server-side classification.
   const cause = readMember(error, 'cause');
 
-  return isErrorValue(cause) ? isTLSCertificateErrorSelf(cause) : false;
+  if (isErrorValue(cause)) {
+    return isTLSCertificateErrorSelf(cause);
+  }
+
+  // Any other object by its code alone: a function-style error (node-fetch 2's `FetchError`,
+  // built with `Error.call(this)`) has no error slot, so `toError` wraps it and hangs it
+  // here, code and all. Its message is no evidence, as a `fetch` wrapper may reject with
+  // an API's JSON (`{ message: 'No certificate for this account' }`), and a function-style
+  // error's text is on the wrapper already.
+  return typeof cause === 'object' && cause !== null
+    ? isCertificateCode(readMember(cause, 'code'))
+    : false;
 }
 
 /**
@@ -130,6 +141,52 @@ export function isTLSCertificateError(error: Error): boolean {
 function isTLSCertificateErrorSelf(error: Error): boolean {
   const rawCode = readMember(error, 'code');
   const code = typeof rawCode === 'string' ? rawCode : '';
+
+  if (isCertificateCode(code)) {
+    return true;
+  }
+
+  // A code that names a transport failure is authoritative, so the message is
+  // never consulted for one. The message test below runs against a runtime-built
+  // string with the hostname interpolated in, so `getaddrinfo EAI_AGAIN
+  // certificates.internal.corp` matches /certificate/ on the host name alone —
+  // and any deployment calling a `certificates.*` host would have every DNS
+  // blip resolve as a permanent 495 with `isRetryable: false`.
+  //
+  // Only the fallback is suppressed; the code checks above still run first.
+  if (
+    TRANSPORT_ERROR_CODES.has(code) ||
+    code.startsWith(GETADDRINFO_ERROR_PREFIX) ||
+    code.startsWith(UNDICI_TRANSPORT_ERROR_PREFIX) ||
+    isBeforeTLS(readMember(error, 'syscall'))
+  ) {
+    return false;
+  }
+
+  // Reached with no code, or a code the checks above do not recognize — which is
+  // why the fallback cannot be dropped for any error carrying one. OpenSSL has
+  // more permanent verification failures than the set names (UNABLE_TO_GET_ISSUER_CERT,
+  // CERT_CHAIN_TOO_LONG, …), and a runtime may report one with no code at all.
+  //
+  // `certificate` and `altname` count as words of the text, not as part of a dotted host,
+  // a `host:port` or a path the message quotes: an error with no code, from a custom lookup
+  // or agent, can name `certificates.internal.corp` too. A bare name, `certificates`
+  // alone, reads the same as the word and still matches. A URL the message quotes is left
+  // out whole, so nothing in its path or query (`?type=certificate`) reads as the failure.
+  const message = readMember(error, 'message');
+
+  return typeof message === 'string'
+    ? /(?<![a-z0-9./\\-])(?:certificate|altname)s?(?![a-z0-9/\\-]|\.[a-z0-9]|:\d)|self signed|unable to verify|subtree violation|critical extension|path length constraint|issuer public key|alert unknown ca/i.test(
+        message.replace(/(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/\S*/gi, ''),
+      )
+    : false;
+}
+
+/** Whether `code` names a certificate failure, by the code alone. */
+function isCertificateCode(code: unknown): boolean {
+  if (typeof code !== 'string') {
+    return false;
+  }
 
   if (CERT_ERROR_CODES.has(code)) {
     return true;
@@ -164,37 +221,5 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
     return true;
   }
 
-  // A code that names a transport failure is authoritative, so the message is
-  // never consulted for one. The message test below runs against a runtime-built
-  // string with the hostname interpolated in, so `getaddrinfo EAI_AGAIN
-  // certificates.internal.corp` matches /certificate/ on the host name alone —
-  // and any deployment calling a `certificates.*` host would have every DNS
-  // blip resolve as a permanent 495 with `isRetryable: false`.
-  //
-  // Only the fallback is suppressed; the code checks above still run first.
-  if (
-    TRANSPORT_ERROR_CODES.has(code) ||
-    code.startsWith(GETADDRINFO_ERROR_PREFIX) ||
-    code.startsWith(UNDICI_TRANSPORT_ERROR_PREFIX) ||
-    isBeforeTLS(readMember(error, 'syscall'))
-  ) {
-    return false;
-  }
-
-  // Reached with no code, or a code the checks above do not recognize — which is
-  // why the fallback cannot be dropped for any error carrying one. OpenSSL has
-  // more permanent verification failures than the set names (UNABLE_TO_GET_ISSUER_CERT,
-  // CERT_CHAIN_TOO_LONG, …), and a runtime may report one with no code at all.
-  //
-  // `certificate` and `altname` count as words of the text, not as part of a dotted host,
-  // a `host:port` or a path the message quotes: an error with no code, from a custom lookup
-  // or agent, can name `certificates.internal.corp` too. A bare name, `certificates`
-  // alone, reads the same as the word and still matches.
-  const message = readMember(error, 'message');
-
-  return typeof message === 'string'
-    ? /(?<![a-z0-9./\\-])(?:certificate|altname)s?(?![a-z0-9/\\-]|\.[a-z0-9]|:\d)|self signed|unable to verify|subtree violation|critical extension|path length constraint|issuer public key|alert unknown ca/i.test(
-        message,
-      )
-    : false;
+  return false;
 }

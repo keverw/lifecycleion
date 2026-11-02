@@ -441,3 +441,44 @@ test('a TLS failure from a write is still read by its message', () => {
 
   expect(isTLSCertificateError(error)).toBe(true);
 });
+
+test('a URL quoted in a message with no code does not read as a certificate failure', () => {
+  for (const url of [
+    'https://api.test/x?type=certificate',
+    'https://api.test/x#certificate',
+  ]) {
+    expect(isTLSCertificateError(new Error(`CONNECT failed for ${url}`))).toBe(
+      false,
+    );
+  }
+
+  expect(
+    isTLSCertificateError(
+      new Error(
+        'request to https://api.test/x failed, reason: certificate has expired',
+      ),
+    ),
+  ).toBe(true);
+});
+
+test('an object on cause that is no error counts by its code alone', () => {
+  for (const cause of [
+    { message: 'certificate not found', status: 404 },
+    { code: 'not_found', message: 'No certificate for this account' },
+  ]) {
+    expect(isTLSCertificateError(new Error('wrapped', { cause }))).toBe(false);
+  }
+
+  expect(
+    isTLSCertificateError(
+      new Error('wrapped', { cause: { code: 'CERT_HAS_EXPIRED' } }),
+    ),
+  ).toBe(true);
+});
+
+test('a long dotted message is read in linear time', () => {
+  const startedAt = performance.now();
+
+  expect(isTLSCertificateError(new Error('a.'.repeat(100_000)))).toBe(false);
+  expect(performance.now() - startedAt).toBeLessThan(2_000);
+});

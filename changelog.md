@@ -609,4 +609,7 @@
 - A request leaves `listRequests()`, and the client's listeners leave the caller's signal, as it settles, before its `final` observers run, so one that never settles keeps neither. A chunk whose write callback succeeded stays accepted if the stream is destroyed before `write` returns.
 - FetchAdapter: an abort cancels a polyfilled `fetch`'s body at once, rather than reading on after the request has ended; a stalled read ends if the stream's cancel ends it.
 - XHRAdapter: an XHR constructor or `addEventListener` that throws is refused as a non-retryable `adapter_error`, and takes the abort listener off the signal.
+- FetchAdapter: an abort also cancels a polyfilled `fetch`'s body read whole with `maxResponseBytes: Infinity`. A function-style polyfill error (node-fetch 2's) keeps its certificate code, so it is a `495`, not retried.
+- XHRAdapter: an abort stops the transfer even when an XHR outside a browser throws while its answer is read.
+- A URL quoted in a TLS error message with no code no longer reads as a certificate failure from its path or query.
 - FetchAdapter: a polyfilled `fetch`'s response body is released on a bodiless answer (HEAD, 204, 205, 304) rather than left unread.

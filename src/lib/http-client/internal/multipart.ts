@@ -95,6 +95,11 @@ export function sanitizeContentType(raw: string): string {
   return raw.replace(/\r\n|\r|\n/g, '');
 }
 
+/** A string part, whole - its Content-Disposition, value and trailing CRLF - as both passes write it. */
+function formatStringPart(fieldName: string, value: string): string {
+  return `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`;
+}
+
 /**
  * A file part's headers - its Content-Disposition with the filename, and its Content-Type -
  * as both passes write them. Reads the caller's `name` and `type`, so it can throw: a
@@ -164,9 +169,7 @@ export function measureMultipartFormData(
       //   blank line
       //   raw string value
       //   trailing CRLF before the next boundary
-      size += Buffer.byteLength(
-        `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`,
-      );
+      size += Buffer.byteLength(formatStringPart(fieldName, value));
     } else {
       // File/blob part wire format:
       //   Content-Disposition header (with filename)
@@ -350,7 +353,7 @@ export async function serializeMultipartFormData(
 
       partHead =
         typeof value === 'string'
-          ? `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`
+          ? formatStringPart(fieldName, value)
           : formatFilePartHeaders(fieldName, value);
     } catch (error) {
       throw sourceReadFailure(error);

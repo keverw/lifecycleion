@@ -239,22 +239,29 @@ export class XHRAdapter implements HTTPAdapter {
           // what was answered, so it is resolved as the load path resolves it, and the
           // client sorts the abort (a cancel stays cancelled; a timeout ends at the
           // refused redirect, as the docs have it for `followRedirects: false`).
-          const responseURL = xhr.responseURL;
-          if (
-            xhr.readyState >= 2 &&
-            responseURL &&
-            didBrowserFollowRedirect(responseURL, answeredURL)
-          ) {
-            followedRedirectBeforeAbort = responseURL;
-          } else if (
-            xhr.readyState >= 2 &&
-            xhr.readyState < 4 &&
-            xhr.status > 0
-          ) {
-            answeredBeforeAbort = {
-              status: xhr.status,
-              headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
-            };
+          //
+          // Guarded, as an XHR outside a browser may throw from any of these: the transfer
+          // is still stopped, and the abort is reported with no answer behind it.
+          try {
+            const responseURL = xhr.responseURL;
+            if (
+              xhr.readyState >= 2 &&
+              responseURL &&
+              didBrowserFollowRedirect(responseURL, answeredURL)
+            ) {
+              followedRedirectBeforeAbort = responseURL;
+            } else if (
+              xhr.readyState >= 2 &&
+              xhr.readyState < 4 &&
+              xhr.status > 0
+            ) {
+              answeredBeforeAbort = {
+                status: xhr.status,
+                headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
+              };
+            }
+          } catch {
+            // Nothing was read to carry out.
           }
 
           xhr.abort();

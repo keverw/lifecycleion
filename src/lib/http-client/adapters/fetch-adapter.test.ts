@@ -2410,6 +2410,113 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     },
   );
 
+  test('an abort lets go of a body being read whole, with no limit', async () => {
+    const controller = new AbortController();
+    let cancels = 0;
+    let failRead = (_error: Error): void => {};
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('', { status: 200 });
+      Object.defineProperty(response, 'body', {
+        value: {
+          cancel: () => {
+            cancels++;
+            failRead(new Error('body destroyed'));
+            return Promise.resolve();
+          },
+        },
+      });
+      Object.defineProperty(response, 'arrayBuffer', {
+        value: () =>
+          new Promise((_resolve, reject) => {
+            failRead = reject;
+            setTimeout(() => {
+              controller.abort();
+            }, 0);
+          }),
+      });
+      return Promise.resolve(response);
+    };
+
+    const failure = await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: Number.POSITIVE_INFINITY,
+        signal: controller.signal,
+      })
+      .catch((error: unknown) => error);
+
+    expect(cancels).toBe(1);
+    expect((failure as Error).message).toBe('body destroyed');
+  });
+
+  test('a cancel that ends a body read whole as if finished is the abort, not a short body', async () => {
+    const controller = new AbortController();
+    let finishRead = (): void => {};
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('', { status: 200 });
+      Object.defineProperty(response, 'body', {
+        value: {
+          cancel: () => {
+            finishRead();
+            return Promise.resolve();
+          },
+        },
+      });
+      Object.defineProperty(response, 'arrayBuffer', {
+        value: () =>
+          new Promise((resolve) => {
+            finishRead = () => {
+              resolve(new Uint8Array([1, 2, 3]).buffer);
+            };
+            setTimeout(() => {
+              controller.abort();
+            }, 0);
+          }),
+      });
+      return Promise.resolve(response);
+    };
+
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: Number.POSITIVE_INFINITY,
+        signal: controller.signal,
+      })
+      .then(
+        () => 'resolved',
+        (error: unknown) => (error as Error).name,
+      );
+
+    expect(outcome).toBe('AbortError');
+  });
+
+  test('a function-style polyfill error keeps its certificate code through the wrapping', async () => {
+    function FetchError(this: { code: string; message: string }) {
+      Error.call(this as never);
+      this.message = 'request failed';
+      this.code = 'CRL_HAS_EXPIRED';
+    }
+    FetchError.prototype = Object.create(Error.prototype);
+
+    (globalThis as any).fetch = () =>
+      Promise.reject(new (FetchError as unknown as new () => Error)());
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.status).toBe(495);
+    expect(response.isRetryable).toBe(false);
+  });
+
   test('a timeout ends a read of endless empty chunks, keeps the status and lets the stream go', async () => {
     let reads = 0;
     let cancels = 0;
