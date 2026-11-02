@@ -280,6 +280,8 @@ export class FetchAdapter implements HTTPAdapter {
       }
     } catch (error) {
       cancelBodyQuietly(readUnknownMember(response, 'body'));
+      // The server answered, so the upload ended, as on every other answered path.
+      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
 
       // A cancellation stays a cancellation, as on the body read below.
       if (isAbortError(error) || isSignalAbortedQuietly(signal)) {
@@ -404,15 +406,20 @@ async function readResponseBody(
   maxResponseBytes: number,
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array | null | typeof RESPONSE_TOO_LARGE> {
+  // `body`, and its `getReader` and `Symbol.asyncIterator`, each read once and guarded, as
+  // a polyfill's or test double's response may carry any getter: one that throws reads as
+  // absent. `arrayBuffer()` is the read of last resort; a failure there fails the send.
+  const body = readUnknownMember(response, 'body');
+
   if (!hasResponseBody(method, answered.status)) {
     // Native `fetch` hands over no body here, but a polyfill's Node `Readable` would hold
     // its socket until the server closed it.
-    cancelBodyQuietly(readUnknownMember(response, 'body'));
+    cancelBodyQuietly(body);
     return null;
   }
 
   if (maxResponseBytes === Number.POSITIVE_INFINITY) {
-    return await readWholeBody(response, signal);
+    return await readWholeBody(response, body, signal);
   }
 
   // Refused before reading when the body says up front it is over the limit - only where
@@ -430,11 +437,6 @@ async function readResponseBody(
         scalarHeader(answered.headers, 'content-length') ?? null,
       )
     : undefined;
-
-  // `body`, and its `getReader` and `Symbol.asyncIterator`, each read once and guarded, as
-  // a polyfill's or test double's response may carry any getter: one that throws reads as
-  // absent. `arrayBuffer()` is the read of last resort; a failure there fails the send.
-  const body = readUnknownMember(response, 'body');
 
   if (declaredLength !== undefined && declaredLength > maxResponseBytes) {
     cancelBodyQuietly(body);
@@ -471,7 +473,7 @@ async function readResponseBody(
       );
     }
 
-    const bytes = await readWholeBody(response, signal);
+    const bytes = await readWholeBody(response, body, signal);
     return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
   }
 
@@ -494,12 +496,12 @@ async function readResponseBody(
   );
 }
 
-/** The body through `arrayBuffer()`, let go of on an abort. */
+/** The body through `arrayBuffer()`, with `body` (as already read) let go of on an abort. */
 async function readWholeBody(
   response: Response,
+  body: unknown,
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array> {
-  const body = readUnknownMember(response, 'body');
   const stopWatching = letGoOnAbort(signal, () => {
     cancelBodyQuietly(body);
   });

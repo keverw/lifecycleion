@@ -2587,6 +2587,34 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     expect(cancels).toBe(1);
   });
 
+  test('a refused response still ends the upload with its final event', async () => {
+    const uploads: number[] = [];
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('ok', { status: 200 });
+      Object.defineProperty(response, 'headers', {
+        get(): never {
+          throw new Error('unreadable');
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/data',
+        method: 'POST',
+        headers: {},
+        body: 'abc',
+        onUploadProgress: (event) => {
+          uploads.push(event.progress);
+        },
+      })
+      .catch(() => {});
+
+    expect(uploads).toEqual([0, 1]);
+  });
+
   test('a response read that throws over an abort stays the abort', async () => {
     const controller = new AbortController();
 
@@ -2913,6 +2941,61 @@ describe('FetchAdapter - body chunk types and sizes', () => {
 
     expect([...(response.body as Uint8Array)]).toEqual([7, 8]);
   });
+
+  test.each([
+    ['a limit', 100],
+    ['no limit', Number.POSITIVE_INFINITY],
+  ])(
+    'a body read whole under %s is read once, and that one is let go of on an abort',
+    async (_name, maxResponseBytes) => {
+      const controller = new AbortController();
+      const bodies: Array<{ cancels: number }> = [];
+      let finishRead = (): void => {};
+
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          type: 'basic',
+          headers: new Headers(),
+          // A new body on every read, as a test double's getter may hand over.
+          get body() {
+            const body = {
+              cancels: 0,
+              cancel: () => {
+                body.cancels++;
+                finishRead();
+                return Promise.resolve();
+              },
+            };
+            bodies.push(body);
+            return body;
+          },
+          arrayBuffer: () =>
+            new Promise<ArrayBuffer>((resolve) => {
+              finishRead = () => resolve(new ArrayBuffer(0));
+            }),
+        });
+
+      const sending = new FetchAdapter()
+        .send({
+          requestURL: 'https://local.test/data',
+          method: 'GET',
+          headers: {},
+          maxResponseBytes,
+          signal: controller.signal,
+        })
+        .then(
+          () => 'resolved',
+          (error: unknown) => (error as Error).name,
+        );
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      controller.abort();
+
+      expect(await sending).toBe('AbortError');
+      expect(bodies.map(({ cancels }) => cancels)).toEqual([1]);
+    },
+  );
 
   test.each([
     ['Symbol.asyncIterator', Symbol.asyncIterator],

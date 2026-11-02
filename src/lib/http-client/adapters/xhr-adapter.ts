@@ -125,9 +125,23 @@ export class XHRAdapter implements HTTPAdapter {
     let removeAbortListener = (): void => {};
 
     const startRequest = (
-      resolve: (response: AdapterResponse) => void,
-      reject: (reason: unknown) => void,
+      resolveSend: (response: AdapterResponse) => void,
+      rejectSend: (reason: unknown) => void,
     ): void => {
+      // Set by every settle. An XHR whose `abort()` threw, or that was answered and then
+      // stopped, may keep firing events: once the send has settled, the listeners below
+      // call none of the caller's callbacks, so nothing reaches them after the request
+      // ended - nor alongside a retry's.
+      let didSettle = false;
+      const resolve = (response: AdapterResponse): void => {
+        didSettle = true;
+        resolveSend(response);
+      };
+      const reject = (reason: unknown): void => {
+        didSettle = true;
+        rejectSend(reason);
+      };
+
       // Refused the same way on every attempt - a method or header value `open` or
       // `setRequestHeader` will not take - so failed once as non-retryable, as the other
       // adapters fail a request their transport refuses to build.
@@ -341,7 +355,7 @@ export class XHRAdapter implements HTTPAdapter {
       // reported, or the body's own size where it reported none - `0` for an empty
       // string, as FetchAdapter reports it - not a stand-in `1`.
       const emitFinalUpload = (): void => {
-        if (didFireUpload100 || !guardedUploadProgress) {
+        if (didSettle || didFireUpload100 || !guardedUploadProgress) {
           return;
         }
 
@@ -378,6 +392,10 @@ export class XHRAdapter implements HTTPAdapter {
 
         if (upload) {
           upload.addEventListener('progress', (event) => {
+            if (didSettle) {
+              return;
+            }
+
             const { progress, total } = readProgressEvent(event);
 
             if (progress === 1) {
@@ -417,6 +435,9 @@ export class XHRAdapter implements HTTPAdapter {
             listener(event);
           } catch (error) {
             removeAbortListener();
+            // Both listeners fire on an answer, so the upload ended, as on every other
+            // answered path.
+            emitFinalUpload();
             refuse(error);
 
             try {
@@ -485,7 +506,7 @@ export class XHRAdapter implements HTTPAdapter {
           // encoded), and encoded bytes have no fixed bound on the decoded size either way.
           // So only a body known to carry no coding is stopped here; one that is or may be
           // compressed is left to `load`, which checks the decoded size exactly.
-          if (didExceedMaxResponseBytes) {
+          if (didSettle) {
             return;
           }
 
@@ -529,6 +550,10 @@ export class XHRAdapter implements HTTPAdapter {
       xhr.addEventListener(
         'load',
         refusingOnThrow(() => {
+          if (didSettle) {
+            return;
+          }
+
           didLoad = true;
 
           // Detect browser-followed redirects.

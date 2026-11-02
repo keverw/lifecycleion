@@ -236,6 +236,9 @@
 - HTTP XHRAdapter: a response read that throws from an XHR outside a browser refuses the request as non-retryable, where the send never settled.
 - HTTP XHRAdapter: an `abort()` that throws when the signal fires ends the send as the abort, where it never settled.
 - HTTP FetchAdapter: a response whose `type`, `status` or `headers` cannot be read refuses the request as non-retryable, where the request was repeated as a network failure. Each is read once, so a getter answering differently on a later read cannot change the answer.
+- HTTP XHRAdapter: once a send has settled, events from an XHR that kept running (an `abort()` that threw) call no progress callback, where they went on reporting after the request ended.
+- HTTP: a response the browser adapters refuse because it cannot be read still fires the final upload progress event, as every other answered response does.
+- HTTP FetchAdapter: a body read whole through `arrayBuffer()` is the `body` read once, so an abort lets go of the stream being read.
 - HTTP FetchAdapter: an abort during a limited read through `arrayBuffer()` lets a polyfill's body go and fails as the abort, where a read cut short returned its partial bytes as a success.
 - HTTP: a multipart form that lost entries after it was measured is refused before its closing delimiter is written.
 - HTTP: a caller's polyfilled or jsdom `AbortSignal` is listened to where the runtime's `AbortSignal.any` refuses it, as axios does, so `send()` runs the request rather than rejecting at setup.

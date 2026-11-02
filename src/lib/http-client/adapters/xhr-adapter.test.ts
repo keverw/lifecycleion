@@ -4093,3 +4093,96 @@ test('a cancel from the final upload event keeps the answer when abort() throws'
 
   expect((await promise).status).toBe(200);
 });
+
+test('an XHR that runs on after a refused abort reports nothing once the send has ended', async () => {
+  const controller = new AbortController();
+  const events: string[] = [];
+  const promise = new XHRAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'POST',
+    headers: {},
+    body: 'abc',
+    signal: controller.signal,
+    onUploadProgress: (event) => {
+      events.push(`upload ${event.progress}`);
+    },
+    onDownloadProgress: (event) => {
+      events.push(`download ${event.progress}`);
+    },
+  });
+  const xhr = lastXHR;
+
+  xhr.abort = () => {
+    throw new Error('abort refused');
+  };
+  controller.abort();
+
+  const outcome = (await promise.catch((error: unknown) => error)) as Error;
+  expect(outcome.name).toBe('AbortError');
+
+  events.length = 0;
+  xhr.simulateUploadProgress(3, 3);
+  xhr.simulateUploadLoad();
+  xhr.simulateDownloadProgress(2, 2);
+  xhr.status = 200;
+  xhr.response = new TextEncoder().encode('ok').buffer;
+  xhr.simulateLoad();
+
+  expect(events).toEqual([]);
+});
+
+test('a body past the limit whose abort is refused reports nothing more of the transfer', async () => {
+  const downloads: number[] = [];
+  const promise = new XHRAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 4,
+    onDownloadProgress: (event) => {
+      downloads.push(event.progress);
+    },
+  });
+  const xhr = lastXHR;
+
+  xhr.abort = () => {
+    throw new Error('abort refused');
+  };
+  xhr.status = 200;
+  xhr.getAllResponseHeadersResult = 'content-encoding: identity\r\n';
+
+  expect(() => {
+    xhr.simulateDownloadProgress(10, 0);
+  }).not.toThrow();
+  expect((await promise).streamErrorCode).toBe('response_too_large');
+
+  // A load within the limit, which would otherwise report its download as complete.
+  xhr.simulateDownloadProgress(20, 0);
+  xhr.response = new ArrayBuffer(2);
+  xhr.simulateLoad();
+
+  expect(downloads).toEqual([]);
+});
+
+test('a refused answer still ends the upload with its final event', async () => {
+  const uploads: number[] = [];
+  const promise = new XHRAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'POST',
+    headers: {},
+    body: 'abc',
+    onUploadProgress: (event) => {
+      uploads.push(event.progress);
+    },
+  });
+  const xhr = lastXHR;
+
+  xhr.status = 200;
+  xhr.getAllResponseHeaders = () => {
+    throw new Error('headers unreadable');
+  };
+  xhr.simulateLoad();
+
+  await promise.catch(() => {});
+
+  expect(uploads).toEqual([0, 1]);
+});
