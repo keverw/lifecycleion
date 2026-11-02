@@ -2527,6 +2527,32 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     },
   );
 
+  test('an answered response is read once, so a getter cannot change the answer', async () => {
+    const reads: Record<string, number> = { type: 0, status: 0, headers: 0 };
+    const headers = new Headers({ 'content-length': '2' });
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('ok', { status: 200 });
+      Object.defineProperties(response, {
+        type: { get: () => (reads.type++, 'basic') },
+        status: { get: () => (reads.status++ === 0 ? 200 : 204) },
+        headers: { get: () => (reads.headers++, headers) },
+      });
+      return Promise.resolve(response);
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1000,
+    });
+
+    expect(response.status).toBe(200);
+    expect(new TextDecoder().decode(response.body as Uint8Array)).toBe('ok');
+    expect(reads).toEqual({ type: 1, status: 1, headers: 1 });
+  });
+
   test('a refused response lets its body go', async () => {
     let cancels = 0;
 

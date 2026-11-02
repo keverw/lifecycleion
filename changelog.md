@@ -234,7 +234,7 @@
 - HTTP: an error's message counts as a certificate failure only when it has no code, or `EPROTO`, `UNSPECIFIED` or an `ERR_SSL_*` code, on the error and on its `cause`, and only in the words of one (`certificate has expired`, `bad certificate`), so a host, path, URL or service that merely mentions a certificate stays a retryable transport failure rather than a permanent `495`. Certificate and CRL verification codes count by the code alone. A failure with an unrecognized code, or in other words, now reads as a transport failure and is retried.
 - HTTP XHRAdapter: a response read that throws from an XHR outside a browser refuses the request as non-retryable, where the send never settled.
 - HTTP XHRAdapter: an `abort()` that throws when the signal fires ends the send as the abort, where it never settled.
-- HTTP FetchAdapter: a response whose `type`, `status` or `headers` cannot be read refuses the request as non-retryable, where the request was repeated as a network failure.
+- HTTP FetchAdapter: a response whose `type`, `status` or `headers` cannot be read refuses the request as non-retryable, where the request was repeated as a network failure. Each is read once, so a getter answering differently on a later read cannot change the answer.
 - HTTP FetchAdapter: an abort during a limited read through `arrayBuffer()` lets a polyfill's body go and fails as the abort, where a read cut short returned its partial bytes as a success.
 - HTTP: a multipart form that lost entries after it was measured is refused before its closing delimiter is written.
 - HTTP: a caller's polyfilled or jsdom `AbortSignal` is listened to where the runtime's `AbortSignal.any` refuses it, as axios does, so `send()` runs the request rather than rejecting at setup.

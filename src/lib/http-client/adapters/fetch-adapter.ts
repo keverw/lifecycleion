@@ -20,6 +20,7 @@ import {
 } from '../internal/adapter-error';
 import {
   extractFetchHeaders,
+  scalarHeader,
   derivedRedirectFields,
   resolveBrowserDispatchURL,
 } from '../utils';
@@ -261,15 +262,17 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
-    // Guarded, as a polyfill's or test double's response may carry any getter. One that
-    // throws fails the same way on every attempt, so it is refused as non-retryable rather
-    // than repeating a request the server answered, and its body let go.
+    // Each read once and guarded, as a polyfill's or test double's response may carry any
+    // getter. One that throws fails the same way on every attempt, so it is refused as
+    // non-retryable rather than repeating a request the server answered, and its body let go.
+    let responseType: unknown;
     let isOpaqueRedirect: boolean;
     let status = 0;
     let responseHeadersForBody: Record<string, string | string[]> = {};
 
     try {
-      isOpaqueRedirect = response.type === 'opaqueredirect';
+      responseType = response.type;
+      isOpaqueRedirect = responseType === 'opaqueredirect';
 
       if (!isOpaqueRedirect) {
         status = response.status;
@@ -317,6 +320,7 @@ export class FetchAdapter implements HTTPAdapter {
       rawBody = await readResponseBody(
         method,
         response,
+        { status, headers: responseHeadersForBody, type: responseType },
         maxResponseBytes,
         signal,
       );
@@ -392,10 +396,15 @@ const RESPONSE_TOO_LARGE = Symbol('response too large');
 async function readResponseBody(
   method: string,
   response: Response,
+  answered: {
+    status: number;
+    headers: Record<string, string | string[]>;
+    type: unknown;
+  },
   maxResponseBytes: number,
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array | null | typeof RESPONSE_TOO_LARGE> {
-  if (!hasResponseBody(method, response.status)) {
+  if (!hasResponseBody(method, answered.status)) {
     // Native `fetch` hands over no body here, but a polyfill's Node `Readable` would hold
     // its socket until the server closed it.
     cancelBodyQuietly(readUnknownMember(response, 'body'));
@@ -411,13 +420,15 @@ async function readResponseBody(
   // not when a coding is applied, nor when one may be hidden. A browser exposes
   // `Content-Encoding` on a cross-origin (`cors`) response only when the server lists it
   // in `Access-Control-Expose-Headers`, so its absence there proves nothing.
-  const contentEncoding = response.headers.get('content-encoding');
+  const contentEncoding = scalarHeader(answered.headers, 'content-encoding');
   const isIdentityEncoded =
-    contentEncoding === null
-      ? response.type !== 'cors'
+    contentEncoding === undefined
+      ? answered.type !== 'cors'
       : isIdentityContentEncoding(contentEncoding);
   const declaredLength = isIdentityEncoded
-    ? parseContentLength(response.headers.get('content-length'))
+    ? parseContentLength(
+        scalarHeader(answered.headers, 'content-length') ?? null,
+      )
     : undefined;
 
   // `body`, and its `getReader` and `Symbol.asyncIterator`, each read once and guarded, as
