@@ -3255,9 +3255,15 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         },
       );
 
+      // A read's timer can outlive the cancel, and a throw from it would fail whichever
+      // test is running by then.
+      let wasCancelled = false;
       const streamSpy = spyOn(Blob.prototype, 'stream').mockImplementation(
         () =>
           new ReadableStream<Uint8Array<ArrayBuffer>>({
+            cancel() {
+              wasCancelled = true;
+            },
             pull(controller) {
               if (source === 'a read that never answers') {
                 return new Promise<void>(() => {});
@@ -3270,7 +3276,10 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
               return new Promise<void>((resolve) => {
                 setTimeout(() => {
-                  controller.enqueue(new Uint8Array(0));
+                  if (!wasCancelled) {
+                    controller.enqueue(new Uint8Array(0));
+                  }
+
                   resolve();
                 }, 10);
               });

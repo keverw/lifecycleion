@@ -398,6 +398,28 @@ export class XHRAdapter implements HTTPAdapter {
         return;
       }
 
+      // A listener's reads of an XHR outside a browser may throw, and a throw out of a
+      // listener would leave the send pending with nothing left to end it. Those reads fail
+      // the same way on every attempt, so the request is refused as non-retryable.
+      const refusingOnThrow = <Event>(
+        listener: (event: Event) => void,
+      ): ((event: Event) => void) => {
+        return (event) => {
+          try {
+            listener(event);
+          } catch (error) {
+            removeAbortListener();
+            refuse(error);
+
+            try {
+              xhr.abort();
+            } catch {
+              // Nothing more to stop it with.
+            }
+          }
+        };
+      };
+
       // --- Download progress ---
 
       // Real per-chunk download progress. Same advantage over FetchAdapter:
@@ -443,147 +465,158 @@ export class XHRAdapter implements HTTPAdapter {
         xhr.abort();
       };
 
-      xhr.addEventListener('progress', (event) => {
-        // Stopped as soon as the download passes the limit, rather than once the whole
-        // body has been buffered - when the bytes counted are the body's own. For a
-        // compressed body `loaded` may count encoded or decoded bytes, as the runtime
-        // has it (Chrome counts decoded, Firefox and React Native's Android networking
-        // encoded), and encoded bytes have no fixed bound on the decoded size either way.
-        // So only a body known to carry no coding is stopped here; one that is or may be
-        // compressed is left to `load`, which checks the decoded size exactly.
-        if (didExceedMaxResponseBytes) {
-          return;
-        }
-
-        // Decided once: a body known uncoded is refused at once, and one that is not is
-        // left to `load`. The headers are parsed once, for the decision and the refusal.
-        if (
-          event.loaded > maxResponseBytes &&
-          isBodyKnownUncoded === undefined
-        ) {
-          const headers = parseXHRResponseHeaders(xhr.getAllResponseHeaders());
-          isBodyKnownUncoded = isKnownUncodedBody(xhr, headers, answeredURL);
-
-          if (isBodyKnownUncoded) {
-            refuseTooLargeBody(headers);
+      xhr.addEventListener(
+        'progress',
+        refusingOnThrow((event: ProgressEvent) => {
+          // Stopped as soon as the download passes the limit, rather than once the whole
+          // body has been buffered - when the bytes counted are the body's own. For a
+          // compressed body `loaded` may count encoded or decoded bytes, as the runtime
+          // has it (Chrome counts decoded, Firefox and React Native's Android networking
+          // encoded), and encoded bytes have no fixed bound on the decoded size either way.
+          // So only a body known to carry no coding is stopped here; one that is or may be
+          // compressed is left to `load`, which checks the decoded size exactly.
+          if (didExceedMaxResponseBytes) {
             return;
           }
-        }
 
-        const { progress, total } = readProgressEvent(event);
+          // Decided once: a body known uncoded is refused at once, and one that is not is
+          // left to `load`. The headers are parsed once, for the decision and the refusal.
+          if (
+            event.loaded > maxResponseBytes &&
+            isBodyKnownUncoded === undefined
+          ) {
+            const headers = parseXHRResponseHeaders(
+              xhr.getAllResponseHeaders(),
+            );
+            isBodyKnownUncoded = isKnownUncodedBody(xhr, headers, answeredURL);
 
-        // Whether the last event reported 100%, not whether any did: a compressed body
-        // counted decoded can reach its encoded length partway and count on past it, and
-        // `load` then reports the whole body.
-        didFireDownload100 = progress === 1;
+            if (isBodyKnownUncoded) {
+              refuseTooLargeBody(headers);
+              return;
+            }
+          }
 
-        downloadedBytes = Math.max(downloadedBytes, event.loaded);
-        downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
+          const { progress, total } = readProgressEvent(event);
 
-        guardedDownloadProgress?.({
-          loaded: event.loaded,
-          total,
-          progress,
-        });
-      });
+          // Whether the last event reported 100%, not whether any did: a compressed body
+          // counted decoded can reach its encoded length partway and count on past it, and
+          // `load` then reports the whole body.
+          didFireDownload100 = progress === 1;
+
+          downloadedBytes = Math.max(downloadedBytes, event.loaded);
+          downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
+
+          guardedDownloadProgress?.({
+            loaded: event.loaded,
+            total,
+            progress,
+          });
+        }),
+      );
 
       // --- Load (success) ---
 
-      xhr.addEventListener('load', () => {
-        // Detect browser-followed redirects.
-        //
-        // In a browser, FetchAdapter uses `redirect: 'manual'` which yields an
-        // opaqueredirect response (status 0) — redirects are intercepted before
-        // they happen. XHR has no equivalent opt-out; the browser always follows
-        // redirects automatically. We detect them after-the-fact by comparing
-        // xhr.responseURL (the final URL after all hops) to the original URL.
-        //
-        // Both browser adapters surface the same signal: status 0 +
-        // wasRedirectDetected, which routes through HTTPClient's
-        // redirect_disabled error path so callers get a consistent isFailed
-        // response regardless of adapter.
-        // Read once, before any progress callback: one that aborts the signal resets this
-        // finished XHR, and `responseURL` with it.
-        const responseURL = xhr.responseURL;
-        if (responseURL && didBrowserFollowRedirect(responseURL, answeredURL)) {
-          // The browser completed the transport and surfaced the final URL even
-          // though the client will treat the result as redirect_disabled, so
-          // emit terminal progress before returning the synthetic redirect
-          // response.
-          emitFinalUpload();
+      xhr.addEventListener(
+        'load',
+        refusingOnThrow(() => {
+          // Detect browser-followed redirects.
+          //
+          // In a browser, FetchAdapter uses `redirect: 'manual'` which yields an
+          // opaqueredirect response (status 0) — redirects are intercepted before
+          // they happen. XHR has no equivalent opt-out; the browser always follows
+          // redirects automatically. We detect them after-the-fact by comparing
+          // xhr.responseURL (the final URL after all hops) to the original URL.
+          //
+          // Both browser adapters surface the same signal: status 0 +
+          // wasRedirectDetected, which routes through HTTPClient's
+          // redirect_disabled error path so callers get a consistent isFailed
+          // response regardless of adapter.
+          // Read once, before any progress callback: one that aborts the signal resets this
+          // finished XHR, and `responseURL` with it.
+          const responseURL = xhr.responseURL;
+          if (
+            responseURL &&
+            didBrowserFollowRedirect(responseURL, answeredURL)
+          ) {
+            // The browser completed the transport and surfaced the final URL even
+            // though the client will treat the result as redirect_disabled, so
+            // emit terminal progress before returning the synthetic redirect
+            // response.
+            emitFinalUpload();
 
-          if (!didFireDownload100) {
-            // One number for both, as on every other path: the bytes counted where the
-            // length was unknown, the length where the last throttled event fell short.
-            const bytes = Math.max(downloadedBytes, downloadTotalBytes);
-            guardedDownloadProgress?.(completeProgressEvent(bytes));
+            if (!didFireDownload100) {
+              // One number for both, as on every other path: the bytes counted where the
+              // length was unknown, the length where the last throttled event fell short.
+              const bytes = Math.max(downloadedBytes, downloadTotalBytes);
+              guardedDownloadProgress?.(completeProgressEvent(bytes));
+            }
+
+            resolve(browserRedirectResponse(responseURL));
+            return;
           }
 
-          resolve(browserRedirectResponse(responseURL));
-          return;
-        }
+          // Read before the progress callbacks below: one that aborts the signal makes
+          // `xhr.abort()` reset this finished XHR, wiping its status and headers.
+          const status = xhr.status;
+          const responseHeaders = parseXHRResponseHeaders(
+            xhr.getAllResponseHeaders(),
+          );
+          const body = readResponseBody(method, xhr);
 
-        // Read before the progress callbacks below: one that aborts the signal makes
-        // `xhr.abort()` reset this finished XHR, wiping its status and headers.
-        const status = xhr.status;
-        const responseHeaders = parseXHRResponseHeaders(
-          xhr.getAllResponseHeaders(),
-        );
-        const body = readResponseBody(method, xhr);
+          // Before the refusal below, so a refused body sees it too.
+          emitFinalUpload();
 
-        // Before the refusal below, so a refused body sees it too.
-        emitFinalUpload();
+          // The server answered and what failed is taking delivery, so a stream error with
+          // the real status, as FetchAdapter reports a body it could not read. Left as no
+          // body, an XHR that kept it elsewhere would read as a healthy empty answer.
+          if (body === RESPONSE_UNREADABLE) {
+            resolve({
+              status,
+              ...derivedRedirectFields(answeredURL, status, responseHeaders),
+              headers: responseHeaders,
+              body: null,
+              isStreamError: true,
+              streamErrorCode: 'stream_response_error',
+              errorCause: new TypeError(
+                'XHRAdapter response body was neither an ArrayBuffer nor text',
+              ),
+            });
+            return;
+          }
 
-        // The server answered and what failed is taking delivery, so a stream error with
-        // the real status, as FetchAdapter reports a body it could not read. Left as no
-        // body, an XHR that kept it elsewhere would read as a healthy empty answer.
-        if (body === RESPONSE_UNREADABLE) {
+          // The body as handed over can be larger than the bytes progress counted - a
+          // runtime may count a compressed response encoded there, and a body that is or
+          // may be compressed is not stopped on them - and a runtime need not report
+          // progress at all, so the whole body is checked once more here.
+          if (body !== null && body.length > maxResponseBytes) {
+            resolve(
+              tooLargeAnswer(
+                answeredURL,
+                status,
+                responseHeaders,
+                maxResponseBytes,
+              ),
+            );
+            return;
+          }
+
+          // Final 100% download progress — skip if a progress event already
+          // fired exactly 100% (Content-Length known and final chunk completed it).
+          if (!didFireDownload100) {
+            guardedDownloadProgress?.(completeProgressEvent(body?.length ?? 0));
+          }
+
+          // A 3xx the browser did not follow - one with no `Location` - or one handed over
+          // by an XHR outside a browser is reported as a redirect, as FetchAdapter reports
+          // a real 3xx.
           resolve({
             status,
             ...derivedRedirectFields(answeredURL, status, responseHeaders),
             headers: responseHeaders,
-            body: null,
-            isStreamError: true,
-            streamErrorCode: 'stream_response_error',
-            errorCause: new TypeError(
-              'XHRAdapter response body was neither an ArrayBuffer nor text',
-            ),
+            body,
           });
-          return;
-        }
-
-        // The body as handed over can be larger than the bytes progress counted - a
-        // runtime may count a compressed response encoded there, and a body that is or
-        // may be compressed is not stopped on them - and a runtime need not report
-        // progress at all, so the whole body is checked once more here.
-        if (body !== null && body.length > maxResponseBytes) {
-          resolve(
-            tooLargeAnswer(
-              answeredURL,
-              status,
-              responseHeaders,
-              maxResponseBytes,
-            ),
-          );
-          return;
-        }
-
-        // Final 100% download progress — skip if a progress event already
-        // fired exactly 100% (Content-Length known and final chunk completed it).
-        if (!didFireDownload100) {
-          guardedDownloadProgress?.(completeProgressEvent(body?.length ?? 0));
-        }
-
-        // A 3xx the browser did not follow - one with no `Location` - or one handed over
-        // by an XHR outside a browser is reported as a redirect, as FetchAdapter reports
-        // a real 3xx.
-        resolve({
-          status,
-          ...derivedRedirectFields(answeredURL, status, responseHeaders),
-          headers: responseHeaders,
-          body,
-        });
-      });
+        }),
+      );
 
       // --- Error / timeout / abort ---
 

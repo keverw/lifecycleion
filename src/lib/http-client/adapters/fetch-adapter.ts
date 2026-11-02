@@ -282,7 +282,8 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
-    // Fire 100% upload + download progress (fetch has no real per-chunk progress)
+    // Fire 100% upload progress (fetch has no real per-chunk progress). Download progress
+    // fires once the body has been read and passed the limit, below.
     guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
 
     const responseHeadersForBody = extractFetchHeaders(response.headers);
@@ -392,23 +393,7 @@ async function readResponseBody(
   }
 
   if (maxResponseBytes === Number.POSITIVE_INFINITY) {
-    const unlimitedBody = readUnknownMember(response, 'body');
-    const stopWatching = letGoOnAbort(signal, () => {
-      cancelBodyQuietly(unlimitedBody);
-    });
-
-    try {
-      const buffer = await response.arrayBuffer();
-
-      // A cancel can end the read as if finished; what it read is not the whole body.
-      if (isSignalAbortedQuietly(signal)) {
-        throw makeAbortError();
-      }
-
-      return new Uint8Array(buffer);
-    } finally {
-      stopWatching();
-    }
+    return await readWholeBody(response, signal);
   }
 
   // Refused before reading when the body says up front it is over the limit - only where
@@ -465,8 +450,7 @@ async function readResponseBody(
       );
     }
 
-    const buffer = await response.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
+    const bytes = await readWholeBody(response, signal);
     return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
   }
 
@@ -487,6 +471,30 @@ async function readResponseBody(
     false,
     signal,
   );
+}
+
+/** The body through `arrayBuffer()`, let go of on an abort. */
+async function readWholeBody(
+  response: Response,
+  signal: AbortSignal | undefined,
+): Promise<Uint8Array> {
+  const body = readUnknownMember(response, 'body');
+  const stopWatching = letGoOnAbort(signal, () => {
+    cancelBodyQuietly(body);
+  });
+
+  try {
+    const buffer = await response.arrayBuffer();
+
+    // A cancel can end the read as if finished; what it read is not the whole body.
+    if (isSignalAbortedQuietly(signal)) {
+      throw makeAbortError();
+    }
+
+    return new Uint8Array(buffer);
+  } finally {
+    stopWatching();
+  }
 }
 
 /** A web stream reader's chunks, as an async iterable. */

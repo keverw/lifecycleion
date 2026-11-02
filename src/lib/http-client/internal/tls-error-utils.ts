@@ -30,156 +30,91 @@ const CERT_ERROR_CODES = new Set([
   'UNHANDLED_CRITICAL_EXTENSION',
   'PATH_LENGTH_EXCEEDED',
   'UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY',
+  'INVALID_PURPOSE',
+  'UNKNOWN_CERTIFICATE_VERIFICATION_ERROR',
+  'KEYUSAGE_NO_CERTSIGN',
+  'SUBJECT_ISSUER_MISMATCH',
+  'AKID_SKID_MISMATCH',
+  'AKID_ISSUER_SERIAL_MISMATCH',
 ]);
 
-/** `CRL` or `CRLS` as an underscore-delimited token, anywhere in a code. */
-const CRL_CODE_PATTERN = /(?:^|_)CRLS?(?:_|$)/;
+/** `CERT`, `CRL` or `CRLS` as an underscore-delimited token, anywhere in a code. */
+const CERT_OR_CRL_CODE_PATTERN = /(?:^|_)(?:CERT|CRLS?)(?:_|$)/;
 
 /**
- * Node system error codes that name a DNS or socket failure, so whatever the
- * message says, the connection is what failed. Consulted only to suppress the
- * message fallback.
- *
- * Deliberately not NodeAdapter's `PRE_CONNECTION_ERROR_CODES`, which answers a
- * different question (did any bytes reach the server?) and must stay
- * conservative in the opposite direction.
+ * The wording of a certificate failure, from OpenSSL, Go and rustls, for a runtime that
+ * reports one with no code. Phrases rather than the bare word, as a message may name
+ * anything else that has `certificate` in it: a host, a path, a URL, a service, or an API's
+ * own answer. A failure in other words reads as a network failure, and is retried.
  */
-const TRANSPORT_ERROR_CODES = new Set([
-  'ENOTFOUND',
-  // A resolver's own codes, for one reported with no `syscall`.
-  'ENODATA',
-  'ESERVFAIL',
-  'EREFUSED',
-  'ETIMEOUT',
-  'EFORMERR',
-  'EBADRESP',
-  'ECONNREFUSED',
-  'ECONNRESET',
-  'ECONNABORTED',
-  'ETIMEDOUT',
-  'EPIPE',
-  'EHOSTUNREACH',
-  'EHOSTDOWN',
-  'ENETUNREACH',
-  'ENETDOWN',
-  'EADDRNOTAVAIL',
-  // A `socketPath` that is missing, not permitted or not a socket: the message names the
-  // path, and `sock/certificates/agent.sock` would match /certificate/ on it alone.
-  'ENOENT',
-  'EACCES',
-  'EINVAL',
-  'ENOTSOCK',
-]);
-
-/**
- * Node's built-in `fetch` is backed by Undici, which uses its own `UND_ERR_*`
- * namespace for transport and protocol failures instead of the system codes
- * above. Keep the namespaces separate so this does not imply NodeAdapter —
- * which uses `node:http` / `node:https` — emits Undici errors too.
- */
-const UNDICI_TRANSPORT_ERROR_PREFIX = 'UND_ERR_';
-
-/**
- * Every getaddrinfo failure (`EAI_AGAIN`, `EAI_FAIL`, `EAI_SYSTEM`, ...), whatever the
- * message says about the host (`certificates.internal.corp`). Node reports `EAI_NONAME` and
- * `EAI_NODATA` as `ENOTFOUND`.
- */
-const GETADDRINFO_ERROR_PREFIX = 'EAI_';
-
-/**
- * Whether the system call that failed resolves a name or opens the socket, which is before
- * any certificate exists: a code of any kind, `EBADNAME` from `queryA` or `ENOTDIR` from a
- * `socketPath`'s `connect`, says nothing of one. A TLS failure comes from `read` or `write`
- * (`EPROTO`), and stays with the message.
- */
-function isBeforeTLS(syscall: unknown): boolean {
-  return (
-    typeof syscall === 'string' &&
-    (syscall === 'connect' ||
-      syscall === 'getaddrinfo' ||
-      syscall.startsWith('query'))
-  );
-}
+const CERTIFICATE_FAILURE_MESSAGE_PATTERN =
+  /\bcertificate(?:_verify|\s(?:verif|signed by|signature|has expired|expired|is not yet valid|not yet valid|is valid for|key too weak|for this server|revoked|not trusted|untrusted|rejected|required|unknown|chain|is invalid))|\b(?:bad|invalid|expired|revoked|untrusted|unsupported|unknown|peer|issuer|non-CA|proxy)\scertificate|does not match certificate|does not include certificate signing|self signed|self-signed\scertificate|unable to verify|subtree violation|critical extension|path length constraint|issuer public key|alert unknown ca/i;
 
 /**
  * Best-effort classification for TLS certificate failures that should be
  * treated as non-retryable transport errors by NodeAdapter.
+ *
+ * Bun puts the OpenSSL code on the rejected error itself; Node wraps it as
+ * `TypeError: fetch failed` and hangs the real error off `cause`. Checking the
+ * error plus exactly one cause link covers both.
+ *
+ * One link, not a walk: `cause` is library-controlled and may point back at its
+ * own error, and nothing in either runtime nests deeper. A browser has nothing
+ * to follow, so this stays a server-side classification.
  */
 export function isTLSCertificateError(error: Error): boolean {
-  if (isTLSCertificateErrorSelf(error)) {
-    return true;
-  }
-
-  // Bun puts the OpenSSL code on the rejected error itself; Node wraps it as
-  // `TypeError: fetch failed` and hangs the real error off `cause`. Checking the
-  // error plus exactly one cause link covers both.
-  //
-  // One link, not a walk: `cause` is library-controlled and may point back at its
-  // own error, and nothing in either runtime nests deeper. A browser has nothing
-  // to follow, so this stays a server-side classification.
+  const code = readMember(error, 'code');
   const cause = readMember(error, 'cause');
+  // Any object by its code: a function-style error (node-fetch 2's `FetchError`, built
+  // with `Error.call(this)`) has no error slot, so `toError` wraps it and hangs it here,
+  // code and all.
+  const causeCode =
+    typeof cause === 'object' && cause !== null
+      ? readMember(cause, 'code')
+      : undefined;
 
-  if (isErrorValue(cause)) {
-    return isTLSCertificateErrorSelf(cause);
-  }
-
-  // Any other object by its code alone: a function-style error (node-fetch 2's `FetchError`,
-  // built with `Error.call(this)`) has no error slot, so `toError` wraps it and hangs it
-  // here, code and all. Its message is no evidence, as a `fetch` wrapper may reject with
-  // an API's JSON (`{ message: 'No certificate for this account' }`), and a function-style
-  // error's text is on the wrapper already.
-  return typeof cause === 'object' && cause !== null
-    ? isCertificateCode(readMember(cause, 'code'))
-    : false;
-}
-
-/**
- * Classify a single error, without consulting its `cause`. Every field is read
- * through {@link readMember}, since the error is whatever a runtime, a library,
- * or a caller's mocked `fetch` rejected with.
- */
-function isTLSCertificateErrorSelf(error: Error): boolean {
-  const rawCode = readMember(error, 'code');
-  const code = typeof rawCode === 'string' ? rawCode : '';
-
-  if (isCertificateCode(code)) {
+  if (isCertificateCode(code) || isCertificateCode(causeCode)) {
     return true;
   }
 
-  // A code that names a transport failure is authoritative, so the message is
-  // never consulted for one. The message test below runs against a runtime-built
-  // string with the hostname interpolated in, so `getaddrinfo EAI_AGAIN
-  // certificates.internal.corp` matches /certificate/ on the host name alone —
-  // and any deployment calling a `certificates.*` host would have every DNS
-  // blip resolve as a permanent 495 with `isRetryable: false`.
-  //
-  // Only the fallback is suppressed; the code checks above still run first.
-  if (
-    TRANSPORT_ERROR_CODES.has(code) ||
-    code.startsWith(GETADDRINFO_ERROR_PREFIX) ||
-    code.startsWith(UNDICI_TRANSPORT_ERROR_PREFIX) ||
-    isBeforeTLS(readMember(error, 'syscall'))
-  ) {
+  // Any other code says what failed, and a wrapper's words do not outrank it.
+  if (!mayBeTLSFailureCode(code) || !mayBeTLSFailureCode(causeCode)) {
     return false;
   }
 
-  // Reached with no code, or a code the checks above do not recognize — which is
-  // why the fallback cannot be dropped for any error carrying one. OpenSSL has
-  // more permanent verification failures than the set names (UNABLE_TO_GET_ISSUER_CERT,
-  // CERT_CHAIN_TOO_LONG, …), and a runtime may report one with no code at all.
-  //
-  // `certificate` and `altname` count as words of the text, not as part of a dotted host,
-  // a `host:port` or a path the message quotes: an error with no code, from a custom lookup
-  // or agent, can name `certificates.internal.corp` too. A bare name, `certificates`
-  // alone, reads the same as the word and still matches. A URL the message quotes is left
-  // out whole, so nothing in its path or query (`?type=certificate`) reads as the failure.
+  // A cause's message only if it is an error: a `fetch` wrapper may reject with an API's
+  // JSON (`{ message: 'No certificate for this account' }`), and a function-style error's
+  // text is on the wrapper already.
+  return (
+    readsAsCertificateFailure(error) ||
+    (isErrorValue(cause) && readsAsCertificateFailure(cause))
+  );
+}
+
+/**
+ * Whether a code leaves the message to decide: none at all, or the ones a TLS alert or
+ * handshake failure comes with, whose certificate failures only the text names. And
+ * `UNSPECIFIED`, Node's code for a verification failure it has no name for (`permitted
+ * subtree violation`).
+ */
+function mayBeTLSFailureCode(code: unknown): boolean {
+  return (
+    typeof code !== 'string' ||
+    code === '' ||
+    code === 'EPROTO' ||
+    code === 'UNSPECIFIED' ||
+    code.startsWith('ERR_SSL_')
+  );
+}
+
+/** Whether an error's message words a certificate failure. */
+function readsAsCertificateFailure(error: object): boolean {
   const message = readMember(error, 'message');
 
-  return typeof message === 'string'
-    ? /(?<![a-z0-9./\\-])(?:certificate|altname)s?(?![a-z0-9/\\-]|\.[a-z0-9]|:\d)|self signed|unable to verify|subtree violation|critical extension|path length constraint|issuer public key|alert unknown ca/i.test(
-        message.replace(/(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/\S*/gi, ''),
-      )
-    : false;
+  return (
+    typeof message === 'string' &&
+    CERTIFICATE_FAILURE_MESSAGE_PATTERN.test(message)
+  );
 }
 
 /** Whether `code` names a certificate failure, by the code alone. */
@@ -192,22 +127,16 @@ function isCertificateCode(code: unknown): boolean {
     return true;
   }
 
-  // Every CRL-related verification code, by property rather than by name.
-  // OpenSSL exposes twelve of them (UNABLE_TO_GET_CRL,
-  // UNABLE_TO_DECRYPT_CRL_SIGNATURE, CRL_HAS_EXPIRED, KEYUSAGE_NO_CRL_SIGN,
-  // ERROR_IN_CRL_NEXT_UPDATE_FIELD, DIFFERENT_CRL_SCOPE, …), and a list written
-  // by hand misses whichever of them it leaves out. They are all
-  // revocation-check failures, and enumerating them means being wrong
-  // the next time OpenSSL adds one — so ask whether the code concerns a CRL
-  // instead. The message fallback below does not catch them: 'CRL has expired'
-  // and "format error in CRL's lastUpdate field" contain none of the words it
-  // looks for, so without this they resolve as status 0 rather than 495.
+  // Every certificate and CRL verification code, by property rather than by name.
+  // OpenSSL exposes dozens (UNABLE_TO_GET_ISSUER_CERT, CERT_CHAIN_TOO_LONG,
+  // UNABLE_TO_GET_CRL, KEYUSAGE_NO_CRL_SIGN, DIFFERENT_CRL_SCOPE, ...), and a list
+  // written by hand misses whichever of them it leaves out.
   //
   // Matched as an underscore-delimited token, not a substring, which closes the
   // one word that shares the prefix by accident: CRLF. No code uses it today, but
   // header and framing errors are where one would be minted, and those are
   // connection problems. The plural is allowed for NO_CRLS_INCLUDED.
-  if (CRL_CODE_PATTERN.test(code)) {
+  if (CERT_OR_CRL_CODE_PATTERN.test(code)) {
     return true;
   }
 

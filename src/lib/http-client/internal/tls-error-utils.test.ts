@@ -107,8 +107,12 @@ describe('isTLSCertificateError on an error with no code', () => {
     'lookup failed for altname.internal',
     'lookup failed for certificates:443',
     'connect failed: C:\\certs\\certificates\\agent.sock',
+    'lookup failed for certificates',
+    'lookup failed for self-signed.internal',
+    'upstream certificate service returned 503',
+    'No certificate for this account',
   ])(
-    'a message that only quotes a host or path is no TLS failure: %s',
+    'a message that only mentions a certificate is no TLS failure: %s',
     (message) => {
       expect(isTLSCertificateError(new Error(message))).toBe(false);
     },
@@ -125,6 +129,14 @@ describe('isTLSCertificateError on an error with no code', () => {
     'certificate has expired',
     'sslv3 alert bad certificate',
     'Invalid certificate.',
+    'self-signed certificate',
+    'x509: certificate is valid for a.example, not b.example',
+    'sslv3 alert unsupported certificate',
+    'key usage does not include certificate signing',
+    'invalid non-CA certificate (has CA markings)',
+    'proxy certificates not allowed, please set the appropriate flag',
+    'EE certificate key too weak',
+    'The certificate for this server is invalid.',
   ])('a certificate failure in words is one: %s', (message) => {
     expect(isTLSCertificateError(new Error(message))).toBe(true);
   });
@@ -279,33 +291,31 @@ describe('isTLSCertificateError cause handling', () => {
     expect(isTLSCertificateError(wrapper)).toBe(true);
   });
 
-  test('classifies verification codes the code rules do not name', () => {
-    // OpenSSL exposes far more verification failures than CERT_ERROR_CODES
-    // lists, and none of these match any code rule: not the set, not the CRL
-    // token, not the ERR_TLS_/ERR_SSL_ prefixes. The message fallback is the
-    // only thing that catches them, which is exactly why it cannot be skipped
-    // for every error that merely carries a code. All are permanent.
-    const uncodedByRule: Array<[string, string]> = [
-      ['certificate not trusted', 'CERT_UNTRUSTED'],
-      ['certificate rejected', 'CERT_REJECTED'],
-      ['certificate signature failure', 'CERT_SIGNATURE_FAILURE'],
-      ['certificate is not yet valid', 'CERT_NOT_YET_VALID'],
-      ['certificate chain too long', 'CERT_CHAIN_TOO_LONG'],
-      ['unable to get issuer certificate', 'UNABLE_TO_GET_ISSUER_CERT'],
-      [
-        "unable to decrypt certificate's signature",
-        'UNABLE_TO_DECRYPT_CERT_SIGNATURE',
-      ],
-      [
-        "Hostname/IP does not match certificate's altnames",
-        'HOSTNAME_MISMATCH',
-      ],
-      ['invalid CA certificate', 'INVALID_CA'],
-    ];
-
-    for (const [message, code] of uncodedByRule) {
-      expect(isTLSCertificateError(makeError(message, code))).toBe(true);
+  test('classifies verification codes by the code alone', () => {
+    for (const code of [
+      'CERT_UNTRUSTED',
+      'CERT_REJECTED',
+      'CERT_SIGNATURE_FAILURE',
+      'CERT_NOT_YET_VALID',
+      'CERT_CHAIN_TOO_LONG',
+      'UNABLE_TO_GET_ISSUER_CERT',
+      'UNABLE_TO_DECRYPT_CERT_SIGNATURE',
+      'ERROR_IN_CERT_NOT_BEFORE_FIELD',
+      'HOSTNAME_MISMATCH',
+      'INVALID_CA',
+      'INVALID_PURPOSE',
+      'UNKNOWN_CERTIFICATE_VERIFICATION_ERROR',
+      'KEYUSAGE_NO_CERTSIGN',
+      'SUBJECT_ISSUER_MISMATCH',
+    ]) {
+      expect(isTLSCertificateError(makeError('failed', code))).toBe(true);
     }
+  });
+
+  test('a code outside the TLS ones leaves the message unread, known or not', () => {
+    expect(
+      isTLSCertificateError(makeError('bad certificate', 'ESOMETHINGNEW')),
+    ).toBe(false);
   });
 
   test('a transport code outranks certificate wording in its message', () => {
@@ -329,17 +339,24 @@ describe('isTLSCertificateError cause handling', () => {
     }
   });
 
-  test('a transport code on the cause does not veto a cert error on the outer', () => {
-    // Each link is classified on its own, so suppressing the fallback for one
-    // must not suppress it for the other.
-    const wrapped = makeError('unable to verify the first certificate');
+  test('a transport code on the cause outranks a wrapper that words a certificate failure', () => {
+    const cause = makeError('read ECONNRESET', 'ECONNRESET');
 
-    (wrapped as Error & { cause?: unknown }).cause = makeError(
-      'getaddrinfo EAI_AGAIN api.example.com',
-      'EAI_AGAIN',
-    );
+    expect(
+      isTLSCertificateError(
+        new Error('bad certificate from upstream', { cause }),
+      ),
+    ).toBe(false);
+  });
 
-    expect(isTLSCertificateError(wrapped)).toBe(true);
+  test('a transport code on a function-style cause outranks a bare host in the wrapper', () => {
+    expect(
+      isTLSCertificateError(
+        new Error('certificate unknown', {
+          cause: { code: 'ENOTFOUND', message: 'certificates' },
+        }),
+      ),
+    ).toBe(false);
   });
 
   test('does not treat CRLF codes as CRL codes', () => {

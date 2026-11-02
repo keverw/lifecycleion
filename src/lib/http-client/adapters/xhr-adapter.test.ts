@@ -3991,3 +3991,60 @@ test('a CONNECT is refused as non-retryable before an XHR is opened', async () =
   expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
   expect(FakeXHR.instances.length).toBe(before);
 });
+
+test.each(['load', 'progress'])(
+  'an XHR whose response headers cannot be read refuses the send from %s',
+  async (eventName) => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+    const xhr = lastXHR;
+
+    xhr.status = 200;
+    xhr.getAllResponseHeaders = () => {
+      throw new Error('headers unreadable');
+    };
+
+    if (eventName === 'load') {
+      xhr.simulateLoad();
+    } else {
+      xhr.simulateDownloadProgress(11, 0);
+    }
+
+    const outcome = (await promise.catch((error: unknown) => error)) as Error &
+      Record<string, unknown>;
+
+    expect(outcome[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(xhr.abortCalled).toBe(true);
+  },
+);
+
+test('a refused read still settles when the abort after it throws', async () => {
+  const promise = new XHRAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'GET',
+    headers: {},
+  });
+  const xhr = lastXHR;
+
+  Object.defineProperty(xhr, 'status', {
+    get(): never {
+      throw new Error('status unreadable');
+    },
+  });
+  xhr.abort = () => {
+    throw new Error('abort refused');
+  };
+
+  expect(() => {
+    xhr.simulateLoad();
+  }).not.toThrow();
+
+  const outcome = (await promise.catch((error: unknown) => error)) as Error &
+    Record<string, unknown>;
+
+  expect(outcome[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+});
