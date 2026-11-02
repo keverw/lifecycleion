@@ -109,6 +109,10 @@ describe('isTLSCertificateError on an error with no code', () => {
     'connect failed: C:\\certs\\certificates\\agent.sock',
     'lookup failed for certificates',
     'lookup failed for self-signed.internal',
+    'unable to verify upstream host',
+    'the payload itself signed by nobody',
+    'config has a critical extension point',
+    'no issuer public keys configured',
     'upstream certificate service returned 503',
     'No certificate for this account',
   ])(
@@ -137,6 +141,10 @@ describe('isTLSCertificateError on an error with no code', () => {
     'proxy certificates not allowed, please set the appropriate flag',
     'EE certificate key too weak',
     'The certificate for this server is invalid.',
+    'unable to verify leaf signature',
+    'unhandled critical CRL extension',
+    'unable to decode issuer public key',
+    'subject signature algorithm and issuer public key algorithm mismatch',
   ])('a certificate failure in words is one: %s', (message) => {
     expect(isTLSCertificateError(new Error(message))).toBe(true);
   });

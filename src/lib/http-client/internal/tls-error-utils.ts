@@ -48,11 +48,11 @@ const CERT_OR_CRL_CODE_PATTERN = /(?:^|_)(?:CERT|CRLS?)(?:_|$)/;
  * own answer. A failure in other words reads as a network failure, and is retried.
  */
 const CERTIFICATE_FAILURE_MESSAGE_PATTERN =
-  /\bcertificate(?:_verify|\s(?:verif|signed by|signature|has expired|expired|is not yet valid|not yet valid|is valid for|key too weak|for this server|revoked|not trusted|untrusted|rejected|required|unknown|chain|is invalid))|\b(?:bad|invalid|expired|revoked|untrusted|unsupported|unknown|peer|issuer|non-CA|proxy)\scertificate|does not match certificate|does not include certificate signing|self signed|self-signed\scertificate|unable to verify|subtree violation|critical extension|path length constraint|issuer public key|alert unknown ca/i;
+  /\bcertificate(?:_verify|\s(?:verif|signed by|signature|has expired|expired|is not yet valid|not yet valid|is valid for|key too weak|for this server|revoked|not trusted|untrusted|rejected|required|unknown|chain|is invalid))|\b(?:bad|invalid|expired|revoked|untrusted|unsupported|unknown|peer|issuer|non-CA|proxy)\scertificate|does not match certificate|does not include certificate signing|self[\s-]signed\scertificate|unable to verify (?:the first certificate|(?:the )?leaf signature)|subtree violation|unhandled critical (?:crl )?extension|path length constraint|decode issuer public key|issuer public key algorithm mismatch|alert unknown ca/i;
 
 /**
  * Best-effort classification for TLS certificate failures that should be
- * treated as non-retryable transport errors by NodeAdapter.
+ * treated as non-retryable transport errors, by NodeAdapter and FetchAdapter.
  *
  * Bun puts the OpenSSL code on the rejected error itself; Node wraps it as
  * `TypeError: fetch failed` and hangs the real error off `cause`. Checking the

@@ -264,7 +264,15 @@ export class XHRAdapter implements HTTPAdapter {
             // Nothing was read to carry out.
           }
 
-          xhr.abort();
+          // Guarded too: refused, no `abort` event would follow to end the send.
+          try {
+            xhr.abort();
+          } catch {
+            // Not over an answer already on its way out, which a working `abort()` leaves be.
+            if (!didLoad && !didExceedMaxResponseBytes) {
+              settleAborted();
+            }
+          }
         };
 
         try {
@@ -434,6 +442,8 @@ export class XHRAdapter implements HTTPAdapter {
       // Set when this adapter aborted the XHR itself over a body past `maxResponseBytes`,
       // so the `abort` event that follows is not reported as a cancel.
       let didExceedMaxResponseBytes = false;
+      // Set as `load` starts, which answers whatever a progress callback then cancels.
+      let didLoad = false;
       // Whether the bytes progress counts are the body's own (see `isKnownUncodedBody`):
       // read once, when they first pass the limit.
       let isBodyKnownUncoded: boolean | undefined;
@@ -519,6 +529,8 @@ export class XHRAdapter implements HTTPAdapter {
       xhr.addEventListener(
         'load',
         refusingOnThrow(() => {
+          didLoad = true;
+
           // Detect browser-followed redirects.
           //
           // In a browser, FetchAdapter uses `redirect: 'manual'` which yields an
@@ -656,10 +668,12 @@ export class XHRAdapter implements HTTPAdapter {
 
       xhr.addEventListener('abort', () => {
         // Already resolved as `response_too_large`; this abort is the adapter's own.
-        if (didExceedMaxResponseBytes) {
-          return;
+        if (!didExceedMaxResponseBytes) {
+          settleAborted();
         }
+      });
 
+      function settleAborted(): void {
         if (followedRedirectBeforeAbort !== undefined) {
           // An answer, as on `load`: the final upload event fires for it there too.
           emitFinalUpload();
@@ -677,7 +691,7 @@ export class XHRAdapter implements HTTPAdapter {
                 answeredBeforeAbort.headers,
               ),
         );
-      });
+      }
 
       // Fire initial 0% upload progress before any bytes leave the browser, mirroring the
       // FetchAdapter pattern so callers see a consistent first event regardless of

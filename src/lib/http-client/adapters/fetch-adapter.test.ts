@@ -2502,6 +2502,114 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     },
   );
 
+  test.each(['type', 'status', 'headers'])(
+    'a response whose %s cannot be read is refused as non-retryable',
+    async (member) => {
+      (globalThis as any).fetch = () => {
+        const response = new Response('ok', { status: 200 });
+        Object.defineProperty(response, member, {
+          get(): never {
+            throw new Error('unreadable');
+          },
+        });
+        return Promise.resolve(response);
+      };
+
+      const outcome = (await new FetchAdapter()
+        .send({
+          requestURL: 'https://local.test/data',
+          method: 'GET',
+          headers: {},
+        })
+        .catch((error: unknown) => error)) as Record<string, unknown>;
+
+      expect(outcome[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    },
+  );
+
+  test('a refused response lets its body go', async () => {
+    let cancels = 0;
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('ok', { status: 200 });
+      Object.defineProperties(response, {
+        headers: {
+          get(): never {
+            throw new Error('unreadable');
+          },
+        },
+        body: {
+          value: {
+            cancel: () => {
+              cancels++;
+              return Promise.resolve();
+            },
+          },
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+      })
+      .catch(() => {});
+
+    expect(cancels).toBe(1);
+  });
+
+  test('a response read that throws over an abort stays the abort', async () => {
+    const controller = new AbortController();
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('ok', { status: 200 });
+      Object.defineProperty(response, 'headers', {
+        get(): never {
+          controller.abort();
+          throw new Error('unreadable');
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const outcome = (await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+      })
+      .catch((error: unknown) => error)) as Error;
+
+    expect(outcome.name).toBe('AbortError');
+  });
+
+  test('an opaque redirect answers without its status being read', async () => {
+    (globalThis as any).fetch = () => {
+      const response = new Response('', { status: 200 });
+      Object.defineProperties(response, {
+        type: { value: 'opaqueredirect' },
+        status: {
+          get(): never {
+            throw new Error('unreadable');
+          },
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.wasRedirectDetected).toBe(true);
+  });
+
   test('a function-style polyfill error keeps its certificate code through the wrapping', async () => {
     function FetchError(this: { code: string; message: string }) {
       Error.call(this as never);

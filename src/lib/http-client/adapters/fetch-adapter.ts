@@ -261,13 +261,38 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
+    // Guarded, as a polyfill's or test double's response may carry any getter. One that
+    // throws fails the same way on every attempt, so it is refused as non-retryable rather
+    // than repeating a request the server answered, and its body let go.
+    let isOpaqueRedirect: boolean;
+    let status = 0;
+    let responseHeadersForBody: Record<string, string | string[]> = {};
+
+    try {
+      isOpaqueRedirect = response.type === 'opaqueredirect';
+
+      if (!isOpaqueRedirect) {
+        status = response.status;
+        responseHeadersForBody = extractFetchHeaders(response.headers);
+      }
+    } catch (error) {
+      cancelBodyQuietly(readUnknownMember(response, 'body'));
+
+      // A cancellation stays a cancellation, as on the body read below.
+      if (isAbortError(error) || isSignalAbortedQuietly(signal)) {
+        throw isAbortError(error) ? error : makeAbortError();
+      }
+
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+
     // Browser-only: `redirect: 'manual'` in a browser context yields an opaque
     // redirect response (status 0, no accessible Location header) due to CORS
     // security constraints. In server runtimes (Bun, Node) `redirect: 'manual'`
     // returns the real 3xx with a Location header, so this branch is never hit
     // there — the real status falls through to the normal return path below and
     // HTTPClient's redirect loop handles it as usual.
-    if (response.type === 'opaqueredirect') {
+    if (isOpaqueRedirect) {
       // Even though the client will classify this as redirect_disabled, the
       // browser completed the fetch operation. Emit terminal progress so the
       // browser adapters match the server/mock adapters' completion semantics.
@@ -285,8 +310,6 @@ export class FetchAdapter implements HTTPAdapter {
     // Fire 100% upload progress (fetch has no real per-chunk progress). Download progress
     // fires once the body has been read and passed the limit, below.
     guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
-
-    const responseHeadersForBody = extractFetchHeaders(response.headers);
 
     let rawBody: Uint8Array | null | typeof RESPONSE_TOO_LARGE;
 
@@ -309,29 +332,20 @@ export class FetchAdapter implements HTTPAdapter {
       // sorts it: cancel stays cancelled, a post-header timeout becomes a
       // terminal stream error with the real status.
       if (isAbortError(error) || isSignalAbortedQuietly(signal)) {
-        throw markResponseStreamAbort(
-          error,
-          response.status,
-          responseHeadersForBody,
-        );
+        throw markResponseStreamAbort(error, status, responseHeadersForBody);
       }
 
       // Redirect detection is reported the same way as on the success path: the
       // headers arrived, so a 3xx here still knows where it was pointing, and a
       // truncated body must not lose the target an intact one would report.
       return {
-        status: response.status,
-        ...derivedRedirectFields(
-          dispatchedURL,
-          response.status,
-          responseHeadersForBody,
-        ),
+        status,
+        ...derivedRedirectFields(dispatchedURL, status, responseHeadersForBody),
         headers: responseHeadersForBody,
         body: null,
         isStreamError: true,
-        // fetch buffers the body for us, so there is no per-chunk delivery to
-        // distinguish a local write failure from an upstream stream failure.
-        // Everything reaching here is an upstream/transfer failure.
+        // The body is only collected here, never written out, so there is no local write
+        // to fail: what reaches here is a failed transfer or a chunk `readBodyWithin` refused.
         streamErrorCode: 'stream_response_error',
         errorCause: normalizeError(error),
       };
@@ -343,7 +357,7 @@ export class FetchAdapter implements HTTPAdapter {
     if (rawBody === RESPONSE_TOO_LARGE) {
       return tooLargeAnswer(
         dispatchedURL,
-        response.status,
+        status,
         responseHeadersForBody,
         maxResponseBytes,
       );
@@ -352,14 +366,10 @@ export class FetchAdapter implements HTTPAdapter {
     guardedDownloadProgress?.(completeProgressEvent(rawBody?.length ?? 0));
 
     return {
-      status: response.status,
+      status,
       // Server/runtime manual redirects reach this path as real 3xx responses.
       // Browser opaque redirects returned above never reach this branch.
-      ...derivedRedirectFields(
-        dispatchedURL,
-        response.status,
-        responseHeadersForBody,
-      ),
+      ...derivedRedirectFields(dispatchedURL, status, responseHeadersForBody),
       headers: responseHeadersForBody,
       body: rawBody,
     };

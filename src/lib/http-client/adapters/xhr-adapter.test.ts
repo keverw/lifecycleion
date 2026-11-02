@@ -4048,3 +4048,48 @@ test('a refused read still settles when the abort after it throws', async () => 
 
   expect(outcome[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });
+
+test('an abort() that throws from the signal listener still ends the send as the abort', async () => {
+  const controller = new AbortController();
+  const promise = new XHRAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'GET',
+    headers: {},
+    signal: controller.signal,
+  });
+
+  lastXHR.abort = () => {
+    throw new Error('abort refused');
+  };
+  controller.abort();
+
+  const outcome = (await promise.catch((error: unknown) => error)) as Error;
+
+  expect(outcome.name).toBe('AbortError');
+});
+
+test('a cancel from the final upload event keeps the answer when abort() throws', async () => {
+  const controller = new AbortController();
+  const promise = new XHRAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'POST',
+    headers: {},
+    body: 'x',
+    signal: controller.signal,
+    onUploadProgress: (event) => {
+      if (event.progress === 1) {
+        controller.abort();
+      }
+    },
+  });
+  const xhr = lastXHR;
+
+  xhr.abort = () => {
+    throw new Error('abort refused');
+  };
+  xhr.readyState = 4;
+  xhr.status = 200;
+  xhr.simulateLoad();
+
+  expect((await promise).status).toBe(200);
+});
