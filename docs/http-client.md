@@ -420,7 +420,7 @@ client waits to dispatch another hop is a separate request failure.
 
 ### Content-Type Detection and Body Parsing
 
-The response `Content-Type` header determines how the body is parsed. Only its media type is read - the first one, when fetch or XHR joined a repeated header, and without its parameters, trimmed of HTTP whitespace and in any ASCII case:
+The response `Content-Type` header determines how the body is parsed. Only its media type is read - the first one, when fetch or XHR joined a repeated header, and without its parameters, trimmed of HTTP whitespace and in any ASCII case. A `charset` is one of those parameters: text is decoded as UTF-8 whatever it names, as fetch's `response.text()` decodes it, with bytes that are not UTF-8 read as U+FFFD. Stream the response with `streamResponse`, or have it served as a binary type, to decode it some other way:
 
 | Media type                                            | `contentType` | Body type                 |
 | ----------------------------------------------------- | ------------- | ------------------------- |
