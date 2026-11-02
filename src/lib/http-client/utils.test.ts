@@ -583,6 +583,11 @@ describe('parseContentType', () => {
     expect(parseContentType('application/json')).toBe('json');
   });
 
+  test('returns json for text/json, a JSON MIME type of the MIME Sniffing standard', () => {
+    expect(parseContentType('text/json')).toBe('json');
+    expect(parseContentType('Text/JSON; charset=utf-8')).toBe('json');
+  });
+
   test('returns json for +json vendor types', () => {
     expect(parseContentType('application/vnd.api+json')).toBe('json');
   });

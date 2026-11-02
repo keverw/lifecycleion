@@ -840,10 +840,15 @@ export function parseContentType(
     return 'binary';
   } else {
     // The media type alone: a parameter (`profile="x+json"`) or a longer subtype
-    // (`application/jsonl`) is not JSON.
+    // (`application/jsonl`) is not JSON. The JSON MIME types are the MIME Sniffing
+    // standard's: `application/json`, `text/json`, and any subtype ending in `+json`.
     const lower = normalizeMimeType(contentTypeHeader);
 
-    if (lower === 'application/json' || lower.endsWith('+json')) {
+    if (
+      lower === 'application/json' ||
+      lower === 'text/json' ||
+      lower.endsWith('+json')
+    ) {
       return 'json';
     } else if (lower.startsWith('text/')) {
       return 'text';

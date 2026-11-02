@@ -422,12 +422,12 @@ client waits to dispatch another hop is a separate request failure.
 
 The response `Content-Type` header determines how the body is parsed. Only its media type is read - the first one, when fetch or XHR joined a repeated header, and without its parameters, trimmed of HTTP whitespace and in any ASCII case:
 
-| Media type                                    | `contentType` | Body type                 |
-| --------------------------------------------- | ------------- | ------------------------- |
-| `application/json`, or ends with `+json`      | `'json'`      | Parsed via `JSON.parse()` |
-| Starts with `text/`                           | `'text'`      | UTF-8 decoded string      |
-| `application/x-www-form-urlencoded`           | `'text'`      | UTF-8 decoded string      |
-| Absent or anything else (`application/jsonl`) | `'binary'`    | Raw `Uint8Array`          |
+| Media type                                            | `contentType` | Body type                 |
+| ----------------------------------------------------- | ------------- | ------------------------- |
+| `application/json`, `text/json`, or ends with `+json` | `'json'`      | Parsed via `JSON.parse()` |
+| Starts with `text/`                                   | `'text'`      | UTF-8 decoded string      |
+| `application/x-www-form-urlencoded`                   | `'text'`      | UTF-8 decoded string      |
+| Absent or anything else (`application/jsonl`)         | `'binary'`    | Raw `Uint8Array`          |
 
 `isText` mirrors `contentType === 'text'`. `isJSON` is `true` only when JSON parsing actually succeeded, and it stays `false` on a parse failure. `isParseError` is `true` when the server sent a JSON `Content-Type` but the body could not be parsed. In that case `contentType` is still `'json'`, `isJSON` is `false`, and `body` falls back to the raw string. An empty body is no body, whatever the `Content-Type` and the adapter: `body` is `null` and `isParseError` is `false`.
 
