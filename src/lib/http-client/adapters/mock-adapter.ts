@@ -836,8 +836,10 @@ export class MockAdapter implements HTTPAdapter {
         mockResponse.body !== undefined &&
         mockResponse.body !== null);
     if (!hasHeader(responseHeaders, 'content-type') && hasRouteBody) {
+      // The value checked above, not a second read.
       const ct =
-        mockResponse.contentType ?? inferContentType(mockResponse.body);
+        (routeContentType as ContentType | null | undefined) ??
+        inferContentType(mockResponse.body);
 
       if (ct === 'json') {
         responseHeaders['content-type'] = 'application/json';
