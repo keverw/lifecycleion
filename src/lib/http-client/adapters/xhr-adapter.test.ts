@@ -4788,7 +4788,8 @@ describe('XHRAdapter - a cancel from the final upload event on an XHR whose abor
       expect(events).toEqual(
         eventName === 'progress'
           ? ['upload 0', 'upload 1', 'rejected AbortError']
-          : ['upload 0', 'upload 1', 'download 1', 'resolved 200'],
+          : // Load keeps its answer for the client to sort, but reports no completion.
+            ['upload 0', 'upload 1', 'resolved 200'],
       );
     },
   );
@@ -5142,6 +5143,31 @@ describe('XHRAdapter - a redirect seen at the headers, and a cancel once the res
     expect(xhr.abortCalled).toBe(false);
     expect(response.status).toBe(200);
     expect((response.body as Uint8Array).length).toBe(5);
+  });
+
+  test('a download cancelled from its last progress event reports no completion', async () => {
+    const controller = new AbortController();
+    const downloads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+      onDownloadProgress: ({ progress }) => {
+        downloads.push(progress);
+        controller.abort();
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.simulateHeadersReceived(200);
+    xhr.readyState = 4;
+    xhr.response = new ArrayBuffer(5);
+    xhr.simulateDownloadProgress(5, 0);
+    xhr.simulateLoad();
+    await promise;
+
+    expect(downloads).toEqual([-1]);
   });
 });
 

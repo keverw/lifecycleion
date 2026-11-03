@@ -792,8 +792,12 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
-          // The final download event, the only one at 100%: the body's own size.
-          reportDownload?.(completeProgressEvent(body?.length ?? 0));
+          // The final download event, the only one at 100%: the body's own size. Not for a
+          // download cancelled already - from its last progress event, which a runtime may
+          // fire once the response is complete - which reports no completion.
+          if (!isSignalAbortedQuietly(signal)) {
+            reportDownload?.(completeProgressEvent(body?.length ?? 0));
+          }
 
           // A 3xx the browser did not follow - one with no `Location` - or one handed over
           // by an XHR outside a browser is reported as a redirect, as FetchAdapter reports
