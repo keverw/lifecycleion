@@ -250,9 +250,14 @@ export function buildURL(
           (pair) => pair !== '' && !overridden.has(topLevelQueryKey(pair)),
         );
       const added = qs.stringify(snapshot);
-      const query = [...kept, ...(added ? [added] : [])].join('&');
-      // An empty query the path wrote (`/x?`) is kept as written, as its fragment is.
-      url = `${basePath}${query !== '' || existingQuery === '' ? `?${query}` : ''}${fragment}`;
+
+      // Params that add nothing and override nothing - each one unset - leave the URL as
+      // written, its query included: an empty one (`/x?`) or empty pairs (`?a=1&&b=2`),
+      // which a signed URL's signature covers.
+      if (added !== '' || overridden.size > 0) {
+        const query = [...kept, ...(added ? [added] : [])].join('&');
+        url = `${basePath}${query ? `?${query}` : ''}${fragment}`;
+      }
     }
   }
 

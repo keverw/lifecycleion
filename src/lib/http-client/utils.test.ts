@@ -79,8 +79,10 @@ describe('buildURL', () => {
   test.each([
     ['https://a.test/x?', 'https://a.test/x?'],
     ['https://a.test/x?#', 'https://a.test/x?#'],
+    ['https://a.test/x?&', 'https://a.test/x?&'],
+    ['https://a.test/x?a=1&&b=2', 'https://a.test/x?a=1&&b=2'],
   ])(
-    'keeps an empty query as written when every param is unset: %s',
+    'keeps the query as written when every param is unset: %s',
     (path, expected) => {
       expect(buildURL(undefined, path, { page: undefined })).toBe(expected);
     },
