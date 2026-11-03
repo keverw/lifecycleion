@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
-import { byteProgressEvent, guardProgressCallback } from './progress';
+import {
+  byteProgressEvent,
+  guardProgressCallback,
+  knownBodyByteLength,
+} from './progress';
 import type { AdapterProgressEvent } from '../types';
 
 const event: AdapterProgressEvent = {
@@ -140,5 +144,26 @@ describe('byteProgressEvent', () => {
       total: 120,
       progress: -1,
     });
+  });
+});
+
+describe('knownBodyByteLength', () => {
+  test.each([
+    ['a string', '12'],
+    ['NaN', Number.NaN],
+    ['a negative', -1],
+    ['a fraction', 1.5],
+  ])('a Blob whose size reports %s has no known length', (_label, size) => {
+    class OddBlob extends Blob {
+      public override get size(): number {
+        return size as number;
+      }
+    }
+
+    expect(knownBodyByteLength(new OddBlob(['abc']))).toBeUndefined();
+  });
+
+  test('a Blob reports its size', () => {
+    expect(knownBodyByteLength(new Blob(['abc']))).toBe(3);
   });
 });

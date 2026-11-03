@@ -21,6 +21,7 @@ import {
 } from '../internal/adapter-error';
 import {
   isSignalAborted,
+  isSignalAbortedQuietly,
   readAdapterRequestFields,
 } from '../internal/request-fields';
 import {
@@ -143,6 +144,21 @@ export class XHRAdapter implements HTTPAdapter {
         rejectSend(reason);
       };
 
+      // The caller's progress callbacks, called only while the send is pending: the one
+      // place that rule is kept, so a listener that runs on after a settle reports nothing.
+      type ProgressCallback = NonNullable<typeof guardedUploadProgress>;
+      const whilePending = (
+        callback: ProgressCallback | undefined,
+      ): ProgressCallback | undefined =>
+        callback &&
+        ((event) => {
+          if (!didSettle) {
+            callback(event);
+          }
+        });
+      const reportUpload = whilePending(guardedUploadProgress);
+      const reportDownload = whilePending(guardedDownloadProgress);
+
       // Refused the same way on every attempt - a method or header value `open` or
       // `setRequestHeader` will not take - so failed once as non-retryable, as the other
       // adapters fail a request their transport refuses to build.
@@ -251,9 +267,11 @@ export class XHRAdapter implements HTTPAdapter {
        * alone, which is all it is reported by: its headers are the final page's, so they are
        * not read, and one that cannot be read does not lose the redirect.
        */
-      const readAnswer = (): AnsweredHeaders => {
-        const responseURL = xhr.responseURL;
-        const status = xhr.status;
+      const readAnswer = (status: number = xhr.status): AnsweredHeaders => {
+        // A string or none: an XHR outside a browser may have no `responseURL` at all, which
+        // says nothing of a redirect.
+        const reportedURL: unknown = xhr.responseURL;
+        const responseURL = typeof reportedURL === 'string' ? reportedURL : '';
 
         return {
           status,
@@ -269,7 +287,7 @@ export class XHRAdapter implements HTTPAdapter {
         if (answeredAtHeaders === undefined && xhr.readyState >= 2) {
           const status = xhr.status;
           if (status > 0) {
-            answeredAtHeaders = { ...readAnswer(), status };
+            answeredAtHeaders = readAnswer(status);
           }
         }
 
@@ -410,7 +428,7 @@ export class XHRAdapter implements HTTPAdapter {
             ? knownBodyByteLength(requestBody)
             : binaryBodyByteLength) ??
             0);
-        guardedUploadProgress(completeProgressEvent(bytes));
+        reportUpload?.(completeProgressEvent(bytes));
       };
 
       // A listener's reads of an XHR outside a browser may throw, and a throw out of a
@@ -478,7 +496,7 @@ export class XHRAdapter implements HTTPAdapter {
               uploadedBytes = Math.max(uploadedBytes, event.loaded);
               uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
 
-              guardedUploadProgress?.(reported);
+              reportUpload?.(reported);
             }, false),
           );
 
@@ -530,8 +548,13 @@ export class XHRAdapter implements HTTPAdapter {
        * as the redirect, as on `load`: the client refuses those whatever the body.
        */
       const refuseTooLargeBody = (answer: AnsweredHeaders): void => {
-        didExceedMaxResponseBytes = true;
+        // Before the flag, so a cancel from that upload callback ends the send as the cancel.
         emitFinalUpload();
+        if (didSettle) {
+          return;
+        }
+
+        didExceedMaxResponseBytes = true;
 
         const redirectURL = followedRedirectOf(answer);
         resolve(
@@ -611,7 +634,7 @@ export class XHRAdapter implements HTTPAdapter {
           downloadedBytes = Math.max(downloadedBytes, event.loaded);
           downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
 
-          guardedDownloadProgress?.(reported);
+          reportDownload?.(reported);
         }, true),
       );
 
@@ -675,7 +698,7 @@ export class XHRAdapter implements HTTPAdapter {
               // One number for both, as on every other path: the bytes counted where the
               // length was unknown, the length where the last throttled event fell short.
               const bytes = Math.max(downloadedBytes, downloadTotalBytes);
-              guardedDownloadProgress?.(completeProgressEvent(bytes));
+              reportDownload?.(completeProgressEvent(bytes));
             }
 
             resolve(browserRedirectResponse(redirectURL));
@@ -728,7 +751,7 @@ export class XHRAdapter implements HTTPAdapter {
           // fewer bytes than that event's, for a body that took more bytes encoded.
           const bodyBytes = body?.length ?? 0;
           if (!didFireDownload100 || lastDownloadLoaded !== bodyBytes) {
-            guardedDownloadProgress?.(completeProgressEvent(bodyBytes));
+            reportDownload?.(completeProgressEvent(bodyBytes));
           }
 
           // A 3xx the browser did not follow - one with no `Location` - or one handed over
@@ -749,6 +772,10 @@ export class XHRAdapter implements HTTPAdapter {
       // connection, CORS rejection). It never fires for HTTP error status codes
       // (4xx, 5xx) — those arrive on the load event with a real status.
       xhr.addEventListener('error', () => {
+        if (didSettle) {
+          return;
+        }
+
         // Neither replay signal is set here, on purpose. This adapter can never
         // prove non-delivery: upload progress is suppressed for cross-origin
         // requests CORS does not grant access to, and those are still delivered —
@@ -856,7 +883,17 @@ export class XHRAdapter implements HTTPAdapter {
       // FetchAdapter pattern so callers see a consistent first event regardless of
       // adapter. Here, once every refusal above has passed, so a request refused before
       // it is sent reports no upload start.
-      guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+      //
+      // Nor for one cancelled already - a caller's getter read above (a `Blob`'s `size`)
+      // may abort the signal, where `xhr.abort()` on an unsent XHR fires nothing - as
+      // FetchAdapter reports none for a request aborted at dispatch.
+      if (isSignalAbortedQuietly(signal)) {
+        removeAbortListener();
+        reject(makeAbortError());
+        return;
+      }
+
+      reportUpload?.({ loaded: 0, total: 0, progress: 0 });
 
       // Checked again here: a cancel from the 0% upload progress callback above aborts the
       // signal while the XHR is opened but not sent, where `xhr.abort()` does nothing and

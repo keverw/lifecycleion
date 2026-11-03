@@ -4731,3 +4731,93 @@ describe('XHRAdapter - a cancel from the final upload event on an XHR whose abor
     },
   );
 });
+
+describe('XHRAdapter - shims, early cancels and odd sizes', () => {
+  test('an XHR with no responseURL reports no redirect, and its headers', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+    const xhr = lastXHR as unknown as Record<string, unknown>;
+
+    xhr.responseURL = undefined;
+    xhr.status = 200;
+    xhr.response = new ArrayBuffer(2);
+    lastXHR.getAllResponseHeadersResult = 'x-a: 1\r\n';
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+    expect(response.wasRedirectDetected).toBe(false);
+    expect(response.headers['x-a']).toBe('1');
+  });
+
+  test('a request cancelled by a getter read before it goes out reports no upload start', async () => {
+    const controller = new AbortController();
+    const uploads: number[] = [];
+    const blob = new Blob(['abc']);
+    Object.defineProperty(blob, 'size', {
+      get() {
+        controller.abort();
+        return 3;
+      },
+    });
+
+    const outcome = (await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/data',
+        method: 'POST',
+        headers: {},
+        body: blob as unknown as AdapterRequest['body'],
+        signal: controller.signal,
+        onUploadProgress: (event) => {
+          uploads.push(event.progress);
+        },
+      })
+      .catch((error: unknown) => error)) as Error;
+
+    expect(outcome.name).toBe('AbortError');
+    expect(uploads).toEqual([]);
+  });
+
+  test('a cancel from the final upload event of a body refused as too large ends as the cancel', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      maxResponseBytes: 4,
+      signal: controller.signal,
+      onUploadProgress: (event) => {
+        if (event.progress === 1) {
+          controller.abort();
+        }
+      },
+    });
+    const xhr = lastXHR;
+    const readHeaders = xhr.getAllResponseHeaders.bind(xhr);
+    let headerReads = 0;
+
+    // A shim whose first header read fails, and whose abort() fires at once.
+    xhr.getAllResponseHeaders = () => {
+      headerReads++;
+      if (headerReads === 1) {
+        throw new Error('not yet');
+      }
+      return readHeaders();
+    };
+    xhr.abort = () => {
+      xhr.simulateAbort();
+    };
+    xhr.readyState = 3;
+    xhr.status = 200;
+    xhr.getAllResponseHeadersResult = 'content-encoding: identity\r\n';
+    xhr.simulateDownloadProgress(10, 0);
+
+    const outcome = (await promise.catch((error: unknown) => error)) as Error;
+
+    expect(outcome.name).toBe('AbortError');
+  });
+});

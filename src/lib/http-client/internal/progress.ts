@@ -78,7 +78,11 @@ export function knownBodyByteLength(body: unknown): number | undefined {
   // exception on the global channel rather than a size that cannot be known.
   try {
     if (typeof Blob !== 'undefined' && body instanceof Blob) {
-      return body.size;
+      // A subclass's own `size` may report anything: only a byte count is one.
+      const size: unknown = body.size;
+      return typeof size === 'number' && Number.isSafeInteger(size) && size >= 0
+        ? size
+        : undefined;
     }
   } catch {
     // Unknowable, as for a body of another kind.

@@ -13,6 +13,7 @@ import {
 } from './multipart';
 import type { RequestBodyWritable } from './request-body-writable';
 import { REQUEST_BODY_CHUNK_SIZE } from './request-body-writer';
+import { filePartNameToSend } from './form-entries';
 import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
 import {
   scriptFormEntries,
@@ -2095,13 +2096,30 @@ test('a file part on Bun is written under the last segment of its name, never a 
     expect(written).toContain('name="plain"; filename="kept.txt"');
     expect(written).toContain('name="endsInSlash"; filename="dir"');
     expect(written).toContain('name="pathEndsInSlash"; filename="sub"');
-    expect(written).toContain('name="onlySlashes"; filename=""');
+    expect(written).toContain('name="onlySlashes"; filename="//"');
     if (process.platform !== 'win32') {
       expect(written).toContain('name="backslash"; filename="a\\b.txt"');
     }
     expect(written).not.toContain(directory);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('on Bun under Windows, a file part name loses its drive prefix as path.win32.basename drops it', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  try {
+    expect(filePartNameToSend('C:\\Users\\me\\report.txt')).toBe('report.txt');
+    expect(filePartNameToSend('C:report.txt')).toBe('report.txt');
+    expect(filePartNameToSend('C:\\Users\\me\\dir\\')).toBe('dir');
+    expect(filePartNameToSend('a/b\\c.txt')).toBe('c.txt');
+    // No segment left: sent as it is, not as no file chosen.
+    expect(filePartNameToSend('C:\\')).toBe('C:\\');
+  } finally {
+    if (platform) {
+      Object.defineProperty(process, 'platform', platform);
+    }
   }
 });
 

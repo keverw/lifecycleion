@@ -47,10 +47,10 @@ export function isFormData(value: unknown): value is FormData {
  * a path there - `Bun.file()`, `openAsBlob` - reports the path as its name, even when
  * appended under another, and a form's entries do not tell it from a `File` named with a
  * slash. So only the last segment is sent, as the form-data package sends it
- * (`path.basename`, by its separators; a Windows drive prefix is kept): a local path is no
- * business of the server's. Trailing separators are dropped first, so `/home/me/dir/` is
- * sent as `dir`, and a name of separators alone as an empty one. Handed the name rather
- * than the part, so each use reads a part's name once.
+ * (`path.basename`, a Windows drive prefix included): a local path is no business of the
+ * server's. Trailing separators are dropped first, so `/home/me/dir/` is sent as `dir`. A
+ * name with no segment left (`/`, `C:\\`) is sent as it is. Handed the name rather than
+ * the part, so each use reads a part's name once.
  */
 export function filePartNameToSend(name: unknown): unknown {
   if (!isBunRuntime || typeof name !== 'string') {
@@ -61,15 +61,20 @@ export function filePartNameToSend(name: unknown): unknown {
   const isSeparator = (char: string): boolean =>
     char === '/' || (isWindows && char === '\\');
 
+  // A drive prefix (`C:`) is a local path too, as `path.win32.basename` reads it.
+  const root = isWindows && /^[A-Za-z]:/.test(name) ? 2 : 0;
+
   let end = name.length;
-  while (end > 0 && isSeparator(name[end - 1])) {
+  while (end > root && isSeparator(name[end - 1])) {
     end--;
   }
 
   let start = end;
-  while (start > 0 && !isSeparator(name[start - 1])) {
+  while (start > root && !isSeparator(name[start - 1])) {
     start--;
   }
 
-  return name.slice(start, end);
+  // A name of separators alone names no path, and is left as it is: sent as `filename=""`,
+  // a server would read the part as no file chosen.
+  return start === end ? name : name.slice(start, end);
 }
