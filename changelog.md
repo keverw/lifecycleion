@@ -239,6 +239,8 @@
 - HTTP XHRAdapter: once a send has settled, events from an XHR that kept running (an `abort()` that threw) call no progress callback, where they went on reporting after the request ended.
 - HTTP: a response the browser adapters refuse because it cannot be read still fires the final upload progress event, as every other answered response does.
 - HTTP FetchAdapter: a body read whole through `arrayBuffer()` is the `body` read once, so an abort lets go of the stream being read.
+- HTTP XHRAdapter: the status and headers are read as they arrive, so a network error mid-body is a `stream_response_error` with the real status and is not retried, where it was a `status: 0` network failure that retried a `GET` (and a `POST` with `retryNonIdempotentMethods`). A timeout the runtime's own XHR fires after the headers is the same stream error, reported with `isTimeout`.
+- HTTP XHRAdapter: the final upload progress event fires as the response headers arrive, before any download progress, and on an abort after them, where an empty or unwatched upload reported it only at `load`.
 - HTTP FetchAdapter: an abort during a limited read through `arrayBuffer()` lets a polyfill's body go and fails as the abort, where a read cut short returned its partial bytes as a success.
 - HTTP: a multipart form that lost entries after it was measured is refused before its closing delimiter is written.
 - HTTP: a caller's polyfilled or jsdom `AbortSignal` is listened to where the runtime's `AbortSignal.any` refuses it, as axios does, so `send()` runs the request rather than rejecting at setup.

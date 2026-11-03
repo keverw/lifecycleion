@@ -4138,6 +4138,11 @@ export class BaseHTTPClient {
             );
           }
 
+          // A browser-fired XHR timeout over an answer is a timeout, as the client's own is.
+          if (isXHRBrowserTimeout(error)) {
+            isTimedOut = true;
+          }
+
           const fallbackStatus = abortedResponse?.status ?? 0;
           const fallbackHeaders = abortedResponse?.headers ?? {};
 

@@ -130,6 +130,32 @@ class FakeXHR {
     }
   }
 
+  /** The headers arriving: `readyState` 2, with the status and headers to read. */
+  public simulateHeadersReceived(status: number, headers = '') {
+    this.readyState = 2;
+    this.status = status;
+    this.getAllResponseHeadersResult = headers;
+    for (const h of this.handlers['readystatechange'] ?? []) {
+      h(new Event('readystatechange'));
+    }
+  }
+
+  /**
+   * A network failure as the XHR standard runs it: the state set to done with the status
+   * and headers reset, that change reported, then the failure itself.
+   */
+  public simulateNetworkFailure(type: 'error' | 'timeout') {
+    this.readyState = 4;
+    this.status = 0;
+    this.getAllResponseHeadersResult = '';
+    for (const h of this.handlers['readystatechange'] ?? []) {
+      h(new Event('readystatechange'));
+    }
+    for (const h of this.handlers[type] ?? []) {
+      h(new Event(type));
+    }
+  }
+
   public simulateTimeout() {
     for (const h of this.handlers['timeout'] ?? []) {
       h(new Event('timeout'));
@@ -4220,4 +4246,159 @@ test('a cancel from a getter read before the send ends the send as the abort whe
       Object.defineProperty(FakeXHR.prototype, 'abort', realAbort);
     }
   }
+});
+
+describe('XHRAdapter - an answer that fails after its headers', () => {
+  test.each(['error', 'timeout'] as const)(
+    'a %s after the headers ends with the real status, not retried as a network failure',
+    async (type) => {
+      const client = new HTTPClient({
+        adapter: new XHRAdapter(),
+        baseURL: 'https://api.test',
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+      });
+      const before = FakeXHR.instances.length;
+      const builder = client.get('/data');
+      const sending = builder.send();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      lastXHR.simulateHeadersReceived(200, 'x-answer: yes\r\n');
+      lastXHR.simulateNetworkFailure(type);
+      const response = await sending;
+
+      expect(FakeXHR.instances.length - before).toBe(1);
+      expect(builder.error?.code).toBe('stream_response_error');
+      expect(response.status).toBe(200);
+      expect(response.headers['x-answer']).toBe('yes');
+      expect(response.isTimeout).toBe(type === 'timeout');
+    },
+  );
+
+  test.each(['error', 'timeout'] as const)(
+    'a %s before any headers is still a network failure, with no upload end',
+    async (type) => {
+      const uploads: number[] = [];
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'POST',
+        headers: {},
+        body: 'abc',
+        onUploadProgress: (event) => {
+          uploads.push(event.progress);
+        },
+      });
+
+      lastXHR.simulateNetworkFailure(type);
+      const outcome = (await promise.catch((error: unknown) => error)) as {
+        status?: number;
+        isTransportError?: boolean;
+        name?: string;
+      };
+
+      if (type === 'error') {
+        expect(outcome.status).toBe(0);
+        expect(outcome.isTransportError).toBe(true);
+      } else {
+        expect(outcome.name).toBe('AbortError');
+        expect(
+          (outcome as Record<string, unknown>)[RESPONSE_STREAM_ABORT_FLAG],
+        ).toBeUndefined();
+      }
+      expect(uploads).toEqual([0]);
+    },
+  );
+
+  test('upload progress the browser reports after an early answer is dropped', async () => {
+    const uploads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'x'.repeat(10),
+      onUploadProgress: (event) => {
+        uploads.push(event.progress);
+      },
+    });
+
+    lastXHR.simulateUploadProgress(3, 10);
+    lastXHR.simulateHeadersReceived(413);
+    lastXHR.simulateUploadProgress(6, 10);
+    lastXHR.readyState = 4;
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(uploads).toEqual([0, 0.3, 1]);
+  });
+
+  test('an error after the browser followed a redirect reports the redirect', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.responseURL = 'https://api.test/elsewhere';
+    lastXHR.simulateHeadersReceived(200);
+    lastXHR.simulateNetworkFailure('error');
+    const response = await promise;
+
+    expect(response.status).toBe(0);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://api.test/elsewhere');
+  });
+
+  test('the upload ends as the headers arrive, before any download progress', async () => {
+    const events: string[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: '',
+      onUploadProgress: (event) => {
+        events.push(`upload ${event.progress}`);
+      },
+      onDownloadProgress: (event) => {
+        events.push(`download ${event.progress}`);
+      },
+    });
+
+    lastXHR.simulateHeadersReceived(200);
+    lastXHR.readyState = 3;
+    lastXHR.simulateDownloadProgress(5, 10);
+    lastXHR.readyState = 4;
+    lastXHR.response = new ArrayBuffer(10);
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(events).toEqual([
+      'upload 0',
+      'upload 1',
+      'download 0.5',
+      'download 1',
+    ]);
+  });
+
+  test('a cancel after the headers still ends the upload', async () => {
+    const controller = new AbortController();
+    const uploads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: '',
+      signal: controller.signal,
+      onUploadProgress: (event) => {
+        uploads.push(event.progress);
+      },
+    });
+
+    // An XHR that reports no state change, so only the abort sees the answer.
+    lastXHR.readyState = 3;
+    lastXHR.status = 200;
+    controller.abort();
+    lastXHR.simulateAbort();
+    await promise.catch(() => {});
+
+    expect(uploads).toEqual([0, 1]);
+  });
 });

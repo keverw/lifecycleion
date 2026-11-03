@@ -402,7 +402,9 @@ export class XHRAdapter implements HTTPAdapter {
 
         if (upload) {
           upload.addEventListener('progress', (event) => {
-            if (didSettle) {
+            // Nor once the upload has ended: an answer that comes before the body is sent
+            // ends it, and the bytes the browser goes on reporting would run it backwards.
+            if (didSettle || didFireUpload100) {
               return;
             }
 
@@ -511,8 +513,9 @@ export class XHRAdapter implements HTTPAdapter {
           // encoded), and the two bound each other in neither direction: a body can decode
           // to many times its encoded bytes, and one a server flushes in small writes takes
           // several times more bytes encoded than decoded, so no margin over the limit
-          // proves a decoded body past it. So only a body known to carry no coding is stopped here; one that is or may be
-          // compressed is left to `load`, which checks the decoded size exactly.
+          // proves a decoded body past it. So only a body known to carry no coding is
+          // stopped here; one that is or may be compressed is left to `load`, which checks
+          // the decoded size exactly.
           if (didSettle) {
             return;
           }
@@ -547,6 +550,51 @@ export class XHRAdapter implements HTTPAdapter {
           guardedDownloadProgress?.(reported);
         }),
       );
+
+      // --- Headers received ---
+
+      // The answer, read as its headers arrive: an `error` or `timeout` later on resets the
+      // XHR's status and headers (the XHR standard's request error steps), and a failure
+      // once the server has answered is a stream error with the real status, as the other
+      // adapters report one - not a network failure, retried as though nothing had been
+      // answered. The answer also ends the upload, as it does in FetchAdapter, so its final
+      // event fires here, before any download progress. A read that throws captures
+      // nothing; the request ends as it would have.
+      let answeredAtHeaders: AnsweredHeaders | undefined;
+
+      xhr.addEventListener('readystatechange', () => {
+        if (didSettle || answeredAtHeaders !== undefined) {
+          return;
+        }
+
+        // Only an answer: a failure sets the state to done with the status already `0`
+        // and reports that change too, before its `error`, `timeout` or `abort`.
+        try {
+          const status = xhr.status;
+          if (xhr.readyState < 2 || !(status > 0)) {
+            return;
+          }
+
+          answeredAtHeaders = {
+            status,
+            headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
+            responseURL: xhr.responseURL,
+          };
+        } catch {
+          return;
+        }
+
+        emitFinalUpload();
+      });
+
+      /** A browser-followed redirect behind `answer`, by its final URL. */
+      const followedRedirectOf = (
+        answer: AnsweredHeaders,
+      ): string | undefined =>
+        answer.responseURL &&
+        didBrowserFollowRedirect(answer.responseURL, answeredURL)
+          ? answer.responseURL
+          : undefined;
 
       // --- Load (success) ---
 
@@ -673,6 +721,34 @@ export class XHRAdapter implements HTTPAdapter {
         // `isRetryable: false` does not stand in for it: that flag blocks every
         // method, so it would stop retrying an idempotent `PUT` after an ordinary
         // network error and override `retryNonIdempotentMethods`.
+        //
+        // Unless the headers had arrived: then the server answered, and what failed is the
+        // body, so it is the stream error FetchAdapter reports for one - a redirect the
+        // browser had followed reported as the redirect, as on `load`.
+        if (answeredAtHeaders !== undefined) {
+          const redirectURL = followedRedirectOf(answeredAtHeaders);
+          const { status, headers: answeredHeaders } = answeredAtHeaders;
+
+          resolve(
+            redirectURL !== undefined
+              ? browserRedirectResponse(redirectURL)
+              : {
+                  status,
+                  ...derivedRedirectFields(
+                    answeredURL,
+                    status,
+                    answeredHeaders,
+                  ),
+                  headers: answeredHeaders,
+                  body: null,
+                  isStreamError: true,
+                  streamErrorCode: 'stream_response_error',
+                  errorCause: new Error('XHR network error'),
+                },
+          );
+          return;
+        }
+
         resolve({
           status: 0,
           isTransportError: true,
@@ -685,12 +761,33 @@ export class XHRAdapter implements HTTPAdapter {
       // Defensive fallback: fires if the browser has a hard-coded internal
       // timeout limit (xhr.timeout is 0 so we never set one ourselves). Mark
       // the error so HTTPClient classifies it as a timeout (retryable) rather
-      // than an unexpected abort (non-retryable cancel).
+      // than an unexpected abort (non-retryable cancel). One after the headers carries
+      // the answer out, as a timeout from the client's own timer does (see `onAbort`).
       xhr.addEventListener('timeout', () => {
+        if (answeredAtHeaders === undefined) {
+          reject(
+            Object.assign(makeAbortError('Request timed out'), {
+              [XHR_BROWSER_TIMEOUT_FLAG]: true,
+            }),
+          );
+          return;
+        }
+
+        const redirectURL = followedRedirectOf(answeredAtHeaders);
+        if (redirectURL !== undefined) {
+          resolve(browserRedirectResponse(redirectURL));
+          return;
+        }
+
         reject(
-          Object.assign(makeAbortError('Request timed out'), {
-            [XHR_BROWSER_TIMEOUT_FLAG]: true,
-          }),
+          Object.assign(
+            markResponseStreamAbort(
+              makeAbortError('Request timed out'),
+              answeredAtHeaders.status,
+              answeredAtHeaders.headers,
+            ),
+            { [XHR_BROWSER_TIMEOUT_FLAG]: true },
+          ),
         );
       });
 
@@ -707,6 +804,11 @@ export class XHRAdapter implements HTTPAdapter {
           emitFinalUpload();
           resolve(browserRedirectResponse(followedRedirectBeforeAbort));
           return;
+        }
+
+        // An answer too: the upload ended with it, wherever the download got to.
+        if (answeredBeforeAbort !== undefined) {
+          emitFinalUpload();
         }
 
         const abortError = makeAbortError();
@@ -844,6 +946,13 @@ function readProgressEvent(event: {
     event.loaded,
     event.lengthComputable ? event.total : 0,
   );
+}
+
+/** An answer as read when its headers arrived, before a later failure resets the XHR. */
+interface AnsweredHeaders {
+  status: number;
+  headers: Record<string, string | string[]>;
+  responseURL: string;
 }
 
 /** What `readResponseBody` answers for a body an XHR handed over in no form it can read. */

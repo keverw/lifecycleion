@@ -1562,7 +1562,7 @@ No configuration options. Adapter-level behavior is controlled through `HTTPClie
 - `followRedirects` must not be `true`
 - `HTTPClient` throws if `XMLHttpRequest` is not available (e.g. Node.js without a shim)
 
-A synchronous throw from `xhr.send()` fails the request once, as a non-retryable `adapter_error`. An asynchronous `send()` throws only an `InvalidStateError` or for a body it cannot convert, and both fail the same way on every attempt; network failures arrive as `error` events and follow the retry rules. An `XMLHttpRequest` shim that throws a network failure from `send()` instead is not retried. An `XMLHttpRequest` with no `upload` (as some shims have) sends without per-chunk upload progress: `onUploadProgress` fires `0` at dispatch and `1` only once an answer arrives (a response, including one refused as too large or a redirect the browser followed, even one an abort lands on), not on a network error, a timeout or an abort. One whose `upload` throws when read or listened on fails a request with a body to send and an `onUploadProgress` once, as a non-retryable `adapter_error`.
+A synchronous throw from `xhr.send()` fails the request once, as a non-retryable `adapter_error`. An asynchronous `send()` throws only an `InvalidStateError` or for a body it cannot convert, and both fail the same way on every attempt; network failures arrive as `error` events and follow the retry rules. An `XMLHttpRequest` shim that throws a network failure from `send()` instead is not retried. An `XMLHttpRequest` with no `upload` (as some shims have) sends without per-chunk upload progress: `onUploadProgress` fires `0` at dispatch and `1` only once an answer arrives - as its headers do, before any download progress, whatever then becomes of the body - not on a network error, a timeout or an abort before then. One whose `upload` throws when read or listened on fails a request with a body to send and an `onUploadProgress` once, as a non-retryable `adapter_error`.
 
 A caller's `Content-Length` is not sent: the XHR frames the body itself, as `fetch` does for `FetchAdapter`. The adapter rejects a cancel or timeout with a plain `Error` named `AbortError`, so it needs no `DOMException` where XHR runs outside a browser (React Native, a test shim).
 
@@ -1925,12 +1925,12 @@ Two things deliberately do **not** set the flag. A caller's own `AbortSignal` fi
 
 #### Adapter Support
 
-| Adapter        | `isStreamError` | Notes                                                                                                                                                      |
-| -------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                             |
-| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. Always reports `stream_response_error` because `fetch` buffers the body, so there is no per-chunk delivery to inspect  |
-| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                  |
-| `XHRAdapter`   | Limited         | A per-attempt timeout after the headers, or a body it cannot read, keeps the real status; a network error mid-body cannot, as `XMLHttpRequest` discards it |
+| Adapter        | `isStreamError` | Notes                                                                                                                                                     |
+| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                            |
+| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. Always reports `stream_response_error` because `fetch` buffers the body, so there is no per-chunk delivery to inspect |
+| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                 |
+| `XHRAdapter`   | Buffered bodies | Reads the status and headers as they arrive, so a network error or timeout mid-body keeps them, as does a body it cannot read                             |
 
 Every adapter, `XHRAdapter` included, also reports `response_too_large` as a stream error for a buffered body past `maxResponseBytes` (see [Response Size Limit](#response-size-limit)): there the adapter itself stops the read, while the headers are still in hand.
 
@@ -1938,9 +1938,7 @@ Every adapter, `XHRAdapter` included, also reports `response_too_large` as a str
 
 A per-attempt timeout that fires _during_ the body read counts as a post-header failure too, and is reported with the real status rather than as a plain timeout. The adapter cannot tell that abort apart from a caller cancellation because both arrive on the same signal, so it carries the response metadata out with the error and the client decides: a cancellation stays `isCancelled`, a timeout becomes a terminal stream failure (`stream_response_error`, even when a slow sink rather than the server is what held the body up).
 
-`XHRAdapter` is the one real gap, for a network error mid-body - a per-attempt timeout there is the adapter's own abort, which reads the status first and carries it out as FetchAdapter does (after a redirect the browser followed, the refused redirect is reported instead). It is a spec-level limitation rather than a browser inconsistency: setting the error flag sets the response to a network error, which forces `status` to `0`. There is no surviving signal that headers ever arrived, so a mid-body truncation is indistinguishable from a connection refused. It arrives as an ordinary transport failure (`status: 0`, `isStreamError: false`), which for an **idempotent** method is eligible for retry, so a truncated `GET` is silently re-fetched where `NodeAdapter` and `FetchAdapter` would report the real status and stop.
-
-A non-idempotent write is not replayed there, but only because `XHRAdapter` never supplies `wasDefinitelyNotSent`, so the default rule blocks it for want of proof, not because the truncation was recognized. Enable `retryNonIdempotentMethods` and that protection is gone, since nothing distinguishes this failure from a connection that was refused. Browser code performing non-idempotent writes should prefer `FetchAdapter` where replay safety matters.
+`XHRAdapter` reads the status and headers when they arrive (`readyState` 2), because an `XMLHttpRequest` that fails later discards them: its `error` or `timeout` event comes with the status forced to `0`. So a network error mid-body is the stream error `NodeAdapter` and `FetchAdapter` report, with the real status, and not retried; so is a timeout the runtime's own XHR fires (still `isTimeout`). A per-attempt timeout there is the adapter's own abort, carried out as FetchAdapter carries it. After a redirect the browser followed, the refused redirect is reported instead. A failure before any headers arrived - a connection refused, a CORS rejection - is an ordinary transport failure (`status: 0`).
 
 #### Failures Before a Response
 
