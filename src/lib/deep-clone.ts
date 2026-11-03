@@ -937,10 +937,15 @@ class ErrorFrame implements Frame {
         continue;
       }
 
-      const value = cloneValue(
-        (source as unknown as Record<string, unknown>)[key],
-        state,
-      );
+      // Read from the descriptor already in hand: a data property's value, or what its
+      // getter answers for the error - read once, as every other property is.
+      const read: unknown =
+        'value' in descriptor
+          ? descriptor.value
+          : descriptor.get === undefined
+            ? undefined
+            : Reflect.apply(descriptor.get, source, []);
+      const value: unknown = cloneValue(read, state);
       const kept = Reflect.getOwnPropertyDescriptor(target, key);
 
       if (kept?.configurable === false) {

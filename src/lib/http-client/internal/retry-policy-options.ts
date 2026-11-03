@@ -46,8 +46,6 @@ export function snapshotRetryPolicyOptions(
   // default applied. One that neither strategy takes is refused first, before a value
   // is read, so a typo is named ahead of a bad value beside it.
   assertKnownFields(options, ANY_STRATEGY_FIELDS, 'HTTPClient retryPolicy');
-  // Normalized policies contain only primitive fields. Brand only our frozen
-  // copies, so inheritance can reuse them without trusting mutable caller data.
   // Built before the other strategy's fields are refused, so they are checked against the
   // strategy it resolved - read once, a getter's included.
   const snapshot = Object.freeze(new RetryPolicy(options).policyInfo);
@@ -56,6 +54,8 @@ export function snapshotRetryPolicyOptions(
     retryPolicyFields(snapshot.strategy),
     'HTTPClient retryPolicy',
   );
+  // Normalized policies contain only primitive fields. Brand only our frozen
+  // copies, so inheritance can reuse them without trusting mutable caller data.
   validatedSnapshots.add(snapshot);
   return snapshot;
 }

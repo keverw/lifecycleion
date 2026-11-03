@@ -743,6 +743,26 @@ describe('MockAdapter via HTTPClient', () => {
     },
   );
 
+  test("a route-time onHandlerError refusal keeps the route's failure as its cause", async () => {
+    const routeFailure = new Error('db down');
+    const config = {};
+    Object.defineProperty(config, 'onHandlerError', {
+      get: () => 'not a function',
+    });
+    const getterAdapter = new MockAdapter(config);
+    getterAdapter.routes.get('/test', () => {
+      throw routeFailure;
+    });
+
+    const outcome = (await getterAdapter
+      .send(makeAdapterRequest())
+      .catch((error: unknown) => error)) as Error;
+
+    // The carrier's cause is the refusal, and the refusal's the route's failure.
+    expect(outcome.message).toMatch(/must be a function/);
+    expect((outcome.cause as Error).cause).toBe(routeFailure);
+  });
+
   test('default delay updates on the original config remain live', async () => {
     const config = { defaultDelay: 0 };
     const liveAdapter = new MockAdapter(config);

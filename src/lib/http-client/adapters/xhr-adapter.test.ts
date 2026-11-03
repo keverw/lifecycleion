@@ -5696,3 +5696,29 @@ describe("XHRAdapter - the adapter's own abort after a refused body", () => {
     expect(response.streamErrorCode).toBe('response_too_large');
   });
 });
+
+describe('XHRAdapter - a runtime timeout once load has started', () => {
+  test('leaves load its answer', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      onUploadProgress: ({ progress }) => {
+        // A shim that fires its own timeout from inside the load's final upload event.
+        if (progress === 1) {
+          lastXHR.simulateTimeout();
+        }
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.readyState = 4;
+    xhr.status = 200;
+    xhr.response = new ArrayBuffer(2);
+    xhr.simulateLoad();
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+  });
+});

@@ -490,8 +490,9 @@ export class MockAdapter implements HTTPAdapter {
         // Read now, as the config is live, and held to the rule the constructor holds an
         // own value to: a getter that throws, or a value that is no function, is a setup
         // mistake, refused rather than retried as the adapter's own failure.
+        // The route's own failure kept as the refusal's `cause`, so it is not lost to it.
         const onHandlerError = asRouteMistake(() =>
-          assertOnHandlerError(this.config.onHandlerError),
+          assertOnHandlerError(this.config.onHandlerError, handlerError),
         );
         if (onHandlerError) {
           responseSource = 'onHandlerError';
@@ -1595,13 +1596,18 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** `value` as an `onHandlerError` setting: a function or nothing, else a `TypeError`. */
+/**
+ * `value` as an `onHandlerError` setting: a function or nothing, else a `TypeError` - with
+ * `cause`, when there is one: the route failure it was read for.
+ */
 function assertOnHandlerError(
   value: unknown,
+  ...cause: [unknown?]
 ): MockAdapterConfig['onHandlerError'] | null | undefined {
   if (!isNullish(value) && typeof value !== 'function') {
     throw new TypeError(
       `MockAdapter onHandlerError must be a function (got ${describeValue(value)})`,
+      cause.length > 0 ? { cause: cause[0] } : undefined,
     );
   }
 
