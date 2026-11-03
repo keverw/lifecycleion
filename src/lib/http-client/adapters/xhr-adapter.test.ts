@@ -5144,3 +5144,106 @@ describe('XHRAdapter - a redirect seen at the headers, and a cancel once the res
     expect((response.body as Uint8Array).length).toBe(5);
   });
 });
+
+describe('XHRAdapter - one way to end at a followed redirect, and a hidden timeout tag', () => {
+  test('a redirect first seen by an abort ends its download at 0 bytes, as every followed redirect does', async () => {
+    const controller = new AbortController();
+    const downloads: Array<{ loaded: number; progress: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+      onDownloadProgress: ({ loaded, progress }) => {
+        downloads.push({ loaded, progress });
+      },
+    });
+    const xhr = lastXHR;
+
+    // An XHR that reports no change of state: the abort is the first to read the answer.
+    xhr.readyState = 3;
+    xhr.status = 200;
+    xhr.responseURL = 'https://api.test/elsewhere';
+    controller.abort();
+    xhr.simulateAbort();
+    const response = await promise;
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(downloads).toEqual([{ loaded: 0, progress: 1 }]);
+  });
+
+  test('a redirect first seen by an error after a cancel at done ends its download at 0 bytes', async () => {
+    const controller = new AbortController();
+    const downloads: Array<{ loaded: number; progress: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+      onDownloadProgress: ({ loaded, progress }) => {
+        downloads.push({ loaded, progress });
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.readyState = 4;
+    xhr.status = 200;
+    xhr.responseURL = 'https://api.test/elsewhere';
+    controller.abort();
+    for (const handler of (
+      xhr as unknown as {
+        handlers: Record<string, Array<(e: unknown) => void>>;
+      }
+    ).handlers['error'] ?? []) {
+      handler(new Event('error'));
+    }
+    const response = await promise;
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(downloads).toEqual([{ loaded: 0, progress: 1 }]);
+  });
+
+  test('a redirect first seen by the size limit ends its download at 0 bytes', async () => {
+    const downloads: Array<{ loaded: number; progress: number }> = [];
+    const response = await withPageOrigin('https://api.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 4,
+        onDownloadProgress: ({ loaded, progress }) => {
+          downloads.push({ loaded, progress });
+        },
+      });
+      const xhr = lastXHR;
+
+      // Read only once the bytes pass the limit: before then the XHR reports no answer.
+      xhr.readyState = 1;
+      xhr.status = 0;
+      xhr.responseURL = 'https://api.test/elsewhere';
+      xhr.simulateDownloadProgress(10, 0);
+      return await promise;
+    });
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(downloads).toEqual([{ loaded: 0, progress: 1 }]);
+  });
+
+  test("a browser-fired timeout's tag is kept out of a serialized error", async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.simulateHeadersReceived(200);
+    lastXHR.simulateNetworkFailure('timeout');
+    const outcome = (await promise.catch((error: unknown) => error)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(outcome[XHR_BROWSER_TIMEOUT_FLAG]).toBe(true);
+    expect(Object.keys(outcome)).not.toContain(XHR_BROWSER_TIMEOUT_FLAG);
+  });
+});

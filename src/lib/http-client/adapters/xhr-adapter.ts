@@ -14,6 +14,7 @@ import {
 } from '../internal/progress';
 import {
   connectRefusal,
+  defineHiddenTags,
   markNonRetryableAdapterError,
   makeAbortError,
   markResponseStreamAbort,
@@ -30,6 +31,7 @@ import {
   isIdentityContentEncoding,
 } from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
+import { safeParseURL } from '../../domain-utils/domain-utils';
 import { readUnknownMember } from '../../internal/read-member';
 import type {
   HTTPAdapter,
@@ -280,12 +282,18 @@ export class XHRAdapter implements HTTPAdapter {
         const reportedURL: unknown = xhr.responseURL;
         const responseURL = typeof reportedURL === 'string' ? reportedURL : '';
 
+        const redirectURL = isFollowedRedirect(responseURL)
+          ? responseURL
+          : undefined;
+
         return {
           status,
-          headers: isFollowedRedirect(responseURL)
-            ? {}
-            : parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
+          headers:
+            redirectURL === undefined
+              ? parseXHRResponseHeaders(xhr.getAllResponseHeaders())
+              : {},
           responseURL,
+          redirectURL,
         };
       };
 
@@ -300,16 +308,6 @@ export class XHRAdapter implements HTTPAdapter {
 
         return answeredAtHeaders;
       };
-
-      /**
-       * A browser-followed redirect behind `answer`, by its final URL. Those headers are the
-       * final page's, which the original URL never answered with: the redirect is what was
-       * answered, reported as the load path reports it, and the client refuses it.
-       */
-      const followedRedirectOf = (
-        answer: AnsweredHeaders,
-      ): string | undefined =>
-        isFollowedRedirect(answer.responseURL) ? answer.responseURL : undefined;
 
       // --- Abort signal ---
       //
@@ -594,6 +592,11 @@ export class XHRAdapter implements HTTPAdapter {
        * as the redirect, as on `load`: the client refuses those whatever the body.
        */
       const refuseTooLargeBody = (answer: AnsweredHeaders): void => {
+        if (answer.redirectURL !== undefined) {
+          settleFollowedRedirect(answer.redirectURL);
+          return;
+        }
+
         // Before the flag, so a cancel from that upload callback ends the send as the cancel.
         emitFinalUpload();
         if (didSettle) {
@@ -601,20 +604,20 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         didExceedMaxResponseBytes = true;
-
-        const redirectURL = followedRedirectOf(answer);
         resolve(
-          redirectURL !== undefined
-            ? browserRedirectResponse(redirectURL)
-            : tooLargeAnswer(
-                answeredURL,
-                answer.status,
-                answer.headers,
-                maxResponseBytes,
-              ),
+          tooLargeAnswer(
+            answeredURL,
+            answer.status,
+            answer.headers,
+            maxResponseBytes,
+          ),
         );
 
-        xhr.abort();
+        try {
+          xhr.abort();
+        } catch {
+          // Whatever the body goes on to deliver is reported to no one.
+        }
       };
 
       xhr.addEventListener(
@@ -645,7 +648,7 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           if (answered !== undefined) {
-            const redirectURL = followedRedirectOf(answered);
+            const redirectURL = answered.redirectURL;
             if (redirectURL !== undefined) {
               settleFollowedRedirect(redirectURL);
               return;
@@ -707,7 +710,7 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        const redirectURL = followedRedirectOf(answered);
+        const redirectURL = answered.redirectURL;
         if (redirectURL !== undefined) {
           settleFollowedRedirect(redirectURL);
           return;
@@ -742,7 +745,7 @@ export class XHRAdapter implements HTTPAdapter {
           // Read before any progress callback, as everything this listener reports is: the
           // answer, captured once (see `answeredAtHeaders`).
           const answer = captureAnswer() ?? readAnswer();
-          const redirectURL = followedRedirectOf(answer);
+          const redirectURL = answer.redirectURL;
           // Seen here only by an XHR that reported none of it before.
           if (redirectURL !== undefined) {
             settleFollowedRedirect(redirectURL);
@@ -828,26 +831,26 @@ export class XHRAdapter implements HTTPAdapter {
         // body, so it is the stream error FetchAdapter reports for one - a redirect the
         // browser had followed reported as the redirect, as on `load`.
         if (answeredAtHeaders !== undefined) {
-          const redirectURL = followedRedirectOf(answeredAtHeaders);
-          const { status, headers: answeredHeaders } = answeredAtHeaders;
+          const {
+            status,
+            headers: answeredHeaders,
+            redirectURL,
+          } = answeredAtHeaders;
 
-          resolve(
-            redirectURL !== undefined
-              ? browserRedirectResponse(redirectURL)
-              : {
-                  status,
-                  ...derivedRedirectFields(
-                    answeredURL,
-                    status,
-                    answeredHeaders,
-                  ),
-                  headers: answeredHeaders,
-                  body: null,
-                  isStreamError: true,
-                  streamErrorCode: 'stream_response_error',
-                  errorCause: new Error('XHR network error'),
-                },
-          );
+          if (redirectURL !== undefined) {
+            settleFollowedRedirect(redirectURL);
+            return;
+          }
+
+          resolve({
+            status,
+            ...derivedRedirectFields(answeredURL, status, answeredHeaders),
+            headers: answeredHeaders,
+            body: null,
+            isStreamError: true,
+            streamErrorCode: 'stream_response_error',
+            errorCause: new Error('XHR network error'),
+          });
           return;
         }
 
@@ -888,14 +891,13 @@ export class XHRAdapter implements HTTPAdapter {
         const answer = answeredAtHeaders;
 
         if (answer !== undefined) {
-          // An answer, as on `load`: the upload ended with it, wherever the download got to.
-          emitFinalUpload();
-
-          const redirectURL = followedRedirectOf(answer);
-          if (redirectURL !== undefined) {
-            resolve(browserRedirectResponse(redirectURL));
+          if (answer.redirectURL !== undefined) {
+            settleFollowedRedirect(answer.redirectURL);
             return;
           }
+
+          // An answer, as on `load`: the upload ended with it, wherever the download got to.
+          emitFinalUpload();
         }
 
         const abortError = isBrowserTimeout
@@ -910,11 +912,16 @@ export class XHRAdapter implements HTTPAdapter {
                 answer.headers,
               );
 
-        reject(
-          isBrowserTimeout
-            ? Object.assign(failure, { [XHR_BROWSER_TIMEOUT_FLAG]: true })
-            : failure,
-        );
+        // Hidden, as the adapters' other tags are: kept out of a serialized error.
+        if (isBrowserTimeout) {
+          try {
+            defineHiddenTags(failure, { [XHR_BROWSER_TIMEOUT_FLAG]: true });
+          } catch {
+            // An error that refuses the tag is reported as the plain abort it is.
+          }
+        }
+
+        reject(failure);
       }
 
       // Fire initial 0% upload progress before any bytes leave the browser, mirroring the
@@ -1075,6 +1082,12 @@ interface AnsweredHeaders {
   status: number;
   headers: Record<string, string | string[]>;
   responseURL: string;
+  /**
+   * The URL of a redirect the browser followed, worked out once as the answer is read.
+   * Its headers are then the final page's, which the original URL never answered with:
+   * the redirect is what was answered, and the client refuses it.
+   */
+  redirectURL: string | undefined;
 }
 
 /** What `readResponseBody` answers for a body an XHR handed over in no form it can read. */
@@ -1087,12 +1100,7 @@ const RESPONSE_UNREADABLE = Symbol('response unreadable');
  * reports none, rather than the raw string handed on as though it were a URL.
  */
 function browserRedirectResponse(responseURL: string): AdapterResponse {
-  let isURL = true;
-  try {
-    new URL(responseURL);
-  } catch {
-    isURL = false;
-  }
+  const isURL = safeParseURL(responseURL) !== null;
 
   return {
     status: 0,
@@ -1256,11 +1264,9 @@ function didBrowserFollowRedirect(
   responseURL: string,
   answeredURL: string,
 ): boolean {
-  let normalizedResponse: URL;
+  const normalizedResponse = safeParseURL(responseURL);
 
-  try {
-    normalizedResponse = new URL(responseURL);
-  } catch {
+  if (normalizedResponse === null) {
     return true;
   }
 
