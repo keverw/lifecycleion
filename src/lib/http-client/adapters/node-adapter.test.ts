@@ -5295,6 +5295,68 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     },
   );
 
+  test('a sink destroyed with no error before it is handed an empty body fails the download as a write error', async () => {
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '0',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        setImmediate(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          // Ended once the adapter listens, so the sink is what the download waits on.
+          const endWhenListened = (): void => {
+            if (res.listenerCount('end') > 0) {
+              res.emit('end');
+              return;
+            }
+            setImmediate(endWhenListened);
+          };
+          setImmediate(endWhenListened);
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+    let guard: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      const sending = new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: async () => {
+          const sink = new Writable({
+            write: (_chunk, _encoding, done) => done(),
+          });
+          sink.destroy();
+          await new Promise<void>((done) => {
+            setImmediate(done);
+          });
+          return sink;
+        },
+      });
+      const response = await Promise.race([
+        sending,
+        new Promise<'pending'>((done) => {
+          guard = setTimeout(() => done('pending'), 1000);
+        }),
+      ]);
+
+      expect(response).not.toBe('pending');
+      const settled = response as Awaited<typeof sending>;
+      expect(settled.streamErrorCode).toBe('stream_write_error');
+      expect(settled.errorCause?.message).toBe(
+        'Writable was destroyed before the response body was written to it',
+      );
+    } finally {
+      clearTimeout(guard);
+      requestSpy.mockRestore();
+    }
+  });
+
   test('a refused removal keeps the absorber tracked instead of stacking another', async () => {
     // The removal method is caller code and can refuse. When it does, the absorber is
     // still attached, so its bookkeeping is kept rather than dropped - dropping it would

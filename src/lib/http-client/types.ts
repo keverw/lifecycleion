@@ -339,6 +339,12 @@ export interface WritableLike {
    * a runtime that destroys the stream without passing the error to `end`'s callback.
    */
   errored?: Error | null;
+  /**
+   * Set by Node-style streams once the stream is destroyed. One handed over already
+   * destroyed, with no error and not finished, fails the download at once, as one that
+   * closes partway does: it would never call `end`'s callback.
+   */
+  destroyed?: boolean;
 }
 
 /**

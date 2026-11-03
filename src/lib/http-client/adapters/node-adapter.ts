@@ -3059,6 +3059,23 @@ async function streamResponseBody(
       return;
     }
 
+    // And one destroyed with no error, its `'close'` emitted already or still to come: an
+    // empty body would hand it nothing but an `end` that a destroyed stream never calls
+    // back, so the download would wait on it until the timeout, or forever with none. Not
+    // one that finished first - a sink reused after a download - whose own error says so.
+    if (
+      readUnknownMember(writable, 'destroyed') === true &&
+      readUnknownMember(writable, 'writableFinished') !== true
+    ) {
+      settle({
+        code: 'stream_write_error',
+        cause: new Error(
+          'Writable was destroyed before the response body was written to it',
+        ),
+      });
+      return;
+    }
+
     // Through `attachWritableListener`, which for a writable that defines neither `off`
     // nor `removeListener` registers with one permanent listener per event instead of
     // adding another of its own. `off` and `removeListener` are both optional on
