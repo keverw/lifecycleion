@@ -906,7 +906,10 @@ function isBuiltInErrorPrototype(prototype: object, name: string): boolean {
   return root !== null && Reflect.getPrototypeOf(root) === null;
 }
 
-/** An error being filled with its own string-keyed properties: see {@link cloneError}. */
+/**
+ * An error being filled with its own string-keyed properties: see {@link cloneError}. One
+ * deleted before its turn is passed over.
+ */
 class ErrorFrame implements Frame {
   private readonly keys: string[];
   private position = 0;
@@ -927,6 +930,13 @@ class ErrorFrame implements Frame {
     while (this.position < keys.length) {
       const key = keys[this.position++];
       const descriptor = Reflect.getOwnPropertyDescriptor(source, key);
+
+      // Deleted before its turn - by a getter read earlier - and passed over, as a plain
+      // object's is: not copied as `undefined`, nor as a value its prototype has.
+      if (descriptor === undefined) {
+        continue;
+      }
+
       const value = cloneValue(
         (source as unknown as Record<string, unknown>)[key],
         state,
@@ -943,7 +953,7 @@ class ErrorFrame implements Frame {
           __proto__: null,
           value,
           writable: true,
-          enumerable: descriptor?.enumerable === true,
+          enumerable: descriptor.enumerable === true,
           configurable: true,
         } as PropertyDescriptor);
       }

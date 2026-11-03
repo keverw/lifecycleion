@@ -1292,3 +1292,26 @@ describe('deepClone', () => {
     });
   });
 });
+
+describe('deepClone - an error property deleted before its turn', () => {
+  test('is passed over, as a plain object property is', () => {
+    const error = new Error('boom') as Error & {
+      first?: unknown;
+      later?: unknown;
+    };
+    Object.defineProperty(error, 'first', {
+      enumerable: true,
+      configurable: true,
+      get() {
+        delete error.later;
+        return 1;
+      },
+    });
+    error.later = 2;
+
+    const cloned = deepClone(error);
+
+    expect(Object.hasOwn(cloned, 'first')).toBe(true);
+    expect(Object.hasOwn(cloned, 'later')).toBe(false);
+  });
+});

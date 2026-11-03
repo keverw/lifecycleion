@@ -210,3 +210,20 @@ test.each(['client', 'builder'] as const)(
     expect(factorReads).toBe(1);
   },
 );
+
+test("a getter's strategy refuses the other strategy's fields, read once", () => {
+  let reads = 0;
+  const policy = {
+    get strategy(): 'fixed' {
+      reads++;
+      return 'fixed';
+    },
+    maxRetryAttempts: 1,
+    factor: 2,
+  };
+
+  expect(() =>
+    snapshotRetryPolicyOptions(policy as unknown as RetryPolicyOptions),
+  ).toThrow(/factor/);
+  expect(reads).toBe(1);
+});
