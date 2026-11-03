@@ -1850,8 +1850,24 @@ export function matchesFilter(
   // Checked whenever the context has a URL, an empty one included, as `methods` is: a
   // request whose URL could not be read (`''`) matches no host or scheme rather than
   // skipping the filter, so a host-scoped observer does not hear about other hosts.
+  // Parsed once for the host and scheme checks, and only when one of them reads it.
+  let parsedRequestURL: URL | null | undefined;
+  const readRequestURL = (url: string): URL | null => {
+    if (parsedRequestURL === undefined) {
+      try {
+        parsedRequestURL = new URL(url);
+      } catch {
+        parsedRequestURL = null;
+      }
+    }
+
+    return parsedRequestURL;
+  };
+
   if (filter.hosts && context.requestURL !== undefined) {
-    const host = checkedHostFor(extractHostname(context.requestURL));
+    const host = checkedHostFor(
+      readRequestURL(context.requestURL)?.hostname ?? '',
+    );
     const { hosts, hostPatterns } = filter;
 
     if (
@@ -1872,20 +1888,9 @@ export function matchesFilter(
     filter.schemes.length > 0 &&
     context.requestURL !== undefined
   ) {
-    let scheme: 'http' | 'https' | null = null;
-
-    try {
-      const parsedScheme = new URL(context.requestURL).protocol.replace(
-        ':',
-        '',
-      );
-
-      if (parsedScheme === 'http' || parsedScheme === 'https') {
-        scheme = parsedScheme;
-      }
-    } catch {
-      scheme = null;
-    }
+    const protocol = readRequestURL(context.requestURL)?.protocol;
+    const scheme =
+      protocol === 'http:' ? 'http' : protocol === 'https:' ? 'https' : null;
 
     if (!scheme || !filter.schemes.includes(scheme)) {
       return false;

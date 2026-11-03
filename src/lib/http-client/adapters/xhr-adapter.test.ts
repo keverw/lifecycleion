@@ -4753,6 +4753,37 @@ describe('XHRAdapter - shims, early cancels and odd sizes', () => {
     expect(response.headers['x-a']).toBe('1');
   });
 
+  test('a body past the limit is judged by the URL its answer was read with', async () => {
+    const response = await withPageOrigin('https://api.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 4,
+      });
+      const xhr = lastXHR;
+      let urlReads = 0;
+
+      // A shim whose `responseURL` can be read once.
+      Object.defineProperty(xhr, 'responseURL', {
+        get() {
+          urlReads++;
+          if (urlReads > 1) {
+            throw new Error('responseURL read again');
+          }
+          return 'https://api.test/data';
+        },
+      });
+      xhr.readyState = 3;
+      xhr.status = 200;
+      xhr.simulateDownloadProgress(10, 0);
+      return await promise;
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.streamErrorCode).toBe('response_too_large');
+  });
+
   test('a request cancelled by a getter read before it goes out reports no upload start', async () => {
     const controller = new AbortController();
     const uploads: number[] = [];
@@ -4779,6 +4810,66 @@ describe('XHRAdapter - shims, early cancels and odd sizes', () => {
 
     expect(outcome.name).toBe('AbortError');
     expect(uploads).toEqual([]);
+  });
+
+  test('a signal that reads aborted without telling its listeners gets no upload start', async () => {
+    const uploads: number[] = [];
+    const signal = {
+      aborted: false,
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    const blob = new Blob(['abc']);
+    Object.defineProperty(blob, 'size', {
+      get() {
+        signal.aborted = true;
+        return 3;
+      },
+    });
+
+    const outcome = (await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/data',
+        method: 'POST',
+        headers: {},
+        body: blob as unknown as AdapterRequest['body'],
+        signal: signal as unknown as AbortSignal,
+        onUploadProgress: (event) => {
+          uploads.push(event.progress);
+        },
+      })
+      .catch((error: unknown) => error)) as Error;
+
+    expect(outcome.name).toBe('AbortError');
+    expect(uploads).toEqual([]);
+    expect(lastXHR.sentBody).toBeNull();
+  });
+
+  test('a signal that calls its listener as it is added leaves none behind', async () => {
+    const listeners = new Set<() => void>();
+    const signal = {
+      aborted: false,
+      addEventListener(_type: string, listener: () => void) {
+        listeners.add(listener);
+        signal.aborted = true;
+        listener();
+      },
+      removeEventListener(_type: string, listener: () => void) {
+        listeners.delete(listener);
+      },
+    };
+
+    const outcome = (await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        signal: signal as unknown as AbortSignal,
+      })
+      .catch((error: unknown) => error)) as Error;
+
+    expect(outcome.name).toBe('AbortError');
+    expect(listeners.size).toBe(0);
   });
 
   test('a cancel from the final upload event of a body refused as too large ends as the cancel', async () => {

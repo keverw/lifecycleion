@@ -43,6 +43,7 @@ import { types } from 'node:util';
 import { plainBytesView } from '../../internal/binary-view';
 import { markNonRetryableAdapterError } from './adapter-error';
 import { filePartNameToSend, formEntries } from './form-entries';
+import { isByteCount } from './progress';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 import {
@@ -183,11 +184,7 @@ export function measureMultipartFormData(
       // out as the `Content-Length`.
       const partSize: unknown = (value as Blob).size;
 
-      if (
-        typeof partSize !== 'number' ||
-        !Number.isSafeInteger(partSize) ||
-        partSize < 0
-      ) {
+      if (!isByteCount(partSize)) {
         throw new TypeError(
           'Request body part has a size that is not a byte count',
         );

@@ -246,6 +246,9 @@ export class XHRAdapter implements HTTPAdapter {
       let didExceedMaxResponseBytes = false;
       // Set as `load` starts, which answers whatever a progress callback then cancels.
       let didLoad = false;
+      // Set as the request is handed to `send()`. Until then `xhr.abort()` does nothing and
+      // fires no event, so the abort listener answers a cancel itself.
+      let didSend = false;
 
       // The answer, read once and kept: as its headers arrive (the `readystatechange`
       // listener below), or where it is first needed, for an XHR that reports no change of
@@ -320,6 +323,14 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         const onAbort = (): void => {
+          // Not sent yet - a caller's getter read while the request is prepared (a `Blob`'s
+          // `size`), or the 0% upload callback, cancelled it: answered here, and never sent.
+          if (!didSend) {
+            removeAbortListener();
+            reject(makeAbortError());
+            return;
+          }
+
           // Read before `abort()`, which resets the status to `0`, where the headers did
           // not report it: a timeout that lands once the headers are in has a real answer
           // behind it, and FetchAdapter carries it out on the abort so the client reports
@@ -346,20 +357,8 @@ export class XHRAdapter implements HTTPAdapter {
           }
         };
 
-        try {
-          signal.addEventListener(
-            'abort',
-            onAbort,
-            // once: true — the XHR is already done after the first abort, no
-            // need to keep the listener alive and risk a second call.
-            { once: true },
-          );
-        } catch (error) {
-          refuse(error);
-          return;
-        }
-
-        // And removed when the request ends any other way. `once` only fires on
+        // Set before the listener is added, which a signal of the caller's own may call at
+        // once. And removed when the request ends any other way. `once` only fires on
         // abort, so on a long-lived shared signal - one controller over a whole
         // page session - every completed request would leave its listener behind,
         // one per request, until the signal finally aborted or was collected.
@@ -374,6 +373,19 @@ export class XHRAdapter implements HTTPAdapter {
             // The listener stays; `once` still bounds it to one call.
           }
         };
+        try {
+          signal.addEventListener(
+            'abort',
+            onAbort,
+            // once: true — the XHR is already done after the first abort, no
+            // need to keep the listener alive and risk a second call.
+            { once: true },
+          );
+        } catch (error) {
+          refuse(error);
+          return;
+        }
+
         xhr.addEventListener('loadend', removeAbortListener);
       }
 
@@ -611,11 +623,7 @@ export class XHRAdapter implements HTTPAdapter {
             isBodyKnownUncoded === undefined
           ) {
             const answer = captureAnswer() ?? readAnswer();
-            isBodyKnownUncoded = isKnownUncodedBody(
-              xhr,
-              answer.headers,
-              answeredURL,
-            );
+            isBodyKnownUncoded = isKnownUncodedBody(answer, answeredURL);
 
             if (isBodyKnownUncoded) {
               refuseTooLargeBody(answer);
@@ -884,10 +892,10 @@ export class XHRAdapter implements HTTPAdapter {
       // adapter. Here, once every refusal above has passed, so a request refused before
       // it is sent reports no upload start.
       //
-      // Nor for one cancelled already - a caller's getter read above (a `Blob`'s `size`)
-      // may abort the signal, where `xhr.abort()` on an unsent XHR fires nothing - as
-      // FetchAdapter reports none for a request aborted at dispatch.
-      if (isSignalAbortedQuietly(signal)) {
+      // Nor for one cancelled already, as FetchAdapter reports none for a request aborted
+      // at dispatch: answered by the abort listener (see `didSend`), or by a signal that
+      // reads aborted without telling its listeners.
+      if (didSettle || isSignalAbortedQuietly(signal)) {
         removeAbortListener();
         reject(makeAbortError());
         return;
@@ -895,9 +903,8 @@ export class XHRAdapter implements HTTPAdapter {
 
       reportUpload?.({ loaded: 0, total: 0, progress: 0 });
 
-      // Checked again here: a cancel from the 0% upload progress callback above aborts the
-      // signal while the XHR is opened but not sent, where `xhr.abort()` does nothing and
-      // fires no event - so the request would go out regardless, its one-shot listener spent.
+      // Not sent once cancelled - from the 0% upload callback above, answered by the abort
+      // listener - nor for a signal aborted without telling its listeners.
       //
       // And the send itself, guarded. An asynchronous `send()` throws only an
       // `InvalidStateError` or a body it cannot convert (a `toString` that throws, a
@@ -905,12 +912,17 @@ export class XHRAdapter implements HTTPAdapter {
       // way on every attempt, so it is refused as non-retryable. Never sent, the request
       // fires no `loadend` to take the abort listener off the signal, so that is done here.
       try {
+        if (didSettle) {
+          return;
+        }
+
         if (isSignalAborted(signal)) {
           removeAbortListener();
           reject(makeAbortError());
           return;
         }
 
+        didSend = true;
         // A `string`, a `Uint8Array` (a BufferSource) and a `FormData` are all
         // `XMLHttpRequestBodyInit`: the cast is safe for the bodies the client produces.
         xhr.send(requestBody as XMLHttpRequestBodyInit | null);
@@ -951,11 +963,10 @@ export class XHRAdapter implements HTTPAdapter {
  * there its absence proves nothing and the body is taken as possibly coded.
  */
 function isKnownUncodedBody(
-  xhr: XMLHttpRequest,
-  headers: Record<string, string | string[]>,
+  answer: AnsweredHeaders,
   answeredURL: string,
 ): boolean {
-  const contentEncoding = headers['content-encoding'];
+  const contentEncoding = answer.headers['content-encoding'];
 
   if (contentEncoding !== undefined) {
     return isIdentityContentEncoding(contentEncoding as string);
@@ -966,7 +977,7 @@ function isKnownUncodedBody(
   return (
     pageOrigin !== undefined &&
     !isCrossOrigin(pageOrigin, answeredURL) &&
-    !isCrossOrigin(pageOrigin, xhr.responseURL || answeredURL)
+    !isCrossOrigin(pageOrigin, answer.responseURL || answeredURL)
   );
 }
 

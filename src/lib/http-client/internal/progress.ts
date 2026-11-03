@@ -80,15 +80,18 @@ export function knownBodyByteLength(body: unknown): number | undefined {
     if (typeof Blob !== 'undefined' && body instanceof Blob) {
       // A subclass's own `size` may report anything: only a byte count is one.
       const size: unknown = body.size;
-      return typeof size === 'number' && Number.isSafeInteger(size) && size >= 0
-        ? size
-        : undefined;
+      return isByteCount(size) ? size : undefined;
     }
   } catch {
     // Unknowable, as for a body of another kind.
   }
 
   return undefined;
+}
+
+/** Whether `value` is a count of bytes: a safe, non-negative integer. */
+export function isByteCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 /**
