@@ -210,12 +210,13 @@ export function buildURL(
     // At the first `#` only: `split`'s limit drops everything after a second one.
     const hashIndex = url.indexOf('#');
     const urlWithoutHash = hashIndex === -1 ? url : url.slice(0, hashIndex);
-    const hash = hashIndex === -1 ? '' : url.slice(hashIndex + 1);
+    // With its `#`, so an empty fragment (`/x#`) is kept as written too.
+    const fragment = hashIndex === -1 ? '' : url.slice(hashIndex);
     const queryStartIndex = urlWithoutHash.indexOf('?');
 
     if (queryStartIndex === -1) {
       const queryString = qs.stringify(params, { addQueryPrefix: true });
-      url = `${urlWithoutHash}${queryString}${hash ? `#${hash}` : ''}`;
+      url = `${urlWithoutHash}${queryString}${fragment}`;
     } else {
       const basePath = urlWithoutHash.slice(0, queryStartIndex);
       const existingQuery = urlWithoutHash.slice(queryStartIndex + 1);
@@ -250,7 +251,7 @@ export function buildURL(
         );
       const added = qs.stringify(snapshot);
       const query = [...kept, ...(added ? [added] : [])].join('&');
-      url = `${basePath}${query ? `?${query}` : ''}${hash ? `#${hash}` : ''}`;
+      url = `${basePath}${query ? `?${query}` : ''}${fragment}`;
     }
   }
 

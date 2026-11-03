@@ -2061,9 +2061,11 @@ export class BaseHTTPClient {
             // the writer is still running - so without this wait the next hop would be
             // dispatched with the previous one's body still going out on its own socket,
             // and a `307`/`308` would start a second upload of the same body beside the
-            // first. The outcome never rejects and always settles (the adapter's stall
-            // watchdog sees to that), so this is a wait, not a hazard; raced against the
-            // cancel signal so a caller who gives up is not held for it. Only the
+            // first. The outcome never rejects, and the wait is bounded - by the adapter's
+            // stall watchdog, and by the client's own stall bound for an adapter without
+            // one, which `timeout: 0` turns off as it does the per-attempt timer - so this
+            // is a wait, not a hazard; raced against the cancel signal so a caller who
+            // gives up is not held for it. Only the
             // adapter's word is waited on: a hop that threw has no socket left to wait
             // for.
             if (adapterResponse.requestBodySettled !== undefined) {

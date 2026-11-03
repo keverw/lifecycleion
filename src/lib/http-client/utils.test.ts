@@ -69,6 +69,13 @@ afterEach(() => {
 });
 
 describe('buildURL', () => {
+  test.each([
+    ['https://a.test/x#', 'https://a.test/x?p=1#'],
+    ['https://a.test/x?q=2#', 'https://a.test/x?q=2&p=1#'],
+  ])('keeps an empty fragment as written: %s', (path, expected) => {
+    expect(buildURL(undefined, path, { p: 1 })).toBe(expected);
+  });
+
   test('with a base, only a scheme followed by // leaves it', () => {
     for (const path of [
       'http:evil.test/x',
