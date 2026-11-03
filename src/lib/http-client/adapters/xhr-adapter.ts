@@ -441,10 +441,11 @@ export class XHRAdapter implements HTTPAdapter {
       // The one final upload event, on every way the request ends with an answer, a refused
       // one too, and however the upload ends: the bytes the browser
       // reported, or the body's own size where it reported none - `0` for an empty
-      // string, as FetchAdapter reports it - not a stand-in `1`.
-      const emitFinalUpload = (): void => {
+      // string, as FetchAdapter reports it - not a stand-in `1`. Answers whether the send
+      // is still pending after it: that callback may cancel, which ends it.
+      const emitFinalUpload = (): boolean => {
         if (didSettle || didFireUpload100 || !guardedUploadProgress) {
-          return;
+          return !didSettle;
         }
 
         didFireUpload100 = true;
@@ -460,6 +461,7 @@ export class XHRAdapter implements HTTPAdapter {
             : binaryBodyByteLength) ??
             0);
         reportUpload?.(completeProgressEvent(bytes));
+        return !didSettle;
       };
 
       // A listener's reads of an XHR outside a browser may throw, and a throw out of a
@@ -571,10 +573,8 @@ export class XHRAdapter implements HTTPAdapter {
        * redirect.
        */
       const settleFollowedRedirect = (redirectURL: string): void => {
-        emitFinalUpload();
-
         // A cancel from that upload callback ended it already.
-        if (didSettle) {
+        if (!emitFinalUpload()) {
           return;
         }
 
@@ -610,8 +610,7 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         // Before the flag, so a cancel from that upload callback ends the send as the cancel.
-        emitFinalUpload();
-        if (didSettle) {
+        if (!emitFinalUpload()) {
           return;
         }
 
@@ -646,11 +645,9 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        emitFinalUpload();
-
         // A cancel from that upload callback may have ended the send.
         if (
-          didSettle ||
+          !emitFinalUpload() ||
           !Number.isFinite(maxResponseBytes) ||
           !hasResponseBody(method, answer.status)
         ) {
@@ -900,8 +897,7 @@ export class XHRAdapter implements HTTPAdapter {
 
           // Ended with the answer already where it was acted on as it was read; not where a
           // cancel read it first, at done (see `onAbort`), leaving the end to `load`.
-          emitFinalUpload();
-          if (didSettle) {
+          if (!emitFinalUpload()) {
             return;
           }
 
@@ -962,10 +958,8 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           // An answer, as on `load`: the upload ended with it, wherever the download got to.
-          emitFinalUpload();
-
           // A cancel from that upload callback ended it already.
-          if (didSettle) {
+          if (!emitFinalUpload()) {
             return;
           }
         }
@@ -1050,6 +1044,34 @@ export class XHRAdapter implements HTTPAdapter {
           reject(makeAbortError());
         } else {
           refuse(error);
+        }
+        return;
+      }
+
+      // A cancel while `send()` read the body - a value of the caller's converted to text
+      // can run code - came before the XHR marked itself sent, where the XHR standard has
+      // `abort()` do nothing and fire no event, so the request went out regardless: stopped
+      // now, and ended as the cancel it is if no `abort` event did.
+      //
+      // Not once it is done, which `load` answers, as `onAbort` leaves it: an XHR outside a
+      // browser may complete within `send()`.
+      if (!didSettle && isSignalAbortedQuietly(signal)) {
+        try {
+          if (xhr.readyState === 4) {
+            return;
+          }
+        } catch {
+          // Stopped as any other.
+        }
+
+        try {
+          xhr.abort();
+        } catch {
+          // Ended below either way.
+        }
+
+        if (!didSettle) {
+          settleAborted();
         }
       }
     };

@@ -325,7 +325,10 @@ export class FetchAdapter implements HTTPAdapter {
     // A cancel from that callback ends the request as a cancel over the answer, as the
     // body read below ends one, and as NodeAdapter ends it: a bodiless answer has no read
     // to stop, and would otherwise resolve as though it had not been cancelled.
+    // The body is let go of, as on every abort once the headers are in: a polyfill's Node
+    // `Readable` would hold its socket until the server closed it.
     if (isSignalAbortedQuietly(signal)) {
+      cancelBodyQuietly(readUnknownMember(response, 'body'));
       throw markResponseStreamAbort(
         makeAbortError(),
         status,

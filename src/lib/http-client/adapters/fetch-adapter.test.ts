@@ -1071,6 +1071,45 @@ describe('FetchAdapter', () => {
     },
   );
 
+  test('a cancel from the final upload event lets go of the body', async () => {
+    const controller = new AbortController();
+    let isCancelled = false;
+
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        // A polyfill's body that does not watch the signal.
+        body: {
+          cancel: () => {
+            isCancelled = true;
+            return Promise.resolve();
+          },
+        },
+      } as unknown as Response);
+
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/users',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+        onUploadProgress: ({ progress }) => {
+          if (progress === 1) {
+            controller.abort();
+          }
+        },
+      })
+      .then(
+        () => 'resolved',
+        (error: unknown) => `rejected ${(error as Error).name}`,
+      );
+
+    expect(outcome).toBe('rejected AbortError');
+    expect(isCancelled).toBe(true);
+  });
+
   test('delegates browser-restricted headers to fetch in browser environments', async () => {
     let isFetchCalled = false;
     let capturedInit: RequestInit | undefined;

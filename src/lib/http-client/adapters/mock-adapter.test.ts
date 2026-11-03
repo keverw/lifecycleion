@@ -1,7 +1,10 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
 import vm from 'node:vm';
 import { MockAdapter } from './mock-adapter';
-import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
+import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+  RESPONSE_STREAM_ABORT_FLAG,
+} from '../consts';
 import type { MockAdapterConfig, MockFormData } from './mock-adapter';
 import { HTTPClient } from '../http-client';
 import { CookieJar } from '../cookie-jar';
@@ -1139,12 +1142,44 @@ describe('MockAdapter.send() — low-level contract', () => {
         }),
       )
       .then(
-        () => 'resolved',
-        (error: unknown) => `rejected ${(error as Error).name}`,
+        () => undefined,
+        (error: unknown) => error as Record<string, unknown>,
       );
 
-    expect(outcome).toBe('rejected AbortError');
+    // A cancel over the answer, carried out with it, as the network adapters end one.
+    expect(outcome?.name).toBe('AbortError');
+    expect(outcome?.[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
     expect(download).toEqual([]);
+  });
+
+  test('a signal that throws once the answer is in does not replace the answer', async () => {
+    adapter.routes.get('/prog', () => ({ status: 200, body: { x: 1 } }));
+    const controller = new AbortController();
+    let isAnswered = false;
+    // A caller's signal whose `aborted` throws once the upload has ended.
+    const signal = new Proxy(controller.signal, {
+      get(target, key) {
+        if (key === 'aborted' && isAnswered) {
+          throw new Error('signal unreadable');
+        }
+        const value: unknown = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const response = await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/prog',
+        signal,
+        onUploadProgress: ({ progress }) => {
+          if (progress === 1) {
+            isAnswered = true;
+          }
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
   });
 
   test('throws AbortError if signal already aborted', async () => {

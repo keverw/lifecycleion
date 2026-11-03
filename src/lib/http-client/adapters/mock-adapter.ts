@@ -17,10 +17,12 @@ import {
   connectRefusal,
   makeAbortError,
   markNonRetryableAdapterError,
+  markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
 import {
   isSignalAborted,
+  isSignalAbortedQuietly,
   readAdapterRequestFields,
 } from '../internal/request-fields';
 import { defineEntry } from '../../internal/define-entry';
@@ -857,10 +859,16 @@ export class MockAdapter implements HTTPAdapter {
     // Signal upload complete, then report download size based on serialised body.
     guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
 
-    // A cancel from that callback ends the request, as the network adapters end one over
-    // an answer, rather than resolving it with no download.
-    if (isSignalAborted(signal)) {
-      throwAbortError();
+    // A cancel from that callback ends the request as a cancel over the answer, its status
+    // and headers carried out, as the network adapters end one, rather than resolving it
+    // with no download. Read quietly, as once an answer is in hand they read it: a signal
+    // that throws now does not replace the answer with a refusal.
+    if (isSignalAbortedQuietly(signal)) {
+      throw markResponseStreamAbort(
+        makeAbortError(),
+        mockResponse.status,
+        normalizedResponseHeaders,
+      );
     }
 
     // A simulated stream error reports no terminal download progress: real

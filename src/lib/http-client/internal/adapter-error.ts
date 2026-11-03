@@ -176,9 +176,10 @@ export function defineHiddenTags(
 }
 
 /**
- * Tag an abort thrown while reading the body with the response already received,
- * matching what NodeAdapter attaches to its response-stream aborts. Shared by FetchAdapter
- * and XHRAdapter. The client decides what the abort meant; this only makes the evidence
+ * Tag an abort that ends a request once its response is in - while the body is read, or
+ * from the final upload callback before it is - with that response, matching what
+ * NodeAdapter attaches to its response-stream aborts. Shared by FetchAdapter, XHRAdapter
+ * and MockAdapter. The client decides what the abort meant; this only makes the evidence
  * survive the throw.
  *
  * No `effectiveRequestHeaders` is tagged: neither `fetch` nor `XMLHttpRequest` exposes

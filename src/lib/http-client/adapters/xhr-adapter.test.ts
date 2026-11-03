@@ -1091,7 +1091,7 @@ describe('XHRAdapter', () => {
         removed++;
       },
     };
-    // eslint-disable-next-line @typescript-eslint/unbound-method -- put back as it was, below
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its own receiver, and put back after
     const originalSend = FakeXHR.prototype.send;
     FakeXHR.prototype.send = () => {
       throw new DOMException('refused', 'InvalidStateError');
@@ -5436,5 +5436,78 @@ describe('XHRAdapter - the final upload event on an error after the answer', () 
 
     expect(response.streamErrorCode).toBe('stream_response_error');
     expect(uploads).toEqual([0, 1]);
+  });
+});
+
+describe('XHRAdapter - a cancel while send() reads the body', () => {
+  test('stops the request and ends it as the cancel', async () => {
+    const controller = new AbortController();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its own receiver, and put back after
+    const originalSend = FakeXHR.prototype.send;
+    // A body conversion that runs the caller's code, which cancels: before the XHR is
+    // marked sent, so its `abort()` fires no event.
+    FakeXHR.prototype.send = function (this: FakeXHR, body) {
+      controller.abort();
+      // That `abort()` did nothing: the request was not sent yet.
+      this.abortCalled = false;
+      originalSend.call(this, body);
+    };
+
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'POST',
+        headers: {},
+        body: 'abc',
+        signal: controller.signal,
+      });
+      const outcome = await Promise.race([
+        promise.then(
+          () => 'resolved',
+          (error: unknown) => `rejected ${(error as Error).name}`,
+        ),
+        new Promise((resolve) => setTimeout(() => resolve('pending'), 20)),
+      ]);
+
+      expect(outcome).toBe('rejected AbortError');
+      // Stopped once it was sent.
+      expect(lastXHR.abortCalled).toBe(true);
+    } finally {
+      FakeXHR.prototype.send = originalSend;
+    }
+  });
+});
+
+describe('XHRAdapter - a cancel during a send() that completes the response', () => {
+  test('leaves the body to load', async () => {
+    const controller = new AbortController();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its own receiver, and put back after
+    const originalSend = FakeXHR.prototype.send;
+    // An XHR outside a browser that completes within `send()`, where the caller cancels.
+    FakeXHR.prototype.send = function (this: FakeXHR, body) {
+      originalSend.call(this, body);
+      this.readyState = 4;
+      this.status = 200;
+      this.response = new ArrayBuffer(3);
+      controller.abort();
+    };
+
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+      });
+      expect(lastXHR.abortCalled).toBe(false);
+
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.status).toBe(200);
+      expect((response.body as Uint8Array).length).toBe(3);
+    } finally {
+      FakeXHR.prototype.send = originalSend;
+    }
   });
 });
