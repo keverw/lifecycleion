@@ -2081,6 +2081,8 @@ test('a file part on Bun is written under the last segment of its name, never a 
     form.append('fromNode', await openAsBlob(path));
     form.append('plain', new File(['x'], 'dir/kept.txt'));
     form.append('endsInSlash', new File(['x'], 'dir/'));
+    form.append('pathEndsInSlash', new File(['x'], `${directory}/sub//`));
+    form.append('onlySlashes', new File(['x'], '//'));
     form.append('backslash', new File(['x'], 'a\\b.txt'));
 
     const { req, getBody } = makeCapture();
@@ -2091,7 +2093,9 @@ test('a file part on Bun is written under the last segment of its name, never a 
     expect(written).toContain('name="fromNode"; filename="report.txt"');
     // A form's entries do not tell this `File` from one backed by a path.
     expect(written).toContain('name="plain"; filename="kept.txt"');
-    expect(written).toContain('name="endsInSlash"; filename="dir/"');
+    expect(written).toContain('name="endsInSlash"; filename="dir"');
+    expect(written).toContain('name="pathEndsInSlash"; filename="sub"');
+    expect(written).toContain('name="onlySlashes"; filename=""');
     if (process.platform !== 'win32') {
       expect(written).toContain('name="backslash"; filename="a\\b.txt"');
     }

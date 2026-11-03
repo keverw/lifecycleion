@@ -4402,3 +4402,149 @@ describe('XHRAdapter - an answer that fails after its headers', () => {
     expect(uploads).toEqual([0, 1]);
   });
 });
+
+describe('XHRAdapter - the answer read once', () => {
+  test('an abort after the headers keeps them when a later read would throw', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+    });
+    const xhr = lastXHR;
+
+    xhr.simulateHeadersReceived(200, 'x-answer: yes\r\n');
+    xhr.readyState = 3;
+    xhr.getAllResponseHeaders = () => {
+      throw new Error('headers unreadable');
+    };
+    controller.abort();
+    xhr.simulateAbort();
+
+    const outcome = (await promise.catch((error: unknown) => error)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(outcome[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
+  });
+
+  test('an abort the signal did not make keeps an answer already in', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+    const xhr = lastXHR;
+
+    xhr.simulateHeadersReceived(200);
+    xhr.readyState = 4;
+    xhr.status = 0;
+    xhr.simulateAbort();
+
+    const outcome = (await promise.catch((error: unknown) => error)) as Error &
+      Record<string, unknown>;
+
+    expect(outcome.name).toBe('AbortError');
+    expect(outcome[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
+  });
+
+  test('a redirect the browser followed is reported when its headers cannot be read', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+    });
+    const xhr = lastXHR;
+
+    xhr.status = 200;
+    xhr.responseURL = 'https://api.test/elsewhere';
+    xhr.getAllResponseHeaders = () => {
+      throw new Error('headers unreadable');
+    };
+    xhr.simulateLoad();
+    const response = await promise;
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://api.test/elsewhere');
+  });
+
+  test('an upload load that throws after an early answer leaves the answer be', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      onUploadProgress: () => {},
+    });
+    const xhr = lastXHR;
+
+    xhr.simulateHeadersReceived(413);
+    expect(() => {
+      xhr.upload.dispatch('load', {
+        get loaded(): number {
+          throw new Error('loaded unreadable');
+        },
+        total: 3,
+        lengthComputable: true,
+      });
+    }).not.toThrow();
+    xhr.readyState = 4;
+    xhr.simulateLoad();
+
+    expect((await promise).status).toBe(413);
+  });
+
+  test('through the client, an abort the signal did not make after the headers is a stream error', async () => {
+    const client = new HTTPClient({
+      adapter: new XHRAdapter(),
+      baseURL: 'https://api.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+    });
+    const before = FakeXHR.instances.length;
+    const builder = client.get('/data');
+    const sending = builder.send();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    lastXHR.simulateHeadersReceived(503, 'x-answer: yes\r\n');
+    lastXHR.readyState = 4;
+    lastXHR.status = 0;
+    lastXHR.simulateAbort();
+    const response = await sending;
+
+    expect(FakeXHR.instances.length - before).toBe(1);
+    expect(builder.error?.code).toBe('stream_response_error');
+    expect(response.status).toBe(503);
+    expect(response.isCancelled).toBe(false);
+  });
+
+  test('an upload progress event that throws when read refuses the send', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      onUploadProgress: () => {},
+    });
+    const xhr = lastXHR;
+
+    expect(() => {
+      xhr.upload.dispatch('progress', {
+        get loaded(): number {
+          throw new Error('loaded unreadable');
+        },
+        total: 3,
+        lengthComputable: true,
+      });
+    }).not.toThrow();
+
+    const outcome = (await promise.catch((error: unknown) => error)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(outcome[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(xhr.abortCalled).toBe(true);
+  });
+});

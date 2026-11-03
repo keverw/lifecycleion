@@ -46,21 +46,30 @@ export function isFormData(value: unknown): value is FormData {
  * The name a file part named `name` is sent under: `name`, except on Bun. A file backed by
  * a path there - `Bun.file()`, `openAsBlob` - reports the path as its name, even when
  * appended under another, and a form's entries do not tell it from a `File` named with a
- * slash. So only the last segment is sent, as the form-data package sends it: a local path
- * is no business of the server's. A name ending in a separator has none, and is left as it
- * is. Handed the name rather than the part, so each use reads a part's name once.
+ * slash. So only the last segment is sent, as the form-data package sends it
+ * (`path.basename`, by its separators; a Windows drive prefix is kept): a local path is no
+ * business of the server's. Trailing separators are dropped first, so `/home/me/dir/` is
+ * sent as `dir`, and a name of separators alone as an empty one. Handed the name rather
+ * than the part, so each use reads a part's name once.
  */
 export function filePartNameToSend(name: unknown): unknown {
   if (!isBunRuntime || typeof name !== 'string') {
     return name;
   }
 
-  const separator =
-    process.platform === 'win32'
-      ? Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'))
-      : name.lastIndexOf('/');
+  const isWindows = process.platform === 'win32';
+  const isSeparator = (char: string): boolean =>
+    char === '/' || (isWindows && char === '\\');
 
-  return separator === -1 || separator === name.length - 1
-    ? name
-    : name.slice(separator + 1);
+  let end = name.length;
+  while (end > 0 && isSeparator(name[end - 1])) {
+    end--;
+  }
+
+  let start = end;
+  while (start > 0 && !isSeparator(name[start - 1])) {
+    start--;
+  }
+
+  return name.slice(start, end);
 }

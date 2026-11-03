@@ -1,6 +1,6 @@
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
-import { completeProgressEvent } from './progress';
+import { byteProgressEvent, completeProgressEvent } from './progress';
 
 /**
  * 16 KB chunks: meaningful upload progress granularity (a 1 MB body fires ~64
@@ -56,11 +56,7 @@ export async function writeRequestBodyChunked(
     await writeChunkWithBackpressure(req, chunk, () => {
       // Only count bytes after the writable confirms the chunk was accepted.
       uploadedBytes += chunk.length;
-      onProgress?.({
-        loaded: uploadedBytes,
-        total: totalSize,
-        progress: uploadedBytes / totalSize,
-      });
+      onProgress?.(byteProgressEvent(uploadedBytes, totalSize));
     });
   }
 

@@ -161,12 +161,6 @@ export class XHRAdapter implements HTTPAdapter {
       }
 
       const xhr = new XMLHttpRequest();
-      /** A redirect the browser followed before an abort, read before `abort()` resets it. */
-      let followedRedirectBeforeAbort: string | undefined;
-      /** The answer an abort landed on, read before `abort()` resets it. */
-      let answeredBeforeAbort:
-        | { status: number; headers: Record<string, string | string[]> }
-        | undefined;
 
       try {
         // Refused in its own words, and without the runtime's error, as a header below is:
@@ -237,6 +231,61 @@ export class XHRAdapter implements HTTPAdapter {
       // Set as `load` starts, which answers whatever a progress callback then cancels.
       let didLoad = false;
 
+      // The answer, read once and kept: as its headers arrive (the `readystatechange`
+      // listener below), or where it is first needed, for an XHR that reports no change of
+      // state. Kept because the XHR does not keep it: `abort()`, and the `error` or
+      // `timeout` of a failure later on, reset its status and headers (the XHR standard's
+      // request error steps), and a failure once the server has answered is a stream error
+      // with the real status, as the other adapters report one - not a network failure,
+      // retried as though nothing had been answered. Only an answer is kept: headers in,
+      // with a status. A failure sets the state to done with the status already `0`.
+      let answeredAtHeaders: AnsweredHeaders | undefined;
+
+      /** Whether `responseURL` is where the browser followed a redirect to. */
+      const isFollowedRedirect = (responseURL: string): boolean =>
+        responseURL !== '' &&
+        didBrowserFollowRedirect(responseURL, answeredURL);
+
+      /**
+       * The answer as the XHR has it now. A redirect the browser followed is told by its URL
+       * alone, which is all it is reported by: its headers are the final page's, so they are
+       * not read, and one that cannot be read does not lose the redirect.
+       */
+      const readAnswer = (): AnsweredHeaders => {
+        const responseURL = xhr.responseURL;
+        const status = xhr.status;
+
+        return {
+          status,
+          headers: isFollowedRedirect(responseURL)
+            ? {}
+            : parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
+          responseURL,
+        };
+      };
+
+      /** The answer, read the first time there is one. */
+      const captureAnswer = (): AnsweredHeaders | undefined => {
+        if (answeredAtHeaders === undefined && xhr.readyState >= 2) {
+          const status = xhr.status;
+          if (status > 0) {
+            answeredAtHeaders = { ...readAnswer(), status };
+          }
+        }
+
+        return answeredAtHeaders;
+      };
+
+      /**
+       * A browser-followed redirect behind `answer`, by its final URL. Those headers are the
+       * final page's, which the original URL never answered with: the redirect is what was
+       * answered, reported as the load path reports it, and the client refuses it.
+       */
+      const followedRedirectOf = (
+        answer: AnsweredHeaders,
+      ): string | undefined =>
+        isFollowedRedirect(answer.responseURL) ? answer.responseURL : undefined;
+
       // --- Abort signal ---
       //
       // Check for pre-aborted signal before calling xhr.send — if we called
@@ -253,39 +302,19 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         const onAbort = (): void => {
-          // Read before `abort()`, which resets the status to `0`: a timeout that lands
-          // once the headers are in has a real answer behind it, and FetchAdapter
-          // carries it out on the abort so the client reports a terminal stream error
-          // with that status rather than a retryable plain timeout.
-          //
-          // Unless the browser had already followed a redirect: those headers are the
-          // final page's, which the original URL never answered with. The redirect is
-          // what was answered, so it is resolved as the load path resolves it, and the
-          // client sorts the abort (a cancel stays cancelled; a timeout ends at the
-          // refused redirect, as the docs have it for `followRedirects: false`).
+          // Read before `abort()`, which resets the status to `0`, where the headers did
+          // not report it: a timeout that lands once the headers are in has a real answer
+          // behind it, and FetchAdapter carries it out on the abort so the client reports
+          // a terminal stream error with that status rather than a retryable plain timeout
+          // (or, behind a redirect the browser followed, the refused redirect; a cancel
+          // stays cancelled either way).
           //
           // Guarded, as an XHR outside a browser may throw from any of these: the transfer
-          // is still stopped, and the abort is reported with no answer behind it.
+          // is still stopped, and the abort is reported with what was read already.
           try {
-            const responseURL = xhr.responseURL;
-            if (
-              xhr.readyState >= 2 &&
-              responseURL &&
-              didBrowserFollowRedirect(responseURL, answeredURL)
-            ) {
-              followedRedirectBeforeAbort = responseURL;
-            } else if (
-              xhr.readyState >= 2 &&
-              xhr.readyState < 4 &&
-              xhr.status > 0
-            ) {
-              answeredBeforeAbort = {
-                status: xhr.status,
-                headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
-              };
-            }
+            captureAnswer();
           } catch {
-            // Nothing was read to carry out.
+            // Nothing more was read to carry out.
           }
 
           // Guarded too: refused, no `abort` event would follow to end the send.
@@ -384,6 +413,35 @@ export class XHRAdapter implements HTTPAdapter {
         guardedUploadProgress(completeProgressEvent(bytes));
       };
 
+      // A listener's reads of an XHR outside a browser may throw, and a throw out of a
+      // listener would leave the send pending with nothing left to end it. Those reads fail
+      // the same way on every attempt, so the request is refused as non-retryable. One that
+      // fires on an answer ends the upload first, as on every other answered path.
+      const refusingOnThrow = <Event>(
+        listener: (event: Event) => void,
+        isOnAnswer: boolean,
+      ): ((event: Event) => void) => {
+        return (event) => {
+          try {
+            listener(event);
+          } catch (error) {
+            removeAbortListener();
+
+            if (isOnAnswer) {
+              emitFinalUpload();
+            }
+
+            refuse(error);
+
+            try {
+              xhr.abort();
+            } catch {
+              // Nothing more to stop it with.
+            }
+          }
+        };
+      };
+
       // `upload` is optional where XHR runs outside a browser - Node's `xmlhttprequest` has
       // none - so without one there is no per-chunk upload progress, and the final upload
       // event still fires when the request ends. One whose getter or `addEventListener`
@@ -401,65 +459,53 @@ export class XHRAdapter implements HTTPAdapter {
           guardedUploadProgress && hasBytesToSend ? xhr.upload : undefined;
 
         if (upload) {
-          upload.addEventListener('progress', (event) => {
-            // Nor once the upload has ended: an answer that comes before the body is sent
-            // ends it, and the bytes the browser goes on reporting would run it backwards.
-            if (didSettle || didFireUpload100) {
-              return;
-            }
+          upload.addEventListener(
+            'progress',
+            refusingOnThrow((event: ProgressEvent) => {
+              // Nor once the upload has ended: an answer that comes before the body is
+              // sent ends it, and the bytes the browser goes on reporting would run it
+              // backwards.
+              if (didSettle || didFireUpload100) {
+                return;
+              }
 
-            const reported = readProgressEvent(event);
+              const reported = readProgressEvent(event);
 
-            if (reported.progress === 1) {
-              didFireUpload100 = true;
-            }
+              if (reported.progress === 1) {
+                didFireUpload100 = true;
+              }
 
-            uploadedBytes = Math.max(uploadedBytes, event.loaded);
-            uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
+              uploadedBytes = Math.max(uploadedBytes, event.loaded);
+              uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
 
-            guardedUploadProgress?.(reported);
-          });
+              guardedUploadProgress?.(reported);
+            }, false),
+          );
 
-          upload.addEventListener('load', (event) => {
-            uploadedBytes = Math.max(uploadedBytes, event.loaded);
-            uploadTotalBytes = Math.max(
-              uploadTotalBytes,
-              event.total || event.loaded,
-            );
+          upload.addEventListener(
+            'load',
+            refusingOnThrow((event: ProgressEvent) => {
+              // As for `progress`: an upload an answer has ended is not read again, so a
+              // refusal from here is only ever one before the answer.
+              if (didSettle || didFireUpload100) {
+                return;
+              }
 
-            emitFinalUpload();
-          });
+              uploadedBytes = Math.max(uploadedBytes, event.loaded);
+              uploadTotalBytes = Math.max(
+                uploadTotalBytes,
+                event.total || event.loaded,
+              );
+
+              emitFinalUpload();
+            }, false),
+          );
         }
       } catch (error) {
         removeAbortListener();
         refuse(error);
         return;
       }
-
-      // A listener's reads of an XHR outside a browser may throw, and a throw out of a
-      // listener would leave the send pending with nothing left to end it. Those reads fail
-      // the same way on every attempt, so the request is refused as non-retryable.
-      const refusingOnThrow = <Event>(
-        listener: (event: Event) => void,
-      ): ((event: Event) => void) => {
-        return (event) => {
-          try {
-            listener(event);
-          } catch (error) {
-            removeAbortListener();
-            // Both listeners fire on an answer, so the upload ended, as on every other
-            // answered path.
-            emitFinalUpload();
-            refuse(error);
-
-            try {
-              xhr.abort();
-            } catch {
-              // Nothing more to stop it with.
-            }
-          }
-        };
-      };
 
       // --- Download progress ---
 
@@ -478,27 +524,24 @@ export class XHRAdapter implements HTTPAdapter {
 
       /**
        * Fail a body past `maxResponseBytes` as a stream error with the real status and
-       * `headers` (parsed by the caller), and stop the download. Both are read before
-       * `xhr.abort()`, which resets them. A browser-followed redirect is reported as the
-       * redirect, as on `load`: the client refuses those whatever the body.
+       * headers of `answer`, and stop the download. A browser-followed redirect is reported
+       * as the redirect, as on `load`: the client refuses those whatever the body.
        */
-      const refuseTooLargeBody = (
-        headers: Record<string, string | string[]>,
-      ): void => {
+      const refuseTooLargeBody = (answer: AnsweredHeaders): void => {
         didExceedMaxResponseBytes = true;
-        // Read before the upload callback below: one that cancels makes `xhr.abort()`
-        // reset this XHR, wiping its URL, status and headers.
-        const responseURL = xhr.responseURL;
-        const status = xhr.status;
         emitFinalUpload();
 
-        if (responseURL && didBrowserFollowRedirect(responseURL, answeredURL)) {
-          resolve(browserRedirectResponse(responseURL));
-        } else {
-          resolve(
-            tooLargeAnswer(answeredURL, status, headers, maxResponseBytes),
-          );
-        }
+        const redirectURL = followedRedirectOf(answer);
+        resolve(
+          redirectURL !== undefined
+            ? browserRedirectResponse(redirectURL)
+            : tooLargeAnswer(
+                answeredURL,
+                answer.status,
+                answer.headers,
+                maxResponseBytes,
+              ),
+        );
 
         xhr.abort();
       };
@@ -521,18 +564,20 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           // Decided once: a body known uncoded is refused at once, and one that is not is
-          // left to `load`. The headers are parsed once, for the decision and the refusal.
+          // left to `load`.
           if (
             event.loaded > maxResponseBytes &&
             isBodyKnownUncoded === undefined
           ) {
-            const headers = parseXHRResponseHeaders(
-              xhr.getAllResponseHeaders(),
+            const answer = captureAnswer() ?? readAnswer();
+            isBodyKnownUncoded = isKnownUncodedBody(
+              xhr,
+              answer.headers,
+              answeredURL,
             );
-            isBodyKnownUncoded = isKnownUncodedBody(xhr, headers, answeredURL);
 
             if (isBodyKnownUncoded) {
-              refuseTooLargeBody(headers);
+              refuseTooLargeBody(answer);
               return;
             }
           }
@@ -548,53 +593,30 @@ export class XHRAdapter implements HTTPAdapter {
           downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
 
           guardedDownloadProgress?.(reported);
-        }),
+        }, true),
       );
 
       // --- Headers received ---
 
-      // The answer, read as its headers arrive: an `error` or `timeout` later on resets the
-      // XHR's status and headers (the XHR standard's request error steps), and a failure
-      // once the server has answered is a stream error with the real status, as the other
-      // adapters report one - not a network failure, retried as though nothing had been
-      // answered. The answer also ends the upload, as it does in FetchAdapter, so its final
-      // event fires here, before any download progress. A read that throws captures
-      // nothing; the request ends as it would have.
-      let answeredAtHeaders: AnsweredHeaders | undefined;
-
+      // The answer, read as its headers arrive (see `answeredAtHeaders`). It also ends the
+      // upload, as it does in FetchAdapter, so its final event fires here, before any
+      // download progress. A read that throws captures nothing; the request ends as it
+      // would have.
       xhr.addEventListener('readystatechange', () => {
         if (didSettle || answeredAtHeaders !== undefined) {
           return;
         }
 
-        // Only an answer: a failure sets the state to done with the status already `0`
-        // and reports that change too, before its `error`, `timeout` or `abort`.
         try {
-          const status = xhr.status;
-          if (xhr.readyState < 2 || !(status > 0)) {
+          if (captureAnswer() === undefined) {
             return;
           }
-
-          answeredAtHeaders = {
-            status,
-            headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
-            responseURL: xhr.responseURL,
-          };
         } catch {
           return;
         }
 
         emitFinalUpload();
       });
-
-      /** A browser-followed redirect behind `answer`, by its final URL. */
-      const followedRedirectOf = (
-        answer: AnsweredHeaders,
-      ): string | undefined =>
-        answer.responseURL &&
-        didBrowserFollowRedirect(answer.responseURL, answeredURL)
-          ? answer.responseURL
-          : undefined;
 
       // --- Load (success) ---
 
@@ -619,13 +641,11 @@ export class XHRAdapter implements HTTPAdapter {
           // wasRedirectDetected, which routes through HTTPClient's
           // redirect_disabled error path so callers get a consistent isFailed
           // response regardless of adapter.
-          // Read once, before any progress callback: one that aborts the signal resets this
-          // finished XHR, and `responseURL` with it.
-          const responseURL = xhr.responseURL;
-          if (
-            responseURL &&
-            didBrowserFollowRedirect(responseURL, answeredURL)
-          ) {
+          // Read before any progress callback: one that aborts the signal resets this
+          // finished XHR, its URL, status and headers with it.
+          const answer = captureAnswer() ?? readAnswer();
+          const redirectURL = followedRedirectOf(answer);
+          if (redirectURL !== undefined) {
             // The browser completed the transport and surfaced the final URL even
             // though the client will treat the result as redirect_disabled, so
             // emit terminal progress before returning the synthetic redirect
@@ -639,17 +659,12 @@ export class XHRAdapter implements HTTPAdapter {
               guardedDownloadProgress?.(completeProgressEvent(bytes));
             }
 
-            resolve(browserRedirectResponse(responseURL));
+            resolve(browserRedirectResponse(redirectURL));
             return;
           }
 
-          // Read before the progress callbacks below: one that aborts the signal makes
-          // `xhr.abort()` reset this finished XHR, wiping its status and headers.
-          const status = xhr.status;
-          const responseHeaders = parseXHRResponseHeaders(
-            xhr.getAllResponseHeaders(),
-          );
-          const body = readResponseBody(method, xhr);
+          const { status, headers: responseHeaders } = answer;
+          const body = readResponseBody(method, status, xhr);
 
           // Before the refusal below, so a refused body sees it too.
           emitFinalUpload();
@@ -703,7 +718,7 @@ export class XHRAdapter implements HTTPAdapter {
             headers: responseHeaders,
             body,
           });
-        }),
+        }, true),
       );
 
       // --- Error / timeout / abort ---
@@ -764,31 +779,7 @@ export class XHRAdapter implements HTTPAdapter {
       // than an unexpected abort (non-retryable cancel). One after the headers carries
       // the answer out, as a timeout from the client's own timer does (see `onAbort`).
       xhr.addEventListener('timeout', () => {
-        if (answeredAtHeaders === undefined) {
-          reject(
-            Object.assign(makeAbortError('Request timed out'), {
-              [XHR_BROWSER_TIMEOUT_FLAG]: true,
-            }),
-          );
-          return;
-        }
-
-        const redirectURL = followedRedirectOf(answeredAtHeaders);
-        if (redirectURL !== undefined) {
-          resolve(browserRedirectResponse(redirectURL));
-          return;
-        }
-
-        reject(
-          Object.assign(
-            markResponseStreamAbort(
-              makeAbortError('Request timed out'),
-              answeredAtHeaders.status,
-              answeredAtHeaders.headers,
-            ),
-            { [XHR_BROWSER_TIMEOUT_FLAG]: true },
-          ),
-        );
+        settleAborted(true);
       });
 
       xhr.addEventListener('abort', () => {
@@ -798,28 +789,42 @@ export class XHRAdapter implements HTTPAdapter {
         }
       });
 
-      function settleAborted(): void {
-        if (followedRedirectBeforeAbort !== undefined) {
-          // An answer, as on `load`: the final upload event fires for it there too.
+      /**
+       * End the send on an abort, or on a timeout the runtime's XHR fired itself: over an
+       * answer, with it carried out (behind a redirect the browser followed, the redirect).
+       * Whether it came from the signal or not - a browser aborts a request whose page is
+       * leaving - the client sorts it: a cancel stays cancelled.
+       */
+      function settleAborted(isBrowserTimeout = false): void {
+        const answer = answeredAtHeaders;
+
+        if (answer !== undefined) {
+          // An answer, as on `load`: the upload ended with it, wherever the download got to.
           emitFinalUpload();
-          resolve(browserRedirectResponse(followedRedirectBeforeAbort));
-          return;
+
+          const redirectURL = followedRedirectOf(answer);
+          if (redirectURL !== undefined) {
+            resolve(browserRedirectResponse(redirectURL));
+            return;
+          }
         }
 
-        // An answer too: the upload ended with it, wherever the download got to.
-        if (answeredBeforeAbort !== undefined) {
-          emitFinalUpload();
-        }
-
-        const abortError = makeAbortError();
-        reject(
-          answeredBeforeAbort === undefined
+        const abortError = isBrowserTimeout
+          ? makeAbortError('Request timed out')
+          : makeAbortError();
+        const failure =
+          answer === undefined
             ? abortError
             : markResponseStreamAbort(
                 abortError,
-                answeredBeforeAbort.status,
-                answeredBeforeAbort.headers,
-              ),
+                answer.status,
+                answer.headers,
+              );
+
+        reject(
+          isBrowserTimeout
+            ? Object.assign(failure, { [XHR_BROWSER_TIMEOUT_FLAG]: true })
+            : failure,
         );
       }
 
@@ -991,10 +996,11 @@ function browserRedirectResponse(responseURL: string): AdapterResponse {
  */
 function readResponseBody(
   method: string,
+  status: number,
   xhr: XMLHttpRequest,
 ): Uint8Array | null | typeof RESPONSE_UNREADABLE {
   // The shared rule, so a `205` or `1xx` is bodiless here as in the other adapters.
-  if (!hasResponseBody(method, xhr.status)) {
+  if (!hasResponseBody(method, status)) {
     return null;
   }
 
