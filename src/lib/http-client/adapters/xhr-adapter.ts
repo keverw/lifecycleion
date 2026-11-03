@@ -349,6 +349,19 @@ export class XHRAdapter implements HTTPAdapter {
             // Nothing more was read to carry out.
           }
 
+          // Done already: a cancel from a download progress event the runtime fires once the
+          // response is complete, just before `load` - Chromium flushes its last throttled
+          // one then, where the XHR standard fires it while loading. `abort()` would discard
+          // the body `load` answers with, which a cancel during `load` leaves be, for the
+          // client to sort.
+          try {
+            if (xhr.readyState === 4) {
+              return;
+            }
+          } catch {
+            // Stopped as any other.
+          }
+
           // Guarded too: refused, no `abort` event would follow to end the send.
           try {
             xhr.abort();
@@ -540,6 +553,31 @@ export class XHRAdapter implements HTTPAdapter {
         return;
       }
 
+      /**
+       * End the send at a redirect the browser followed, as soon as it is seen: the client
+       * refuses it whatever the page it led to, so that page is not downloaded nor held -
+       * past `maxResponseBytes` included - nor its bytes reported. No body is handed over
+       * for it, so its download ends at `0` bytes, as FetchAdapter reports its opaque
+       * redirect.
+       */
+      const settleFollowedRedirect = (redirectURL: string): void => {
+        emitFinalUpload();
+
+        // A cancel from that upload callback ended it already.
+        if (didSettle) {
+          return;
+        }
+
+        reportDownload?.(completeProgressEvent(0));
+        resolve(browserRedirectResponse(redirectURL));
+
+        try {
+          xhr.abort();
+        } catch {
+          // Whatever the page goes on to deliver is reported to no one.
+        }
+      };
+
       // --- Download progress ---
 
       // Real per-chunk download progress. Same advantage over FetchAdapter:
@@ -599,12 +637,21 @@ export class XHRAdapter implements HTTPAdapter {
           // Answered by now, for an XHR that reports no change of state too: read once, so
           // a failure later keeps it, and the upload ended with it. A read that throws
           // captures nothing, as on `readystatechange`: the request ends as it would have.
+          let answered: AnsweredHeaders | undefined;
           try {
-            if (captureAnswer() !== undefined) {
-              emitFinalUpload();
-            }
+            answered = captureAnswer();
           } catch {
             // Read again where it is needed: past the limit, and on `load`.
+          }
+
+          if (answered !== undefined) {
+            const redirectURL = followedRedirectOf(answered);
+            if (redirectURL !== undefined) {
+              settleFollowedRedirect(redirectURL);
+              return;
+            }
+
+            emitFinalUpload();
           }
 
           // A cancel from that upload callback may have ended the send.
@@ -649,11 +696,20 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
+        let answered: AnsweredHeaders | undefined;
         try {
-          if (captureAnswer() === undefined) {
-            return;
-          }
+          answered = captureAnswer();
         } catch {
+          return;
+        }
+
+        if (answered === undefined) {
+          return;
+        }
+
+        const redirectURL = followedRedirectOf(answered);
+        if (redirectURL !== undefined) {
+          settleFollowedRedirect(redirectURL);
           return;
         }
 
@@ -683,22 +739,13 @@ export class XHRAdapter implements HTTPAdapter {
           // wasRedirectDetected, which routes through HTTPClient's
           // redirect_disabled error path so callers get a consistent isFailed
           // response regardless of adapter.
-          // Read before any progress callback: one that aborts the signal resets this
-          // finished XHR, its URL, status and headers with it.
+          // Read before any progress callback, as everything this listener reports is: the
+          // answer, captured once (see `answeredAtHeaders`).
           const answer = captureAnswer() ?? readAnswer();
           const redirectURL = followedRedirectOf(answer);
+          // Seen here only by an XHR that reported none of it before.
           if (redirectURL !== undefined) {
-            // The browser completed the transport and surfaced the final URL even
-            // though the client will treat the result as redirect_disabled, so
-            // emit terminal progress before returning the synthetic redirect
-            // response.
-            emitFinalUpload();
-
-            // No body is handed over for it, so `0` bytes, as FetchAdapter reports its
-            // opaque redirect: the runtime's count is of the page it followed to.
-            reportDownload?.(completeProgressEvent(0));
-
-            resolve(browserRedirectResponse(redirectURL));
+            settleFollowedRedirect(redirectURL);
             return;
           }
 

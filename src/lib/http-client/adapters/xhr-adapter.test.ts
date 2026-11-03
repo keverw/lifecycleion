@@ -277,7 +277,11 @@ async function withPageOrigin<T>(
 async function sendPastLimitWithoutCoding(
   requestURL: string,
   responseURL = '',
-): Promise<{ abortCalled: boolean; streamErrorCode: string | undefined }> {
+): Promise<{
+  abortCalled: boolean;
+  streamErrorCode: string | undefined;
+  wasRedirectDetected: boolean | undefined;
+}> {
   const promise = new XHRAdapter().send({
     requestURL,
     method: 'GET',
@@ -298,6 +302,7 @@ async function sendPastLimitWithoutCoding(
   return {
     abortCalled: xhr.abortCalled,
     streamErrorCode: response.streamErrorCode,
+    wasRedirectDetected: response.wasRedirectDetected,
   };
 }
 
@@ -3300,27 +3305,51 @@ describe('XHRAdapter - maxResponseBytes and the page origin', () => {
     expect(result.streamErrorCode).toBeUndefined();
   });
 
-  test('a cross-origin request redirected back to the page origin is not cut on its bytes', async () => {
-    const result = await withPageOrigin('https://app.test', async () => {
-      return await sendPastLimitWithoutCoding(
-        'https://api.test/x',
-        'https://app.test/y',
-      );
+  test.each([
+    [
+      'a cross-origin request redirected back to the page origin',
+      'https://app.test',
+      'https://api.test/x',
+      'https://app.test/y',
+    ],
+    [
+      'a same-origin request redirected to another origin',
+      'https://api.test',
+      'https://api.test/x',
+      'https://other.test/y',
+    ],
+  ])(
+    '%s ends at the redirect, not on its bytes',
+    async (_label, pageOrigin, requestURL, responseURL) => {
+      const result = await withPageOrigin(pageOrigin, async () => {
+        return await sendPastLimitWithoutCoding(requestURL, responseURL);
+      });
+
+      // Stopped as the redirect is seen, and reported as the redirect, never too large.
+      expect(result.abortCalled).toBe(true);
+      expect(result.wasRedirectDetected).toBe(true);
+      expect(result.streamErrorCode).toBeUndefined();
+    },
+  );
+
+  test('a redirect is ended as it is seen with its bytes well under the limit', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1000,
     });
+    const xhr = lastXHR;
 
-    // Not stopped mid-download; reported as the redirect the browser followed.
-    expect(result.abortCalled).toBe(false);
-  });
+    // An XHR that reports no change of state: seen at its first progress event.
+    xhr.readyState = 3;
+    xhr.status = 200;
+    xhr.responseURL = 'https://api.test/y';
+    xhr.simulateDownloadProgress(10, 0);
+    const response = await promise;
 
-  test('a same-origin request whose response URL is on another origin is not cut on its bytes', async () => {
-    const result = await withPageOrigin('https://api.test', async () => {
-      return await sendPastLimitWithoutCoding(
-        'https://api.test/x',
-        'https://other.test/y',
-      );
-    });
-
-    expect(result.abortCalled).toBe(false);
+    expect(xhr.abortCalled).toBe(true);
+    expect(response.wasRedirectDetected).toBe(true);
   });
 
   test('the page origin is read from location, and from window and self, as a worker or page has it', async () => {
@@ -5055,5 +5084,63 @@ describe('XHRAdapter - totals, listener removal and a send cancelled as it throw
         Object.defineProperty(FakeXHR.prototype, 'send', realSend);
       }
     }
+  });
+});
+
+describe('XHRAdapter - a redirect seen at the headers, and a cancel once the response is done', () => {
+  test('a redirect the browser followed ends the send at its headers, downloading nothing', async () => {
+    const downloads: Array<{ loaded: number; progress: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+      onDownloadProgress: ({ loaded, progress }) => {
+        downloads.push({ loaded, progress });
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.responseURL = 'https://api.test/elsewhere';
+    xhr.simulateHeadersReceived(200);
+    const response = await promise;
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(xhr.abortCalled).toBe(true);
+    // Whatever the page goes on to report reaches no one.
+    xhr.readyState = 3;
+    xhr.simulateDownloadProgress(50_000, 0);
+    expect(downloads).toEqual([{ loaded: 0, progress: 1 }]);
+  });
+
+  test('a cancel from a download event fired once the response is done, as Chromium fires its last, leaves load its body', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+      onDownloadProgress: () => {
+        controller.abort();
+      },
+    });
+    const xhr = lastXHR;
+
+    // `abort()` on a finished XHR resets it and fires nothing, as the standard has it.
+    xhr.abort = () => {
+      xhr.abortCalled = true;
+      xhr.readyState = 0;
+      xhr.status = 0;
+      xhr.response = null;
+    };
+    xhr.simulateHeadersReceived(200);
+    xhr.readyState = 4;
+    xhr.response = new ArrayBuffer(5);
+    xhr.simulateDownloadProgress(5, 0);
+    xhr.simulateLoad();
+    const response = await promise;
+
+    expect(xhr.abortCalled).toBe(false);
+    expect(response.status).toBe(200);
+    expect((response.body as Uint8Array).length).toBe(5);
   });
 });
