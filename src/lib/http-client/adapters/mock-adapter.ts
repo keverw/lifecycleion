@@ -865,7 +865,7 @@ export class MockAdapter implements HTTPAdapter {
     // that throws now does not replace the answer with a refusal.
     if (isSignalAbortedQuietly(signal)) {
       throw markResponseStreamAbort(
-        makeAbortError(),
+        makeAbortError(MOCK_ABORT_MESSAGE),
         mockResponse.status,
         normalizedResponseHeaders,
       );
@@ -1469,8 +1469,11 @@ function isInternalAbortError(error: unknown): error is InternalMockAbortError {
   }
 }
 
+/** The message of every abort MockAdapter throws. */
+const MOCK_ABORT_MESSAGE = 'The operation was aborted.';
+
 function throwAbortError(): never {
-  throw makeAbortError('The operation was aborted.');
+  throw makeAbortError(MOCK_ABORT_MESSAGE);
 }
 
 function awaitAbortable<T>(

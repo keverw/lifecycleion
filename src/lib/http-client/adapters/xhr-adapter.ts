@@ -268,6 +268,54 @@ export class XHRAdapter implements HTTPAdapter {
       // with a status. A failure sets the state to done with the status already `0`.
       let answeredAtHeaders: AnsweredHeaders | undefined;
 
+      /**
+       * Stop a send the caller cancelled once it is sent. The answer is read first, before
+       * `abort()`, which resets the status to `0`, where the headers did not report it: a
+       * timeout that lands once the headers are in has a real answer behind it, and
+       * FetchAdapter carries it out on the abort so the client reports a terminal stream
+       * error with that status rather than a retryable plain timeout (or, behind a redirect
+       * the browser followed, the refused redirect; a cancel stays cancelled either way).
+       *
+       * Done already - a cancel from a download progress event the runtime fires once the
+       * response is complete, just before `load` (Chromium flushes its last throttled one
+       * then, where the XHR standard fires it while loading), from an upload event of a
+       * failure, which sets the state to done before its `error`, or within a `send()` that
+       * completes the response - it is ended here, as the cancel over that answer, with no
+       * `abort()` to reset it.
+       *
+       * Each read guarded, as an XHR outside a browser may throw from any of them: the
+       * transfer is still stopped, and the abort is reported with what was read already.
+       */
+      const stopCancelledSend = (): void => {
+        try {
+          captureAnswer();
+        } catch {
+          // Nothing more was read to carry out.
+        }
+
+        let isDone = false;
+        try {
+          isDone = xhr.readyState === 4;
+        } catch {
+          // Stopped as any other.
+        }
+
+        if (isDone) {
+          settleAborted();
+          return;
+        }
+
+        // Guarded too: refused, no `abort` event would follow to end the send.
+        try {
+          xhr.abort();
+        } catch {
+          // Not over an answer already on its way out, which a working `abort()` leaves be.
+          if (!didExceedMaxResponseBytes) {
+            settleAborted();
+          }
+        }
+      };
+
       /** Whether `responseURL` is where the browser followed a redirect to. */
       const isFollowedRedirect = (responseURL: string): boolean =>
         responseURL !== '' &&
@@ -327,6 +375,11 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         const onAbort = (): void => {
+          // Ended already: a listener a signal of the caller's kept past the end.
+          if (didSettle) {
+            return;
+          }
+
           // Not sent yet - a caller's getter read while the request is prepared (a `Blob`'s
           // `size`), or the 0% upload callback, cancelled it: answered here, and never sent.
           if (!didSend) {
@@ -334,43 +387,13 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
-          // Read before `abort()`, which resets the status to `0`, where the headers did
-          // not report it: a timeout that lands once the headers are in has a real answer
-          // behind it, and FetchAdapter carries it out on the abort so the client reports
-          // a terminal stream error with that status rather than a retryable plain timeout
-          // (or, behind a redirect the browser followed, the refused redirect; a cancel
-          // stays cancelled either way).
-          //
-          // Guarded, as an XHR outside a browser may throw from any of these: the transfer
-          // is still stopped, and the abort is reported with what was read already.
-          try {
-            captureAnswer();
-          } catch {
-            // Nothing more was read to carry out.
+          // Once `load` has started it ends the cancel itself, before it reads the body, and
+          // answers a cancel from its final download callback, as FetchAdapter does.
+          if (didLoad) {
+            return;
           }
 
-          // Done already: a cancel from a download progress event the runtime fires once the
-          // response is complete, just before `load` - Chromium flushes its last throttled
-          // one then, where the XHR standard fires it while loading. `abort()` would discard
-          // the body `load` answers with, which a cancel during `load` leaves be, for the
-          // client to sort.
-          try {
-            if (xhr.readyState === 4) {
-              return;
-            }
-          } catch {
-            // Stopped as any other.
-          }
-
-          // Guarded too: refused, no `abort` event would follow to end the send.
-          try {
-            xhr.abort();
-          } catch {
-            // Not over an answer already on its way out, which a working `abort()` leaves be.
-            if (!didLoad && !didExceedMaxResponseBytes) {
-              settleAborted();
-            }
-          }
+          stopCancelledSend();
         };
 
         // Set before the listener is added, which a signal of the caller's own may call at
@@ -806,10 +829,26 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           const { status, headers: responseHeaders } = answer;
-          const body = readResponseBody(method, status, xhr);
 
-          // Before the refusal below, so a refused body sees it too.
-          emitFinalUpload();
+          // Before the body is read, so a refused body sees it too. A cancel from that upload
+          // callback, which `onAbort` leaves to this listener, ends the send as the cancel
+          // over the answer, as FetchAdapter and MockAdapter end one, rather than answering
+          // as though nothing had cancelled it - and before the body is copied for nothing.
+          if (!emitFinalUpload()) {
+            return;
+          }
+
+          if (isSignalAbortedQuietly(signal)) {
+            // With the answer read here, for an XHR that reported none of it before.
+            if (answeredAtHeaders === undefined && status > 0) {
+              answeredAtHeaders = answer;
+            }
+
+            settleAborted();
+            return;
+          }
+
+          const body = readResponseBody(method, status, xhr);
 
           // The server answered and what failed is taking delivery, so a stream error with
           // the real status, as FetchAdapter reports a body it could not read. Left as no
@@ -895,8 +934,8 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
-          // Ended with the answer already where it was acted on as it was read; not where a
-          // cancel read it first, at done (see `onAbort`), leaving the end to `load`.
+          // Ended with the answer already, where it was acted on as it was read: ended here
+          // as on every answered exit all the same.
           if (!emitFinalUpload()) {
             return;
           }
@@ -1053,22 +1092,9 @@ export class XHRAdapter implements HTTPAdapter {
       // `abort()` do nothing and fire no event, so the request went out regardless: stopped
       // now, and ended as the cancel it is if no `abort` event did.
       //
-      // Not once it is done, which `load` answers, as `onAbort` leaves it: an XHR outside a
-      // browser may complete within `send()`.
+      // Stopped as `onAbort` stops one, and ended here where that fired no event.
       if (!didSettle && isSignalAbortedQuietly(signal)) {
-        try {
-          if (xhr.readyState === 4) {
-            return;
-          }
-        } catch {
-          // Stopped as any other.
-        }
-
-        try {
-          xhr.abort();
-        } catch {
-          // Ended below either way.
-        }
+        stopCancelledSend();
 
         if (!didSettle) {
           settleAborted();

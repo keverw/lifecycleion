@@ -2421,6 +2421,102 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     expect(response.body?.length).toBe(0);
   });
 
+  test('empty chunks yield to timers once every so many, not after each one', async () => {
+    const emptyChunks = 640;
+    let reads = 0;
+    let timers = 0;
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('', { status: 200 });
+      Object.defineProperty(response, 'body', {
+        value: {
+          getReader: () => ({
+            read: () => {
+              reads++;
+              return Promise.resolve(
+                reads > emptyChunks
+                  ? { done: true, value: undefined }
+                  : { done: false, value: new Uint8Array(0) },
+              );
+            },
+            cancel: () => Promise.resolve(),
+          }),
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    // A browser holds a timer set from a timer's callback to at least 4 ms past a few
+    // levels, so each wait counts.
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+      timers++;
+      return originalSetTimeout(...args);
+    }) as typeof setTimeout;
+
+    try {
+      await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 10,
+      });
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+
+    // Some waits, so timers still run - but far fewer than one per chunk.
+    expect(timers).toBeGreaterThan(0);
+    expect(timers).toBeLessThan(emptyChunks / 8);
+  });
+
+  test('empty chunks between bytes still yield to timers', async () => {
+    let reads = 0;
+    let timers = 0;
+
+    // Runs of empty chunks, each ended by a byte, from microtasks alone.
+    (globalThis as any).fetch = () => {
+      const response = new Response('', { status: 200 });
+      Object.defineProperty(response, 'body', {
+        value: {
+          getReader: () => ({
+            read: () => {
+              reads++;
+              if (reads > 6_400) {
+                return Promise.resolve({ done: true, value: undefined });
+              }
+              return Promise.resolve({
+                done: false,
+                value: new Uint8Array(reads % 32 === 0 ? 1 : 0),
+              });
+            },
+            cancel: () => Promise.resolve(),
+          }),
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const originalSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+      timers++;
+      return originalSetTimeout(...args);
+    }) as typeof setTimeout;
+
+    try {
+      await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1_000,
+      });
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+
+    expect(timers).toBeGreaterThan(0);
+  });
+
   test.each([
     ['chunks that ignore it', false],
     ['a read that stalls until cancelled', true],

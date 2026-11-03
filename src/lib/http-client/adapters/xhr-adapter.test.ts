@@ -4156,7 +4156,7 @@ test('an abort() that throws from the signal listener still ends the send as the
   expect(outcome.name).toBe('AbortError');
 });
 
-test('a cancel from the final upload event keeps the answer when abort() throws', async () => {
+test('a cancel from the final upload event at load ends as the cancel over the answer when abort() throws', async () => {
   const controller = new AbortController();
   const promise = new XHRAdapter().send({
     requestURL: 'https://local.test/data',
@@ -4178,8 +4178,14 @@ test('a cancel from the final upload event keeps the answer when abort() throws'
   xhr.readyState = 4;
   xhr.status = 200;
   xhr.simulateLoad();
+  const outcome = (await promise.catch((error: unknown) => error)) as Record<
+    PropertyKey,
+    unknown
+  >;
 
-  expect((await promise).status).toBe(200);
+  expect(outcome.name).toBe('AbortError');
+  expect(outcome[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
+  expect(outcome[STREAM_ABORT_STATUS_KEY]).toBe(200);
 });
 
 test('an XHR that runs on after a refused abort reports nothing once the send has ended', async () => {
@@ -4785,12 +4791,7 @@ describe('XHRAdapter - a cancel from the final upload event on an XHR whose abor
       );
       events.push(outcome);
 
-      expect(events).toEqual(
-        eventName === 'progress'
-          ? ['upload 0', 'upload 1', 'rejected AbortError']
-          : // Load keeps its answer for the client to sort, but reports no completion.
-            ['upload 0', 'upload 1', 'resolved 200'],
-      );
+      expect(events).toEqual(['upload 0', 'upload 1', 'rejected AbortError']);
     },
   );
 });
@@ -5113,7 +5114,7 @@ describe('XHRAdapter - a redirect seen at the headers, and a cancel once the res
     expect(downloads).toEqual([{ loaded: 0, progress: 1 }]);
   });
 
-  test('a cancel from a download event fired once the response is done, as Chromium fires its last, leaves load its body', async () => {
+  test('a cancel from a download event fired once the response is done, as Chromium fires its last, ends as the cancel over the answer', async () => {
     const controller = new AbortController();
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
@@ -5138,11 +5139,15 @@ describe('XHRAdapter - a redirect seen at the headers, and a cancel once the res
     xhr.response = new ArrayBuffer(5);
     xhr.simulateDownloadProgress(5, 0);
     xhr.simulateLoad();
-    const response = await promise;
+    const outcome = (await promise.catch((error: unknown) => error)) as Record<
+      PropertyKey,
+      unknown
+    >;
 
+    // Not reset by `abort()` first, so the cancel carries the real status out.
     expect(xhr.abortCalled).toBe(false);
-    expect(response.status).toBe(200);
-    expect((response.body as Uint8Array).length).toBe(5);
+    expect(outcome.name).toBe('AbortError');
+    expect(outcome[STREAM_ABORT_STATUS_KEY]).toBe(200);
   });
 
   test('a download cancelled from its last progress event reports no completion', async () => {
@@ -5165,7 +5170,7 @@ describe('XHRAdapter - a redirect seen at the headers, and a cancel once the res
     xhr.response = new ArrayBuffer(5);
     xhr.simulateDownloadProgress(5, 0);
     xhr.simulateLoad();
-    await promise;
+    await promise.catch(() => undefined);
 
     expect(downloads).toEqual([-1]);
   });
@@ -5382,7 +5387,7 @@ describe('XHRAdapter - a cancel at a followed redirect, and a body declared past
 });
 
 describe('XHRAdapter - the final upload event on an error after the answer', () => {
-  test('an answer a cancel at done read first ends the upload when an error follows', async () => {
+  test('a cancel at done ends the upload, then the send as the cancel over the answer, before an error', async () => {
     const controller = new AbortController();
     const uploads: number[] = [];
     const promise = new XHRAdapter().send({
@@ -5400,9 +5405,13 @@ describe('XHRAdapter - the final upload event on an error after the answer', () 
     xhr.status = 200;
     controller.abort();
     xhr.simulateError();
-    const response = await promise;
+    const outcome = (await promise.catch((error: unknown) => error)) as Record<
+      PropertyKey,
+      unknown
+    >;
 
-    expect(response.streamErrorCode).toBe('stream_response_error');
+    expect(outcome.name).toBe('AbortError');
+    expect(outcome[STREAM_ABORT_STATUS_KEY]).toBe(200);
     expect(uploads).toEqual([0, 1]);
   });
 
@@ -5479,7 +5488,7 @@ describe('XHRAdapter - a cancel while send() reads the body', () => {
 });
 
 describe('XHRAdapter - a cancel during a send() that completes the response', () => {
-  test('leaves the body to load', async () => {
+  test('ends as the cancel over the answer, not reset by abort() first', async () => {
     const controller = new AbortController();
     // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its own receiver, and put back after
     const originalSend = FakeXHR.prototype.send;
@@ -5502,10 +5511,163 @@ describe('XHRAdapter - a cancel during a send() that completes the response', ()
       expect(lastXHR.abortCalled).toBe(false);
 
       lastXHR.simulateLoad();
-      const response = await promise;
+      const outcome = (await promise.catch(
+        (error: unknown) => error,
+      )) as Record<PropertyKey, unknown>;
 
-      expect(response.status).toBe(200);
-      expect((response.body as Uint8Array).length).toBe(3);
+      expect(outcome.name).toBe('AbortError');
+      expect(outcome[STREAM_ABORT_STATUS_KEY]).toBe(200);
+    } finally {
+      FakeXHR.prototype.send = originalSend;
+    }
+  });
+});
+
+describe('XHRAdapter - a cancel once a failure has set the state to done', () => {
+  test('ends as the cancel, not as a network failure', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      signal: controller.signal,
+    });
+    const xhr = lastXHR;
+
+    // The failure's request error steps: done, with the status reset, before its upload
+    // events - one of which the caller cancels from - and then `error`.
+    xhr.readyState = 4;
+    xhr.status = 0;
+    controller.abort();
+    xhr.simulateError();
+    const outcome = await promise.then(
+      (response) => `resolved ${response.status}`,
+      (error: unknown) => `rejected ${(error as Error).name}`,
+    );
+
+    expect(outcome).toBe('rejected AbortError');
+  });
+});
+
+describe('XHRAdapter - a cancel at done from the final upload event of the last download event', () => {
+  test('reports no download progress after the cancel', async () => {
+    const controller = new AbortController();
+    const events: string[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      signal: controller.signal,
+      onUploadProgress: ({ progress }) => {
+        events.push(`upload ${progress}`);
+        if (progress === 1) {
+          controller.abort();
+        }
+      },
+      onDownloadProgress: ({ progress }) => events.push(`download ${progress}`),
+    });
+    const xhr = lastXHR;
+
+    // A shim with no state changes, whose last download event comes once it is done.
+    xhr.readyState = 4;
+    xhr.status = 200;
+    xhr.response = new ArrayBuffer(3);
+    xhr.simulateDownloadProgress(3, 0);
+    xhr.simulateLoad();
+    const outcome = await promise.then(
+      () => 'resolved',
+      (error: unknown) => `rejected ${(error as Error).name}`,
+    );
+
+    expect(events).toEqual(['upload 0', 'upload 1']);
+    expect(outcome).toBe('rejected AbortError');
+  });
+
+  test('a cancel from the final download event at load keeps the answer, as FetchAdapter does', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+      onDownloadProgress: ({ progress }) => {
+        if (progress === 1) {
+          controller.abort();
+        }
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.simulateHeadersReceived(200);
+    xhr.readyState = 4;
+    xhr.response = new ArrayBuffer(3);
+    xhr.simulateLoad();
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+    expect((response.body as Uint8Array).length).toBe(3);
+  });
+});
+
+describe('XHRAdapter - a cancel at done carries the answer however it was read', () => {
+  test('one load reads first carries its status out', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      signal: controller.signal,
+      onUploadProgress: ({ progress }) => {
+        if (progress === 1) {
+          controller.abort();
+        }
+      },
+    });
+    const xhr = lastXHR;
+
+    // An XHR that reports no state at all: `load` is the first to read the answer.
+    (xhr as unknown as { readyState: unknown }).readyState = undefined;
+    xhr.status = 200;
+    xhr.simulateLoad();
+    const outcome = (await promise.catch((error: unknown) => error)) as Record<
+      PropertyKey,
+      unknown
+    >;
+
+    expect(outcome.name).toBe('AbortError');
+    expect(outcome[STREAM_ABORT_STATUS_KEY]).toBe(200);
+  });
+
+  test('a done XHR whose headers cannot be read is not reset by abort()', async () => {
+    const controller = new AbortController();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its own receiver, and put back after
+    const originalSend = FakeXHR.prototype.send;
+    // Completes within `send()`, where the caller cancels, with headers that throw.
+    FakeXHR.prototype.send = function (this: FakeXHR, body) {
+      originalSend.call(this, body);
+      this.readyState = 4;
+      this.status = 200;
+      this.getAllResponseHeaders = () => {
+        throw new Error('unreadable');
+      };
+      controller.abort();
+    };
+
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+      });
+
+      expect(lastXHR.abortCalled).toBe(false);
+      expect(
+        ((await promise.catch((error: unknown) => error)) as Error).name,
+      ).toBe('AbortError');
     } finally {
       FakeXHR.prototype.send = originalSend;
     }

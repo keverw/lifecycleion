@@ -401,6 +401,9 @@ export class FetchAdapter implements HTTPAdapter {
   }
 }
 
+/** How many empty chunks a body read takes between the waits that let timers run. */
+const EMPTY_CHUNKS_PER_YIELD = 64;
+
 /** What {@link readResponseBody} answers for a body over `maxResponseBytes`. */
 const RESPONSE_TOO_LARGE = Symbol('response too large');
 
@@ -610,6 +613,7 @@ async function readBodyWithin(
 ): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
   const chunks: Uint8Array[] = [];
   let loadedBytes = 0;
+  let emptyChunks = 0;
   let encoder: TextEncoder | undefined;
 
   // The body is let go of on an abort, not only when a chunk next arrives: a polyfill's stream need not
@@ -654,11 +658,18 @@ async function readBodyWithin(
 
       // No bytes to count or keep, and no limit they could reach: a stream that keeps
       // answering with them from microtasks alone would otherwise starve every timer, the
-      // attempt timeout's included. `setTimeout`, as this adapter also runs in browsers.
+      // attempt timeout's included. `setTimeout`, as this adapter also runs in browsers -
+      // once every so many of them, counted over the whole body so bytes between them do
+      // not put the wait off, as a browser holds a timer set from a timer's callback to at
+      // least 4 ms past a few levels, which a wait after each one would add up.
       if (byteLength === 0) {
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, 0);
-        });
+        emptyChunks += 1;
+
+        if (emptyChunks % EMPTY_CHUNKS_PER_YIELD === 0) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 0);
+          });
+        }
 
         continue;
       }

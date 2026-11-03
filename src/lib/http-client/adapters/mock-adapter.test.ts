@@ -1149,6 +1149,8 @@ describe('MockAdapter.send() — low-level contract', () => {
     // A cancel over the answer, carried out with it, as the network adapters end one.
     expect(outcome?.name).toBe('AbortError');
     expect(outcome?.[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
+    // Worded as every other abort MockAdapter throws.
+    expect(outcome?.message).toBe('The operation was aborted.');
     expect(download).toEqual([]);
   });
 
