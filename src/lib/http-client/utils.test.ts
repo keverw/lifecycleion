@@ -76,6 +76,16 @@ describe('buildURL', () => {
     expect(buildURL(undefined, path, { p: 1 })).toBe(expected);
   });
 
+  test.each([
+    ['https://a.test/x?', 'https://a.test/x?'],
+    ['https://a.test/x?#', 'https://a.test/x?#'],
+  ])(
+    'keeps an empty query as written when every param is unset: %s',
+    (path, expected) => {
+      expect(buildURL(undefined, path, { page: undefined })).toBe(expected);
+    },
+  );
+
   test('with a base, only a scheme followed by // leaves it', () => {
     for (const path of [
       'http:evil.test/x',

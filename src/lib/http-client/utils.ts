@@ -251,7 +251,8 @@ export function buildURL(
         );
       const added = qs.stringify(snapshot);
       const query = [...kept, ...(added ? [added] : [])].join('&');
-      url = `${basePath}${query ? `?${query}` : ''}${fragment}`;
+      // An empty query the path wrote (`/x?`) is kept as written, as its fragment is.
+      url = `${basePath}${query !== '' || existingQuery === '' ? `?${query}` : ''}${fragment}`;
     }
   }
 
