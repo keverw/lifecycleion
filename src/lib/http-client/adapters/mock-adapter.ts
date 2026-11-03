@@ -857,6 +857,12 @@ export class MockAdapter implements HTTPAdapter {
     // Signal upload complete, then report download size based on serialised body.
     guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
 
+    // A cancel from that callback ends the request, as the network adapters end one over
+    // an answer, rather than resolving it with no download.
+    if (isSignalAborted(signal)) {
+      throwAbortError();
+    }
+
     // A simulated stream error reports no terminal download progress: real
     // adapters fail the body read before that point, so `progress: 1` here would
     // signal a completed download for a body that never arrived.

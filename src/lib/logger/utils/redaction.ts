@@ -190,9 +190,10 @@ export function applyRedaction(
   // lie about. A `Proxy` over a real array whose `length` reads `0` passes `Array.isArray`,
   // spreads to `[]`, and reports a count of zero, so the "nothing was asked for" exit below
   // would hand the caller's params straight back with the very values redaction was asked
-  // to hide. No throw, no marker, no report. `snapshotList` refuses it by the invariant a real array cannot break - an own
-  // index key at or beyond its own `length` - and returns a plain array otherwise, so
-  // everything below reads a snapshot rather than the caller's object.
+  // to hide. No throw, no marker, no report. `snapshotList` refuses it by the invariant a
+  // real array cannot break - an own index key at or beyond its own `length` - and returns
+  // a plain array otherwise, so everything below reads a snapshot rather than the caller's
+  // object.
   let entries: unknown[] | null;
 
   try {

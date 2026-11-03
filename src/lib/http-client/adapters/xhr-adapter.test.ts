@@ -5380,3 +5380,61 @@ describe('XHRAdapter - a cancel at a followed redirect, and a body declared past
     });
   });
 });
+
+describe('XHRAdapter - the final upload event on an error after the answer', () => {
+  test('an answer a cancel at done read first ends the upload when an error follows', async () => {
+    const controller = new AbortController();
+    const uploads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      signal: controller.signal,
+      onUploadProgress: ({ progress }) => uploads.push(progress),
+    });
+    const xhr = lastXHR;
+
+    // A shim with no state changes, done, cancelled before its `error` is dispatched.
+    xhr.readyState = 4;
+    xhr.status = 200;
+    controller.abort();
+    xhr.simulateError();
+    const response = await promise;
+
+    expect(response.streamErrorCode).toBe('stream_response_error');
+    expect(uploads).toEqual([0, 1]);
+  });
+
+  test('an answer first read for the size limit ends the upload when an error follows', async () => {
+    const uploads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      maxResponseBytes: 4,
+      onUploadProgress: ({ progress }) => uploads.push(progress),
+    });
+    const xhr = lastXHR;
+
+    // Headers that cannot be read as the progress event comes in, and can once it is past
+    // the limit.
+    let reads = 0;
+    xhr.getAllResponseHeaders = () => {
+      reads += 1;
+      if (reads === 1) {
+        throw new Error('not yet');
+      }
+      return 'content-encoding: gzip\r\n';
+    };
+    xhr.readyState = 3;
+    xhr.status = 200;
+    xhr.simulateDownloadProgress(10, 0);
+    xhr.simulateError();
+    const response = await promise;
+
+    expect(response.streamErrorCode).toBe('stream_response_error');
+    expect(uploads).toEqual([0, 1]);
+  });
+});

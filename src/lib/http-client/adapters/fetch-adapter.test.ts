@@ -1029,6 +1029,48 @@ describe('FetchAdapter', () => {
     expect(downloadEvents).toEqual([{ loaded: 0, total: 0, progress: 1 }]);
   });
 
+  test.each([
+    ['an opaque redirect', 0, 'opaqueredirect', 'GET', 'resolved'],
+    ['a bodiless answer', 204, 'basic', 'GET', 'rejected AbortError'],
+    ['a HEAD answer', 200, 'basic', 'HEAD', 'rejected AbortError'],
+  ] as const)(
+    'a cancel from the final upload event on %s reports no download completion',
+    async (_label, status, type, method, expected) => {
+      const controller = new AbortController();
+      const downloads: number[] = [];
+
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status,
+          type,
+          headers: new Headers(),
+          body: null,
+        } as Response);
+
+      const outcome = await new FetchAdapter()
+        .send({
+          requestURL: 'https://local.test/users',
+          method,
+          headers: {},
+          signal: controller.signal,
+          onUploadProgress: ({ progress }) => {
+            if (progress === 1) {
+              controller.abort();
+            }
+          },
+          onDownloadProgress: ({ progress }) => downloads.push(progress),
+        })
+        .then(
+          () => 'resolved',
+          (error: unknown) => `rejected ${(error as Error).name}`,
+        );
+
+      // The opaque redirect is the client's to sort from the cancel, as XHRAdapter's is.
+      expect(outcome).toBe(expected);
+      expect(downloads).toEqual([]);
+    },
+  );
+
   test('delegates browser-restricted headers to fetch in browser environments', async () => {
     let isFetchCalled = false;
     let capturedInit: RequestInit | undefined;

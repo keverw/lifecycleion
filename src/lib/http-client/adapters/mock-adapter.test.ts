@@ -1120,6 +1120,33 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(download).toContain(1);
   });
 
+  test('a cancel from the final upload event rejects, with no download completion', async () => {
+    adapter.routes.get('/prog', () => ({ status: 200, body: { x: 1 } }));
+    const controller = new AbortController();
+    const download: number[] = [];
+
+    const outcome = await adapter
+      .send(
+        makeAdapterRequest({
+          requestURL: '/prog',
+          signal: controller.signal,
+          onUploadProgress: ({ progress }) => {
+            if (progress === 1) {
+              controller.abort();
+            }
+          },
+          onDownloadProgress: (e) => download.push(e.progress),
+        }),
+      )
+      .then(
+        () => 'resolved',
+        (error: unknown) => `rejected ${(error as Error).name}`,
+      );
+
+    expect(outcome).toBe('rejected AbortError');
+    expect(download).toEqual([]);
+  });
+
   test('throws AbortError if signal already aborted', async () => {
     adapter.routes.get('/item', () => ({ status: 200 }));
     const controller = new AbortController();

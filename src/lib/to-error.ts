@@ -41,7 +41,8 @@ export function isErrorValue(value: unknown): value is Error {
     // A `DOMException` is accepted beside it, by its own internal state. The proposal
     // has `Error.isError` answer `true` for one, and Node does, but Bun 1.4 answers
     // `false` - and every `AbortError` a fetch or an `AbortSignal` produces is a
-    // `DOMException`, and the client tells a cancellation from a failure by it. Checked through a branded getter rather than `instanceof`, which
+    // `DOMException`, and the client tells a cancellation from a failure by it.
+    // Checked through a branded getter rather than `instanceof`, which
     // `Object.create(DOMException.prototype)` would pass exactly as it passes
     // `instanceof Error`: the `code` accessor throws for a receiver with no
     // `DOMException` state behind it, on Bun and Node alike.

@@ -676,6 +676,30 @@ export class XHRAdapter implements HTTPAdapter {
         }
       };
 
+      /**
+       * The answer, read the first time there is one and acted on as it is (see
+       * `onAnswered`), by every listener that reads it on its way in. A read that throws
+       * captures nothing: the request ends as it would have.
+       */
+      const readAndActOnAnswer = (): AnsweredHeaders | undefined => {
+        if (answeredAtHeaders !== undefined) {
+          return answeredAtHeaders;
+        }
+
+        let answered: AnsweredHeaders | undefined;
+        try {
+          answered = captureAnswer();
+        } catch {
+          return undefined;
+        }
+
+        if (answered !== undefined) {
+          onAnswered(answered);
+        }
+
+        return answered;
+      };
+
       xhr.addEventListener(
         'progress',
         refusingOnThrow((event: ProgressEvent) => {
@@ -694,20 +718,9 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           // Answered by now, for an XHR that reports no change of state too: read once, so
-          // a failure later keeps it, and acted on as it is read. A read that throws
-          // captures nothing, as on `readystatechange`: the request ends as it would have.
-          if (answeredAtHeaders === undefined) {
-            let answered: AnsweredHeaders | undefined;
-            try {
-              answered = captureAnswer();
-            } catch {
-              // Read again where it is needed: past the limit, and on `load`.
-            }
-
-            if (answered !== undefined) {
-              onAnswered(answered);
-            }
-          }
+          // a failure later keeps it. One that cannot be read yet is read again where it
+          // is needed: past the limit, and on `load`.
+          readAndActOnAnswer();
 
           // Ended by that answer, or by a cancel from its upload callback.
           if (didSettle) {
@@ -720,7 +733,13 @@ export class XHRAdapter implements HTTPAdapter {
             event.loaded > maxResponseBytes &&
             isBodyKnownUncoded === undefined
           ) {
-            const answer = captureAnswer() ?? readAnswer();
+            const answer = readAndActOnAnswer() ?? readAnswer();
+
+            // Ended by the answer, read for the first time here.
+            if (didSettle) {
+              return;
+            }
+
             isBodyKnownUncoded = isKnownUncodedBody(answer, answeredURL);
 
             if (isBodyKnownUncoded) {
@@ -750,19 +769,8 @@ export class XHRAdapter implements HTTPAdapter {
       xhr.addEventListener(
         'readystatechange',
         refusingOnThrow(() => {
-          if (didSettle || answeredAtHeaders !== undefined) {
-            return;
-          }
-
-          let answered: AnsweredHeaders | undefined;
-          try {
-            answered = captureAnswer();
-          } catch {
-            return;
-          }
-
-          if (answered !== undefined) {
-            onAnswered(answered);
+          if (!didSettle) {
+            readAndActOnAnswer();
           }
         }, true),
       );
@@ -890,6 +898,13 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
+          // Ended with the answer already where it was acted on as it was read; not where a
+          // cancel read it first, at done (see `onAbort`), leaving the end to `load`.
+          emitFinalUpload();
+          if (didSettle) {
+            return;
+          }
+
           resolve(
             streamErrorAnswer(
               answeredURL,
@@ -926,7 +941,7 @@ export class XHRAdapter implements HTTPAdapter {
         // Already resolved as `response_too_large`; this abort is the adapter's own. Nor
         // once `load` has started: it answers whatever its callbacks then cancel, as a
         // browser's `abort()` on a finished XHR fires no event at all.
-        if (!didExceedMaxResponseBytes && !didLoad) {
+        if (!didSettle && !didExceedMaxResponseBytes && !didLoad) {
           settleAborted();
         }
       });
@@ -948,6 +963,11 @@ export class XHRAdapter implements HTTPAdapter {
 
           // An answer, as on `load`: the upload ended with it, wherever the download got to.
           emitFinalUpload();
+
+          // A cancel from that upload callback ended it already.
+          if (didSettle) {
+            return;
+          }
         }
 
         const abortError = isBrowserTimeout

@@ -303,7 +303,12 @@ export class FetchAdapter implements HTTPAdapter {
       // browser completed the fetch operation. Emit terminal progress so the
       // browser adapters match the server/mock adapters' completion semantics.
       guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
-      guardedDownloadProgress?.(completeProgressEvent(0));
+
+      // Not for a request that callback cancelled, which reports no completion, as a
+      // cancelled download never does: the client sorts the redirect from the cancel.
+      if (!isSignalAbortedQuietly(signal)) {
+        guardedDownloadProgress?.(completeProgressEvent(0));
+      }
 
       return {
         status: 0,
@@ -316,6 +321,17 @@ export class FetchAdapter implements HTTPAdapter {
     // Fire 100% upload progress (fetch has no real per-chunk progress). Download progress
     // fires once the body has been read and passed the limit, below.
     guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+
+    // A cancel from that callback ends the request as a cancel over the answer, as the
+    // body read below ends one, and as NodeAdapter ends it: a bodiless answer has no read
+    // to stop, and would otherwise resolve as though it had not been cancelled.
+    if (isSignalAbortedQuietly(signal)) {
+      throw markResponseStreamAbort(
+        makeAbortError(),
+        status,
+        responseHeadersForBody,
+      );
+    }
 
     let rawBody: Uint8Array | null | typeof RESPONSE_TOO_LARGE;
 
