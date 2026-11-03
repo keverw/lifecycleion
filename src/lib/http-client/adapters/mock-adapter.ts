@@ -493,7 +493,19 @@ export class MockAdapter implements HTTPAdapter {
           throw handlerError;
         }
 
-        const onHandlerError = this.config.onHandlerError;
+        // Read now, as the config is live, and held to the rule the constructor holds an
+        // own value to: a getter that throws, or a value that is no function, is a setup
+        // mistake, refused rather than retried as the adapter's own failure.
+        const onHandlerError = asRouteMistake(() => {
+          const value: unknown = this.config.onHandlerError;
+          if (!isNullish(value) && typeof value !== 'function') {
+            throw new TypeError(
+              `MockAdapter onHandlerError must be a function (got ${describeValue(value)})`,
+            );
+          }
+          return value as
+            MockAdapterConfig['onHandlerError'] | null | undefined;
+        });
         if (onHandlerError) {
           responseSource = 'onHandlerError';
           try {

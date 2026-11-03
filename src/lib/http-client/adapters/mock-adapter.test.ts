@@ -715,6 +715,34 @@ describe('MockAdapter via HTTPClient', () => {
     expect(reads).toBe(1);
   });
 
+  test.each([
+    [
+      'throws',
+      () => {
+        throw new Error('config unreadable');
+      },
+      /config unreadable/,
+    ],
+    ['answers no function', () => 'not a function', /must be a function/],
+  ])(
+    'an onHandlerError getter that %s is refused as non-retryable',
+    async (_label, read, message) => {
+      const config = {};
+      Object.defineProperty(config, 'onHandlerError', { get: read });
+      const getterAdapter = new MockAdapter(config);
+      getterAdapter.routes.get('/test', () => {
+        throw new Error('route failed');
+      });
+
+      const outcome = (await getterAdapter
+        .send(makeAdapterRequest())
+        .catch((error: unknown) => error)) as Record<PropertyKey, unknown>;
+
+      expect(String(outcome.message)).toMatch(message);
+      expect(outcome[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    },
+  );
+
   test('default delay updates on the original config remain live', async () => {
     const config = { defaultDelay: 0 };
     const liveAdapter = new MockAdapter(config);
