@@ -33,6 +33,7 @@ import {
   hasResponseBody,
   isIdentityContentEncoding,
   tooLargeAnswer,
+  streamErrorAnswer,
   parseContentLength,
 } from '../internal/response-limit';
 import type {
@@ -344,17 +345,16 @@ export class FetchAdapter implements HTTPAdapter {
       // Redirect detection is reported the same way as on the success path: the
       // headers arrived, so a 3xx here still knows where it was pointing, and a
       // truncated body must not lose the target an intact one would report.
-      return {
+      //
+      // The body is only collected here, never written out, so there is no local write to
+      // fail: what reaches here is a failed transfer or a chunk `readBodyWithin` refused.
+      return streamErrorAnswer(
+        dispatchedURL,
         status,
-        ...derivedRedirectFields(dispatchedURL, status, responseHeadersForBody),
-        headers: responseHeadersForBody,
-        body: null,
-        isStreamError: true,
-        // The body is only collected here, never written out, so there is no local write
-        // to fail: what reaches here is a failed transfer or a chunk `readBodyWithin` refused.
-        streamErrorCode: 'stream_response_error',
-        errorCause: normalizeError(error),
-      };
+        responseHeadersForBody,
+        'stream_response_error',
+        normalizeError(error),
+      );
     }
 
     // A body over the limit fails as a stream error with the real status, as a body that

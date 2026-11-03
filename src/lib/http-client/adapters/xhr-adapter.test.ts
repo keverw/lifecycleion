@@ -5172,7 +5172,7 @@ describe('XHRAdapter - a redirect seen at the headers, and a cancel once the res
 });
 
 describe('XHRAdapter - one way to end at a followed redirect, and a hidden timeout tag', () => {
-  test('a redirect first seen by an abort ends its download at 0 bytes, as every followed redirect does', async () => {
+  test('a redirect first seen by a cancel is reported, with no download completion', async () => {
     const controller = new AbortController();
     const downloads: Array<{ loaded: number; progress: number }> = [];
     const promise = new XHRAdapter().send({
@@ -5195,10 +5195,11 @@ describe('XHRAdapter - one way to end at a followed redirect, and a hidden timeo
     const response = await promise;
 
     expect(response.wasRedirectDetected).toBe(true);
-    expect(downloads).toEqual([{ loaded: 0, progress: 1 }]);
+    // The client sorts the redirect from the cancel; a cancelled download completes for no one.
+    expect(downloads).toEqual([]);
   });
 
-  test('a redirect first seen by an error after a cancel at done ends its download at 0 bytes', async () => {
+  test('a redirect first seen by an error after a cancel at done is reported, with no download completion', async () => {
     const controller = new AbortController();
     const downloads: Array<{ loaded: number; progress: number }> = [];
     const promise = new XHRAdapter().send({
@@ -5226,7 +5227,8 @@ describe('XHRAdapter - one way to end at a followed redirect, and a hidden timeo
     const response = await promise;
 
     expect(response.wasRedirectDetected).toBe(true);
-    expect(downloads).toEqual([{ loaded: 0, progress: 1 }]);
+    // The client sorts the redirect from the cancel; a cancelled download completes for no one.
+    expect(downloads).toEqual([]);
   });
 
   test('a redirect first seen by the size limit ends its download at 0 bytes', async () => {
@@ -5271,5 +5273,110 @@ describe('XHRAdapter - one way to end at a followed redirect, and a hidden timeo
 
     expect(outcome[XHR_BROWSER_TIMEOUT_FLAG]).toBe(true);
     expect(Object.keys(outcome)).not.toContain(XHR_BROWSER_TIMEOUT_FLAG);
+  });
+});
+
+describe('XHRAdapter - a cancel at a followed redirect, and a body declared past the limit', () => {
+  test('a cancel from the final upload event at a followed redirect reports no download completion', async () => {
+    const controller = new AbortController();
+    const events: string[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      signal: controller.signal,
+      onUploadProgress: (event) => {
+        events.push(`upload ${event.progress}`);
+        if (event.progress === 1) {
+          controller.abort();
+        }
+      },
+      onDownloadProgress: (event) => {
+        events.push(`download ${event.progress}`);
+      },
+    });
+    const xhr = lastXHR;
+
+    // An `abort()` that fires `abort` at once, as a browser's does once the headers are in.
+    xhr.abort = () => {
+      xhr.simulateAbort();
+    };
+    xhr.responseURL = 'https://api.test/elsewhere';
+    xhr.simulateHeadersReceived(200);
+    const response = await promise;
+
+    // The redirect, for the client to sort from the cancel, as a cancel over any answer.
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(events).toEqual(['upload 0', 'upload 1']);
+  });
+
+  test('a same-origin body whose Content-Length is past the limit is refused as its headers arrive', async () => {
+    const response = await withPageOrigin('https://api.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 4,
+      });
+
+      lastXHR.simulateHeadersReceived(200, 'content-length: 10\r\n');
+      expect(lastXHR.abortCalled).toBe(true);
+      return await promise;
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.streamErrorCode).toBe('response_too_large');
+  });
+
+  test.each([
+    [
+      'a compressed body',
+      'GET',
+      200,
+      'content-encoding: gzip\r\ncontent-length: 10\r\n',
+    ],
+    ['a HEAD answer', 'HEAD', 200, 'content-length: 10\r\n'],
+    ['a 304', 'GET', 304, 'content-length: 10\r\n'],
+    ['a body within the limit', 'GET', 200, 'content-length: 4\r\n'],
+  ] as const)(
+    '%s is not refused on its Content-Length',
+    async (_label, method, status, headers) => {
+      await withPageOrigin('https://api.test', async () => {
+        const promise = new XHRAdapter().send({
+          requestURL: 'https://api.test/data',
+          method,
+          headers: {},
+          maxResponseBytes: 4,
+        });
+
+        lastXHR.simulateHeadersReceived(status, headers);
+        expect(lastXHR.abortCalled).toBe(false);
+
+        lastXHR.readyState = 4;
+        lastXHR.response = new ArrayBuffer(0);
+        lastXHR.simulateLoad();
+        await promise;
+      });
+    },
+  );
+
+  test('a cross-origin body with no exposed coding is not refused on its Content-Length', async () => {
+    await withPageOrigin('https://app.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 4,
+      });
+
+      lastXHR.simulateHeadersReceived(200, 'content-length: 10\r\n');
+      expect(lastXHR.abortCalled).toBe(false);
+
+      lastXHR.readyState = 4;
+      lastXHR.response = new ArrayBuffer(0);
+      lastXHR.simulateLoad();
+      await promise;
+    });
   });
 });

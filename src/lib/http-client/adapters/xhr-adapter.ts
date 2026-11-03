@@ -29,6 +29,8 @@ import {
   tooLargeAnswer,
   hasResponseBody,
   isIdentityContentEncoding,
+  parseContentLength,
+  streamErrorAnswer,
 } from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
@@ -551,6 +553,16 @@ export class XHRAdapter implements HTTPAdapter {
         return;
       }
 
+      // The final download event, the only one at 100%. Not for a download cancelled
+      // already, which reports no completion - from its last progress event, which a
+      // runtime may fire once the response is complete, or from the final upload event,
+      // whose cancel can reach a redirect's settle again through the `abort` event.
+      const reportDownloadComplete = (bytes: number): void => {
+        if (!isSignalAbortedQuietly(signal)) {
+          reportDownload?.(completeProgressEvent(bytes));
+        }
+      };
+
       /**
        * End the send at a redirect the browser followed, as soon as it is seen: the client
        * refuses it whatever the page it led to, so that page is not downloaded nor held -
@@ -566,7 +578,7 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        reportDownload?.(completeProgressEvent(0));
+        reportDownloadComplete(0);
         resolve(browserRedirectResponse(redirectURL));
 
         try {
@@ -620,6 +632,50 @@ export class XHRAdapter implements HTTPAdapter {
         }
       };
 
+      /**
+       * Act on the answer as it is first read: a redirect the browser followed ends the send, and
+       * any other ends the upload - and the send too, for a body whose `Content-Length`
+       * says up front it is past `maxResponseBytes`, as FetchAdapter refuses one before
+       * reading it, so it is not downloaded first. Only where that length counts the body
+       * itself (see `isKnownUncodedBody`), and only for an answer with a body: a `HEAD`'s
+       * `Content-Length` is the `GET`'s.
+       */
+      const onAnswered = (answer: AnsweredHeaders): void => {
+        if (answer.redirectURL !== undefined) {
+          settleFollowedRedirect(answer.redirectURL);
+          return;
+        }
+
+        emitFinalUpload();
+
+        // A cancel from that upload callback may have ended the send.
+        if (
+          didSettle ||
+          !Number.isFinite(maxResponseBytes) ||
+          !hasResponseBody(method, answer.status)
+        ) {
+          return;
+        }
+
+        const declaredLength = parseContentLength(
+          answer.headers['content-length'],
+        );
+
+        if (
+          declaredLength === undefined ||
+          declaredLength <= maxResponseBytes
+        ) {
+          return;
+        }
+
+        // The same decision the download's bytes would come to (see `isBodyKnownUncoded`).
+        isBodyKnownUncoded = isKnownUncodedBody(answer, answeredURL);
+
+        if (isBodyKnownUncoded) {
+          refuseTooLargeBody(answer);
+        }
+      };
+
       xhr.addEventListener(
         'progress',
         refusingOnThrow((event: ProgressEvent) => {
@@ -638,26 +694,22 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           // Answered by now, for an XHR that reports no change of state too: read once, so
-          // a failure later keeps it, and the upload ended with it. A read that throws
+          // a failure later keeps it, and acted on as it is read. A read that throws
           // captures nothing, as on `readystatechange`: the request ends as it would have.
-          let answered: AnsweredHeaders | undefined;
-          try {
-            answered = captureAnswer();
-          } catch {
-            // Read again where it is needed: past the limit, and on `load`.
-          }
-
-          if (answered !== undefined) {
-            const redirectURL = answered.redirectURL;
-            if (redirectURL !== undefined) {
-              settleFollowedRedirect(redirectURL);
-              return;
+          if (answeredAtHeaders === undefined) {
+            let answered: AnsweredHeaders | undefined;
+            try {
+              answered = captureAnswer();
+            } catch {
+              // Read again where it is needed: past the limit, and on `load`.
             }
 
-            emitFinalUpload();
+            if (answered !== undefined) {
+              onAnswered(answered);
+            }
           }
 
-          // A cancel from that upload callback may have ended the send.
+          // Ended by that answer, or by a cancel from its upload callback.
           if (didSettle) {
             return;
           }
@@ -690,34 +742,30 @@ export class XHRAdapter implements HTTPAdapter {
 
       // --- Headers received ---
 
-      // The answer, read as its headers arrive (see `answeredAtHeaders`). It also ends the
-      // upload, as it does in FetchAdapter, so its final event fires here, before any
-      // download progress. A read that throws captures nothing; the request ends as it
-      // would have.
-      xhr.addEventListener('readystatechange', () => {
-        if (didSettle || answeredAtHeaders !== undefined) {
-          return;
-        }
+      // The answer, read as its headers arrive (see `answeredAtHeaders`), and acted on (see
+      // `onAnswered`). It ends the upload, as it does in FetchAdapter, so its final event
+      // fires here, before any download progress. A read that throws captures nothing; the
+      // request ends as it would have. A throw from acting on it is refused, as on
+      // `progress`.
+      xhr.addEventListener(
+        'readystatechange',
+        refusingOnThrow(() => {
+          if (didSettle || answeredAtHeaders !== undefined) {
+            return;
+          }
 
-        let answered: AnsweredHeaders | undefined;
-        try {
-          answered = captureAnswer();
-        } catch {
-          return;
-        }
+          let answered: AnsweredHeaders | undefined;
+          try {
+            answered = captureAnswer();
+          } catch {
+            return;
+          }
 
-        if (answered === undefined) {
-          return;
-        }
-
-        const redirectURL = answered.redirectURL;
-        if (redirectURL !== undefined) {
-          settleFollowedRedirect(redirectURL);
-          return;
-        }
-
-        emitFinalUpload();
-      });
+          if (answered !== undefined) {
+            onAnswered(answered);
+          }
+        }, true),
+      );
 
       // --- Load (success) ---
 
@@ -762,17 +810,17 @@ export class XHRAdapter implements HTTPAdapter {
           // the real status, as FetchAdapter reports a body it could not read. Left as no
           // body, an XHR that kept it elsewhere would read as a healthy empty answer.
           if (body === RESPONSE_UNREADABLE) {
-            resolve({
-              status,
-              ...derivedRedirectFields(answeredURL, status, responseHeaders),
-              headers: responseHeaders,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: new TypeError(
-                'XHRAdapter response body was neither an ArrayBuffer nor text',
+            resolve(
+              streamErrorAnswer(
+                answeredURL,
+                status,
+                responseHeaders,
+                'stream_response_error',
+                new TypeError(
+                  'XHRAdapter response body was neither an ArrayBuffer nor text',
+                ),
               ),
-            });
+            );
             return;
           }
 
@@ -792,12 +840,8 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
-          // The final download event, the only one at 100%: the body's own size. Not for a
-          // download cancelled already - from its last progress event, which a runtime may
-          // fire once the response is complete - which reports no completion.
-          if (!isSignalAbortedQuietly(signal)) {
-            reportDownload?.(completeProgressEvent(body?.length ?? 0));
-          }
+          // The final download event: the body's own size.
+          reportDownloadComplete(body?.length ?? 0);
 
           // A 3xx the browser did not follow - one with no `Location` - or one handed over
           // by an XHR outside a browser is reported as a redirect, as FetchAdapter reports
@@ -846,15 +890,15 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
-          resolve({
-            status,
-            ...derivedRedirectFields(answeredURL, status, answeredHeaders),
-            headers: answeredHeaders,
-            body: null,
-            isStreamError: true,
-            streamErrorCode: 'stream_response_error',
-            errorCause: new Error('XHR network error'),
-          });
+          resolve(
+            streamErrorAnswer(
+              answeredURL,
+              status,
+              answeredHeaders,
+              'stream_response_error',
+              new Error('XHR network error'),
+            ),
+          );
           return;
         }
 
@@ -873,7 +917,9 @@ export class XHRAdapter implements HTTPAdapter {
       // than an unexpected abort (non-retryable cancel). One after the headers carries
       // the answer out, as a timeout from the client's own timer does (see `onAbort`).
       xhr.addEventListener('timeout', () => {
-        settleAborted(true);
+        if (!didSettle) {
+          settleAborted(true);
+        }
       });
 
       xhr.addEventListener('abort', () => {

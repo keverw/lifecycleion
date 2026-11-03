@@ -96,14 +96,35 @@ export function tooLargeAnswer(
   headers: Record<string, string | string[]>,
   maxResponseBytes: number,
 ): AdapterResponse {
+  return streamErrorAnswer(
+    answeredURL,
+    status,
+    headers,
+    'response_too_large',
+    makeResponseTooLargeError(maxResponseBytes, false),
+  );
+}
+
+/**
+ * The answer a browser adapter gives when the server answered and what failed is taking
+ * delivery of the body: a stream error with the real status and headers, and the redirect
+ * fields that status and `Location` carry, resolved against `answeredURL`.
+ */
+export function streamErrorAnswer(
+  answeredURL: string,
+  status: number,
+  headers: Record<string, string | string[]>,
+  streamErrorCode: NonNullable<AdapterResponse['streamErrorCode']>,
+  errorCause: Error,
+): AdapterResponse {
   return {
     status,
     ...derivedRedirectFields(answeredURL, status, headers),
     headers,
     body: null,
     isStreamError: true,
-    streamErrorCode: 'response_too_large',
-    errorCause: makeResponseTooLargeError(maxResponseBytes, false),
+    streamErrorCode,
+    errorCause,
   };
 }
 
