@@ -2420,11 +2420,14 @@ export class BaseHTTPClient {
       // `range` and the conditional headers are kept as well: they say which part or
       // version of the resource is wanted, not who is asking, and a resumed download sent
       // to a CDN without its `range` gets the whole body back.
+      //
+      // Copied as every record handed on is (see `copyHeaderRecord`): no array of the
+      // request that just ran is shared with the next hop's.
       for (const [key, value] of Object.entries(request.headers)) {
         const lower = lowerCaseHeaderName(key);
 
         if (CROSS_ORIGIN_SAFE_HEADERS.has(lower)) {
-          safeHeaders[lower] = value;
+          safeHeaders[lower] = copyArrayValue(value);
         }
       }
 
@@ -2432,8 +2435,9 @@ export class BaseHTTPClient {
     } else {
       // Same-origin: keep the headers from the request that just ran.
       // If a cookie jar is configured, the next attempt rebuilds `Cookie`
-      // from the jar during request materialization, making the jar authoritative.
-      headers = { ...request.headers };
+      // from the jar during request materialization, making the jar authoritative. Copied
+      // as above.
+      headers = copyHeaderRecord(request.headers);
     }
 
     if (

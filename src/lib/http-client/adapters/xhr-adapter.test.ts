@@ -5673,3 +5673,26 @@ describe('XHRAdapter - a cancel at done carries the answer however it was read',
     }
   });
 });
+
+describe("XHRAdapter - the adapter's own abort after a refused body", () => {
+  test('is not reported as a cancel when its abort event fires at once', async () => {
+    const response = await withPageOrigin('https://api.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 4,
+      });
+      const xhr = lastXHR;
+
+      xhr.abort = () => {
+        xhr.abortCalled = true;
+        xhr.simulateAbort();
+      };
+      xhr.simulateHeadersReceived(200, 'content-length: 10\r\n');
+      return await promise;
+    });
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+  });
+});

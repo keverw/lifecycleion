@@ -249,9 +249,6 @@ export class XHRAdapter implements HTTPAdapter {
       // Both read by the abort listener, so declared before it is added: a caller's getter
       // read before the send (a `Blob`'s `size`) may abort the signal at once.
       //
-      // Set when this adapter aborted the XHR itself over a body past `maxResponseBytes`,
-      // so the `abort` event that follows is not reported as a cancel.
-      let didExceedMaxResponseBytes = false;
       // Set as `load` starts, which answers whatever a progress callback then cancels.
       let didLoad = false;
       // Set as the request is handed to `send()`. Until then `xhr.abort()` does nothing and
@@ -301,7 +298,7 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         if (isDone) {
-          settleAborted();
+          settleAborted(answeredAtHeaders);
           return;
         }
 
@@ -309,10 +306,7 @@ export class XHRAdapter implements HTTPAdapter {
         try {
           xhr.abort();
         } catch {
-          // Not over an answer already on its way out, which a working `abort()` leaves be.
-          if (!didExceedMaxResponseBytes) {
-            settleAborted();
-          }
+          settleAborted(answeredAtHeaders);
         }
       };
 
@@ -632,12 +626,11 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        // Before the flag, so a cancel from that upload callback ends the send as the cancel.
+        // A cancel from that upload callback ends the send as the cancel.
         if (!emitFinalUpload()) {
           return;
         }
 
-        didExceedMaxResponseBytes = true;
         resolve(
           tooLargeAnswer(
             answeredURL,
@@ -839,12 +832,11 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           if (isSignalAbortedQuietly(signal)) {
-            // With the answer read here, for an XHR that reported none of it before.
-            if (answeredAtHeaders === undefined && status > 0) {
-              answeredAtHeaders = answer;
-            }
-
-            settleAborted();
+            // With the answer read here, for an XHR that reported none of it before - an
+            // answer only with a status.
+            settleAborted(
+              answeredAtHeaders ?? (status > 0 ? answer : undefined),
+            );
             return;
           }
 
@@ -968,16 +960,16 @@ export class XHRAdapter implements HTTPAdapter {
       // the answer out, as a timeout from the client's own timer does (see `onAbort`).
       xhr.addEventListener('timeout', () => {
         if (!didSettle) {
-          settleAborted(true);
+          settleAborted(answeredAtHeaders, true);
         }
       });
 
       xhr.addEventListener('abort', () => {
-        // Already resolved as `response_too_large`; this abort is the adapter's own. Nor
-        // once `load` has started: it answers whatever its callbacks then cancel, as a
-        // browser's `abort()` on a finished XHR fires no event at all.
-        if (!didSettle && !didExceedMaxResponseBytes && !didLoad) {
-          settleAborted();
+        // Already settled - a `response_too_large` or a followed redirect, whose abort is the
+        // adapter's own. Nor once `load` has started: it answers whatever its callbacks then
+        // cancel, as a browser's `abort()` on a finished XHR fires no event at all.
+        if (!didSettle && !didLoad) {
+          settleAborted(answeredAtHeaders);
         }
       });
 
@@ -985,10 +977,18 @@ export class XHRAdapter implements HTTPAdapter {
        * End the send on an abort, or on a timeout the runtime's XHR fired itself: over an
        * answer, with it carried out (behind a redirect the browser followed, the redirect).
        * Whether it came from the signal or not - a browser aborts a request whose page is
-       * leaving - the client sorts it: a cancel stays cancelled.
+       * leaving - the client sorts it: a cancel stays cancelled. `answer` is the one the
+       * caller has, `undefined` for none: told explicitly, so no caller hands over another
+       * by omission. Once the send has settled - its own `abort()` after an answer - it
+       * does nothing.
        */
-      function settleAborted(isBrowserTimeout = false): void {
-        const answer = answeredAtHeaders;
+      function settleAborted(
+        answer: AnsweredHeaders | undefined,
+        isBrowserTimeout = false,
+      ): void {
+        if (didSettle) {
+          return;
+        }
 
         if (answer !== undefined) {
           if (answer.redirectURL !== undefined) {
@@ -1097,7 +1097,7 @@ export class XHRAdapter implements HTTPAdapter {
         stopCancelledSend();
 
         if (!didSettle) {
-          settleAborted();
+          settleAborted(answeredAtHeaders);
         }
       }
     };

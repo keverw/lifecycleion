@@ -10811,3 +10811,33 @@ describe('a caller signal this runtime did not make', () => {
     expect(attempts).toBe(0);
   });
 });
+
+describe('HTTPClient — redirect hop header copies', () => {
+  test.each([
+    ['a same-origin', 'https://a.test/next', 'x-tag'],
+    ['a cross-origin', 'https://b.test/next', 'if-none-match'],
+  ])(
+    '%s hop shares no header array with the request that just ran',
+    (_label, nextURL, name) => {
+      const sanitize = Reflect.get(
+        HTTPClient.prototype,
+        '_sanitizeRedirectRequest',
+      ) as (...args: unknown[]) => { headers: Record<string, unknown> };
+      const values = ['"a"', '"b"'];
+      const client = new HTTPClient({ adapter: new MockAdapter() });
+
+      const next = Reflect.apply(sanitize, client, [
+        {
+          requestURL: nextURL,
+          method: 'GET',
+          headers: { [name]: values },
+          body: undefined,
+        },
+        { fromURL: 'https://a.test/start' },
+      ]);
+
+      expect(next.headers[name]).toEqual(values);
+      expect(next.headers[name]).not.toBe(values);
+    },
+  );
+});
