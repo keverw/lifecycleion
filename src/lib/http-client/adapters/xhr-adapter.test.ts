@@ -118,12 +118,6 @@ class FakeXHR {
     }
   }
 
-  public simulateLoadEnd() {
-    for (const h of this.handlers['loadend'] ?? []) {
-      h(new Event('loadend'));
-    }
-  }
-
   public simulateError() {
     for (const h of this.handlers['error'] ?? []) {
       h(new Event('error'));
@@ -930,44 +924,31 @@ describe('XHRAdapter', () => {
     });
   });
 
-  test('a browser-followed redirect of unknown length reports the bytes read as its total', async () => {
-    const downloads: Array<{ loaded: number; total: number }> = [];
+  test('a browser-followed redirect ends its download at 0 bytes, as no body is handed over', async () => {
+    const downloads: Array<{
+      loaded: number;
+      total: number;
+      progress: number;
+    }> = [];
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/start',
       method: 'GET',
       headers: {},
       onDownloadProgress: (event) => {
-        downloads.push({ loaded: event.loaded, total: event.total });
+        downloads.push(event);
       },
     });
 
-    lastXHR.simulateDownloadProgress(5000, 0);
-    lastXHR.status = 200;
-    lastXHR.responseURL = 'https://api.test/elsewhere';
-    lastXHR.response = textBody('ok');
-    lastXHR.simulateLoad();
-    await promise;
-
-    expect(downloads.at(-1)).toEqual({ loaded: 5000, total: 5000 });
-
-    // A known length the last throttled event fell short of: the length, for both.
-    const known: Array<{ loaded: number; total: number }> = [];
-    const second = new XHRAdapter().send({
-      requestURL: 'https://api.test/start',
-      method: 'GET',
-      headers: {},
-      onDownloadProgress: (event) => {
-        known.push({ loaded: event.loaded, total: event.total });
-      },
-    });
+    // The runtime's count is of the page it followed to.
     lastXHR.simulateDownloadProgress(4000, 5000);
     lastXHR.status = 200;
     lastXHR.responseURL = 'https://api.test/elsewhere';
     lastXHR.response = textBody('ok');
     lastXHR.simulateLoad();
-    await second;
+    const response = await promise;
 
-    expect(known.at(-1)).toEqual({ loaded: 5000, total: 5000 });
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(downloads.at(-1)).toEqual({ loaded: 0, total: 0, progress: 1 });
   });
 
   test('an unset header value is not sent as "null", and a Headers is refused', async () => {
@@ -1609,7 +1590,7 @@ describe('XHRAdapter', () => {
     ).toBe(true);
   });
 
-  test('audit: a signal that throws on removal does not throw out of loadend', async () => {
+  test('a signal that throws on removal does not throw out of the settle', async () => {
     const controller = new AbortController();
     const signal = controller.signal;
     signal.removeEventListener = () => {
@@ -1624,8 +1605,7 @@ describe('XHRAdapter', () => {
 
     lastXHR.status = 200;
     lastXHR.response = textBody('ok');
-    lastXHR.simulateLoad();
-    expect(() => lastXHR.simulateLoadEnd()).not.toThrow();
+    expect(() => lastXHR.simulateLoad()).not.toThrow();
     expect((await promise).status).toBe(200);
   });
 
@@ -4996,5 +4976,84 @@ describe('XHRAdapter - shims, early cancels and odd sizes', () => {
     const outcome = (await promise.catch((error: unknown) => error)) as Error;
 
     expect(outcome.name).toBe('AbortError');
+  });
+});
+
+describe('XHRAdapter - totals, listener removal and a send cancelled as it throws', () => {
+  test('an upload total the runtime marks not computable does not reach the final event', async () => {
+    const uploads: Array<{ loaded: number; total: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      onUploadProgress: ({ loaded, total }) => {
+        uploads.push({ loaded, total });
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.upload.dispatch('progress', {
+      loaded: 3,
+      total: 1_000_000,
+      lengthComputable: false,
+    });
+    xhr.status = 200;
+    xhr.simulateLoad();
+    await promise;
+
+    expect(uploads.at(-1)).toEqual({ loaded: 3, total: 3 });
+  });
+
+  test('the abort listener leaves the signal as the send settles, with no loadend', async () => {
+    const listeners = new Set<unknown>();
+    const signal = {
+      aborted: false,
+      addEventListener(_type: string, listener: unknown) {
+        listeners.add(listener);
+      },
+      removeEventListener(_type: string, listener: unknown) {
+        listeners.delete(listener);
+      },
+    };
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      signal: signal as unknown as AbortSignal,
+    });
+
+    expect(listeners.size).toBe(1);
+    lastXHR.status = 200;
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(listeners.size).toBe(0);
+  });
+
+  test('a send that throws as the request is cancelled ends as the cancel', async () => {
+    const controller = new AbortController();
+    const realSend = Object.getOwnPropertyDescriptor(FakeXHR.prototype, 'send');
+    FakeXHR.prototype.send = () => {
+      controller.abort();
+      throw new Error('send refused');
+    };
+
+    try {
+      const outcome = (await new XHRAdapter()
+        .send({
+          requestURL: 'https://api.test/data',
+          method: 'GET',
+          headers: {},
+          signal: controller.signal,
+        })
+        .catch((error: unknown) => error)) as Error;
+
+      expect(outcome.name).toBe('AbortError');
+    } finally {
+      if (realSend) {
+        Object.defineProperty(FakeXHR.prototype, 'send', realSend);
+      }
+    }
   });
 });

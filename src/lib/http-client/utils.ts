@@ -23,7 +23,7 @@ import {
   lowerCaseHeaderName,
   presentHeaderValue,
 } from './internal/header-utils';
-import { normalizeDomain } from '../domain-utils/domain-utils';
+import { normalizeDomain, safeParseURL } from '../domain-utils/domain-utils';
 import {
   checkDNSLength,
   compileWildcardPattern,
@@ -1855,11 +1855,7 @@ export function matchesFilter(
   let parsedRequestURL: URL | null | undefined;
   const readRequestURL = (): URL | null => {
     if (parsedRequestURL === undefined) {
-      try {
-        parsedRequestURL = new URL(requestURL ?? '');
-      } catch {
-        parsedRequestURL = null;
-      }
+      parsedRequestURL = safeParseURL(requestURL ?? '');
     }
 
     return parsedRequestURL;

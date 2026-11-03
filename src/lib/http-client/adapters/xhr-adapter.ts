@@ -21,6 +21,7 @@ import {
 } from '../internal/adapter-error';
 import {
   isSignalAborted,
+  isSignalAbortedQuietly,
   readAdapterRequestFields,
 } from '../internal/request-fields';
 import {
@@ -133,14 +134,18 @@ export class XHRAdapter implements HTTPAdapter {
       // stopped, may keep firing events: once the send has settled, the listeners below
       // call none of the caller's callbacks, so nothing reaches them after the request
       // ended - nor alongside a retry's.
+      // A settle also takes the abort listener off the caller's signal: nothing is left for
+      // it to stop, and an XHR outside a browser may fire no `loadend` to take it off.
       let didSettle = false;
       const resolve = (response: AdapterResponse): void => {
         didSettle = true;
         resolveSend(response);
+        removeAbortListener();
       };
       const reject = (reason: unknown): void => {
         didSettle = true;
         rejectSend(reason);
+        removeAbortListener();
       };
 
       // The caller's progress callbacks, called only while the send is pending: the one
@@ -325,7 +330,6 @@ export class XHRAdapter implements HTTPAdapter {
           // Not sent yet - a caller's getter read while the request is prepared (a `Blob`'s
           // `size`), or the 0% upload callback, cancelled it: answered here, and never sent.
           if (!didSend) {
-            removeAbortListener();
             reject(makeAbortError());
             return;
           }
@@ -357,12 +361,10 @@ export class XHRAdapter implements HTTPAdapter {
         };
 
         // Set before the listener is added, which a signal of the caller's own may call at
-        // once. And removed when the request ends any other way. `once` only fires on
-        // abort, so on a long-lived shared signal - one controller over a whole
-        // page session - every completed request would leave its listener behind,
+        // once. And removed as the send settles (see `resolve`), however it ends. `once`
+        // only fires on abort, so on a long-lived shared signal - one controller over a
+        // whole page session - every completed request would leave its listener behind,
         // one per request, until the signal finally aborted or was collected.
-        // `loadend` fires after load, error, timeout and abort alike - and a send
-        // that throws, which fires none of them, removes it itself.
         removeAbortListener = () => {
           // Guarded: a signal of the caller's own that throws on removal would throw out
           // of this listener, as an uncaught exception.
@@ -385,7 +387,12 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        xhr.addEventListener('loadend', removeAbortListener);
+        // Answered already by a signal that called the listener as it was added, and
+        // took the listener after: off it now.
+        if (didSettle) {
+          removeAbortListener();
+          return;
+        }
       }
 
       // --- Upload progress ---
@@ -454,8 +461,6 @@ export class XHRAdapter implements HTTPAdapter {
           try {
             listener(event);
           } catch (error) {
-            removeAbortListener();
-
             if (isOnAnswer) {
               emitFinalUpload();
             }
@@ -504,8 +509,10 @@ export class XHRAdapter implements HTTPAdapter {
                 didFireUpload100 = true;
               }
 
-              uploadedBytes = Math.max(uploadedBytes, event.loaded);
-              uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
+              // The reported total, which stands for the bytes so far where the runtime's
+              // is not a length (see `readProgressEvent`).
+              uploadedBytes = Math.max(uploadedBytes, reported.loaded);
+              uploadTotalBytes = Math.max(uploadTotalBytes, reported.total);
 
               reportUpload?.(reported);
             }, false),
@@ -520,18 +527,15 @@ export class XHRAdapter implements HTTPAdapter {
                 return;
               }
 
-              uploadedBytes = Math.max(uploadedBytes, event.loaded);
-              uploadTotalBytes = Math.max(
-                uploadTotalBytes,
-                event.total || event.loaded,
-              );
+              const reported = readProgressEvent(event);
+              uploadedBytes = Math.max(uploadedBytes, reported.loaded);
+              uploadTotalBytes = Math.max(uploadTotalBytes, reported.total);
 
               emitFinalUpload();
             }, false),
           );
         }
       } catch (error) {
-        removeAbortListener();
         refuse(error);
         return;
       }
@@ -541,8 +545,6 @@ export class XHRAdapter implements HTTPAdapter {
       // Real per-chunk download progress. Same advantage over FetchAdapter:
       // FetchAdapter buffers the full response body before firing any progress,
       // so it can only ever report 0% then 100%.
-      let downloadedBytes = 0;
-      let downloadTotalBytes = 0;
 
       // Whether the bytes progress counts are the body's own (see `isKnownUncodedBody`):
       // read once, when they first pass the limit.
@@ -627,9 +629,6 @@ export class XHRAdapter implements HTTPAdapter {
 
           const reported = readProgressEvent(event);
 
-          downloadedBytes = Math.max(downloadedBytes, event.loaded);
-          downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
-
           // The one `progress: 1` is `load`'s, with the body's own size: the runtime's 100%
           // may be of an encoded `Content-Length` (Firefox, React Native count a compressed
           // body encoded), which the body itself then differs from.
@@ -695,13 +694,9 @@ export class XHRAdapter implements HTTPAdapter {
             // response.
             emitFinalUpload();
 
-            // One number for both, as on every other path: the bytes counted where the
-            // length was unknown, the length where the last throttled event fell short.
-            reportDownload?.(
-              completeProgressEvent(
-                Math.max(downloadedBytes, downloadTotalBytes),
-              ),
-            );
+            // No body is handed over for it, so `0` bytes, as FetchAdapter reports its
+            // opaque redirect: the runtime's count is of the page it followed to.
+            reportDownload?.(completeProgressEvent(0));
 
             resolve(browserRedirectResponse(redirectURL));
             return;
@@ -894,13 +889,11 @@ export class XHRAdapter implements HTTPAdapter {
           isAborted = isSignalAborted(signal);
         } catch (error) {
           // The caller's signal, refused as at the start.
-          removeAbortListener();
           refuse(error);
           return true;
         }
 
         if (isAborted) {
-          removeAbortListener();
           reject(makeAbortError());
         }
 
@@ -920,16 +913,20 @@ export class XHRAdapter implements HTTPAdapter {
       // The send itself, guarded. An asynchronous `send()` throws only an
       // `InvalidStateError` or a body it cannot convert (a `toString` that throws, a
       // detached buffer) - network failures arrive as events - and either fails the same
-      // way on every attempt, so it is refused as non-retryable. Never sent, the request
-      // fires no `loadend` to take the abort listener off the signal, so that is done here.
+      // way on every attempt, so it is refused as non-retryable - unless the request was
+      // cancelled as it was handed over, which stays the cancel, as FetchAdapter keeps one
+      // that lands while `fetch` dispatches.
       try {
         didSend = true;
         // A `string`, a `Uint8Array` (a BufferSource) and a `FormData` are all
         // `XMLHttpRequestBodyInit`: the cast is safe for the bodies the client produces.
         xhr.send(requestBody as XMLHttpRequestBodyInit | null);
       } catch (error) {
-        removeAbortListener();
-        refuse(error);
+        if (isSignalAbortedQuietly(signal)) {
+          reject(makeAbortError());
+        } else {
+          refuse(error);
+        }
       }
     };
 
