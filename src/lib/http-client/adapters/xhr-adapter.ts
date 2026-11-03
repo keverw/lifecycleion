@@ -227,6 +227,15 @@ export class XHRAdapter implements HTTPAdapter {
         return;
       }
 
+      // Both read by the abort listener, so declared before it is added: a caller's getter
+      // read before the send (a `Blob`'s `size`) may abort the signal at once.
+      //
+      // Set when this adapter aborted the XHR itself over a body past `maxResponseBytes`,
+      // so the `abort` event that follows is not reported as a cancel.
+      let didExceedMaxResponseBytes = false;
+      // Set as `load` starts, which answers whatever a progress callback then cancels.
+      let didLoad = false;
+
       // --- Abort signal ---
       //
       // Check for pre-aborted signal before calling xhr.send — if we called
@@ -460,11 +469,6 @@ export class XHRAdapter implements HTTPAdapter {
       let downloadedBytes = 0;
       let downloadTotalBytes = 0;
 
-      // Set when this adapter aborted the XHR itself over a body past `maxResponseBytes`,
-      // so the `abort` event that follows is not reported as a cancel.
-      let didExceedMaxResponseBytes = false;
-      // Set as `load` starts, which answers whatever a progress callback then cancels.
-      let didLoad = false;
       // Whether the bytes progress counts are the body's own (see `isKnownUncodedBody`):
       // read once, when they first pass the limit.
       let isBodyKnownUncoded: boolean | undefined;

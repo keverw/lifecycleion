@@ -433,9 +433,7 @@ async function readResponseBody(
       ? answered.type !== 'cors'
       : isIdentityContentEncoding(contentEncoding);
   const declaredLength = isIdentityEncoded
-    ? parseContentLength(
-        scalarHeader(answered.headers, 'content-length') ?? null,
-      )
+    ? parseContentLength(answered.headers['content-length'])
     : undefined;
 
   if (declaredLength !== undefined && declaredLength > maxResponseBytes) {
@@ -496,7 +494,12 @@ async function readResponseBody(
   );
 }
 
-/** The body through `arrayBuffer()`, with `body` (as already read) let go of on an abort. */
+/**
+ * The body through `arrayBuffer()`, with `body` (as already read) let go of on an abort.
+ * That reaches a polyfill's Node `Readable`, which `arrayBuffer()` does not lock. A web
+ * stream it has locked refuses the cancel: native `fetch` ends that read through its own
+ * signal, and a polyfill that does not heed it reads on.
+ */
 async function readWholeBody(
   response: Response,
   body: unknown,

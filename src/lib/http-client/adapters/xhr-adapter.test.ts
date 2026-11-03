@@ -4186,3 +4186,36 @@ test('a refused answer still ends the upload with its final event', async () => 
 
   expect(uploads).toEqual([0, 1]);
 });
+
+test('a cancel from a getter read before the send ends the send as the abort when abort() throws', async () => {
+  const controller = new AbortController();
+  const blob = new Blob(['abc']);
+  Object.defineProperty(blob, 'size', {
+    get() {
+      controller.abort();
+      return 3;
+    },
+  });
+  const realAbort = Object.getOwnPropertyDescriptor(FakeXHR.prototype, 'abort');
+  FakeXHR.prototype.abort = () => {
+    throw new Error('abort refused');
+  };
+
+  try {
+    const outcome = (await new XHRAdapter()
+      .send({
+        requestURL: 'https://local.test/data',
+        method: 'POST',
+        headers: {},
+        // A `Blob` from a caller driving the adapter directly, which sizes it.
+        body: blob as unknown as AdapterRequest['body'],
+        signal: controller.signal,
+        onUploadProgress: () => {},
+      })
+      .catch((error: unknown) => error)) as Error;
+
+    expect(outcome.name).toBe('AbortError');
+  } finally {
+    Object.defineProperty(FakeXHR.prototype, 'abort', realAbort!);
+  }
+});
