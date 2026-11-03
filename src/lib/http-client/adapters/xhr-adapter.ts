@@ -21,7 +21,6 @@ import {
 } from '../internal/adapter-error';
 import {
   isSignalAborted,
-  isSignalAbortedQuietly,
   readAdapterRequestFields,
 } from '../internal/request-fields';
 import {
@@ -542,11 +541,6 @@ export class XHRAdapter implements HTTPAdapter {
       // Real per-chunk download progress. Same advantage over FetchAdapter:
       // FetchAdapter buffers the full response body before firing any progress,
       // so it can only ever report 0% then 100%.
-      // Deduplication guard — when Content-Length is known and the final
-      // progress chunk reaches 100%, xhr.load would otherwise fire it again.
-      let didFireDownload100 = false;
-      /** The `loaded` of the last download event reported. */
-      let lastDownloadLoaded = 0;
       let downloadedBytes = 0;
       let downloadTotalBytes = 0;
 
@@ -633,16 +627,15 @@ export class XHRAdapter implements HTTPAdapter {
 
           const reported = readProgressEvent(event);
 
-          // Whether the last event reported 100%, not whether any did: a compressed body
-          // counted decoded can reach its encoded length partway and count on past it, and
-          // `load` then reports the whole body.
-          didFireDownload100 = reported.progress === 1;
-          lastDownloadLoaded = event.loaded;
-
           downloadedBytes = Math.max(downloadedBytes, event.loaded);
           downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
 
-          reportDownload?.(reported);
+          // The one `progress: 1` is `load`'s, with the body's own size: the runtime's 100%
+          // may be of an encoded `Content-Length` (Firefox, React Native count a compressed
+          // body encoded), which the body itself then differs from.
+          if (reported.progress !== 1) {
+            reportDownload?.(reported);
+          }
         }, true),
       );
 
@@ -702,12 +695,13 @@ export class XHRAdapter implements HTTPAdapter {
             // response.
             emitFinalUpload();
 
-            if (!didFireDownload100) {
-              // One number for both, as on every other path: the bytes counted where the
-              // length was unknown, the length where the last throttled event fell short.
-              const bytes = Math.max(downloadedBytes, downloadTotalBytes);
-              reportDownload?.(completeProgressEvent(bytes));
-            }
+            // One number for both, as on every other path: the bytes counted where the
+            // length was unknown, the length where the last throttled event fell short.
+            reportDownload?.(
+              completeProgressEvent(
+                Math.max(downloadedBytes, downloadTotalBytes),
+              ),
+            );
 
             resolve(browserRedirectResponse(redirectURL));
             return;
@@ -753,14 +747,8 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
-          // Final 100% download progress — skip if a progress event already fired exactly
-          // 100% of the body itself. A runtime that counts a compressed body encoded reaches
-          // 100% of the encoded `Content-Length`, so the body's own size still follows -
-          // fewer bytes than that event's, for a body that took more bytes encoded.
-          const bodyBytes = body?.length ?? 0;
-          if (!didFireDownload100 || lastDownloadLoaded !== bodyBytes) {
-            reportDownload?.(completeProgressEvent(bodyBytes));
-          }
+          // The final download event, the only one at 100%: the body's own size.
+          reportDownload?.(completeProgressEvent(body?.length ?? 0));
 
           // A 3xx the browser did not follow - one with no `Location` - or one handed over
           // by an XHR outside a browser is reported as a redirect, as FetchAdapter reports
@@ -894,34 +882,47 @@ export class XHRAdapter implements HTTPAdapter {
       //
       // Nor for one cancelled already, as FetchAdapter reports none for a request aborted
       // at dispatch: answered by the abort listener (see `didSend`), or by a signal that
-      // reads aborted without telling its listeners.
-      if (didSettle || isSignalAbortedQuietly(signal)) {
-        removeAbortListener();
-        reject(makeAbortError());
+      // reads aborted without telling its listeners. Asked again after the 0% callback,
+      // which may cancel, so the request is not sent once it is.
+      const endedBeforeSend = (): boolean => {
+        if (didSettle) {
+          return true;
+        }
+
+        let isAborted: boolean;
+        try {
+          isAborted = isSignalAborted(signal);
+        } catch (error) {
+          // The caller's signal, refused as at the start.
+          removeAbortListener();
+          refuse(error);
+          return true;
+        }
+
+        if (isAborted) {
+          removeAbortListener();
+          reject(makeAbortError());
+        }
+
+        return isAborted;
+      };
+
+      if (endedBeforeSend()) {
         return;
       }
 
       reportUpload?.({ loaded: 0, total: 0, progress: 0 });
 
-      // Not sent once cancelled - from the 0% upload callback above, answered by the abort
-      // listener - nor for a signal aborted without telling its listeners.
-      //
-      // And the send itself, guarded. An asynchronous `send()` throws only an
+      if (endedBeforeSend()) {
+        return;
+      }
+
+      // The send itself, guarded. An asynchronous `send()` throws only an
       // `InvalidStateError` or a body it cannot convert (a `toString` that throws, a
       // detached buffer) - network failures arrive as events - and either fails the same
       // way on every attempt, so it is refused as non-retryable. Never sent, the request
       // fires no `loadend` to take the abort listener off the signal, so that is done here.
       try {
-        if (didSettle) {
-          return;
-        }
-
-        if (isSignalAborted(signal)) {
-          removeAbortListener();
-          reject(makeAbortError());
-          return;
-        }
-
         didSend = true;
         // A `string`, a `Uint8Array` (a BufferSource) and a `FormData` are all
         // `XMLHttpRequestBodyInit`: the cast is safe for the bodies the client produces.

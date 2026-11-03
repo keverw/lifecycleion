@@ -3962,15 +3962,68 @@ describe('XHRAdapter - progress past the declared length', () => {
     lastXHR.simulateLoad();
     await promise;
 
-    expect(downloadEvents.every((e) => e.progress <= 1)).toBe(true);
-    expect(downloadEvents[2]).toEqual({
-      loaded: 40960,
-      total: 40960,
-      progress: -1,
-    });
-    expect(downloadEvents.slice(3)).toEqual([
+    // The runtime's 100% partway is not reported: the one `progress: 1` is load's.
+    expect(downloadEvents).toEqual([
+      { loaded: 5120, total: 10240, progress: 0.5 },
+      { loaded: 40960, total: 40960, progress: -1 },
       { loaded: 40960, total: 40960, progress: 1 },
     ]);
+  });
+
+  test.each(['too large at load', 'an error', 'a cancel'] as const)(
+    'a download ending in %s after the runtime reported 100% reports no progress: 1',
+    async (ending) => {
+      const controller = new AbortController();
+      const downloads: number[] = [];
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 10,
+        signal: controller.signal,
+        onDownloadProgress: ({ progress }) => {
+          downloads.push(progress);
+        },
+      });
+      const xhr = lastXHR;
+
+      xhr.simulateHeadersReceived(200, 'content-encoding: gzip\r\n');
+      xhr.readyState = 3;
+      xhr.simulateDownloadProgress(4, 4);
+      if (ending === 'too large at load') {
+        xhr.readyState = 4;
+        xhr.response = new ArrayBuffer(20);
+        xhr.simulateLoad();
+      } else if (ending === 'an error') {
+        xhr.simulateNetworkFailure('error');
+      } else {
+        controller.abort();
+        xhr.simulateAbort();
+      }
+      await promise.catch(() => {});
+
+      expect(downloads).toEqual([]);
+    },
+  );
+
+  test('a body counted encoded to 100% reports one final event, the body size', async () => {
+    const downloads: Array<{ loaded: number; progress: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      onDownloadProgress: ({ loaded, progress }) => {
+        downloads.push({ loaded, progress });
+      },
+    });
+
+    lastXHR.simulateDownloadProgress(1000, 1000);
+    lastXHR.status = 200;
+    lastXHR.response = new ArrayBuffer(4000);
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(downloads).toEqual([{ loaded: 4000, progress: 1 }]);
   });
 
   test('an upload counted past its reported total reports an unknown length', async () => {
@@ -4841,6 +4894,39 @@ describe('XHRAdapter - shims, early cancels and odd sizes', () => {
       .catch((error: unknown) => error)) as Error;
 
     expect(outcome.name).toBe('AbortError');
+    expect(uploads).toEqual([]);
+    expect(lastXHR.sentBody).toBeNull();
+  });
+
+  test('a signal whose aborted getter throws once the request is prepared is refused with no upload start', async () => {
+    const uploads: number[] = [];
+    let reads = 0;
+    const signal = {
+      get aborted(): boolean {
+        reads++;
+        if (reads > 1) {
+          throw new Error('aborted unreadable');
+        }
+        return false;
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    };
+
+    const outcome = (await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/data',
+        method: 'POST',
+        headers: {},
+        body: 'abc',
+        signal: signal as unknown as AbortSignal,
+        onUploadProgress: (event) => {
+          uploads.push(event.progress);
+        },
+      })
+      .catch((error: unknown) => error)) as Record<string, unknown>;
+
+    expect(outcome[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     expect(uploads).toEqual([]);
     expect(lastXHR.sentBody).toBeNull();
   });
