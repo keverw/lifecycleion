@@ -303,15 +303,9 @@ export class MockAdapter implements HTTPAdapter {
     // A function or nothing: anything else would fail each route error as a reported
     // `onHandlerError` failure and a 500, rather than once, here. An own data value only,
     // read by descriptor: a getter is read when a route fails, as the config is live.
-    const onHandlerError: unknown = Object.getOwnPropertyDescriptor(
-      this.config,
-      'onHandlerError',
-    )?.value;
-    if (!isNullish(onHandlerError) && typeof onHandlerError !== 'function') {
-      throw new TypeError(
-        `MockAdapter onHandlerError must be a function (got ${describeValue(onHandlerError)})`,
-      );
-    }
+    assertOnHandlerError(
+      Object.getOwnPropertyDescriptor(this.config, 'onHandlerError')?.value,
+    );
     resolveTimeoutMS(this.config.defaultDelay, 0, 'MockAdapter defaultDelay');
 
     this.router = Router({
@@ -496,16 +490,9 @@ export class MockAdapter implements HTTPAdapter {
         // Read now, as the config is live, and held to the rule the constructor holds an
         // own value to: a getter that throws, or a value that is no function, is a setup
         // mistake, refused rather than retried as the adapter's own failure.
-        const onHandlerError = asRouteMistake(() => {
-          const value: unknown = this.config.onHandlerError;
-          if (!isNullish(value) && typeof value !== 'function') {
-            throw new TypeError(
-              `MockAdapter onHandlerError must be a function (got ${describeValue(value)})`,
-            );
-          }
-          return value as
-            MockAdapterConfig['onHandlerError'] | null | undefined;
-        });
+        const onHandlerError = asRouteMistake(() =>
+          assertOnHandlerError(this.config.onHandlerError),
+        );
         if (onHandlerError) {
           responseSource = 'onHandlerError';
           try {
@@ -1606,6 +1593,19 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
       throw nonRetryableAdapterErrorFrom(error);
     }
   });
+}
+
+/** `value` as an `onHandlerError` setting: a function or nothing, else a `TypeError`. */
+function assertOnHandlerError(
+  value: unknown,
+): MockAdapterConfig['onHandlerError'] | null | undefined {
+  if (!isNullish(value) && typeof value !== 'function') {
+    throw new TypeError(
+      `MockAdapter onHandlerError must be a function (got ${describeValue(value)})`,
+    );
+  }
+
+  return value as MockAdapterConfig['onHandlerError'] | null | undefined;
 }
 
 /**

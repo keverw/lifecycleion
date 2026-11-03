@@ -227,3 +227,13 @@ test("a getter's strategy refuses the other strategy's fields, read once", () =>
   ).toThrow(/factor/);
   expect(reads).toBe(1);
 });
+
+test('a misspelled field is named ahead of a bad value beside it', () => {
+  expect(() =>
+    snapshotRetryPolicyOptions({
+      strategy: 'exponential',
+      maxRetryAttemps: 5,
+      factor: Number.NaN,
+    } as unknown as RetryPolicyOptions),
+  ).toThrow(/maxRetryAttemps/);
+});

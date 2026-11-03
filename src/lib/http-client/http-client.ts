@@ -2066,9 +2066,8 @@ export class BaseHTTPClient {
             // own stall bound - unless `timeout: 0` turns that off, as it does the
             // per-attempt timer, when an adapter that never settles holds the hop until
             // the caller cancels. Raced against the cancel signal so a caller who gives up
-            // is not held for it. Only the
-            // adapter's word is waited on: a hop that threw has no socket left to wait
-            // for.
+            // is not held for it. Only the adapter's word is waited on: a hop that threw
+            // has no socket left to wait for.
             if (adapterResponse.requestBodySettled !== undefined) {
               const wait = await settleUploadBeforeNextDispatch(
                 adapterResponse.requestBodySettled,

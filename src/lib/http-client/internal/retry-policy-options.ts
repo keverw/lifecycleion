@@ -20,6 +20,11 @@ const EXPONENTIAL_FIELDS = fieldNames<RetryPolicyOptionsStrategyExponential>({
   maxTimeoutMS: true,
   dispersion: true,
 });
+/** Either strategy's: the fields checked before the strategy is known. */
+const ANY_STRATEGY_FIELDS = [
+  ...new Set([...FIXED_FIELDS, ...EXPONENTIAL_FIELDS]),
+];
+
 /** The fields a policy of `strategy` - as `RetryPolicy` resolved it - may hold. */
 function retryPolicyFields(
   strategy: RetryPolicyOptions['strategy'],
@@ -36,14 +41,16 @@ export function snapshotRetryPolicyOptions(
   if (validatedSnapshots.has(options)) {
     return options;
   }
-  // Normalized policies contain only primitive fields. Brand only our frozen
-  // copies, so inheritance can reuse them without trusting mutable caller data.
-  // Built first, so the fields are checked against the strategy it resolved - read once,
-  // a getter's included - and an unknown strategy is its to refuse.
-  const snapshot = Object.freeze(new RetryPolicy(options).policyInfo);
   // A misspelled field (`maxRetryAttemps: 5`, meant to raise the limit), or the other
   // strategy's (`delayMS` on an exponential policy), would be read as absent and the
-  // default applied.
+  // default applied. One that neither strategy takes is refused first, before a value
+  // is read, so a typo is named ahead of a bad value beside it.
+  assertKnownFields(options, ANY_STRATEGY_FIELDS, 'HTTPClient retryPolicy');
+  // Normalized policies contain only primitive fields. Brand only our frozen
+  // copies, so inheritance can reuse them without trusting mutable caller data.
+  // Built before the other strategy's fields are refused, so they are checked against the
+  // strategy it resolved - read once, a getter's included.
+  const snapshot = Object.freeze(new RetryPolicy(options).policyInfo);
   assertKnownFields(
     options,
     retryPolicyFields(snapshot.strategy),
