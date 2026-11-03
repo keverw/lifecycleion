@@ -2160,12 +2160,12 @@ describe('XHRAdapter', () => {
 
     lastXHR.simulateDownloadProgress(1024, 1024); // fires exactly 100%
     lastXHR.status = 200;
-    lastXHR.response = textBody('ok');
+    lastXHR.response = new ArrayBuffer(1024);
     lastXHR.simulateLoad();
 
     await promise;
 
-    // load handler sees didFireDownload100 = true and skips — exactly one 100%
+    // The last event reported the whole body, so load skips its own — exactly one 100%
     expect(events).toEqual([1]);
   });
 
@@ -4546,5 +4546,135 @@ describe('XHRAdapter - the answer read once', () => {
 
     expect(outcome[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     expect(xhr.abortCalled).toBe(true);
+  });
+});
+
+describe('XHRAdapter - a download counted encoded, and an XHR with no state changes', () => {
+  test('the final download event is the body size after a compressed body counted encoded', async () => {
+    const downloads: Array<{ loaded: number; progress: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      onDownloadProgress: ({ loaded, progress }) => {
+        downloads.push({ loaded, progress });
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.simulateHeadersReceived(200, 'content-encoding: gzip\r\n');
+    xhr.readyState = 3;
+    xhr.simulateDownloadProgress(500, 1000);
+    xhr.simulateDownloadProgress(1000, 1000);
+    xhr.readyState = 4;
+    xhr.response = new ArrayBuffer(5000);
+    xhr.simulateLoad();
+    await promise;
+
+    expect(downloads.at(-1)).toEqual({ loaded: 5000, progress: 1 });
+  });
+
+  test('a body reported whole is not reported again', async () => {
+    const downloads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      onDownloadProgress: ({ loaded }) => {
+        downloads.push(loaded);
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.simulateHeadersReceived(200);
+    xhr.readyState = 3;
+    xhr.simulateDownloadProgress(10, 10);
+    xhr.readyState = 4;
+    xhr.response = new ArrayBuffer(10);
+    xhr.simulateLoad();
+    await promise;
+
+    expect(downloads).toEqual([10]);
+  });
+
+  test('an XHR with no state changes ends the upload before its first download event', async () => {
+    const events: string[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+      onUploadProgress: (event) => {
+        events.push(`upload ${event.progress}`);
+      },
+      onDownloadProgress: (event) => {
+        events.push(`download ${event.progress}`);
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.readyState = 3;
+    xhr.status = 200;
+    xhr.simulateDownloadProgress(5, 10);
+    xhr.readyState = 4;
+    xhr.response = new ArrayBuffer(10);
+    xhr.simulateLoad();
+    await promise;
+
+    expect(events).toEqual([
+      'upload 0',
+      'upload 1',
+      'download 0.5',
+      'download 1',
+    ]);
+  });
+
+  test('a header read that throws until the body is in does not fail the download', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+    const xhr = lastXHR;
+    const readHeaders = xhr.getAllResponseHeaders.bind(xhr);
+
+    xhr.status = 200;
+    xhr.getAllResponseHeaders = () => {
+      if (xhr.readyState < 4) {
+        throw new Error('not yet');
+      }
+      return readHeaders();
+    };
+    xhr.readyState = 3;
+    xhr.simulateDownloadProgress(2, 0);
+    xhr.readyState = 4;
+    xhr.response = new ArrayBuffer(2);
+    xhr.simulateLoad();
+
+    expect((await promise).status).toBe(200);
+  });
+
+  test('an XHR with no state changes keeps the answer its download reported through an error', async () => {
+    const uploads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+      onUploadProgress: (event) => {
+        uploads.push(event.progress);
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.readyState = 3;
+    xhr.status = 200;
+    xhr.simulateDownloadProgress(5, 0);
+    xhr.simulateNetworkFailure('error');
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+    expect(response.streamErrorCode).toBe('stream_response_error');
+    expect(uploads).toEqual([0, 1]);
   });
 });

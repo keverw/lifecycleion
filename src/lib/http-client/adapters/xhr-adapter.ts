@@ -515,6 +515,8 @@ export class XHRAdapter implements HTTPAdapter {
       // Deduplication guard — when Content-Length is known and the final
       // progress chunk reaches 100%, xhr.load would otherwise fire it again.
       let didFireDownload100 = false;
+      /** The `loaded` of the last download event reported. */
+      let lastDownloadLoaded = 0;
       let downloadedBytes = 0;
       let downloadTotalBytes = 0;
 
@@ -563,6 +565,17 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
+          // Answered by now, for an XHR that reports no change of state too: read once, so
+          // a failure later keeps it, and the upload ended with it. A read that throws
+          // captures nothing, as on `readystatechange`: the request ends as it would have.
+          try {
+            if (captureAnswer() !== undefined) {
+              emitFinalUpload();
+            }
+          } catch {
+            // Read again where it is needed: past the limit, and on `load`.
+          }
+
           // Decided once: a body known uncoded is refused at once, and one that is not is
           // left to `load`.
           if (
@@ -588,6 +601,7 @@ export class XHRAdapter implements HTTPAdapter {
           // counted decoded can reach its encoded length partway and count on past it, and
           // `load` then reports the whole body.
           didFireDownload100 = reported.progress === 1;
+          lastDownloadLoaded = event.loaded;
 
           downloadedBytes = Math.max(downloadedBytes, event.loaded);
           downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
@@ -703,10 +717,13 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
-          // Final 100% download progress — skip if a progress event already
-          // fired exactly 100% (Content-Length known and final chunk completed it).
-          if (!didFireDownload100) {
-            guardedDownloadProgress?.(completeProgressEvent(body?.length ?? 0));
+          // Final 100% download progress — skip if a progress event already fired exactly
+          // 100% of the body itself. A runtime that counts a compressed body encoded reaches
+          // 100% of the encoded `Content-Length`, so the body's own size still follows -
+          // fewer bytes than that event's, for a body that took more bytes encoded.
+          const bodyBytes = body?.length ?? 0;
+          if (!didFireDownload100 || lastDownloadLoaded !== bodyBytes) {
+            guardedDownloadProgress?.(completeProgressEvent(bodyBytes));
           }
 
           // A 3xx the browser did not follow - one with no `Location` - or one handed over
