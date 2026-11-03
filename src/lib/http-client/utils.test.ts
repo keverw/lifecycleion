@@ -88,6 +88,16 @@ describe('buildURL', () => {
     },
   );
 
+  test.each([
+    ['https://a.test/x?', { c: {} }],
+    ['https://a.test/x?a=1&&b=2', { c: [] }],
+  ])(
+    'keeps the query as written for an empty param the path does not have: %s',
+    (path, params) => {
+      expect(buildURL(undefined, path, params)).toBe(path);
+    },
+  );
+
   test('with a base, only a scheme followed by // leaves it', () => {
     for (const path of [
       'http:evil.test/x',

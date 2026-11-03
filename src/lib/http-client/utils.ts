@@ -244,17 +244,17 @@ export function buildURL(
           .filter((key) => isGivenParam(snapshot[key]))
           .map(topLevelKeyOf),
       );
-      const kept = existingQuery
-        .split('&')
-        .filter(
-          (pair) => pair !== '' && !overridden.has(topLevelQueryKey(pair)),
-        );
+      const pairs = existingQuery.split('&').filter((pair) => pair !== '');
+      const kept = pairs.filter(
+        (pair) => !overridden.has(topLevelQueryKey(pair)),
+      );
       const added = qs.stringify(snapshot);
 
-      // Params that add nothing and override nothing - each one unset - leave the URL as
-      // written, its query included: an empty one (`/x?`) or empty pairs (`?a=1&&b=2`),
-      // which a signed URL's signature covers.
-      if (added !== '' || overridden.size > 0) {
+      // Params that add nothing and replace no pair of the path's - each unset, or given
+      // empty for a key the path does not have - leave the URL as written, its query
+      // included: an empty one (`/x?`) or empty pairs (`?a=1&&b=2`), which a signed URL's
+      // signature covers.
+      if (added !== '' || kept.length < pairs.length) {
         const query = [...kept, ...(added ? [added] : [])].join('&');
         url = `${basePath}${query ? `?${query}` : ''}${fragment}`;
       }

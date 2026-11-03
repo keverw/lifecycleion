@@ -661,7 +661,9 @@ async function readBodyWithin(
       // attempt timeout's included. `setTimeout`, as this adapter also runs in browsers -
       // once every so many of them, counted over the whole body so bytes between them do
       // not put the wait off, as a browser holds a timer set from a timer's callback to at
-      // least 4 ms past a few levels, which a wait after each one would add up.
+      // least 4 ms past a few levels, which a wait after each one would add up. Chunks
+      // with bytes need none: the limit ends them, and a wait on every so many of a real
+      // download's would hold it on a timer a hidden tab throttles to a second or more.
       if (byteLength === 0) {
         emptyChunks += 1;
 

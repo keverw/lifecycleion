@@ -959,16 +959,15 @@ export class XHRAdapter implements HTTPAdapter {
       // than an unexpected abort (non-retryable cancel). One after the headers carries
       // the answer out, as a timeout from the client's own timer does (see `onAbort`).
       xhr.addEventListener('timeout', () => {
-        if (!didSettle) {
-          settleAborted(answeredAtHeaders, true);
-        }
+        settleAborted(answeredAtHeaders, true);
       });
 
       xhr.addEventListener('abort', () => {
-        // Already settled - a `response_too_large` or a followed redirect, whose abort is the
-        // adapter's own. Nor once `load` has started: it answers whatever its callbacks then
-        // cancel, as a browser's `abort()` on a finished XHR fires no event at all.
-        if (!didSettle && !didLoad) {
+        // Not once `load` has started: it answers whatever its callbacks then cancel, as a
+        // browser's `abort()` on a finished XHR fires no event at all. One after the send
+        // has settled - the adapter's own, after a `response_too_large` or a followed
+        // redirect - `settleAborted` ignores.
+        if (!didLoad) {
           settleAborted(answeredAtHeaders);
         }
       });
@@ -1095,10 +1094,7 @@ export class XHRAdapter implements HTTPAdapter {
       // Stopped as `onAbort` stops one, and ended here where that fired no event.
       if (!didSettle && isSignalAbortedQuietly(signal)) {
         stopCancelledSend();
-
-        if (!didSettle) {
-          settleAborted(answeredAtHeaders);
-        }
+        settleAborted(answeredAtHeaders);
       }
     };
 
