@@ -87,6 +87,20 @@ export function knownBodyByteLength(body: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * A progress event for `loaded` bytes of `total`. Where `total` is unknown (`0`) or already
+ * passed, `progress` is `-1`, the "length unknown" callers read, and `total` the bytes so
+ * far, so an event never reports a total of zero or a share past the whole.
+ */
+export function byteProgressEvent(
+  loaded: number,
+  total: number,
+): { loaded: number; total: number; progress: number } {
+  return total > 0 && loaded <= total
+    ? { loaded, total, progress: loaded / total }
+    : { loaded, total: loaded, progress: -1 };
+}
+
 /** The terminal progress event for a transfer of `byteLength` bytes, or of unknown size. */
 export function completeProgressEvent(byteLength: number | undefined): {
   loaded: number;

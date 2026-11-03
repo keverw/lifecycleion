@@ -8,6 +8,7 @@ import { asciiUppercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import {
+  byteProgressEvent,
   completeProgressEvent,
   knownBodyByteLength,
 } from '../internal/progress';
@@ -405,16 +406,16 @@ export class XHRAdapter implements HTTPAdapter {
               return;
             }
 
-            const { progress, total } = readProgressEvent(event);
+            const reported = readProgressEvent(event);
 
-            if (progress === 1) {
+            if (reported.progress === 1) {
               didFireUpload100 = true;
             }
 
             uploadedBytes = Math.max(uploadedBytes, event.loaded);
             uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
 
-            guardedUploadProgress?.({ loaded: event.loaded, total, progress });
+            guardedUploadProgress?.(reported);
           });
 
           upload.addEventListener('load', (event) => {
@@ -507,8 +508,10 @@ export class XHRAdapter implements HTTPAdapter {
           // body has been buffered - when the bytes counted are the body's own. For a
           // compressed body `loaded` may count encoded or decoded bytes, as the runtime
           // has it (Chrome counts decoded, Firefox and React Native's Android networking
-          // encoded), and encoded bytes have no fixed bound on the decoded size either way.
-          // So only a body known to carry no coding is stopped here; one that is or may be
+          // encoded), and the two bound each other in neither direction: a body can decode
+          // to many times its encoded bytes, and one a server flushes in small writes takes
+          // several times more bytes encoded than decoded, so no margin over the limit
+          // proves a decoded body past it. So only a body known to carry no coding is stopped here; one that is or may be
           // compressed is left to `load`, which checks the decoded size exactly.
           if (didSettle) {
             return;
@@ -531,21 +534,17 @@ export class XHRAdapter implements HTTPAdapter {
             }
           }
 
-          const { progress, total } = readProgressEvent(event);
+          const reported = readProgressEvent(event);
 
           // Whether the last event reported 100%, not whether any did: a compressed body
           // counted decoded can reach its encoded length partway and count on past it, and
           // `load` then reports the whole body.
-          didFireDownload100 = progress === 1;
+          didFireDownload100 = reported.progress === 1;
 
           downloadedBytes = Math.max(downloadedBytes, event.loaded);
           downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
 
-          guardedDownloadProgress?.({
-            loaded: event.loaded,
-            total,
-            progress,
-          });
+          guardedDownloadProgress?.(reported);
         }),
       );
 
@@ -830,24 +829,21 @@ function readPageOrigin(): string | undefined {
 }
 
 /**
- * An XHR progress event's `progress` and `total`, for upload and download alike. A length
- * is known only where it is one: a shim's `lengthComputable` with a total of `0` would make
- * the progress `NaN` or `Infinity`, and a compressed response can count `loaded` in decoded
- * bytes against an encoded `Content-Length` (Chrome does), so a count past the total says
- * the total is not the body's length. An unknown length has progress `-1`, and the bytes
- * so far stand for the total, as NodeAdapter reports a decoded body's.
+ * An XHR progress event as the adapter reports it, for upload and download alike. A length
+ * is known only where it is one (see `byteProgressEvent`): a shim's `lengthComputable` with
+ * a total of `0` would make the progress `NaN` or `Infinity`, and a compressed response can
+ * count `loaded` in decoded bytes against an encoded `Content-Length` (Chrome does), so a
+ * count past the total says the total is not the body's length.
  */
 function readProgressEvent(event: {
   loaded: number;
   total: number;
   lengthComputable: boolean;
-}): { progress: number; total: number } {
-  const isLengthKnown =
-    event.lengthComputable && event.total > 0 && event.loaded <= event.total;
-
-  return isLengthKnown
-    ? { progress: event.loaded / event.total, total: event.total }
-    : { progress: -1, total: event.loaded };
+}): { loaded: number; total: number; progress: number } {
+  return byteProgressEvent(
+    event.loaded,
+    event.lengthComputable ? event.total : 0,
+  );
 }
 
 /** What `readResponseBody` answers for a body an XHR handed over in no form it can read. */

@@ -4216,6 +4216,8 @@ test('a cancel from a getter read before the send ends the send as the abort whe
 
     expect(outcome.name).toBe('AbortError');
   } finally {
-    Object.defineProperty(FakeXHR.prototype, 'abort', realAbort!);
+    if (realAbort) {
+      Object.defineProperty(FakeXHR.prototype, 'abort', realAbort);
+    }
   }
 });

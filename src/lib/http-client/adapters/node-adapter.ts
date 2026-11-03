@@ -16,7 +16,7 @@ import {
 import { concatChunks } from '../internal/concat-chunks';
 import { isPlainRecord } from '../internal/plain-record';
 import { isBunRuntime } from '../../internal/is-bun-runtime';
-import { completeProgressEvent } from '../internal/progress';
+import { byteProgressEvent, completeProgressEvent } from '../internal/progress';
 import {
   isSignalAborted,
   isSignalAbortedQuietly,
@@ -2166,21 +2166,15 @@ export class NodeAdapter implements HTTPAdapter {
 
               // progress: -1 when Content-Length is absent (chunked transfer,
               // compressed response, etc.) — callers treat -1 as "length unknown".
-              const progress = totalBytes > 0 ? loadedBytes / totalBytes : -1;
+              const event = byteProgressEvent(loadedBytes, totalBytes);
 
               // Track whether the final chunk already closed out 100% so the
               // `end` handler can skip a duplicate event.
-              if (progress === 1) {
+              if (event.progress === 1) {
                 didFireDownload100 = true;
               }
 
-              guardedDownloadProgress?.({
-                loaded: loadedBytes,
-                // When total is unknown fall back to loaded so the event always
-                // has a sensible non-zero total.
-                total: totalBytes > 0 ? totalBytes : loadedBytes,
-                progress,
-              });
+              guardedDownloadProgress?.(event);
             });
 
             body.on('end', () => {
@@ -2912,19 +2906,13 @@ async function streamResponseBody(
 
           // progress: -1 when Content-Length is absent — callers treat -1 as
           // "length unknown". Track 100% to avoid a duplicate from onResponseEnd.
-          const progress = totalBytes > 0 ? loadedBytes / totalBytes : -1;
+          const event = byteProgressEvent(loadedBytes, totalBytes);
 
-          if (progress === 1) {
+          if (event.progress === 1) {
             didFireDownload100 = true;
           }
 
-          onProgress?.({
-            loaded: loadedBytes,
-            // Fall back to loaded when total is unknown so the event always
-            // has a sensible non-zero total.
-            total: totalBytes > 0 ? totalBytes : loadedBytes,
-            progress,
-          });
+          onProgress?.(event);
         });
       } catch (error) {
         // The throw came out of `write`, which means the stream is being torn down and

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { guardProgressCallback } from './progress';
+import { byteProgressEvent, guardProgressCallback } from './progress';
 import type { AdapterProgressEvent } from '../types';
 
 const event: AdapterProgressEvent = {
@@ -116,5 +116,29 @@ describe('guardProgressCallback', () => {
     });
 
     expect(events).toHaveLength(1);
+  });
+});
+
+describe('byteProgressEvent', () => {
+  test('reports a known length as a share of it', () => {
+    expect(byteProgressEvent(25, 100)).toEqual({
+      loaded: 25,
+      total: 100,
+      progress: 0.25,
+    });
+    expect(byteProgressEvent(100, 100).progress).toBe(1);
+  });
+
+  test('an unknown or overrun length is -1, with the bytes so far as the total', () => {
+    expect(byteProgressEvent(40, 0)).toEqual({
+      loaded: 40,
+      total: 40,
+      progress: -1,
+    });
+    expect(byteProgressEvent(120, 100)).toEqual({
+      loaded: 120,
+      total: 120,
+      progress: -1,
+    });
   });
 });
