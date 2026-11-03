@@ -4678,3 +4678,56 @@ describe('XHRAdapter - a download counted encoded, and an XHR with no state chan
     expect(uploads).toEqual([0, 1]);
   });
 });
+
+describe('XHRAdapter - a cancel from the final upload event on an XHR whose abort fires at once', () => {
+  test.each(['progress', 'load'] as const)(
+    'from %s, no download callback follows the end of the send',
+    async (eventName) => {
+      const controller = new AbortController();
+      const events: string[] = [];
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'POST',
+        headers: {},
+        body: 'abc',
+        signal: controller.signal,
+        onUploadProgress: (event) => {
+          events.push(`upload ${event.progress}`);
+          if (event.progress === 1) {
+            controller.abort();
+          }
+        },
+        onDownloadProgress: (event) => {
+          events.push(`download ${event.progress}`);
+        },
+      });
+      const xhr = lastXHR;
+
+      // A shim with no state changes, whose `abort()` fires `abort` at once.
+      xhr.abort = () => {
+        xhr.simulateAbort();
+      };
+      xhr.status = 200;
+      if (eventName === 'progress') {
+        xhr.readyState = 3;
+        xhr.simulateDownloadProgress(3, 0);
+      } else {
+        xhr.readyState = 4;
+        xhr.response = new ArrayBuffer(3);
+        xhr.simulateLoad();
+      }
+
+      const outcome = await promise.then(
+        (response) => `resolved ${response.status}`,
+        (error: unknown) => `rejected ${(error as Error).name}`,
+      );
+      events.push(outcome);
+
+      expect(events).toEqual(
+        eventName === 'progress'
+          ? ['upload 0', 'upload 1', 'rejected AbortError']
+          : ['upload 0', 'upload 1', 'download 1', 'resolved 200'],
+      );
+    },
+  );
+});

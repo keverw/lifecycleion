@@ -576,6 +576,11 @@ export class XHRAdapter implements HTTPAdapter {
             // Read again where it is needed: past the limit, and on `load`.
           }
 
+          // A cancel from that upload callback may have ended the send.
+          if (didSettle) {
+            return;
+          }
+
           // Decided once: a body known uncoded is refused at once, and one that is not is
           // left to `load`.
           if (
@@ -800,8 +805,10 @@ export class XHRAdapter implements HTTPAdapter {
       });
 
       xhr.addEventListener('abort', () => {
-        // Already resolved as `response_too_large`; this abort is the adapter's own.
-        if (!didExceedMaxResponseBytes) {
+        // Already resolved as `response_too_large`; this abort is the adapter's own. Nor
+        // once `load` has started: it answers whatever its callbacks then cancel, as a
+        // browser's `abort()` on a finished XHR fires no event at all.
+        if (!didExceedMaxResponseBytes && !didLoad) {
           settleAborted();
         }
       });
