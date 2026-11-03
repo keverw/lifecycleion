@@ -1091,7 +1091,7 @@ describe('XHRAdapter', () => {
         removed++;
       },
     };
-    // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its own receiver, and put back after
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- put back as it was, below
     const originalSend = FakeXHR.prototype.send;
     FakeXHR.prototype.send = () => {
       throw new DOMException('refused', 'InvalidStateError');
