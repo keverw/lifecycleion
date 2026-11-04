@@ -958,7 +958,8 @@ export class XHRAdapter implements HTTPAdapter {
       // the error so HTTPClient classifies it as a timeout (retryable) rather
       // than an unexpected abort (non-retryable cancel). One after the headers carries
       // the answer out, as a timeout from the client's own timer does (see `onAbort`).
-      // Not once `load` has started, as for `abort` below: it answers what it loaded.
+      // Not once `load` has started, as for `abort` below: it answers what it loaded. A
+      // shim can fire one from a callback `load` runs, before `load` has settled.
       xhr.addEventListener('timeout', () => {
         if (!didLoad) {
           settleAborted(answeredAtHeaders, true);

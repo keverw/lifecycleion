@@ -662,9 +662,10 @@ async function readBodyWithin(
       // once every so many of them, counted over the whole body so bytes between them do
       // not put the wait off, as a browser holds a timer set from a timer's callback to at
       // least 4 ms past a few levels, which a wait after each one would add up. Chunks
-      // with bytes need none: the limit ends them (a body with no limit is read whole, not
-      // here), and a wait on every so many of a real download's would hold it on a timer
-      // a hidden tab throttles to a second or more.
+      // with bytes need none: the limit bounds them (a body with no limit is read whole, not
+      // here), and ones that all come from microtasks are a body already in memory, whose
+      // read is work as parsing it would be. A wait on every so many of a real download's
+      // would hold it on a timer a hidden tab throttles to a second or more.
       if (byteLength === 0) {
         emptyChunks += 1;
 
