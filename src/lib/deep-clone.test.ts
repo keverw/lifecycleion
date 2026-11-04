@@ -104,6 +104,16 @@ describe('deepClone', () => {
       expect(cloned.indices?.groups).toEqual({ x: [1, 2] });
     });
 
+    test("reads arrayKeys' own entries whatever a Proxy's has trap answers", () => {
+      const source = Object.assign([1], { meta: { a: 1 } });
+      const arrayKeys = new Proxy(['meta'], { has: () => false });
+
+      const cloned = deepClone(source, { arrayKeys });
+
+      expect(cloned.meta).toEqual({ a: 1 });
+      expect(cloned.meta).not.toBe(source.meta);
+    });
+
     test('refuses an arrayKeys hole its prototype fills', () => {
       const arrayKeys: string[] = [];
       arrayKeys.length = 1;

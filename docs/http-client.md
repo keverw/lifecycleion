@@ -960,7 +960,9 @@ refresh with `hostOnly: true` to have its `Set-Cookie` replace it. A cookie whos
 a public suffix (`localhost`) is the exception: it is stored host-only either way, so the
 server's `Set-Cookie` replaces it.
 Programmatic `setCookie()` and `fromJSON()` have no request scheme to check, but still
-validate prefixes: `__Host-` requires `secure: true`, `hostOnly: true`, and path `/`.
+validate prefixes: `__Host-` requires `secure: true`, `hostOnly: true` (or a domain stored host-only
+whatever it says: a public suffix or an IP address), and a path of `/` - an absent or relative
+`path` is stored as `/`, as a `Set-Cookie` without one is.
 They also validate domains, expiry, and header framing, so cookies are not stored unchecked.
 
 **Cookie scoping uses the full Public Suffix List.** The jar refuses a `Domain=` that

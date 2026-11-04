@@ -16,6 +16,7 @@ import vm from 'node:vm';
 import * as zlib from 'node:zlib';
 import { NodeAdapter } from './node-adapter';
 import { readTypedArrayByteOffset } from '../../internal/binary-view';
+import { MAX_COPIED_ARRAY_LENGTH } from '../../internal/array-copy';
 import { isBuiltInNetworkSend } from '../internal/built-in-adapter';
 import type { NodeAdapterConfig } from './node-adapter';
 import { HTTPClient } from '../http-client';
@@ -8202,6 +8203,18 @@ describe('NodeAdapter — crl option (enforcement)', () => {
   );
 
   test.skipIf(!doesRuntimeEnforceCRL)(
+    "a list's own CRLs are kept whatever a Proxy's has trap answers",
+    async () => {
+      const crl = new Proxy([fixtures.unrelatedCRL, fixtures.crlRevoked], {
+        has: () => false,
+      });
+      const res = await get({ ca, crl }, revokedServer);
+
+      expect(res.status).toBe(495);
+    },
+  );
+
+  test.skipIf(!doesRuntimeEnforceCRL)(
     'a single CRL and a Buffer are passed through',
     async () => {
       const asString = await get(
@@ -9669,6 +9682,41 @@ test('a refreshed CRL that fails validation is a non-retryable adapter_error', a
   }
 });
 
+test.each(['ca', 'crl'] as const)(
+  'a refreshed %s list whose length is refused is a non-retryable adapter_error',
+  async (option) => {
+    const config: NodeAdapterConfig = {};
+    const adapter = new NodeAdapter(config);
+    const requestSpy = spyOn(https, 'request');
+    let attempts = 0;
+    const list: string[] = [];
+    list.length = MAX_COPIED_ARRAY_LENGTH + 1;
+
+    config[option] = list;
+
+    try {
+      const builder = new HTTPClient({ adapter })
+        .get('https://trust.test/api')
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 })
+        .onAttemptEnd(() => {
+          attempts++;
+        });
+
+      const res = await builder.send();
+
+      expect(res.isFailed).toBe(true);
+      expect(builder.error?.code).toBe('adapter_error');
+      expect(builder.error?.cause?.message).toBe(
+        `NodeAdapter ${option} has a length over ${String(MAX_COPIED_ARRAY_LENGTH)} (got ${String(MAX_COPIED_ARRAY_LENGTH + 1)})`,
+      );
+      expect(attempts).toBe(1);
+      expect(requestSpy).not.toHaveBeenCalled();
+    } finally {
+      requestSpy.mockRestore();
+    }
+  },
+);
+
 test('a caller throw while a refreshed CRL is normalized stays retryable and untagged', async () => {
   // Not the adapter's validation refusal: caller code run by the normalization threw.
   // It keeps the usual retryable adapter-error path, and the caller's error object is
@@ -9934,6 +9982,109 @@ test('a response arriving after the signal aborted does not call the streamRespo
       caught = error;
     }
     await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((caught as Error).name).toBe('AbortError');
+    expect(request.destroyed).toBe(true);
+    expect(factoryCalls).toBe(0);
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
+test('an abort while an async streamResponse factory sets up is an abort, the body compressed or not', async () => {
+  const compressed = zlib.gzipSync(Buffer.alloc(300_000, 66));
+  const server = http.createServer((req, res) => {
+    const isCompressed = req.url === '/gz';
+    res.writeHead(200, isCompressed ? { 'content-encoding': 'gzip' } : {});
+    // The rest never sent: the response is still arriving when the abort lands.
+    res.write(isCompressed ? compressed.subarray(0, 4096) : Buffer.alloc(4096));
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const outcomes: string[] = [];
+  try {
+    for (const path of ['/plain', '/gz']) {
+      const controller = new AbortController();
+      const factoryEntered = Promise.withResolvers<void>();
+      const sending = new NodeAdapter().send(
+        makeAdapterRequest(`http://127.0.0.1:${String(port)}${path}`, {
+          signal: controller.signal,
+          streamResponse: async () => {
+            factoryEntered.resolve();
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            return makeMemoryWritable().stream;
+          },
+        }),
+      );
+      await factoryEntered.promise;
+      controller.abort();
+      outcomes.push(
+        await sending.then(
+          (response) => `resolved ${String(response.streamErrorCode)}`,
+          (error: Error) => `${error.name}: ${error.message}`,
+        ),
+      );
+    }
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+
+  expect(outcomes[0]).toStartWith('AbortError');
+  expect(outcomes[1]).toBe(outcomes[0]);
+});
+
+test('a signal that reads as aborted without dispatching abort still settles a streamed request', async () => {
+  let respond: ((res: http.IncomingMessage) => void) | undefined;
+  const request = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    setHeader: () => {},
+    end: () => {},
+    destroy() {
+      this.destroyed = true;
+      return this;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    _options: unknown,
+    callback: (res: http.IncomingMessage) => void,
+  ) => {
+    respond = callback;
+    return request;
+  }) as unknown as typeof http.request);
+  let isAborted = false;
+  const signal = {
+    get aborted() {
+      return isAborted;
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  } as unknown as AbortSignal;
+  let factoryCalls = 0;
+  try {
+    const sending = new NodeAdapter().send(
+      makeAdapterRequest('http://example.test', {
+        signal,
+        streamResponse: () => {
+          factoryCalls++;
+          return makeMemoryWritable().stream;
+        },
+      }),
+    );
+    isAborted = true;
+    respond?.(
+      Object.assign(new EventEmitter(), {
+        statusCode: 200,
+        headers: {},
+        complete: false,
+      }) as unknown as http.IncomingMessage,
+    );
+    const caught = await Promise.race([
+      sending.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+      new Promise((resolve) => setTimeout(() => resolve('unsettled'), 500)),
+    ]);
     expect((caught as Error).name).toBe('AbortError');
     expect(request.destroyed).toBe(true);
     expect(factoryCalls).toBe(0);

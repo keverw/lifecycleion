@@ -82,7 +82,7 @@ deepClone(tagged, { arrayKeys: ['meta'] }).meta; // { source: 'cache' }, a copy
 ## Notes
 
 - Circular references are detected via an internal `WeakMap`: each reaches the one clone of what it pointed at, a `Map` whose key is the map and a `Set` that holds itself included.
-- Nesting depth is not limited by the call stack: entries are filled from a work list, not by recursion.
+- Nesting depth is not limited by the call stack: plain objects are filled by recursion up to 250 levels deep, and every other entry, and those past that depth, from a work list.
 - Symbol keys are **not** cloned, and neither are non-enumerable properties of a plain object. A frozen or sealed value's clone is neither.
 - A `Date`, `RegExp`, `Map`, `Set` or boxed primitive is told by its internal state, so one from another realm (a `vm` context, an iframe) is cloned as this realm's type. Within this realm it is asked about only when its chain holds the type's prototype: one reparented onto another prototype (`Object.setPrototypeOf(new Date(), Map.prototype)`) clones as a plain object. Entries and getters are read in the order a recursive clone reads them, each container's as soon as it is met. A subclass's instance comes back as its base type, and other own properties it carries are not copied. An object that only inherits from one of these prototypes, or a `Proxy` around one, holds none of that state and clones as a plain object.
 - Any other class instance clones as a plain object of its own enumerable properties: its prototype, and so its methods and `instanceof`, are not kept. So do `WeakMap`, `WeakSet`, `Promise`, `URL` and other host objects, which come back as `{}`.

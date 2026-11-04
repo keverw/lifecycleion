@@ -611,6 +611,42 @@ export class MockAdapter implements HTTPAdapter {
       }
     }
 
+    // The headers and cookies too, as the route answered: copied now, so a fixture the
+    // test changes during the delay is not delivered changed, and a copy that cannot be
+    // made refused below, where the body's refusal is.
+    // Read once: the value copied is the value checked. Its arrays copied too (see
+    // `copyArrayValue`), so nothing after - the `cookies` merge - reads the route's.
+    const routeHeaders = captureRead(() => {
+      const headers: unknown = mockResponse.headers;
+      assertOptionalHeaderRecord(headers, 'MockAdapter route response headers');
+      const copy = { ...(headers as AdapterResponse['headers'] | undefined) };
+      for (const [name, value] of Object.entries(copy)) {
+        defineEntry(
+          copy,
+          name,
+          copyArrayValue(value, 'MockAdapter route response header value'),
+        );
+      }
+      return copy;
+    });
+    // Read once, as the headers are: the value used is the value checked.
+    const routeCookieEntries = captureRead((): string[] => {
+      const routeCookies: unknown = mockResponse.cookies;
+      if (routeCookies === undefined || routeCookies === null) {
+        return [];
+      }
+      // A plain object, as the headers are: a `Map` read through `Object.entries` would
+      // set no cookies at all.
+      if (!isPlainRecord(routeCookies)) {
+        throw new TypeError(
+          `MockAdapter route cookies must be a plain object of cookie names to values (got ${Array.isArray(routeCookies) ? 'an array' : describeValue(routeCookies)})`,
+        );
+      }
+      return cookiesToSetCookieHeaders(
+        routeCookies as Parameters<typeof cookiesToSetCookieHeaders>[0],
+      );
+    });
+
     // --- 5. Delay ---
     // Simulates network latency. Per-response delay takes priority over the
     // adapter default. When a signal is present, the sleep is abort-aware and
@@ -782,54 +818,29 @@ export class MockAdapter implements HTTPAdapter {
     // --- 7. Build response headers ---
     // A plain object, as every other header record: a `Headers` or `Map` would spread to
     // `{}`, and then pass every check downstream with every header - `set-cookie` too -
-    // lost.
-    // Read once: the value copied is the value checked. Its arrays copied too (see
-    // `copyArrayValue`), so nothing after - the `cookies` merge below - reads the route's.
-    const responseHeaders: AdapterResponse['headers'] = asRouteMistake(() => {
-      const headers: unknown = mockResponse.headers;
-      assertOptionalHeaderRecord(headers, 'MockAdapter route response headers');
-      const copy = { ...(headers as AdapterResponse['headers'] | undefined) };
-      for (const [name, value] of Object.entries(copy)) {
-        defineEntry(
-          copy,
-          name,
-          copyArrayValue(value, 'MockAdapter route response header value'),
-        );
-      }
-      return copy;
-    });
+    // lost. Copied before the delay (see `routeHeaders`).
+    const responseHeaders: AdapterResponse['headers'] = asRouteMistake(() =>
+      unwrapCaptured(routeHeaders),
+    );
 
     // Merge cookies shorthand into set-cookie headers.
     // Entries from `cookies` are APPENDED after any existing `headers['set-cookie']`
     // entries — they are not overwritten. If both set the same cookie name, the
     // shorthand entry wins because it appears last (last Set-Cookie header for a
     // given name takes precedence in browsers and CookieJar).
-    // Read once, as the headers are: the value used is the value checked.
-    const routeCookies: unknown = mockResponse.cookies;
-    if (routeCookies !== undefined && routeCookies !== null) {
-      const setCookieEntries = asRouteMistake(() => {
-        // A plain object, as the headers are: a `Map` read through `Object.entries` would
-        // set no cookies at all.
-        if (!isPlainRecord(routeCookies)) {
-          throw new TypeError(
-            `MockAdapter route cookies must be a plain object of cookie names to values (got ${Array.isArray(routeCookies) ? 'an array' : describeValue(routeCookies)})`,
-          );
-        }
-        return cookiesToSetCookieHeaders(
-          routeCookies as Parameters<typeof cookiesToSetCookieHeaders>[0],
-        );
-      });
+    const setCookieEntries = asRouteMistake(() =>
+      unwrapCaptured(routeCookieEntries),
+    );
 
-      if (setCookieEntries.length > 0) {
-        const existing = responseHeaders['set-cookie'];
-        const existingArr =
-          existing === undefined
-            ? []
-            : Array.isArray(existing)
-              ? existing
-              : [existing];
-        responseHeaders['set-cookie'] = [...existingArr, ...setCookieEntries];
-      }
+    if (setCookieEntries.length > 0) {
+      const existing = responseHeaders['set-cookie'];
+      const existingArr =
+        existing === undefined
+          ? []
+          : Array.isArray(existing)
+            ? existing
+            : [existing];
+      responseHeaders['set-cookie'] = [...existingArr, ...setCookieEntries];
     }
 
     // Auto-set content-type when handler didn't provide one.
@@ -1366,6 +1377,26 @@ const MOCK_RESPONSE_FIELDS = fieldNames<MockResponse>({
  * The route's answer with each field read once, into a plain object: only the fields it
  * has, so an absent one stays absent.
  */
+/** A value read, or the error reading it threw, to be answered later. */
+type CapturedRead<T> = { value: T } | { error: unknown };
+
+function captureRead<T>(read: () => T): CapturedRead<T> {
+  try {
+    return { value: read() };
+  } catch (error) {
+    return { error };
+  }
+}
+
+/** The value {@link captureRead} read, or its error thrown now. */
+function unwrapCaptured<T>(captured: CapturedRead<T>): T {
+  if ('error' in captured) {
+    throw captured.error;
+  }
+
+  return captured.value;
+}
+
 function snapshotMockResponse(response: MockResponse): MockResponse {
   const snapshot = { status: response.status } as MockResponse;
   const fields = [
@@ -1461,7 +1492,16 @@ function hasHeader(
   name: string,
 ): boolean {
   const lowerName = lowerCaseHeaderName(name);
-  return Object.keys(headers).some((k) => lowerCaseHeaderName(k) === lowerName);
+  // Set, as `normalizeAdapterResponseHeaders` reads a value: a `null` or `undefined` one,
+  // or a list holding nothing else, is no header.
+  return Object.keys(headers).some((k) => {
+    const value: unknown = headers[k];
+    return (
+      lowerCaseHeaderName(k) === lowerName &&
+      !isNullish(value) &&
+      (!Array.isArray(value) || value.some((item) => !isNullish(item)))
+    );
+  });
 }
 
 class InternalMockAbortError extends Error {

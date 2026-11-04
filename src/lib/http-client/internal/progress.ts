@@ -97,7 +97,8 @@ export function isByteCount(value: unknown): value is number {
 /**
  * A progress event for `loaded` bytes of `total`. Where `total` is unknown (`0`) or already
  * passed, `progress` is `-1`, the "length unknown" callers read, and `total` the bytes so
- * far, so an event never reports a total of zero or a share past the whole.
+ * far, so an event never reports a share past the whole, nor a total of zero once a byte
+ * has arrived.
  */
 export function byteProgressEvent(
   loaded: number,

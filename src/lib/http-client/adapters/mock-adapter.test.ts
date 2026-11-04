@@ -314,6 +314,54 @@ describe('MockAdapter via HTTPClient', () => {
     expect(res.body).toBe('{"broken":');
   });
 
+  test('an unset content-type header leaves the content type to contentType or the body', async () => {
+    for (const [index, value] of [undefined, null, [], [undefined]].entries()) {
+      adapter.routes.get(`/unset/${String(index)}`, () => ({
+        status: 200,
+        body: { a: 1 },
+        headers: { 'Content-Type': value as never, 'x-y': '1' },
+      }));
+
+      const res = await client
+        .get(`/unset/${String(index)}`)
+        .send<{ a: number }>();
+      expect(res.headers['content-type']).toBe('application/json');
+      expect(res.isJSON).toBe(true);
+      expect(res.body).toEqual({ a: 1 });
+    }
+
+    adapter.routes.get('/unset-text', () => ({
+      status: 200,
+      body: 'hi',
+      contentType: 'text',
+      headers: { 'content-type': undefined as never },
+    }));
+    const text = await client.get('/unset-text').send<string>();
+    expect(text.headers['content-type']).toBe('text/plain');
+    expect(text.body).toBe('hi');
+  });
+
+  test('headers and cookies are fixed when the route answers, as its body is, not after the delay', async () => {
+    const headers: Record<string, string> = { 'x-state': 'at-answer' };
+    const cookies: Record<string, string> = { session: 'at-answer' };
+    adapter.routes.get('/delayed', () => ({
+      status: 200,
+      body: 'hi',
+      headers,
+      cookies,
+      delay: 30,
+    }));
+
+    const sending = client.get('/delayed').send<string>();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    headers['x-state'] = 'changed-during-delay';
+    cookies.session = 'changed-during-delay';
+    const res = await sending;
+
+    expect(res.headers['x-state']).toBe('at-answer');
+    expect(res.headers['set-cookie']).toEqual(['session=at-answer; Path=/']);
+  });
+
   test('custom response headers are passed through', async () => {
     adapter.routes.get('/hdr', () => ({
       status: 200,

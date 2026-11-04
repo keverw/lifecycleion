@@ -1,3 +1,5 @@
+import { forEachOwnIndex } from './array-indices';
+
 /**
  * The most entries an array handed over to be copied may say it holds - a header value, a
  * trust store, an allowlist or a filter's list. Walked by index, a sparse array's length
@@ -20,6 +22,18 @@ export function readArrayLength(
   return assertArrayLength(array.length, label, maxLength);
 }
 
+/** The refusals {@link assertArrayLength} raised, told from a throw out of caller code. */
+const lengthRefusals = new WeakSet<Error>();
+
+/**
+ * Whether `error` is a length refusal of {@link readArrayLength} or
+ * {@link assertArrayLength}, rather than a throw from the caller's own `length` getter or
+ * `Proxy` trap read alongside it.
+ */
+export function isArrayLengthRefusal(error: unknown): error is TypeError {
+  return error instanceof Error && lengthRefusals.has(error);
+}
+
 /** `length` as {@link readArrayLength} holds an array's, for one already read. */
 export function assertArrayLength(
   length: unknown,
@@ -32,16 +46,23 @@ export function assertArrayLength(
     length < 0 ||
     length > 2 ** 32 - 1
   ) {
-    throw new TypeError(`${label} has no array length`);
+    throw refusal(new TypeError(`${label} has no array length`));
   }
 
   if (length > maxLength) {
-    throw new TypeError(
-      `${label} has a length over ${String(maxLength)} (got ${String(length)})`,
+    throw refusal(
+      new TypeError(
+        `${label} has a length over ${String(maxLength)} (got ${String(length)})`,
+      ),
     );
   }
 
   return length;
+}
+
+function refusal(error: TypeError): TypeError {
+  lengthRefusals.add(error);
+  return error;
 }
 
 /**
@@ -53,6 +74,7 @@ export function assertArrayLength(
  * own `constructor`, which `slice` builds the copy through, nor a `Symbol.iterator`, which
  * a spread runs. A hole stays a hole - one its prototype fills included, as only its own
  * entries are read - so a check that reads every index reads it as the `undefined` it is.
+ * Past a long run of holes the rest are read by its own keys (see {@link forEachOwnIndex}).
  * A length an array cannot have, or one over {@link MAX_COPIED_ARRAY_LENGTH}, is refused
  * (see {@link readArrayLength}).
  */
@@ -61,13 +83,12 @@ export function copyArrayValue<V>(value: V, label = 'A list'): V {
     return value;
   }
 
-  const length = readArrayLength(value, label, MAX_COPIED_ARRAY_LENGTH);
+  const source: unknown[] = value;
+  const length = readArrayLength(source, label, MAX_COPIED_ARRAY_LENGTH);
   const copy: unknown[] = new Array(length);
-  for (let index = 0; index < length; index++) {
-    if (Object.hasOwn(value, index)) {
-      copy[index] = value[index];
-    }
-  }
+  forEachOwnIndex(source, length, (index) => {
+    copy[index] = source[index];
+  });
 
   return copy as V;
 }

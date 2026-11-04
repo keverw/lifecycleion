@@ -4,6 +4,7 @@ import {
   MAX_COPIED_ARRAY_LENGTH,
   readArrayLength,
 } from './array-copy';
+import { SPARSE_RUN } from './array-indices';
 
 /** An array whose `length` reads as `length`, as a `Proxy`'s trap may answer. */
 function withLength(length: unknown): unknown[] {
@@ -45,6 +46,34 @@ describe('copyArrayValue', () => {
         `A list has a length over ${String(MAX_COPIED_ARRAY_LENGTH)} (got ${String(2 ** 32 - 1)})`,
       ),
     );
+  });
+
+  test("copies its own entries whatever a Proxy's has trap answers", () => {
+    const copy = copyArrayValue(new Proxy(['a', 'b'], { has: () => false }));
+
+    expect(Object.hasOwn(copy, 0)).toBe(true);
+    expect(copy).toEqual(['a', 'b']);
+  });
+
+  test("reads a sparse list's tail by its own keys, not index by index", () => {
+    const list: unknown[] = ['a'];
+    list.length = 2 ** 22;
+    list[2 ** 22 - 1] = 'z';
+    let ownChecks = 0;
+    const counted = new Proxy(list, {
+      getOwnPropertyDescriptor: (target, key) => {
+        ownChecks++;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+
+    const copy = copyArrayValue(counted);
+
+    expect(copy).toHaveLength(2 ** 22);
+    expect(copy[0]).toBe('a');
+    expect(copy[2 ** 22 - 1]).toBe('z');
+    expect(Object.keys(copy)).toEqual(['0', String(2 ** 22 - 1)]);
+    expect(ownChecks).toBeLessThan(SPARSE_RUN * 2);
   });
 
   test('keeps a hole its prototype fills as a hole', () => {

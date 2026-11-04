@@ -448,6 +448,19 @@ for (const key of ['sinks', 'diagnosticSinks'] as const) {
     );
   });
 
+  test(`${key} keeps its own entries whatever a Proxy's has trap answers`, async () => {
+    const sink = { write: (): void => {} };
+    const logger = new Logger({
+      callProcessExit: false,
+      [key]: new Proxy([sink], { has: () => false }),
+    });
+
+    const kept =
+      key === 'sinks' ? logger.getSinks() : logger.getDiagnosticSinks();
+    expect(kept).toEqual([sink]);
+    await logger.close();
+  });
+
   test(`${key} keeps only its own entries: a hole its prototype fills is no sink`, async () => {
     const list: unknown[] = [];
     list.length = 1;

@@ -6,6 +6,7 @@ import {
   expect,
   test,
 } from 'bun:test';
+import type { AddressInfo } from 'node:net';
 import { FetchAdapter } from './fetch-adapter';
 import { materializeRequestHeaders } from '../internal/header-utils';
 import { serializeError } from '../../serialize-error';
@@ -3409,5 +3410,127 @@ describe('FetchAdapter - GET and HEAD bodies', () => {
     }
 
     expect(fetches).toBe(0);
+  });
+});
+
+describe('FetchAdapter - a body that only fails to decode', () => {
+  const failingBody = (error: Error): ReadableStream<Uint8Array> =>
+    new ReadableStream({
+      pull(controller) {
+        controller.error(error);
+      },
+    });
+
+  test.each([
+    [
+      "Node's, its cause coded by zlib",
+      Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('incorrect header check'), {
+          code: 'Z_DATA_ERROR',
+        }),
+      }),
+      'gzip',
+      true,
+    ],
+    [
+      "Bun's, coded by its decoder",
+      Object.assign(new TypeError('BrotliDecompressionError fetching'), {
+        code: 'BrotliDecompressionError',
+      }),
+      'br',
+      true,
+    ],
+    [
+      'a failed transfer',
+      Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('other side closed'), {
+          code: 'UND_ERR_SOCKET',
+        }),
+      }),
+      'gzip',
+      false,
+    ],
+    [
+      'a decoder code on an identity body',
+      Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('incorrect header check'), {
+          code: 'Z_DATA_ERROR',
+        }),
+      }),
+      'identity',
+      false,
+    ],
+  ])(
+    'a 503 whose body fails as %s is retried only when it only failed to decode',
+    async (_name, error, encoding, isRetried) => {
+      let fetches = 0;
+      (globalThis as any).fetch = () => {
+        fetches++;
+        return Promise.resolve(
+          fetches === 1
+            ? new Response(failingBody(error), {
+                status: 503,
+                headers: { 'content-encoding': encoding },
+              })
+            : new Response('fine'),
+        );
+      };
+
+      const builder = new HTTPClient({ adapter: new FetchAdapter() })
+        .get('https://decode.test/')
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 });
+      const response = await builder.send();
+
+      expect(fetches).toBe(isRetried ? 2 : 1);
+      expect(response.status).toBe(isRetried ? 200 : 503);
+    },
+  );
+
+  test("is the runtime's decoding failure: a 3xx labelled gzip and sent plain is followed, a 503 retried", async () => {
+    const http = await import('node:http');
+    let busy = 0;
+    const server = http.createServer((request, response) => {
+      if (request.url === '/moved') {
+        response.writeHead(302, {
+          location: '/landed',
+          'content-encoding': 'gzip',
+        });
+        response.end('Moved Temporarily');
+      } else if (request.url === '/busy' && busy++ === 0) {
+        response.writeHead(503, { 'content-encoding': 'gzip' });
+        response.end('Service Unavailable');
+      } else {
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end('landed');
+      }
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const client = new HTTPClient({
+        adapter: new FetchAdapter(),
+        baseURL: `http://127.0.0.1:${String(port)}`,
+        followRedirects: true,
+      });
+
+      const moved = await client.get('/moved').send<string>();
+      expect(moved.status).toBe(200);
+      expect(moved.body).toBe('landed');
+      expect(moved.redirectHistory).toHaveLength(1);
+
+      const builder = client
+        .get('/busy')
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 });
+      const retried = await builder.send<string>();
+      expect(retried.status).toBe(200);
+      expect(retried.body).toBe('landed');
+      expect(builder.attemptCount).toBe(2);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
   });
 });

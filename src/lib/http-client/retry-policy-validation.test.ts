@@ -344,6 +344,23 @@ test('a function is refused as no options object, its fields unchecked otherwise
   );
 });
 
+test('a value that is not an options object is refused with the policy label and its type', () => {
+  for (const [policy, got] of [
+    ['fixed', 'string'],
+    [5, 'number'],
+    [true, 'boolean'],
+    [Symbol('fixed'), 'symbol'],
+    [null, 'null'],
+    [[], 'an array'],
+  ] as const) {
+    expect(() =>
+      snapshotRetryPolicyOptions(policy as unknown as RetryPolicyOptions),
+    ).toThrow(
+      new TypeError(`HTTPClient retryPolicy must be an object (got ${got})`),
+    );
+  }
+});
+
 test("a Proxy trap's own throw while the keys are listed ends the check before strategy is read", () => {
   const trapFailure = new Error('backing store not ready');
   let strategyReads = 0;

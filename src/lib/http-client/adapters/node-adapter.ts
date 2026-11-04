@@ -64,9 +64,11 @@ import {
 } from '../internal/upload-source-wait';
 import {
   copyArrayValue,
+  isArrayLengthRefusal,
   MAX_COPIED_ARRAY_LENGTH,
   readArrayLength,
 } from '../../internal/array-copy';
+import { forEachOwnIndex } from '../../internal/array-indices';
 import { isFormData } from '../internal/form-entries';
 import {
   assertKnownFields,
@@ -726,11 +728,11 @@ export class NodeAdapter implements HTTPAdapter {
       // Each read once, so the value checked is the value sent - a list's entries too,
       // copied by index (see `copyArrayValue`). A hole stays a hole, which
       // `assertTrustAnchors` reads as the `undefined` it is, and refuses.
-      const trustedCA = copyArrayValue(this._config.ca, 'NodeAdapter ca');
+      const trustedCA = copyTrustList(this._config.ca, 'NodeAdapter ca');
       const mtls = this._config.mtls;
       // Its certificate, key and passphrase read once, as checked.
       const clientCertificate = readClientCertificate(mtls);
-      const mtlsCA = copyArrayValue(mtls?.ca, 'NodeAdapter mtls.ca');
+      const mtlsCA = copyTrustList(mtls?.ca, 'NodeAdapter mtls.ca');
       const servername = this._config.servername;
       assertServername(servername);
       assertTrustAnchors(trustedCA, 'ca');
@@ -797,7 +799,10 @@ export class NodeAdapter implements HTTPAdapter {
           // what is wrong. Terminal, as the constructor's own check is. Only this
           // adapter's own refusal is: a throw from caller code read while normalizing
           // keeps its usual retryable adapter-error behavior, and its error is not tagged.
-          if (crlValidationErrors.has(error as Error)) {
+          if (
+            crlValidationErrors.has(error as Error) ||
+            isArrayLengthRefusal(error)
+          ) {
             markNonRetryableAdapterError(error);
           }
 
@@ -1818,10 +1823,15 @@ export class NodeAdapter implements HTTPAdapter {
               // the factory is setting up (`pendingStreamSetup`) or its writable is
               // streaming (`activeResponseStream`) - and not once the stream has
               // finished, so a factory's abort cleanup never undoes a completed body.
-              // Already cancelled: that listener has settled the request, so the factory
-              // is not asked to open a sink nothing will write to.
+              // Already cancelled: the factory is not asked to open a sink nothing will
+              // write to. That listener has settled the request; settled here too - the
+              // first answer stands - for a signal that reads as aborted without having
+              // dispatched `abort`, which would otherwise hold the request open.
               if (request.signal && readIsAborted()) {
                 abortStream();
+                releaseResponseBody?.();
+                destroyRequestQuietly(req);
+                failRequest(makeAbortError());
                 return;
               }
 
@@ -2463,9 +2473,9 @@ export class NodeAdapter implements HTTPAdapter {
           const onAbort = (): void => {
             // Notify a pending factory first, while its cleanup still has ownership.
             pendingStreamSetup?.abort();
-            // Nothing more is decoded for a request that was cancelled or timed out.
-            releaseResponseBody?.();
             if (activeResponseStream) {
+              // Nothing more is decoded for a request that was cancelled or timed out.
+              releaseResponseBody?.();
               const { status, headers, writable, abortStream } =
                 activeResponseStream;
               activeResponseStream = undefined;
@@ -2491,6 +2501,10 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
+            // Below, the body is released once the request has settled: releasing a
+            // decoded one destroys the response, whose `'aborted'` - emitted at once - the
+            // stream setup's own listener would otherwise answer first, as a stream error.
+
             // An answer whose body is buffering, or whose stream setup has not called
             // its factory yet: an abort of the response either way - not a failure of a
             // factory that never ran.
@@ -2515,6 +2529,7 @@ export class NodeAdapter implements HTTPAdapter {
                     : 'Request aborted before the streamResponse factory was called',
                 ),
               );
+              releaseResponseBody?.();
               return;
             }
 
@@ -2530,12 +2545,14 @@ export class NodeAdapter implements HTTPAdapter {
                   headers,
                 }),
               );
+              releaseResponseBody?.();
               return;
             }
 
             destroyRequestQuietly(req);
             const abortErr = makeAbortError();
             failRequest(abortErr);
+            releaseResponseBody?.();
           };
 
           signal.addEventListener('abort', onAbort, { once: true });
@@ -2726,8 +2743,9 @@ export class NodeAdapter implements HTTPAdapter {
  * Five seconds is past any such pause on a connection that is still alive. What is left
  * is a bound rather than a promise: a receiver that stops reading for longer than this
  * while still intending to read gets a truncated body, and the far more common shape - a
- * proxy that has answered and will never read again - costs one idle socket for five
- * seconds instead of one held to that server's timeout.
+ * proxy that has answered and will never read again - costs one idle socket for five to
+ * ten seconds, as the watchdog checks in five-second windows, instead of one held to that
+ * server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
 
@@ -3667,6 +3685,24 @@ function normalizeCRL(
 }
 
 /**
+ * A `ca` or `mtls.ca` value read at `send()`, copied as {@link copyArrayValue} copies it: a
+ * length it refuses fails the request as `assertTrustAnchors` fails it, not retried, as
+ * the same value would be read again. A throw from the caller's own `length` getter or
+ * `Proxy` trap stays retryable.
+ */
+function copyTrustList<V>(value: V, label: string): V {
+  try {
+    return copyArrayValue(value, label);
+  } catch (error) {
+    if (isArrayLengthRefusal(error)) {
+      markNonRetryableAdapterError(error);
+    }
+
+    throw error;
+  }
+}
+
+/**
  * A `crl` value with an array's entries each read once, into an array this adapter owns.
  * A hole is skipped, as `flatMap` skips it, and not kept as one (`copyArrayValue` keeps
  * it): the copy is the cache key `isSameCRLInput` compares entry by entry with `every`,
@@ -3686,11 +3722,9 @@ function snapshotCRLInput(
     'NodeAdapter crl',
     MAX_COPIED_ARRAY_LENGTH,
   );
-  for (let index = 0; index < length; index++) {
-    if (Object.hasOwn(crl, index)) {
-      entries.push(crl[index]);
-    }
-  }
+  forEachOwnIndex(crl, length, (index) => {
+    entries.push(crl[index]);
+  });
 
   return entries;
 }

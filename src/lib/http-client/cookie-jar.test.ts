@@ -145,6 +145,19 @@ describe('CookieJar', () => {
   );
 
   describe('fromJSON cookie list', () => {
+    test("reads its own cookies whatever a Proxy's has trap answers", () => {
+      const source = new CookieJar();
+      source.setCookie({ name: 'id', value: '1', domain: 'example.com' });
+      const data = source.toJSON();
+
+      jar.fromJSON({
+        ...data,
+        cookies: new Proxy(data.cookies, { has: () => false }),
+      });
+
+      expect(jar.getAllCookies().map((cookie) => cookie.name)).toEqual(['id']);
+    });
+
     test('refuses a hole its prototype fills, as no cookie', () => {
       const cookies: unknown[] = [];
       cookies.length = 1;

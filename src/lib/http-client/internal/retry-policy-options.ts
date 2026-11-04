@@ -4,8 +4,11 @@ import type {
   RetryPolicyOptionsStrategyFixed,
   RetryPolicyOptions,
 } from '../../retry-utils';
-import { assertKnownFields, fieldNames } from '../../internal/known-fields';
-import { isObjectLike } from '../../internal/is-object-like';
+import {
+  assertKnownFields,
+  assertOptionsObject,
+  fieldNames,
+} from '../../internal/known-fields';
 import { isNullish } from '../../internal/is-nullish';
 import { defineEntry } from '../../internal/define-entry';
 
@@ -68,16 +71,11 @@ export function snapshotRetryPolicyOptions(
   if (validatedSnapshots.has(options)) {
     return options;
   }
-  // A function is no options object, though `RetryPolicy` would read it as one: refused,
-  // as its fields could not be checked.
-  if (typeof options === 'function') {
-    throw new TypeError(
-      `${RETRY_POLICY_LABEL} must be an object (got function)`,
-    );
-  }
-  // Any other value that is not an object: `RetryPolicy` refuses it as one, so this never
-  // returns.
-  if (!isObjectLike(options)) {
+  // A function is no options object, though `RetryPolicy` would read it as one, nor is an
+  // array: refused as any other value that is not one, as their fields could not be checked.
+  assertOptionsObject(options, RETRY_POLICY_LABEL);
+  if (options === undefined) {
+    // `RetryPolicy` refuses it as no options object, so this never returns.
     return Object.freeze(new RetryPolicy(options).policyInfo);
   }
   // A misspelled field (`maxRetryAttemps: 5`, meant to raise the limit), or the other

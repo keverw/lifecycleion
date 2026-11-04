@@ -1326,6 +1326,29 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(1048);
     });
 
+    test('charges the fallback once and stops when whether an index is held cannot be told', () => {
+      let hasCalls = 0;
+      const value = new Proxy(['abc'], {
+        get: (target, key, receiver) =>
+          key === 'length' ? 1_000_000 : Reflect.get(target, key, receiver),
+        has: (target, key) => {
+          if (key !== '0') {
+            hasCalls++;
+            throw new Error('unknowable');
+          }
+          return Reflect.has(target, key);
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      cache.set('a', value);
+
+      expect(cache.get('a')).toBe(value);
+      // 40 for the array, 6 for its one string, 1000 for the rest.
+      expect(cache.byteSize).toBe(40 + 6 + 1000);
+      expect(hasCalls).toBe(1);
+    });
+
     test('charges a throwing entry the fallback and keeps the entries measured before it', () => {
       const huge = 'x'.repeat(50_000);
       const value: unknown[] = [huge];

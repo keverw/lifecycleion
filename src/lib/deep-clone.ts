@@ -507,9 +507,11 @@ class ObjectFrame implements Frame {
 /**
  * An array being filled, to the length it had when met, by index - not through an own
  * `Symbol.iterator` - so one that grows while it is read is not followed. Each index it
- * holds as its own is copied (told by `in` on an array on `Array.prototype`, far cheaper,
- * and the same but for an index set on `Array.prototype` itself), so a hole stays a hole,
- * one emptied before its turn included. Past enough holes the rest is read by its own
+ * holds as its own is copied, so a hole stays a hole, one emptied before its turn
+ * included. They are told by `in`, far cheaper, on an array whose prototype is
+ * `Array.prototype`, and otherwise by `Object.hasOwn`: on that path a `Proxy`'s `has` trap
+ * is answered as it answers, and a prototype swapped in during the walk can fill a hole
+ * after it. Past enough holes the rest is read by its own
  * keys (see {@link SPARSE_RUN}). Then the named entries: a match result's and `arrayKeys`' - the
  * others are not listed, which would cost a dense array many times its clone.
  */

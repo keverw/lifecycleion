@@ -57,8 +57,11 @@ import {
   readBinaryByteLength,
   isUint8ArrayValue,
 } from '../../internal/binary-view';
-import { asciiLowercase } from '../../internal/ascii-text';
-import { BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES } from '../consts';
+import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
+import {
+  BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES,
+  RESPONSE_DECODE_ERROR_KEY,
+} from '../consts';
 
 export class FetchAdapter implements HTTPAdapter {
   constructor() {
@@ -372,7 +375,9 @@ export class FetchAdapter implements HTTPAdapter {
         status,
         responseHeadersForBody,
         'stream_response_error',
-        normalizeError(error),
+        isRuntimeDecodeFailure(error, responseHeadersForBody)
+          ? decodeFailure(error)
+          : normalizeError(error),
       );
     }
 
@@ -862,4 +867,57 @@ function isFetchDispatchRefusal(error: Error): boolean {
     code === 'UND_ERR_NOT_SUPPORTED' ||
     (typeof message === 'string' && asciiLowercase(message) === 'bad port')
   );
+}
+
+/** The error codes a server runtime's `fetch` gives a body that failed to decode. */
+const BUN_DECODE_ERROR_CODES = [
+  'ZlibError',
+  'BrotliDecompressionError',
+  'ZstdDecompressionError',
+];
+/** Node's (undici's): its cause is the decoder's own error, coded by zlib, brotli or zstd. */
+const NODE_DECODE_ERROR_CODE = /^(?:Z_|ERR__ERROR_|ZSTD_error_)/;
+
+/**
+ * Whether `error`, from reading a body whose `Content-Encoding` is not identity, is the
+ * runtime's decoding failure rather than a failed transfer: in a server runtime `fetch`
+ * decodes the body itself, and says so by the error's code (Bun) or its cause's (Node).
+ * A browser's says nothing of why, so its failure is a transfer's.
+ */
+function isRuntimeDecodeFailure(
+  error: unknown,
+  headers: Record<string, string | string[]>,
+): boolean {
+  const encoding = headers['content-encoding'];
+  const encodings = (Array.isArray(encoding) ? encoding.join(',') : encoding)
+    ?.split(',')
+    .map((token) => asciiLowercase(trimHTTPWhitespace(token)))
+    .filter((token) => token !== '' && token !== 'identity');
+  if (encodings === undefined || encodings.length === 0) {
+    return false;
+  }
+
+  const code = readUnknownMember(error, 'code');
+  if (typeof code === 'string' && BUN_DECODE_ERROR_CODES.includes(code)) {
+    return true;
+  }
+
+  const causeCode = readUnknownMember(
+    readUnknownMember(error, 'cause'),
+    'code',
+  );
+  return (
+    typeof causeCode === 'string' && NODE_DECODE_ERROR_CODE.test(causeCode)
+  );
+}
+
+/**
+ * The runtime's decoding failure, reported as one (see `RESPONSE_DECODE_ERROR_KEY`): an
+ * error of this adapter's own carries the tag, its message the runtime's and its cause the
+ * runtime's error, which is not changed.
+ */
+function decodeFailure(error: unknown): Error {
+  const reported = new Error(normalizeError(error).message, { cause: error });
+  Object.defineProperty(reported, RESPONSE_DECODE_ERROR_KEY, { value: true });
+  return reported;
 }

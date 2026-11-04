@@ -2,6 +2,7 @@ import { safeHandleCallback } from '../safe-handle-callback';
 import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 import {
   indicesFrom,
+  inheritsNoIndices,
   SPARSE_RUN,
   SPARSE_RUN_PER_ENTRY,
 } from '../internal/array-indices';
@@ -457,9 +458,10 @@ export class LRUCache<K, V> {
       // included, counts for nothing, and past a long run of them the rest are read by the
       // array's own index keys, so a sparse array's length is not walked. What cannot be
       // read takes the fallback estimate a circular array does, rather than failing
-      // `set()`: an array whose length is not one an array can have, and an entry whose
-      // read throws, with the entries around it still counted. A failure sizing an entry
-      // it did read is not caught here.
+      // `set()`: an array whose length is not one an array can have, an entry whose read
+      // throws - with the entries around it still counted - and, once for the rest of the
+      // array, an index whose presence cannot be told. A failure sizing an entry it did
+      // read is not caught here.
       const items = value as unknown[];
 
       try {
@@ -475,29 +477,38 @@ export class LRUCache<K, V> {
         let holes = 0;
         let entries = 0;
         let sparseFrom: number | undefined;
-        // `in` on an array whose prototype is `Array.prototype`, as `deepClone`'s walk
-        // reads one: `Object.hasOwn` costs hundreds of times as much per index on a large
-        // array on JavaScriptCore, and this only estimates - a `Proxy`'s `has`, or a
-        // prototype swapped during the walk, can only move the estimate. Another
-        // prototype is read by `Object.hasOwn`, so a hole it fills counts for nothing.
-        const isOwnOnly = Reflect.getPrototypeOf(items) !== Array.prototype;
+        // `in` when no prototype the array inherits from holds an index, as `deepClone`'s
+        // walk reads one: `Object.hasOwn` costs hundreds of times as much per index on a
+        // large array on JavaScriptCore, and this only estimates - a `Proxy`'s `has`, or a
+        // prototype given an index during the walk, can only move the estimate. One that
+        // holds an index is read by `Object.hasOwn`, so a hole it fills counts for nothing.
+        const isOwnOnly = !inheritsNoIndices(items);
 
         for (let index = 0; index < length; index++) {
+          let isOwn: boolean;
+
+          try {
+            isOwn = isOwnOnly ? Object.hasOwn(items, index) : index in items;
+          } catch {
+            return estimatedSize + 1000;
+          }
+
+          if (!isOwn) {
+            // A long run of holes, as `deepClone` measures one: the rest by the array's
+            // own index keys.
+            if (
+              ++holes > SPARSE_RUN &&
+              holes > entries * SPARSE_RUN_PER_ENTRY
+            ) {
+              sparseFrom = index + 1;
+              break;
+            }
+            continue;
+          }
+
           let entry: unknown;
 
           try {
-            if (isOwnOnly ? !Object.hasOwn(items, index) : !(index in items)) {
-              // A long run of holes, as `deepClone` measures one: the rest by the array's
-              // own index keys.
-              if (
-                ++holes > SPARSE_RUN &&
-                holes > entries * SPARSE_RUN_PER_ENTRY
-              ) {
-                sparseFrom = index + 1;
-                break;
-              }
-              continue;
-            }
             entry = items[index];
           } catch {
             estimatedSize += 1000;
@@ -522,14 +533,23 @@ export class LRUCache<K, V> {
         }
 
         for (const index of tail) {
-          let entry: unknown;
+          let isOwn: boolean;
 
           // Checked again, as `deepClone` checks its tail: an entry read before it can
           // have removed it.
           try {
-            if (!Object.hasOwn(items, index)) {
-              continue;
-            }
+            isOwn = Object.hasOwn(items, index);
+          } catch {
+            return estimatedSize + 1000;
+          }
+
+          if (!isOwn) {
+            continue;
+          }
+
+          let entry: unknown;
+
+          try {
             entry = items[index];
           } catch {
             estimatedSize += 1000;

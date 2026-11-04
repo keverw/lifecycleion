@@ -557,6 +557,16 @@ test('a filter whose methods is not an array of strings is refused when register
   );
 });
 
+test("a filter's list is read by its own entries whatever a Proxy's has trap answers", () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+
+  expect(() =>
+    client.addErrorObserver(() => undefined, {
+      methods: new Proxy(['POST'], { has: () => false }),
+    }),
+  ).not.toThrow();
+});
+
 test("a filter's lowercase method matches, and a nullish methods means no filter", async () => {
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
