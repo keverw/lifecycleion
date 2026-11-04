@@ -152,7 +152,10 @@ function normalizeList(
   // Read by index, as every caller list is (see `copyArrayValue`): an `entries` or an
   // iterator of the array's own could report suffixes it does not hold. A hole reads as
   // `undefined` and is refused as any non-string entry is.
-  for (const [index, entry] of copyArrayValue(entries).entries()) {
+  for (const [index, entry] of copyArrayValue(
+    entries,
+    `publicSuffixes.${listName}`,
+  ).entries()) {
     result.push(normalizeSuffix(entry, listName, index));
   }
 

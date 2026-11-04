@@ -739,7 +739,10 @@ export function normalizeFilterMethods(
   // Copied first, by index, as the other lists are (see `copyArrayValue`): the caller's
   // own `map` and iterator are not called, and a hole is read as the `undefined` it is,
   // and refused.
-  const entries = copyArrayValue(methods as unknown[]);
+  const entries = copyArrayValue(
+    methods as unknown[],
+    `${label} filter methods`,
+  );
   if (entries.length === 0) {
     throw new TypeError(
       `${label} filter methods is empty, which would match no request; omit it to match every method`,

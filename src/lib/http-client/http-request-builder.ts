@@ -161,7 +161,7 @@ export class HTTPRequestBuilder<T = unknown> {
       defineEntry(
         this._headers,
         lowerCaseHeaderName(key),
-        copyArrayValue(value),
+        copyArrayValue(value, 'HTTPClient header value'),
       );
     }
     return this;

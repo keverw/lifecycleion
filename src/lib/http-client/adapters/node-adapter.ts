@@ -473,8 +473,11 @@ export class NodeAdapter implements HTTPAdapter {
     if (config.crl !== undefined) {
       normalizeCRL(config.crl, this);
     }
-    assertTrustAnchors(copyArrayValue(config.ca), 'ca');
-    assertTrustAnchors(copyArrayValue(config.mtls?.ca), 'mtls.ca');
+    assertTrustAnchors(copyArrayValue(config.ca, 'NodeAdapter ca'), 'ca');
+    assertTrustAnchors(
+      copyArrayValue(config.mtls?.ca, 'NodeAdapter mtls.ca'),
+      'mtls.ca',
+    );
 
     // Held to their types here and again as each request reads them (see
     // `assertBooleanOption`, `assertSocketPath`, `assertServername` and
@@ -720,11 +723,11 @@ export class NodeAdapter implements HTTPAdapter {
       // Each read once, so the value checked is the value sent - a list's entries too,
       // copied by index (see `copyArrayValue`). A hole stays a hole, which
       // `assertTrustAnchors` reads as the `undefined` it is, and refuses.
-      const trustedCA = copyArrayValue(this._config.ca);
+      const trustedCA = copyArrayValue(this._config.ca, 'NodeAdapter ca');
       const mtls = this._config.mtls;
       // Its certificate, key and passphrase read once, as checked.
       const clientCertificate = readClientCertificate(mtls);
-      const mtlsCA = copyArrayValue(mtls?.ca);
+      const mtlsCA = copyArrayValue(mtls?.ca, 'NodeAdapter mtls.ca');
       const servername = this._config.servername;
       assertServername(servername);
       assertTrustAnchors(trustedCA, 'ca');

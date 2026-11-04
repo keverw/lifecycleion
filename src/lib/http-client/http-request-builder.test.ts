@@ -127,6 +127,18 @@ describe('HTTPRequestBuilder', () => {
       expect(builder.headers({})).toBe(builder);
     });
 
+    test('headers() refuses an array value whose length is not one an array can have', () => {
+      const { builder } = makeBuilder();
+      const value = new Proxy(['a'], {
+        get: (target, key, receiver) =>
+          key === 'length' ? 1.5 : Reflect.get(target, key, receiver),
+      });
+
+      expect(() => builder.headers({ 'x-list': value })).toThrow(
+        new TypeError('HTTPClient header value has no array length'),
+      );
+    });
+
     test('params() returns this', () => {
       const { builder } = makeBuilder();
       expect(builder.params({})).toBe(builder);
