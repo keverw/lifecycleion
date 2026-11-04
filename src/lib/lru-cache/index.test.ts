@@ -1134,6 +1134,55 @@ describe('LRUCache', () => {
       ).toThrow('Invalid onChange reason: bogus');
     });
 
+    test('checks onChangeReasons on the copy it keeps, not through its own iterator', () => {
+      let passes = 0;
+      const reasons = ['set'] as LRUCacheChangeReason[];
+      // Valid on the first pass and another reason after: read twice, the check passes
+      // and the cache keeps the other.
+      Object.defineProperty(reasons, Symbol.iterator, {
+        value: function* () {
+          yield passes++ === 0 ? 'set' : 'delete';
+        },
+      });
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+      const cache = new LRUCache<string, string>(5, {
+        onChange: (event) => {
+          events.push(event);
+        },
+        onChangeReasons: reasons,
+      });
+
+      cache.set('a', '1');
+      cache.delete('a');
+
+      expect(events.map((event) => event.reason)).toEqual(['set']);
+    });
+
+    test('refuses an onChangeReasons length an array cannot have', () => {
+      const reasons = new Proxy(['set'], {
+        get: (target, key, receiver) =>
+          key === 'length' ? Infinity : Reflect.get(target, key, receiver),
+      });
+
+      expect(
+        () =>
+          new LRUCache<string, string>(1, {
+            onChangeReasons: reasons as LRUCacheChangeReason[],
+          }),
+      ).toThrow(new TypeError('onChangeReasons has no array length'));
+    });
+
+    test("estimates an array value's size from its own entries, not its own reduce", () => {
+      const value = ['abc'];
+      Object.defineProperty(value, 'reduce', { value: () => 1_000_000 });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1000 });
+
+      cache.set('a', value);
+
+      // 40 for the array and 2 bytes per UTF-16 unit of its one string.
+      expect(cache.byteSize).toBe(46);
+    });
+
     test('should reject invalid custom TTL values', () => {
       const cache = new LRUCache<string, string>(1);
 

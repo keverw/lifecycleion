@@ -1,4 +1,5 @@
 import { safeHandleCallback } from '../safe-handle-callback';
+import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 
 /**
  * TTL-aware LRU (Least Recently Used) Cache implementation
@@ -120,16 +121,32 @@ export class LRUCache<K, V> {
       throw new TypeError('onChange must be a function');
     }
 
-    if (options?.onChangeReasons !== undefined) {
-      if (!Array.isArray(options.onChangeReasons)) {
+    // Read once and copied by index (see `copyArrayValue`), so the reasons checked are
+    // the reasons kept: not through the list's own iterator, which could yield others on
+    // each pass. A hole reads as `undefined`, refused as any other reason it is not.
+    const givenReasons: unknown = options?.onChangeReasons;
+    let onChangeReasons: LRUCacheChangeReason[] | undefined;
+
+    if (givenReasons !== undefined) {
+      if (!Array.isArray(givenReasons)) {
         throw new TypeError('onChangeReasons must be an array');
       }
 
-      for (const reason of options.onChangeReasons) {
-        if (!VALID_CHANGE_REASONS.has(reason)) {
+      const reasons = copyArrayValue(
+        givenReasons as unknown[],
+        'onChangeReasons',
+      );
+
+      // eslint-disable-next-line unicorn/no-for-loop -- every index, holes included
+      for (let index = 0; index < reasons.length; index++) {
+        const reason = reasons[index];
+
+        if (!VALID_CHANGE_REASONS.has(reason as LRUCacheChangeReason)) {
           throw new RangeError(`Invalid onChange reason: ${String(reason)}`);
         }
       }
+
+      onChangeReasons = reasons as LRUCacheChangeReason[];
     }
 
     this.maxEntries = maxEntries;
@@ -137,8 +154,8 @@ export class LRUCache<K, V> {
     this.maxSize = options?.maxSize;
     this.sizeCalculator = options?.sizeCalculator;
     this.onChange = options?.onChange;
-    this.onChangeReasons = options?.onChangeReasons
-      ? new Set(options.onChangeReasons)
+    this.onChangeReasons = onChangeReasons
+      ? new Set(onChangeReasons)
       : undefined;
   }
 
@@ -430,14 +447,17 @@ export class LRUCache<K, V> {
 
       visitedArrays.add(value);
 
-      // Rough estimate for arrays
-      const estimatedSize =
-        40 +
-        value.reduce(
-          (acc: number, item: unknown) =>
-            acc + this.calculateSize(item, visitedArrays),
-          0,
-        );
+      // Rough estimate for arrays: their own entries, by index, not through the array's
+      // own `reduce`, which a cached value may replace.
+      const items = value as unknown[];
+      const length = readArrayLength(items, 'LRUCache value');
+      let estimatedSize = 40;
+
+      for (let index = 0; index < length; index++) {
+        if (Object.hasOwn(items, index)) {
+          estimatedSize += this.calculateSize(items[index], visitedArrays);
+        }
+      }
 
       visitedArrays.delete(value);
 

@@ -436,6 +436,40 @@ for (const key of ['sinks', 'diagnosticSinks'] as const) {
   });
 }
 
+for (const key of ['sinks', 'diagnosticSinks'] as const) {
+  test(`${key} refuses a length an array cannot have, naming the list`, () => {
+    const list = new Proxy([], {
+      get: (target, key, receiver) =>
+        key === 'length' ? Infinity : Reflect.get(target, key, receiver),
+    });
+
+    expect(() => new Logger({ callProcessExit: false, [key]: list })).toThrow(
+      new TypeError(`Logger ${key} has no array length`),
+    );
+  });
+
+  test(`${key} keeps only its own entries: a hole its prototype fills is no sink`, async () => {
+    const list: unknown[] = [];
+    list.length = 1;
+    Object.setPrototypeOf(
+      list,
+      Object.assign(Object.create(Array.prototype), {
+        0: { write: (): void => {} },
+      }),
+    );
+    const logger = new Logger({
+      callProcessExit: false,
+      [key]: list as never,
+    });
+
+    const kept =
+      key === 'sinks' ? logger.getSinks() : logger.getDiagnosticSinks();
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toBeUndefined();
+    await logger.close();
+  });
+}
+
 for (const addMethod of ['addSink', 'addDiagnosticSink'] as const) {
   for (const when of ['during', 'after'] as const) {
     test(`${addMethod} refuses new ownership ${when} close`, async () => {
