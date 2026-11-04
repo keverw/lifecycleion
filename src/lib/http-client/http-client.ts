@@ -5838,15 +5838,23 @@ function snapshotHeaderRecord(
 
     const snapshot: Record<string, string | string[]> = {};
 
-    for (const [name, headerValue] of Object.entries(value)) {
+    for (const [name, rawValue] of Object.entries(value)) {
+      // Copied first (see `copyArrayValue`), so the items checked are the items kept.
+      const headerValue: unknown = copyArrayValue(rawValue, HEADER_VALUE_LABEL);
       // As `mergeObservedHeaders` reads a record: an unset value or item is skipped,
       // and a number - Node's `getHeaders()` answers `content-length` as one - is a
-      // string. Any other kind of value makes the record malformed.
-      if (
-        !(Array.isArray(headerValue) ? headerValue : [headerValue]).every(
-          isHeaderScalar,
-        )
-      ) {
+      // string. Any other kind of value makes the record malformed. Every index of the
+      // copy, a hole's included, which `every` would skip.
+      const items = Array.isArray(headerValue) ? headerValue : [headerValue];
+      let isWellFormed = true;
+      // eslint-disable-next-line unicorn/no-for-loop -- every index, holes included
+      for (let index = 0; index < items.length; index++) {
+        if (!isHeaderScalar(items[index])) {
+          isWellFormed = false;
+          break;
+        }
+      }
+      if (!isWellFormed) {
         return undefined;
       }
       const present = presentHeaderValue(headerValue);

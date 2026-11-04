@@ -65,19 +65,22 @@ export function snapshotRetryPolicyOptions(
   // ahead of a bad value beside it: against the strategy's fields where `strategy` is an
   // own data value one names, which the refusal then lists, and otherwise against those
   // either strategy takes.
+  const declaredFields = declaredStrategyFields(options);
   assertKnownFields(
     options,
-    declaredStrategyFields(options) ?? ANY_STRATEGY_FIELDS,
+    declaredFields ?? ANY_STRATEGY_FIELDS,
     'HTTPClient retryPolicy',
   );
-  // Built before the other strategy's fields are refused, so they are checked against the
-  // strategy it resolved - read once, a getter's included.
   const snapshot = Object.freeze(new RetryPolicy(options).policyInfo);
-  assertKnownFields(
-    options,
-    retryPolicyFields(snapshot.strategy),
-    'HTTPClient retryPolicy',
-  );
+  // Otherwise - a getter's `strategy`, or none - the other strategy's fields are refused
+  // once `RetryPolicy` has resolved it, so the getter is read once.
+  if (declaredFields === undefined) {
+    assertKnownFields(
+      options,
+      retryPolicyFields(snapshot.strategy),
+      'HTTPClient retryPolicy',
+    );
+  }
   // Normalized policies contain only primitive fields. Brand only our frozen
   // copies, so inheritance can reuse them without trusting mutable caller data.
   validatedSnapshots.add(snapshot);

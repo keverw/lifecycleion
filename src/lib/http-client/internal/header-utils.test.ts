@@ -8,6 +8,7 @@ import {
   requestHeaderPairs,
 } from './header-utils';
 import { errorText } from '../test-helpers/error-text';
+import { copyRequestHeaders } from './request-fields';
 
 describe('presentHeaderValue', () => {
   test("reads an array by index, not through the array's own iterator", () => {
@@ -19,6 +20,28 @@ describe('presentHeaderValue', () => {
     });
 
     expect(presentHeaderValue(value)).toEqual(['a', 'b']);
+  });
+
+  test('skips a hole its prototype fills', () => {
+    const value: unknown[] = ['a'];
+    value.length = 2;
+    Object.setPrototypeOf(
+      value,
+      Object.assign(Object.create(Array.prototype), { 1: 'inherited' }),
+    );
+
+    expect(presentHeaderValue(value)).toEqual(['a']);
+  });
+
+  test("names an adapter driven directly as its own in copyRequestHeaders' refusal", () => {
+    const value = new Proxy(['a'], {
+      get: (target, key, receiver) =>
+        key === 'length' ? Infinity : Reflect.get(target, key, receiver),
+    });
+
+    expect(() => copyRequestHeaders({ 'x-list': value })).toThrow(
+      new TypeError('Adapter request header value has no array length'),
+    );
   });
 
   test('refuses an array whose length is not one an array can have', () => {

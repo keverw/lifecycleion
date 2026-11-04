@@ -17,6 +17,7 @@ import {
   trimSpacesAndTabs,
 } from '../internal/ascii-text';
 import { isNullish } from '../internal/is-nullish';
+import { copyArrayValue } from '../internal/array-copy';
 import { isHeaderSafeCookieText } from './internal/cookie-text';
 
 /** {@link MAX_COOKIE_LIFETIME_SECONDS} in milliseconds. */
@@ -730,7 +731,17 @@ export class CookieJar {
         continue;
       }
 
-      for (const line of Array.isArray(raw) ? (raw as unknown[]) : [raw]) {
+      // Copied by index (see `copyArrayValue`), not through the array's own iterator,
+      // which could yield lines it does not hold. A hole reads as `undefined`, skipped.
+      const given = Array.isArray(raw)
+        ? copyArrayValue(
+            raw as unknown[],
+            'CookieJar processResponseHeaders set-cookie',
+          )
+        : [raw];
+      // eslint-disable-next-line unicorn/no-for-loop -- every index, holes included
+      for (let index = 0; index < given.length; index++) {
+        const line = given[index];
         if (isNullish(line) || line === '') {
           continue;
         }

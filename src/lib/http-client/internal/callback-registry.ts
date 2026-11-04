@@ -1,6 +1,9 @@
 import { isNullish } from '../../internal/is-nullish';
 import { describeValue } from '../../internal/describe-value';
-import { readArrayLength } from '../../internal/array-copy';
+import {
+  MAX_COPIED_ARRAY_LENGTH,
+  readArrayLength,
+} from '../../internal/array-copy';
 import { isRealmRootPrototype } from './plain-record';
 import {
   hasNonHTTPWhitespaceEdge,
@@ -347,10 +350,14 @@ function copyFilterLists(
     // read as the `undefined` it is, and refused. Each checked as it is read, so a list
     // refused at one entry is read no further.
     const source = value as unknown[];
-    const length = readArrayLength(source, `${label} filter ${field}`);
+    const length = readArrayLength(
+      source,
+      `${label} filter ${field}`,
+      MAX_COPIED_ARRAY_LENGTH,
+    );
     const list: unknown[] = [];
     for (let index = 0; index < length; index++) {
-      const entry = index in source ? source[index] : undefined;
+      const entry = Object.hasOwn(source, index) ? source[index] : undefined;
       // Named by its place in the list, never its text.
       const entryName = `${label} filter ${field}[${String(index)}]`;
       if (typeof entry !== rule.entryType) {

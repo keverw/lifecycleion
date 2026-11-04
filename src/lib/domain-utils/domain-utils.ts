@@ -746,17 +746,17 @@ const compiledDomainLists = new WeakMap<
 function compiledDomainList(
   allowedDomains: readonly string[],
 ): CompiledDomainList {
-  const kept = compiledDomainLists.get(allowedDomains);
-  if (kept !== undefined && isSameList(kept.source, allowedDomains)) {
-    return kept;
-  }
-
-  // Each entry read once, into the copy the list is checked against next time.
+  // Each entry read once, into the copy compared with the one the list was compiled from,
+  // and kept as that one when it differs: the caller's list is read nowhere else.
   const source = copyEntryList(
     allowedDomains,
     'matchesDomainList',
     'allowedDomains',
   );
+  const kept = compiledDomainLists.get(allowedDomains);
+  if (kept !== undefined && isSameList(kept.source, source)) {
+    return kept;
+  }
 
   // Trim and filter out empty entries first - and any edged with whitespace other than
   // spaces, tabs, CRs and LFs, which match nothing (see `readTrimmedEntry`).
@@ -829,7 +829,7 @@ function originListPatterns(
   entries: readonly string[],
 ): Map<string, ReturnType<typeof compileWildcardPattern>> {
   const kept = originListPatternMaps.get(allowedOrigins);
-  if (kept !== undefined && isSameList(kept.source, allowedOrigins)) {
+  if (kept !== undefined && isSameList(kept.source, entries)) {
     return kept.patterns;
   }
 

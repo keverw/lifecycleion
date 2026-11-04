@@ -1084,6 +1084,23 @@ describe('CookieJar', () => {
       expect(jar.getCookieFor('a', 'https://example.com')?.value).toBe('1');
     });
 
+    test("reads a set-cookie array by index, not through the array's own iterator", () => {
+      const lines = ['a=1; Path=/'];
+      Object.defineProperty(lines, Symbol.iterator, {
+        value: function* () {
+          yield 'injected=1; Path=/';
+        },
+      });
+      jar.processResponseHeaders(
+        { 'set-cookie': lines },
+        'https://example.com',
+      );
+      expect(jar.getCookieFor('a', 'https://example.com')?.value).toBe('1');
+      expect(
+        jar.getCookieFor('injected', 'https://example.com'),
+      ).toBeUndefined();
+    });
+
     test('processes set-cookie header array', () => {
       jar.processResponseHeaders(
         { 'set-cookie': ['a=1; Path=/', 'b=2; Path=/'] },

@@ -318,6 +318,59 @@ test('a null in effectiveRequestHeaders is skipped, not the whole record', async
   expect(seen[0]).not.toHaveProperty('x-trace');
 });
 
+test('an effectiveRequestHeaders array is checked on the copy it is kept as, each item read once', async () => {
+  let reads = 0;
+  const list: unknown[] = [];
+  // A string on its first read, an object after: read twice, the check passes and the
+  // object is kept as its `[object Object]`.
+  Object.defineProperty(list, 0, {
+    enumerable: true,
+    get: () => (++reads === 1 ? 'ok' : {}),
+  });
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        effectiveRequestHeaders: { 'x-list': list as string[] },
+      }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const seen: Array<Record<string, string | string[]>> = [];
+  client.addResponseObserver((_response, request) => {
+    seen.push(request.headers);
+  });
+
+  await client.get('/x').send();
+
+  expect(seen[0]?.['x-list']).toEqual(['ok']);
+  expect(reads).toBe(1);
+});
+
+test("an adapter's response header array is read by index, not through its own filter", async () => {
+  const lines = ['a=1'];
+  Object.defineProperty(lines, 'filter', { value: () => ['injected=1'] });
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: { 'set-cookie': lines },
+        body: null,
+      }),
+  };
+  const response = await new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+  })
+    .get('/x')
+    .send();
+
+  expect(response.headers['set-cookie']).toEqual(['a=1']);
+});
+
 test("a later interceptor's method filter matches an earlier interceptor's lowercase method", async () => {
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });

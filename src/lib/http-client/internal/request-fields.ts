@@ -147,7 +147,7 @@ export function copyRequestHeaders(
   }
 
   for (const [name, value] of Object.entries(headers)) {
-    const present = presentHeaderValue(value);
+    const present = presentHeaderValue(value, 'Adapter request header value');
     if (present !== undefined) {
       defineEntry(copy, name, present);
     }

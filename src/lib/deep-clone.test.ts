@@ -104,6 +104,21 @@ describe('deepClone', () => {
       expect(cloned.indices?.groups).toEqual({ x: [1, 2] });
     });
 
+    test('refuses an array, or an arrayKeys list, whose length is not one an array can have', () => {
+      const withLength = (length: number) =>
+        new Proxy(['meta'], {
+          get: (target, key, receiver) =>
+            key === 'length' ? length : Reflect.get(target, key, receiver),
+        });
+
+      expect(() => deepClone({ list: withLength(1.5) })).toThrow(
+        new TypeError('deepClone: an array has no array length'),
+      );
+      expect(() => deepClone({}, { arrayKeys: withLength(Infinity) })).toThrow(
+        new TypeError('deepClone: options.arrayKeys has no array length'),
+      );
+    });
+
     test('copies the named entries arrayKeys lists, at any depth, and no others', () => {
       const inner = Object.assign([1], { meta: { id: 1 }, other: 'x' });
       const original = { list: Object.assign([inner], { meta: { id: 2 } }) };

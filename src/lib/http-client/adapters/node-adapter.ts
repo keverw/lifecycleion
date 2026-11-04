@@ -62,7 +62,11 @@ import {
   notifyUploadSourceWait,
   readUploadSourceWaitListener,
 } from '../internal/upload-source-wait';
-import { copyArrayValue, readArrayLength } from '../../internal/array-copy';
+import {
+  copyArrayValue,
+  MAX_COPIED_ARRAY_LENGTH,
+  readArrayLength,
+} from '../../internal/array-copy';
 import { isFormData } from '../internal/form-entries';
 import {
   assertKnownFields,
@@ -3677,9 +3681,13 @@ function snapshotCRLInput(
   }
 
   const entries: Array<string | ArrayBufferView> = [];
-  const length = readArrayLength(crl, 'NodeAdapter crl');
+  const length = readArrayLength(
+    crl,
+    'NodeAdapter crl',
+    MAX_COPIED_ARRAY_LENGTH,
+  );
   for (let index = 0; index < length; index++) {
-    if (index in crl) {
+    if (Object.hasOwn(crl, index)) {
       entries.push(crl[index]);
     }
   }

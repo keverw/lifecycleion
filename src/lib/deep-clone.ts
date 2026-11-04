@@ -10,6 +10,7 @@
  */
 
 import { defineEntry } from './internal/define-entry';
+import { readArrayLength } from './internal/array-copy';
 import { isDOMExceptionInstance } from './internal/dom-exception';
 import {
   arrayBufferKindOf,
@@ -151,7 +152,7 @@ function readArrayKeys(arrayKeys: unknown): readonly string[] {
   const keys: string[] = [];
   // By index, not `for...of`, and to the length read once: a caller's array is read
   // without running its iterator, and a length that grows cannot keep the loop going.
-  const length = arrayKeys.length;
+  const length = readArrayLength(arrayKeys, 'deepClone: options.arrayKeys');
   for (let index = 0; index < length; index++) {
     const key: unknown = arrayKeys[index];
 
@@ -200,10 +201,9 @@ function cloneValue<T>(obj: T, state: CloneState): T {
 
   if (Array.isArray(obj)) {
     const source = obj as unknown[];
-    // Sized by assignment, not `new Array(length)`, which a length that is not a number -
-    // a `Proxy`'s - would make an array of one entry.
+    // A `Proxy`'s length is whatever its trap answers: one an array cannot have is refused.
     const cloned = remember<unknown[]>(state.seen, obj, []);
-    cloned.length = source.length;
+    cloned.length = readArrayLength(source, 'deepClone: an array');
     state.frames.push(new ArrayFrame(source, cloned));
     return cloned as T;
   }

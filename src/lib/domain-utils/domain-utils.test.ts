@@ -3931,6 +3931,22 @@ describe('a value that is not a string', () => {
     expect(matchesDomainList('a.test', [, 'a.test'] as never)).toBe(true);
   });
 
+  it("reads an origin list's entries once a call, not again to check its cache", () => {
+    let reads = 0;
+    const list = new Proxy(['https://*.a.test'], {
+      get: (target, key, receiver) => {
+        if (key === '0') {
+          reads++;
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+
+    matchesOriginList('https://x.a.test', list);
+    matchesOriginList('https://x.a.test', list);
+    expect(reads).toBe(2);
+  });
+
   it('refuses a list whose length is not one an array can have', () => {
     const list = new Proxy(['a.test'], {
       get: (target, key, receiver) =>

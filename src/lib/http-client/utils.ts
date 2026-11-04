@@ -1172,8 +1172,13 @@ export function normalizeAdapterResponseHeaders(
     if (isNullish(rawValue)) {
       continue;
     }
+    // Copied first, by index (see `copyArrayValue`): the adapter's own `filter`, and the
+    // `constructor` it builds through, are not called.
     const value: unknown[] = Array.isArray(rawValue)
-      ? (rawValue as unknown[]).filter((item) => !isNullish(item))
+      ? copyArrayValue(
+          rawValue as unknown[],
+          'HTTPClient adapter response header value',
+        ).filter((item) => !isNullish(item))
       : [rawValue];
 
     if (value.length === 0) {

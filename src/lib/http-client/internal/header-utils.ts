@@ -8,7 +8,11 @@ import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
 import { isFormData } from './form-entries';
 import { isHTTPToken } from './http-token';
-import { copyArrayValue, readArrayLength } from '../../internal/array-copy';
+import {
+  copyArrayValue,
+  MAX_COPIED_ARRAY_LENGTH,
+  readArrayLength,
+} from '../../internal/array-copy';
 import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 import type { RequestHeadersInput } from '../types';
 
@@ -34,6 +38,8 @@ export const HEADER_VALUE_LABEL = 'HTTPClient header value';
  */
 export function presentHeaderValue(
   value: unknown,
+  /** What a refused array is named as: an adapter driven directly names its own. */
+  label: string = HEADER_VALUE_LABEL,
 ): string | string[] | undefined {
   if (isNullish(value)) {
     return undefined;
@@ -45,13 +51,13 @@ export function presentHeaderValue(
     return String(value);
   }
   // By index, each item read once, as every caller array is (see `copyArrayValue`): not
-  // through the array's own iterator, which could yield items it does not hold. A hole
-  // reads as the `undefined` it is, and is skipped.
+  // through the array's own iterator, which could yield items it does not hold. A hole -
+  // one its prototype fills included - reads as the `undefined` it is, and is skipped.
   const list = value as unknown[];
-  const length = readArrayLength(list, HEADER_VALUE_LABEL);
+  const length = readArrayLength(list, label, MAX_COPIED_ARRAY_LENGTH);
   const items: string[] = [];
   for (let index = 0; index < length; index++) {
-    const item = list[index];
+    const item = Object.hasOwn(list, index) ? list[index] : undefined;
     if (!isNullish(item)) {
       // eslint-disable-next-line @typescript-eslint/no-base-to-string -- as above
       items.push(String(item));

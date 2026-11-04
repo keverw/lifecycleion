@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { copyArrayValue, readArrayLength } from './array-copy';
+import {
+  copyArrayValue,
+  MAX_COPIED_ARRAY_LENGTH,
+  readArrayLength,
+} from './array-copy';
 
 /** An array whose `length` reads as `length`, as a `Proxy`'s trap may answer. */
 function withLength(length: unknown): unknown[] {
@@ -30,6 +34,31 @@ describe('copyArrayValue', () => {
     expect(() => copyArrayValue(withLength(Infinity))).toThrow(
       new TypeError('A list has no array length'),
     );
+  });
+
+  test('refuses a sparse length over the cap rather than walking it', () => {
+    const list: unknown[] = [];
+    list.length = 2 ** 32 - 1;
+
+    expect(() => copyArrayValue(list)).toThrow(
+      new TypeError(
+        `A list has a length over ${String(MAX_COPIED_ARRAY_LENGTH)} (got ${String(2 ** 32 - 1)})`,
+      ),
+    );
+  });
+
+  test('keeps a hole its prototype fills as a hole', () => {
+    const list: unknown[] = ['a'];
+    list.length = 2;
+    Object.setPrototypeOf(
+      list,
+      Object.assign(Object.create(Array.prototype), { 1: 'inherited' }),
+    );
+
+    const copy = copyArrayValue(list);
+    expect(copy).toHaveLength(2);
+    expect(Object.hasOwn(copy, 1)).toBe(false);
+    expect(Reflect.getPrototypeOf(copy)).toBe(Array.prototype);
   });
 
   test('copies by index, keeping holes, and leaves a non-array as it is', () => {
