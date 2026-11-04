@@ -1981,7 +1981,7 @@ adapter.routes.get('/bad-cert', () => ({
 }));
 ```
 
-So the `POST`/`PATCH` transport-failure exception is, today, a `NodeAdapter` capability. In a browser those writes are simply not retried after a transport failure, which is the safe outcome, just a stricter one than a runtime with real evidence can offer.
+So the transport-failure exception for a non-idempotent method - `POST`, `PATCH` or a custom one such as `LOCK`, none of which is retried by default - is, today, a `NodeAdapter` capability. In a browser those writes are simply not retried after a transport failure, which is the safe outcome, just a stricter one than a runtime with real evidence can offer.
 
 Since the client treats anything other than `false` as retryable, an unset value means "not known to be unsafe", not "known to be safe". Callers that must not double-apply a write should not infer permission to replay from its absence.
 
