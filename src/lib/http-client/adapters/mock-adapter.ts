@@ -490,10 +490,22 @@ export class MockAdapter implements HTTPAdapter {
         // Read now, as the config is live, and held to the rule the constructor holds an
         // own value to: a getter that throws, or a value that is no function, is a setup
         // mistake, refused rather than retried as the adapter's own failure.
-        // The route's own failure kept as the refusal's `cause`, so it is not lost to it.
-        const onHandlerError = asRouteMistake(() =>
-          assertOnHandlerError(this.config.onHandlerError, handlerError),
-        );
+        // The route's own failure kept on the refusal, so it is not lost to it: as its
+        // `cause`, or beside the getter's error when the read throws.
+        const onHandlerError = asRouteMistake(() => {
+          let value: unknown;
+
+          try {
+            value = this.config.onHandlerError;
+          } catch (readError) {
+            throw new AggregateError(
+              [readError, handlerError],
+              'MockAdapter onHandlerError could not be read',
+            );
+          }
+
+          return assertOnHandlerError(value, handlerError);
+        });
         if (onHandlerError) {
           responseSource = 'onHandlerError';
           try {

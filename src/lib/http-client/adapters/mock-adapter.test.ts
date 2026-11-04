@@ -721,7 +721,7 @@ describe('MockAdapter via HTTPClient', () => {
       () => {
         throw new Error('config unreadable');
       },
-      /config unreadable/,
+      /onHandlerError could not be read/,
     ],
     ['answers no function', () => 'not a function', /must be a function/],
   ])(
@@ -761,6 +761,31 @@ describe('MockAdapter via HTTPClient', () => {
     // The carrier's cause is the refusal, and the refusal's the route's failure.
     expect(outcome.message).toMatch(/must be a function/);
     expect((outcome.cause as Error).cause).toBe(routeFailure);
+  });
+
+  test("an onHandlerError getter that throws at route time keeps both its error and the route's", async () => {
+    const routeFailure = new Error('db down');
+    const readFailure = new Error('bad setup');
+    const config = {};
+    Object.defineProperty(config, 'onHandlerError', {
+      get: () => {
+        throw readFailure;
+      },
+    });
+    const getterAdapter = new MockAdapter(config);
+    getterAdapter.routes.get('/test', () => {
+      throw routeFailure;
+    });
+
+    const outcome = (await getterAdapter
+      .send(makeAdapterRequest())
+      .catch((error: unknown) => error)) as Error;
+
+    expect(outcome.message).toMatch(/onHandlerError could not be read/);
+    expect((outcome.cause as AggregateError).errors).toEqual([
+      readFailure,
+      routeFailure,
+    ]);
   });
 
   test('default delay updates on the original config remain live', async () => {
