@@ -484,7 +484,10 @@ export class LRUCache<K, V> {
           // `Array.prototype`, as `deepClone`'s walk reads one: `Object.hasOwn` costs
           // hundreds of times as much per index on a large array on JavaScriptCore. Any
           // other prototype - one an entry read before swapped in included - can answer
-          // `in` for a hole, so the array is read by `Object.hasOwn` while it has one.
+          // `in` for a hole, so the array is read by `Object.hasOwn` while it has one. An
+          // Array subclass's and another realm's array too: a prototype that lists no
+          // index can still be a `Proxy` whose `has` answers for every hole, and nothing
+          // here tells one apart. A large one is sized faster by a `sizeCalculator`.
           try {
             isOwn =
               Reflect.getPrototypeOf(items) === Array.prototype

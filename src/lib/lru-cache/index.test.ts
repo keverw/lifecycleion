@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeEach, mock } from 'bun:test';
+import { runInNewContext } from 'node:vm';
 import {
   LRUCache,
   type LRUCacheChangeEvent,
@@ -1324,6 +1325,24 @@ describe('LRUCache', () => {
       expect(cache.get('a')).toBe(value);
       // 40 for the array, 1000 for the entry that throws, 8 for the number after it.
       expect(cache.byteSize).toBe(1048);
+    });
+
+    test("sizes an Array subclass's and another realm's array by their own entries", () => {
+      class List extends Array<unknown> {}
+      const subclass = new List();
+      subclass.push('ab', 1);
+      subclass.length = 3;
+      const otherRealm = runInNewContext(
+        'const list = ["ab", 1]; list.length = 3; list',
+      ) as unknown[];
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1000 });
+
+      cache.set('subclass', subclass);
+      // 40 for the array, 4 for its string, 8 for its number; the hole counts for nothing.
+      expect(cache.byteSize).toBe(52);
+
+      cache.set('other realm', otherRealm);
+      expect(cache.byteSize).toBe(104);
     });
 
     test("neither reads nor walks the holes a Proxy prototype's has answers for", () => {
