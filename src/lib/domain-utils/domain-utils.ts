@@ -23,6 +23,7 @@ import {
 } from './helpers';
 import { describeValue } from '../internal/describe-value';
 import { isNullish } from '../internal/is-nullish';
+import { copyArrayValue } from '../internal/array-copy';
 import {
   assertKnownFields,
   assertOptionsObject,
@@ -66,20 +67,13 @@ function assertEntryListIsArray(
 /**
  * An allowlist's entries, each read once into a copy the matcher reads from then on, with
  * one that is not a string refused as {@link assertEntryListIsArray} refuses the list: a
- * number in it would fail with the engine's own error. By index, so nothing of the
- * caller's array is consulted: not its `constructor`, which `slice` builds the copy
- * through, nor a `Symbol.iterator`, which a spread runs. A sparse list's holes stay holes,
- * which `some` and the matchers' `map` skip, rather than becoming `undefined` entries.
+ * number in it would fail with the engine's own error. Copied by {@link copyArrayValue},
+ * so nothing of the caller's array is consulted; a sparse list's holes stay holes, which
+ * `some` and the matchers' `map` skip, rather than becoming `undefined` entries.
  */
 function copyEntryList(list: unknown, fn: string, argument: string): string[] {
   assertEntryListIsArray(list, fn, argument);
-  const length = list.length;
-  const copy: unknown[] = new Array(length);
-  for (let index = 0; index < length; index++) {
-    if (index in list) {
-      copy[index] = list[index];
-    }
-  }
+  const copy = copyArrayValue(list, `${fn}: ${argument}`);
 
   if (copy.some((entry) => typeof entry !== 'string')) {
     throw new TypeError(

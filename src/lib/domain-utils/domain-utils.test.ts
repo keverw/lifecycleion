@@ -3931,6 +3931,17 @@ describe('a value that is not a string', () => {
     expect(matchesDomainList('a.test', [, 'a.test'] as never)).toBe(true);
   });
 
+  it('refuses a list whose length is not one an array can have', () => {
+    const list = new Proxy(['a.test'], {
+      get: (target, key, receiver) =>
+        key === 'length' ? Infinity : Reflect.get(target, key, receiver),
+    });
+
+    expect(() => matchesDomainList('a.test', list)).toThrow(
+      new TypeError('matchesDomainList: allowedDomains has no array length'),
+    );
+  });
+
   it("copies a list by index, not through the caller's constructor", () => {
     const list = ['a.test'];
     // A species that would hand `slice` a list of its own, one that reads its first entry

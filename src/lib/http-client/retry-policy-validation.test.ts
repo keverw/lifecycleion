@@ -237,3 +237,21 @@ test('a misspelled field is named ahead of a bad value beside it', () => {
     } as unknown as RetryPolicyOptions),
   ).toThrow(/maxRetryAttemps/);
 });
+
+test("a field of the other strategy is named ahead of a bad value, with only the declared strategy's fields listed", () => {
+  expect(() =>
+    snapshotRetryPolicyOptions({
+      strategy: 'exponential',
+      delayMS: 500,
+      factor: -1,
+    } as unknown as RetryPolicyOptions),
+  ).toThrow(/"delayMS" field/);
+  expect(() =>
+    snapshotRetryPolicyOptions({
+      strategy: 'fixed',
+      delay: 500,
+    } as unknown as RetryPolicyOptions),
+  ).toThrow(
+    'HTTPClient retryPolicy has no "delay" field (it takes strategy, maxRetryAttempts, delayMS)',
+  );
+});

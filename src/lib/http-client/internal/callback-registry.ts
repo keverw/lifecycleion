@@ -1,5 +1,6 @@
 import { isNullish } from '../../internal/is-nullish';
 import { describeValue } from '../../internal/describe-value';
+import { readArrayLength } from '../../internal/array-copy';
 import { isRealmRootPrototype } from './plain-record';
 import {
   hasNonHTTPWhitespaceEdge,
@@ -346,17 +347,7 @@ function copyFilterLists(
     // read as the `undefined` it is, and refused. Each checked as it is read, so a list
     // refused at one entry is read no further.
     const source = value as unknown[];
-    // An array's own length is always one; a `Proxy`'s is whatever its trap answers, and
-    // one that is not - `Infinity`, `1.5` - would read on without end or past the list.
-    const length: unknown = source.length;
-    if (
-      typeof length !== 'number' ||
-      !Number.isInteger(length) ||
-      length < 0 ||
-      length > 2 ** 32 - 1
-    ) {
-      throw new TypeError(`${label} filter ${field} has no array length`);
-    }
+    const length = readArrayLength(source, `${label} filter ${field}`);
     const list: unknown[] = [];
     for (let index = 0; index < length; index++) {
       const entry = index in source ? source[index] : undefined;

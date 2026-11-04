@@ -32,6 +32,24 @@ function retryPolicyFields(
   return strategy === 'fixed' ? FIXED_FIELDS : EXPONENTIAL_FIELDS;
 }
 
+/**
+ * The fields of the strategy `options` names as an own data value, or `undefined` for one
+ * it does not: a getter is left unread here, for `RetryPolicy` to read once.
+ */
+function declaredStrategyFields(
+  options: RetryPolicyOptions,
+): readonly string[] | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(options, 'strategy');
+  const strategy: unknown =
+    descriptor !== undefined && 'value' in descriptor
+      ? descriptor.value
+      : undefined;
+
+  return strategy === 'fixed' || strategy === 'exponential'
+    ? retryPolicyFields(strategy)
+    : undefined;
+}
+
 const validatedSnapshots = new WeakSet<RetryPolicyOptions>();
 
 /** Validate once at the public configuration boundary and retain plain policy data. */
@@ -43,9 +61,15 @@ export function snapshotRetryPolicyOptions(
   }
   // A misspelled field (`maxRetryAttemps: 5`, meant to raise the limit), or the other
   // strategy's (`delayMS` on an exponential policy), would be read as absent and the
-  // default applied. One that neither strategy takes is refused first, before a value
-  // is read, so a typo is named ahead of a bad value beside it.
-  assertKnownFields(options, ANY_STRATEGY_FIELDS, 'HTTPClient retryPolicy');
+  // default applied. Both are refused first, before a value is read, so they are named
+  // ahead of a bad value beside it: against the strategy's fields where `strategy` is an
+  // own data value one names, which the refusal then lists, and otherwise against those
+  // either strategy takes.
+  assertKnownFields(
+    options,
+    declaredStrategyFields(options) ?? ANY_STRATEGY_FIELDS,
+    'HTTPClient retryPolicy',
+  );
   // Built before the other strategy's fields are refused, so they are checked against the
   // strategy it resolved - read once, a getter's included.
   const snapshot = Object.freeze(new RetryPolicy(options).policyInfo);

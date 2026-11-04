@@ -63,6 +63,7 @@ import {
   readUploadSourceWaitListener,
 } from '../internal/upload-source-wait';
 import { copyArrayValue } from '../internal/array-copy';
+import { readArrayLength } from '../../internal/array-copy';
 import { isFormData } from '../internal/form-entries';
 import {
   assertKnownFields,
@@ -3674,7 +3675,7 @@ function snapshotCRLInput(
   }
 
   const entries: Array<string | ArrayBufferView> = [];
-  const length = crl.length;
+  const length = readArrayLength(crl, 'NodeAdapter crl');
   for (let index = 0; index < length; index++) {
     if (index in crl) {
       entries.push(crl[index]);

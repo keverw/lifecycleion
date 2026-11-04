@@ -247,6 +247,17 @@ test('a socket reset during an async stream factory keeps a response that alread
   }
 });
 
+test('a crl array whose length is not one an array can have is refused as a TypeError', () => {
+  const crl = new Proxy([] as string[], {
+    get: (target, key, receiver) =>
+      key === 'length' ? Infinity : Reflect.get(target, key, receiver),
+  });
+
+  expect(() => new NodeAdapter({ crl })).toThrow(
+    new TypeError('NodeAdapter crl has no array length'),
+  );
+});
+
 test('an empty crl array is refused, at construction and when read for a request', async () => {
   expect(() => new NodeAdapter({ crl: [] })).toThrow(/no -----BEGIN X509 CRL/);
 
