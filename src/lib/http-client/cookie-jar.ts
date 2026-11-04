@@ -17,7 +17,11 @@ import {
   trimSpacesAndTabs,
 } from '../internal/ascii-text';
 import { isNullish } from '../internal/is-nullish';
-import { copyArrayValue } from '../internal/array-copy';
+import {
+  assertArrayLength,
+  copyArrayValue,
+  MAX_COPIED_ARRAY_LENGTH,
+} from '../internal/array-copy';
 import { isHeaderSafeCookieText } from './internal/cookie-text';
 
 /** {@link MAX_COOKIE_LIFETIME_SECONDS} in milliseconds. */
@@ -1044,25 +1048,32 @@ export class CookieJar {
     }
 
     // Read once, in a `try`: a `Proxy` over an array passes `Array.isArray`, and its
-    // `length` getter can throw.
-    let length: number;
+    // `length` getter can throw - or answer one an array cannot have, refused as well.
+    let rawLength: unknown;
 
     try {
-      length = cookies.length;
+      rawLength = cookies.length;
     } catch {
       throw new TypeError('CookieJar.fromJSON: data.cookies cannot be read');
     }
+
+    const length = assertArrayLength(
+      rawLength,
+      'CookieJar.fromJSON: data.cookies',
+      MAX_COPIED_ARRAY_LENGTH,
+    );
 
     const prepared: Cookie[] = [];
 
     // By index, each element read in a `try`: the array is the caller's, and an element
     // getter that throws is an unreadable payload, refused as one. Not the array's own
-    // `entries`, which the caller's array may replace.
+    // `entries`, which the caller's array may replace. Its own entries only: a hole -
+    // one its prototype fills included - is no cookie.
     for (let index = 0; index < length; index++) {
       let entry: unknown;
 
       try {
-        entry = cookies[index];
+        entry = Object.hasOwn(cookies, index) ? cookies[index] : undefined;
       } catch {
         entry = undefined;
       }

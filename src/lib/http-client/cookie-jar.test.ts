@@ -144,6 +144,39 @@ describe('CookieJar', () => {
     },
   );
 
+  describe('fromJSON cookie list', () => {
+    test('refuses a hole its prototype fills, as no cookie', () => {
+      const cookies: unknown[] = [];
+      cookies.length = 1;
+      Object.setPrototypeOf(
+        cookies,
+        Object.assign(Object.create(Array.prototype), {
+          0: {
+            name: 'inh',
+            value: '1',
+            domain: 'example.com',
+            createdAt: Date.now(),
+          },
+        }),
+      );
+
+      expect(() => jar.fromJSON({ cookies } as never)).toThrow(
+        new TypeError('CookieJar.fromJSON: data.cookies[0] is not a cookie'),
+      );
+    });
+
+    test('refuses a length an array cannot have', () => {
+      const cookies = new Proxy([], {
+        get: (target, key, receiver) =>
+          key === 'length' ? Infinity : Reflect.get(target, key, receiver),
+      });
+
+      expect(() => jar.fromJSON({ cookies })).toThrow(
+        new TypeError('CookieJar.fromJSON: data.cookies has no array length'),
+      );
+    });
+  });
+
   describe('setCookie validation', () => {
     test('returns true for valid hostname', () => {
       expect(

@@ -10,7 +10,10 @@
  */
 
 import { defineEntry } from './internal/define-entry';
-import { readArrayLength } from './internal/array-copy';
+import {
+  MAX_COPIED_ARRAY_LENGTH,
+  readArrayLength,
+} from './internal/array-copy';
 import { isDOMExceptionInstance } from './internal/dom-exception';
 import {
   arrayBufferKindOf,
@@ -152,9 +155,16 @@ function readArrayKeys(arrayKeys: unknown): readonly string[] {
   const keys: string[] = [];
   // By index, not `for...of`, and to the length read once: a caller's array is read
   // without running its iterator, and a length that grows cannot keep the loop going.
-  const length = readArrayLength(arrayKeys, 'deepClone: options.arrayKeys');
+  const length = readArrayLength(
+    arrayKeys,
+    'deepClone: options.arrayKeys',
+    MAX_COPIED_ARRAY_LENGTH,
+  );
   for (let index = 0; index < length; index++) {
-    const key: unknown = arrayKeys[index];
+    // Its own entries only: a hole, one its prototype fills included, is no key.
+    const key: unknown = Object.hasOwn(arrayKeys, index)
+      ? arrayKeys[index]
+      : undefined;
 
     if (typeof key !== 'string') {
       throw new TypeError(

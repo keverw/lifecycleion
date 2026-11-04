@@ -17,8 +17,15 @@ export function readArrayLength(
   label: string,
   maxLength = 2 ** 32 - 1,
 ): number {
-  const length: unknown = array.length;
+  return assertArrayLength(array.length, label, maxLength);
+}
 
+/** `length` as {@link readArrayLength} holds an array's, for one already read. */
+export function assertArrayLength(
+  length: unknown,
+  label: string,
+  maxLength = 2 ** 32 - 1,
+): number {
   if (
     typeof length !== 'number' ||
     !Number.isInteger(length) ||

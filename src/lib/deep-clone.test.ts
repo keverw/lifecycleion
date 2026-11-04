@@ -104,6 +104,21 @@ describe('deepClone', () => {
       expect(cloned.indices?.groups).toEqual({ x: [1, 2] });
     });
 
+    test('refuses an arrayKeys hole its prototype fills', () => {
+      const arrayKeys: string[] = [];
+      arrayKeys.length = 1;
+      Object.setPrototypeOf(
+        arrayKeys,
+        Object.assign(Object.create(Array.prototype), { 0: 'x' }),
+      );
+
+      expect(() => deepClone({}, { arrayKeys })).toThrow(
+        new TypeError(
+          'deepClone: options.arrayKeys must be an array of strings',
+        ),
+      );
+    });
+
     test('refuses an array, or an arrayKeys list, whose length is not one an array can have', () => {
       const withLength = (length: number) =>
         new Proxy(['meta'], {

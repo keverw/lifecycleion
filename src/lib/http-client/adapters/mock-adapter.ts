@@ -26,6 +26,7 @@ import {
   readAdapterRequestFields,
 } from '../internal/request-fields';
 import { defineEntry } from '../../internal/define-entry';
+import { copyArrayValue } from '../../internal/array-copy';
 import {
   arrayBufferKindOf,
   readBinaryByteLength,
@@ -782,11 +783,20 @@ export class MockAdapter implements HTTPAdapter {
     // A plain object, as every other header record: a `Headers` or `Map` would spread to
     // `{}`, and then pass every check downstream with every header - `set-cookie` too -
     // lost.
-    // Read once: the value copied is the value checked.
+    // Read once: the value copied is the value checked. Its arrays copied too (see
+    // `copyArrayValue`), so nothing after - the `cookies` merge below - reads the route's.
     const responseHeaders: AdapterResponse['headers'] = asRouteMistake(() => {
       const headers: unknown = mockResponse.headers;
       assertOptionalHeaderRecord(headers, 'MockAdapter route response headers');
-      return { ...(headers as AdapterResponse['headers'] | undefined) };
+      const copy = { ...(headers as AdapterResponse['headers'] | undefined) };
+      for (const [name, value] of Object.entries(copy)) {
+        defineEntry(
+          copy,
+          name,
+          copyArrayValue(value, 'MockAdapter route response header value'),
+        );
+      }
+      return copy;
     });
 
     // Merge cookies shorthand into set-cookie headers.

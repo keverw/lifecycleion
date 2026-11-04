@@ -580,6 +580,28 @@ describe('MockAdapter via HTTPClient', () => {
     },
   );
 
+  test("a route's set-cookie array is read by index when the cookies shorthand is merged into it", async () => {
+    const lines = ['a=1'];
+    Object.defineProperty(lines, Symbol.iterator, {
+      value: function* () {
+        yield 'injected=1';
+      },
+    });
+    const cookieAdapter = new MockAdapter();
+    cookieAdapter.routes.get('/test', () => ({
+      status: 200,
+      headers: { 'set-cookie': lines },
+      cookies: { c: '3' },
+    }));
+
+    const response = await cookieAdapter.send(makeAdapterRequest());
+    const setCookie = response.headers['set-cookie'] as string[];
+
+    expect(setCookie[0]).toBe('a=1');
+    expect(setCookie).toHaveLength(2);
+    expect(setCookie.join('\n')).not.toContain('injected');
+  });
+
   test('null adapter default delay uses zero', async () => {
     const nullableAdapter = new MockAdapter({ defaultDelay: null });
     nullableAdapter.routes.get('/test', () => ({ status: 200, delay: null }));
