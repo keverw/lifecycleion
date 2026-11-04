@@ -255,3 +255,17 @@ test("a field of the other strategy is named ahead of a bad value, with only the
     'HTTPClient retryPolicy has no "delay" field (it takes strategy, maxRetryAttempts, delayMS)',
   );
 });
+
+test("a Proxy's strategy that reads apart from its descriptor is checked against the strategy resolved", () => {
+  const policy = new Proxy(
+    { strategy: 'fixed', delayMS: 5 },
+    {
+      get: (target, key, receiver) =>
+        key === 'strategy' ? 'exponential' : Reflect.get(target, key, receiver),
+    },
+  );
+
+  expect(() =>
+    snapshotRetryPolicyOptions(policy as unknown as RetryPolicyOptions),
+  ).toThrow(/"delayMS" field/);
+});

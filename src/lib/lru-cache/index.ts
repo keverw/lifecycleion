@@ -1,5 +1,9 @@
 import { safeHandleCallback } from '../safe-handle-callback';
-import { copyArrayValue, readArrayLength } from '../internal/array-copy';
+import {
+  copyArrayValue,
+  MAX_COPIED_ARRAY_LENGTH,
+  readArrayLength,
+} from '../internal/array-copy';
 
 /**
  * TTL-aware LRU (Least Recently Used) Cache implementation
@@ -447,16 +451,28 @@ export class LRUCache<K, V> {
 
       visitedArrays.add(value);
 
-      // Rough estimate for arrays: their own entries, by index, not through the array's
-      // own `reduce`, which a cached value may replace.
+      // Rough estimate for arrays: by index, not through the array's own `reduce`, which
+      // a cached value may replace. A length that cannot be walked - one an array cannot
+      // have, a `Proxy`'s that throws, or a sparse one past `MAX_COPIED_ARRAY_LENGTH` -
+      // takes the fallback estimate rather than failing `set()`.
       const items = value as unknown[];
-      const length = readArrayLength(items, 'LRUCache value');
+      let length: number;
+
+      try {
+        length = readArrayLength(
+          items,
+          'LRUCache value',
+          MAX_COPIED_ARRAY_LENGTH,
+        );
+      } catch {
+        visitedArrays.delete(value);
+        return 1000;
+      }
+
       let estimatedSize = 40;
 
       for (let index = 0; index < length; index++) {
-        if (Object.hasOwn(items, index)) {
-          estimatedSize += this.calculateSize(items[index], visitedArrays);
-        }
+        estimatedSize += this.calculateSize(items[index], visitedArrays);
       }
 
       visitedArrays.delete(value);

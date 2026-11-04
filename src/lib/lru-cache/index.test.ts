@@ -1172,7 +1172,22 @@ describe('LRUCache', () => {
       ).toThrow(new TypeError('onChangeReasons has no array length'));
     });
 
-    test("estimates an array value's size from its own entries, not its own reduce", () => {
+    test('takes the fallback estimate for an array whose length cannot be walked', () => {
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+      const invalid = new Proxy([1], {
+        get: (target, key, receiver) =>
+          key === 'length' ? 1.5 : Reflect.get(target, key, receiver),
+      });
+      const sparse: unknown[] = [];
+      sparse.length = 2 ** 32 - 1;
+
+      cache.set('invalid', invalid);
+      expect(cache.byteSize).toBe(1000);
+      cache.set('sparse', sparse);
+      expect(cache.byteSize).toBe(2000);
+    });
+
+    test("estimates an array value's size by index, not through its own reduce", () => {
       const value = ['abc'];
       Object.defineProperty(value, 'reduce', { value: () => 1_000_000 });
       const cache = new LRUCache<string, unknown>(5, { maxSize: 1000 });
