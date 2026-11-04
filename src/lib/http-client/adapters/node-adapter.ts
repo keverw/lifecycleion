@@ -1826,12 +1826,22 @@ export class NodeAdapter implements HTTPAdapter {
               // Already cancelled: the factory is not asked to open a sink nothing will
               // write to. That listener has settled the request; settled here too - the
               // first answer stands - for a signal that reads as aborted without having
-              // dispatched `abort`, which would otherwise hold the request open.
+              // dispatched `abort`, which would otherwise hold the request open. As that
+              // listener answers an abort before the factory is called: with the status and
+              // headers that arrived, so the client keeps them and stores the cookies.
               if (request.signal && readIsAborted()) {
                 abortStream();
                 releaseResponseBody?.();
                 destroyRequestQuietly(req);
-                failRequest(makeAbortError());
+                failRequest(
+                  makeResponseStreamAbortError(
+                    req,
+                    request.headers,
+                    status,
+                    headers,
+                    'Request aborted before the streamResponse factory was called',
+                  ),
+                );
                 return;
               }
 

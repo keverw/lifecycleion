@@ -10038,6 +10038,7 @@ test('a signal that reads as aborted without dispatching abort still settles a s
   const request = Object.assign(new EventEmitter(), {
     destroyed: false,
     setHeader: () => {},
+    getHeaders: () => ({}),
     end: () => {},
     destroy() {
       this.destroyed = true;
@@ -10074,7 +10075,7 @@ test('a signal that reads as aborted without dispatching abort still settles a s
     respond?.(
       Object.assign(new EventEmitter(), {
         statusCode: 200,
-        headers: {},
+        headers: { 'set-cookie': ['id=1'] },
         complete: false,
       }) as unknown as http.IncomingMessage,
     );
@@ -10086,6 +10087,12 @@ test('a signal that reads as aborted without dispatching abort still settles a s
       new Promise((resolve) => setTimeout(() => resolve('unsettled'), 500)),
     ]);
     expect((caught as Error).name).toBe('AbortError');
+    // The answer that arrived, kept as the abort listener keeps it, so the client reports
+    // its status and stores its cookies.
+    const tags = caught as Record<PropertyKey, unknown>;
+    expect(tags[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
+    expect(tags[STREAM_ABORT_STATUS_KEY]).toBe(200);
+    expect(tags[STREAM_ABORT_HEADERS_KEY]).toEqual({ 'set-cookie': ['id=1'] });
     expect(request.destroyed).toBe(true);
     expect(factoryCalls).toBe(0);
   } finally {

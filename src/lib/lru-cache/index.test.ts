@@ -1326,6 +1326,25 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(1048);
     });
 
+    test("does not walk a sparse array's length when a Proxy prototype's has answers for every hole", () => {
+      const value: unknown[] = ['abc'];
+      value.length = 2 ** 32 - 1;
+      Object.setPrototypeOf(
+        value,
+        new Proxy(Object.create(Array.prototype) as object, {
+          has: () => true,
+        }),
+      );
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+      const started = performance.now();
+
+      cache.set('a', value);
+
+      // 40 for the array and 2 bytes per UTF-16 unit of its one string.
+      expect(cache.byteSize).toBe(46);
+      expect(performance.now() - started).toBeLessThan(5000);
+    });
+
     test('charges the fallback once and stops when whether an index is held cannot be told', () => {
       let hasCalls = 0;
       const value = new Proxy(['abc'], {

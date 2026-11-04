@@ -8,6 +8,12 @@ import {
 } from '../internal/array-indices';
 
 /**
+ * How often the default size estimate checks an index `in` reported held against
+ * `Object.hasOwn` (see `calculateSize`).
+ */
+const OWN_INDEX_CHECK_EVERY = 4096;
+
+/**
  * TTL-aware LRU (Least Recently Used) Cache implementation
  *
  * Features:
@@ -482,13 +488,32 @@ export class LRUCache<K, V> {
         // large array on JavaScriptCore, and this only estimates - a `Proxy`'s `has`, or a
         // prototype given an index during the walk, can only move the estimate. One that
         // holds an index is read by `Object.hasOwn`, so a hole it fills counts for nothing.
-        const isOwnOnly = !inheritsNoIndices(items);
+        let isOwnOnly = !inheritsNoIndices(items);
 
         for (let index = 0; index < length; index++) {
           let isOwn: boolean;
 
           try {
             isOwn = isOwnOnly ? Object.hasOwn(items, index) : index in items;
+
+            // Told again by `Object.hasOwn` once every `OWN_INDEX_CHECK_EVERY` indices: a
+            // `Proxy` prototype's `has` can answer for a hole it lists no key for, and read
+            // by `in` alone every index of a sparse array would count as held and its
+            // whole length be walked. One that answers so is read again from the start by
+            // `Object.hasOwn`, past the run of holes that ends a sparse walk.
+            if (
+              isOwn &&
+              !isOwnOnly &&
+              index % OWN_INDEX_CHECK_EVERY === 0 &&
+              !Object.hasOwn(items, index)
+            ) {
+              isOwnOnly = true;
+              estimatedSize = 40;
+              holes = 0;
+              entries = 0;
+              index = -1;
+              continue;
+            }
           } catch {
             return estimatedSize + 1000;
           }
