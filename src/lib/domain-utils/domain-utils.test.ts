@@ -3931,6 +3931,25 @@ describe('a value that is not a string', () => {
     expect(matchesDomainList('a.test', [, 'a.test'] as never)).toBe(true);
   });
 
+  it("copies a list by index, not through the caller's constructor", () => {
+    const list = ['a.test'];
+    // A species that would hand `slice` a list of its own, one that reads its first entry
+    // as another domain than the one written there.
+    Object.defineProperty(list, 'constructor', {
+      value: {
+        [Symbol.species]: function () {
+          return new Proxy([] as string[], {
+            get: (target, key, receiver) =>
+              key === '0' ? 'b.test' : Reflect.get(target, key, receiver),
+          });
+        },
+      },
+    });
+
+    expect(matchesDomainList('a.test', list)).toBe(true);
+    expect(matchesDomainList('b.test', list)).toBe(false);
+  });
+
   it('is checked on the copy the matcher reads, each entry read once', () => {
     for (const match of [
       (list: string[]) => matchesDomainList('a.test', list),

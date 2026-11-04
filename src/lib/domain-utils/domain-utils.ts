@@ -66,13 +66,20 @@ function assertEntryListIsArray(
 /**
  * An allowlist's entries, each read once into a copy the matcher reads from then on, with
  * one that is not a string refused as {@link assertEntryListIsArray} refuses the list: a
- * number in it would fail with the engine's own error. `slice`, not a spread: a sparse
- * list's holes stay holes, which `some` and the matchers' `map` skip, rather than becoming
- * `undefined` entries.
+ * number in it would fail with the engine's own error. By index, so nothing of the
+ * caller's array is consulted: not its `constructor`, which `slice` builds the copy
+ * through, nor a `Symbol.iterator`, which a spread runs. A sparse list's holes stay holes,
+ * which `some` and the matchers' `map` skip, rather than becoming `undefined` entries.
  */
 function copyEntryList(list: unknown, fn: string, argument: string): string[] {
   assertEntryListIsArray(list, fn, argument);
-  const copy = list.slice();
+  const length = list.length;
+  const copy: unknown[] = new Array(length);
+  for (let index = 0; index < length; index++) {
+    if (index in list) {
+      copy[index] = list[index];
+    }
+  }
 
   if (copy.some((entry) => typeof entry !== 'string')) {
     throw new TypeError(

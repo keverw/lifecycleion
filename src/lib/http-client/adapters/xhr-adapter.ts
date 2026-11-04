@@ -897,7 +897,9 @@ export class XHRAdapter implements HTTPAdapter {
       // connection, CORS rejection). It never fires for HTTP error status codes
       // (4xx, 5xx) — those arrive on the load event with a real status.
       xhr.addEventListener('error', () => {
-        if (didSettle) {
+        // Not once `load` has started, as for `timeout` and `abort` below: it answers what
+        // it loaded. A shim can fire one from a callback `load` runs, before it settles.
+        if (didSettle || didLoad) {
           return;
         }
 
