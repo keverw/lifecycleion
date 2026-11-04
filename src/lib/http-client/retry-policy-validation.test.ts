@@ -269,3 +269,123 @@ test("a Proxy's strategy that reads apart from its descriptor is checked against
     snapshotRetryPolicyOptions(policy as unknown as RetryPolicyOptions),
   ).toThrow(/"delayMS" field/);
 });
+
+test.each([
+  [
+    'exponential',
+    'fixed',
+    {
+      factor: 2,
+      minTimeoutMS: 1,
+      maxTimeoutMS: 1,
+      dispersion: 0,
+      maxRetryAttempts: 1,
+    },
+  ],
+  ['fixed', 'exponential', { delayMS: 5 }],
+])(
+  "a Proxy whose strategy reads as %s apart from its descriptor's %s is accepted as the one it reads as",
+  (read, declared, fields) => {
+    const policy = new Proxy(
+      { strategy: declared, ...fields },
+      {
+        get: (target, key, receiver) =>
+          key === 'strategy' ? read : Reflect.get(target, key, receiver),
+      },
+    );
+
+    const snapshot = snapshotRetryPolicyOptions(
+      policy as unknown as RetryPolicyOptions,
+    );
+
+    expect(snapshot).toMatchObject({ strategy: read, ...fields });
+  },
+);
+
+test('a misspelling a getter removes or adds while the policy is read is still refused', () => {
+  const removed = {
+    maxRetryAttemps: 5,
+    get strategy(): 'fixed' {
+      delete (this as { maxRetryAttemps?: number }).maxRetryAttemps;
+      return 'fixed';
+    },
+    delayMS: 5,
+  };
+  const added = {
+    strategy: 'fixed',
+    get delayMS(): number {
+      Object.defineProperty(this, 'maxRetryAttemps', {
+        value: 5,
+        enumerable: true,
+      });
+      return 5;
+    },
+  };
+
+  for (const policy of [removed, added]) {
+    expect(() =>
+      snapshotRetryPolicyOptions(policy as unknown as RetryPolicyOptions),
+    ).toThrow(
+      'HTTPClient retryPolicy has no "maxRetryAttemps" field (it takes strategy, maxRetryAttempts, delayMS)',
+    );
+  }
+});
+
+test('a function is refused as no options object, its fields unchecked otherwise', () => {
+  const policy = Object.assign(() => {}, {
+    strategy: 'fixed',
+    maxRetryAttemps: 5,
+  });
+
+  expect(() =>
+    snapshotRetryPolicyOptions(policy as unknown as RetryPolicyOptions),
+  ).toThrow(
+    new TypeError('HTTPClient retryPolicy must be an object (got function)'),
+  );
+});
+
+test("a Proxy trap's own throw while the keys are listed ends the check before strategy is read", () => {
+  const trapFailure = new Error('backing store not ready');
+  let strategyReads = 0;
+  const policy = new Proxy(
+    { strategy: 'fixed', delayMS: 5 },
+    {
+      ownKeys: () => {
+        throw trapFailure;
+      },
+      get: (target, key, receiver) => {
+        if (key === 'strategy') {
+          strategyReads++;
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    },
+  );
+
+  expect(() =>
+    snapshotRetryPolicyOptions(policy as unknown as RetryPolicyOptions),
+  ).toThrow(trapFailure);
+  expect(strategyReads).toBe(0);
+});
+
+test('a strategy getter is read once, its first answer the strategy used', () => {
+  let reads = 0;
+  const policy = {
+    get strategy(): string {
+      reads++;
+      return reads === 1 ? 'exponential' : 'fixed';
+    },
+    factor: 2,
+    minTimeoutMS: 1,
+    maxTimeoutMS: 1,
+    dispersion: 0,
+    maxRetryAttempts: 1,
+  };
+
+  const snapshot = snapshotRetryPolicyOptions(
+    policy as unknown as RetryPolicyOptions,
+  );
+
+  expect(snapshot.strategy).toBe('exponential');
+  expect(reads).toBe(1);
+});

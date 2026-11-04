@@ -45,6 +45,21 @@ export function assertArrayLength(
 }
 
 /**
+ * A test of whether `array` holds an own entry at an index: `in` where its prototype is
+ * this realm's `Array.prototype`, which holds no index unless the realm's own built-ins
+ * were changed - outside what this guards - and `Object.hasOwn` otherwise, so a hole a
+ * prototype of the caller's fills stays a hole. Not `Object.hasOwn` throughout: on
+ * JavaScriptCore it costs hundreds of times what `in` does per index.
+ */
+export function ownIndexTest(
+  array: readonly unknown[],
+): (index: number) => boolean {
+  return Reflect.getPrototypeOf(array) === Array.prototype
+    ? (index) => index in array
+    : (index) => Object.hasOwn(array, index);
+}
+
+/**
  * A caller's array copied one level deep - its items, a nested object among them, kept as
  * they are - and any other value as it is. The rule for a caller's array a module keeps:
  * a header value, a trust store or a domain allowlist.
@@ -63,8 +78,9 @@ export function copyArrayValue<V>(value: V, label = 'A list'): V {
 
   const length = readArrayLength(value, label, MAX_COPIED_ARRAY_LENGTH);
   const copy: unknown[] = new Array(length);
+  const hasIndex = ownIndexTest(value);
   for (let index = 0; index < length; index++) {
-    if (Object.hasOwn(value, index)) {
+    if (hasIndex(index)) {
       copy[index] = value[index];
     }
   }

@@ -1,9 +1,14 @@
 import { safeHandleCallback } from '../safe-handle-callback';
 import {
   copyArrayValue,
-  MAX_COPIED_ARRAY_LENGTH,
+  ownIndexTest,
   readArrayLength,
 } from '../internal/array-copy';
+import {
+  indicesFrom,
+  SPARSE_RUN,
+  SPARSE_RUN_PER_ENTRY,
+} from '../internal/array-indices';
 
 /**
  * TTL-aware LRU (Least Recently Used) Cache implementation
@@ -451,33 +456,87 @@ export class LRUCache<K, V> {
 
       visitedArrays.add(value);
 
-      // Rough estimate for arrays: by index, not through the array's own `reduce`, which
-      // a cached value may replace. A length that cannot be walked - one an array cannot
-      // have, a `Proxy`'s that throws, or a sparse one past `MAX_COPIED_ARRAY_LENGTH` -
-      // takes the fallback estimate rather than failing `set()`.
+      // Rough estimate for arrays: their own entries, by index, not through the array's
+      // own `reduce`, which a cached value may replace - a hole, one its prototype fills
+      // included, counts for nothing, and past a long run of them the rest are read by the
+      // array's own index keys, so a sparse array's length is not walked. What cannot be
+      // read takes the fallback estimate a circular array does, rather than failing
+      // `set()`: an array whose length is not one an array can have, and an entry whose
+      // read throws, with the entries around it still counted. A failure sizing an entry
+      // it did read is not caught here.
       const items = value as unknown[];
-      let length: number;
 
       try {
-        length = readArrayLength(
-          items,
-          'LRUCache value',
-          MAX_COPIED_ARRAY_LENGTH,
-        );
-      } catch {
+        let length: number;
+
+        try {
+          length = readArrayLength(items, 'LRUCache value');
+        } catch {
+          return 1000;
+        }
+
+        let estimatedSize = 40;
+        let holes = 0;
+        let entries = 0;
+        let sparseFrom: number | undefined;
+        const hasIndex = ownIndexTest(items);
+
+        for (let index = 0; index < length; index++) {
+          let entry: unknown;
+
+          try {
+            if (!hasIndex(index)) {
+              // A long run of holes, as `deepClone` measures one: the rest by the array's
+              // own index keys.
+              if (
+                ++holes > SPARSE_RUN &&
+                holes > entries * SPARSE_RUN_PER_ENTRY
+              ) {
+                sparseFrom = index + 1;
+                break;
+              }
+              continue;
+            }
+            entry = items[index];
+          } catch {
+            estimatedSize += 1000;
+            continue;
+          }
+
+          entries++;
+          estimatedSize += this.calculateSize(entry, visitedArrays);
+        }
+
+        if (sparseFrom === undefined) {
+          return estimatedSize;
+        }
+
+        // Keys that cannot be listed take the fallback for the rest.
+        let tail: number[];
+
+        try {
+          tail = indicesFrom(items, sparseFrom, length);
+        } catch {
+          return estimatedSize + 1000;
+        }
+
+        for (const index of tail) {
+          let entry: unknown;
+
+          try {
+            entry = items[index];
+          } catch {
+            estimatedSize += 1000;
+            continue;
+          }
+
+          estimatedSize += this.calculateSize(entry, visitedArrays);
+        }
+
+        return estimatedSize;
+      } finally {
         visitedArrays.delete(value);
-        return 1000;
       }
-
-      let estimatedSize = 40;
-
-      for (let index = 0; index < length; index++) {
-        estimatedSize += this.calculateSize(items[index], visitedArrays);
-      }
-
-      visitedArrays.delete(value);
-
-      return estimatedSize;
     } else if (typeof value === 'object') {
       try {
         // Rough estimate based on JSON size

@@ -2,6 +2,7 @@ import { isNullish } from '../internal/is-nullish';
 import {
   MAX_COPIED_ARRAY_LENGTH,
   readArrayLength,
+  ownIndexTest,
 } from '../internal/array-copy';
 import { isObjectLike } from '../internal/is-object-like';
 import {
@@ -2494,10 +2495,9 @@ function copySinkList(
   }
   const length = readArrayLength(entries, label, MAX_COPIED_ARRAY_LENGTH);
   const sinks: LogSink[] = [];
+  const hasIndex = ownIndexTest(entries);
   for (let index = 0; index < length; index++) {
-    sinks.push(
-      Object.hasOwn(entries, index) ? entries[index] : (undefined as never),
-    );
+    sinks.push(hasIndex(index) ? entries[index] : (undefined as never));
   }
   return sinks;
 }

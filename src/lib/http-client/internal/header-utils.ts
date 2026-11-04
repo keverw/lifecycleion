@@ -12,6 +12,7 @@ import {
   copyArrayValue,
   MAX_COPIED_ARRAY_LENGTH,
   readArrayLength,
+  ownIndexTest,
 } from '../../internal/array-copy';
 import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 import type { RequestHeadersInput } from '../types';
@@ -56,8 +57,9 @@ export function presentHeaderValue(
   const list = value as unknown[];
   const length = readArrayLength(list, label, MAX_COPIED_ARRAY_LENGTH);
   const items: string[] = [];
+  const hasIndex = ownIndexTest(list);
   for (let index = 0; index < length; index++) {
-    const item = Object.hasOwn(list, index) ? list[index] : undefined;
+    const item = hasIndex(index) ? list[index] : undefined;
     if (!isNullish(item)) {
       // eslint-disable-next-line @typescript-eslint/no-base-to-string -- as above
       items.push(String(item));

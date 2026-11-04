@@ -3,6 +3,7 @@ import { describeValue } from '../../internal/describe-value';
 import {
   MAX_COPIED_ARRAY_LENGTH,
   readArrayLength,
+  ownIndexTest,
 } from '../../internal/array-copy';
 import { isRealmRootPrototype } from './plain-record';
 import {
@@ -356,8 +357,9 @@ function copyFilterLists(
       MAX_COPIED_ARRAY_LENGTH,
     );
     const list: unknown[] = [];
+    const hasIndex = ownIndexTest(source);
     for (let index = 0; index < length; index++) {
-      const entry = Object.hasOwn(source, index) ? source[index] : undefined;
+      const entry = hasIndex(index) ? source[index] : undefined;
       // Named by its place in the list, never its text.
       const entryName = `${label} filter ${field}[${String(index)}]`;
       if (typeof entry !== rule.entryType) {
