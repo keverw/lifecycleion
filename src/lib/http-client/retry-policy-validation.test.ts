@@ -389,3 +389,27 @@ test('a strategy getter is read once, its first answer the strategy used', () =>
   expect(snapshot.strategy).toBe('exponential');
   expect(reads).toBe(1);
 });
+
+test("a misspelling is named ahead of a strategy getter's failure or unknown answer", () => {
+  const throwing = {
+    maxRetryAttemps: 5,
+    get strategy(): string {
+      throw new Error('strategy getter');
+    },
+  };
+  const unknown = {
+    get strategy(): string {
+      Object.defineProperty(this, 'maxRetryAttemps', {
+        value: 5,
+        enumerable: true,
+      });
+      return 'nope';
+    },
+  };
+
+  for (const policy of [throwing, unknown]) {
+    expect(() =>
+      snapshotRetryPolicyOptions(policy as unknown as RetryPolicyOptions),
+    ).toThrow(/"maxRetryAttemps" field/);
+  }
+});

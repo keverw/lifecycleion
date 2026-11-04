@@ -1,9 +1,5 @@
 import { safeHandleCallback } from '../safe-handle-callback';
-import {
-  copyArrayValue,
-  ownIndexTest,
-  readArrayLength,
-} from '../internal/array-copy';
+import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 import {
   indicesFrom,
   SPARSE_RUN,
@@ -479,13 +475,18 @@ export class LRUCache<K, V> {
         let holes = 0;
         let entries = 0;
         let sparseFrom: number | undefined;
-        const hasIndex = ownIndexTest(items);
+        // `in` on an array whose prototype is `Array.prototype`, as `deepClone`'s walk
+        // reads one: `Object.hasOwn` costs hundreds of times as much per index on a large
+        // array on JavaScriptCore, and this only estimates - a `Proxy`'s `has`, or a
+        // prototype swapped during the walk, can only move the estimate. Another
+        // prototype is read by `Object.hasOwn`, so a hole it fills counts for nothing.
+        const isOwnOnly = Reflect.getPrototypeOf(items) !== Array.prototype;
 
         for (let index = 0; index < length; index++) {
           let entry: unknown;
 
           try {
-            if (!hasIndex(index)) {
+            if (isOwnOnly ? !Object.hasOwn(items, index) : !(index in items)) {
               // A long run of holes, as `deepClone` measures one: the rest by the array's
               // own index keys.
               if (
@@ -523,7 +524,12 @@ export class LRUCache<K, V> {
         for (const index of tail) {
           let entry: unknown;
 
+          // Checked again, as `deepClone` checks its tail: an entry read before it can
+          // have removed it.
           try {
+            if (!Object.hasOwn(items, index)) {
+              continue;
+            }
             entry = items[index];
           } catch {
             estimatedSize += 1000;

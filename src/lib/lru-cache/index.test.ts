@@ -1223,6 +1223,36 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(40 + Math.ceil(length / 1000) * 8);
     });
 
+    test('does not read a tail index an earlier entry removed', () => {
+      let inheritedReads = 0;
+      const value: unknown[] = [];
+      value.length = 200_000;
+      value[150_000] = 'x'.repeat(10);
+      Object.defineProperty(value, 100_000, {
+        enumerable: true,
+        get() {
+          Reflect.deleteProperty(value, 150_000);
+          Object.setPrototypeOf(
+            value,
+            Object.defineProperty(Object.create(Array.prototype), 150_000, {
+              get: () => {
+                inheritedReads++;
+                return 'y'.repeat(1000);
+              },
+            }),
+          );
+          return 'a';
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      cache.set('a', value);
+
+      // 40 for the array and 2 bytes for the one string still its own.
+      expect(cache.byteSize).toBe(42);
+      expect(inheritedReads).toBe(0);
+    });
+
     test('counts a dense array past the copy cap in full', () => {
       const dense = new Array<number>(2 ** 24 + 1).fill(1);
       const cache = new LRUCache<string, unknown>(5, { maxSize: 2 ** 30 });

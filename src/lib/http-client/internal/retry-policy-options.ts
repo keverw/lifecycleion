@@ -88,10 +88,20 @@ export function snapshotRetryPolicyOptions(
   // remove one - and judged once the strategy is read.
   const shape = keyShape(options);
   // Read once - a getter's included - as the one value `RetryPolicy` is then handed.
-  const strategy: unknown = options.strategy;
+  let strategy: unknown;
+  try {
+    strategy = options.strategy;
+  } catch (error) {
+    // A misspelling is still named ahead of the getter's own failure.
+    assertKnownFields(shape, ANY_STRATEGY_FIELDS, RETRY_POLICY_LABEL);
+    throw error;
+  }
 
   if (strategy !== 'fixed' && strategy !== 'exponential') {
+    // Named ahead of the strategy's refusal: one there before the getter ran, and one it
+    // added.
     assertKnownFields(shape, ANY_STRATEGY_FIELDS, RETRY_POLICY_LABEL);
+    assertKnownFields(options, ANY_STRATEGY_FIELDS, RETRY_POLICY_LABEL);
     // `RetryPolicy` refuses the strategy, handed it as a plain value so a getter is not
     // read again: this never returns.
     return Object.freeze(

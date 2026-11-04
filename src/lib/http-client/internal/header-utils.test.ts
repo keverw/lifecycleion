@@ -22,6 +22,29 @@ describe('presentHeaderValue', () => {
     expect(presentHeaderValue(value)).toEqual(['a', 'b']);
   });
 
+  test("reads its own entries whatever a Proxy's has trap answers", () => {
+    const value = new Proxy(['keep', 'also-kept'], { has: () => false });
+
+    expect(presentHeaderValue(value)).toEqual(['keep', 'also-kept']);
+  });
+
+  test('skips a hole a prototype swapped in during the read fills', () => {
+    const swapped = Object.defineProperty(Object.create(Array.prototype), 1, {
+      get: () => 'injected',
+    });
+    const value: unknown[] = [];
+    value.length = 2;
+    Object.defineProperty(value, 0, {
+      enumerable: true,
+      get() {
+        Object.setPrototypeOf(value, swapped);
+        return 'first';
+      },
+    });
+
+    expect(presentHeaderValue(value)).toEqual(['first']);
+  });
+
   test('skips a hole its prototype fills', () => {
     const value: unknown[] = ['a'];
     value.length = 2;

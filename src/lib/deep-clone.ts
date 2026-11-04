@@ -18,7 +18,6 @@ import {
 import {
   MAX_COPIED_ARRAY_LENGTH,
   readArrayLength,
-  ownIndexTest,
 } from './internal/array-copy';
 import { isDOMExceptionInstance } from './internal/dom-exception';
 import {
@@ -152,10 +151,11 @@ function readArrayKeys(arrayKeys: unknown): readonly string[] {
     'deepClone: options.arrayKeys',
     MAX_COPIED_ARRAY_LENGTH,
   );
-  const hasIndex = ownIndexTest(arrayKeys);
   for (let index = 0; index < length; index++) {
     // Its own entries only: a hole, one its prototype fills included, is no key.
-    const key: unknown = hasIndex(index) ? arrayKeys[index] : undefined;
+    const key: unknown = Object.hasOwn(arrayKeys, index)
+      ? arrayKeys[index]
+      : undefined;
 
     if (typeof key !== 'string') {
       throw new TypeError(

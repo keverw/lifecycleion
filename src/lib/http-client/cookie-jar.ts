@@ -21,7 +21,6 @@ import {
   assertArrayLength,
   copyArrayValue,
   MAX_COPIED_ARRAY_LENGTH,
-  ownIndexTest,
 } from '../internal/array-copy';
 import { isHeaderSafeCookieText } from './internal/cookie-text';
 
@@ -1070,19 +1069,11 @@ export class CookieJar {
     // getter that throws is an unreadable payload, refused as one. Not the array's own
     // `entries`, which the caller's array may replace. Its own entries only: a hole -
     // one its prototype fills included - is no cookie.
-    let hasIndex: (index: number) => boolean;
-
-    try {
-      hasIndex = ownIndexTest(cookies);
-    } catch {
-      throw new TypeError('CookieJar.fromJSON: data.cookies cannot be read');
-    }
-
     for (let index = 0; index < length; index++) {
       let entry: unknown;
 
       try {
-        entry = hasIndex(index) ? cookies[index] : undefined;
+        entry = Object.hasOwn(cookies, index) ? cookies[index] : undefined;
       } catch {
         entry = undefined;
       }

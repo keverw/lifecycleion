@@ -165,18 +165,6 @@ describe('CookieJar', () => {
       );
     });
 
-    test('refuses a list whose prototype cannot be read as an unreadable payload', () => {
-      const cookies = new Proxy([], {
-        getPrototypeOf: () => {
-          throw new Error('trap');
-        },
-      });
-
-      expect(() => jar.fromJSON({ cookies })).toThrow(
-        new TypeError('CookieJar.fromJSON: data.cookies cannot be read'),
-      );
-    });
-
     test('refuses a length an array cannot have', () => {
       const cookies = new Proxy([], {
         get: (target, key, receiver) =>

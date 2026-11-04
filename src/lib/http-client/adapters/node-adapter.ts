@@ -66,7 +66,6 @@ import {
   copyArrayValue,
   MAX_COPIED_ARRAY_LENGTH,
   readArrayLength,
-  ownIndexTest,
 } from '../../internal/array-copy';
 import { isFormData } from '../internal/form-entries';
 import {
@@ -3687,9 +3686,8 @@ function snapshotCRLInput(
     'NodeAdapter crl',
     MAX_COPIED_ARRAY_LENGTH,
   );
-  const hasIndex = ownIndexTest(crl);
   for (let index = 0; index < length; index++) {
-    if (hasIndex(index)) {
+    if (Object.hasOwn(crl, index)) {
       entries.push(crl[index]);
     }
   }
