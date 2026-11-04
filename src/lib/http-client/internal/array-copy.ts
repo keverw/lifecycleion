@@ -1,10 +1,5 @@
 import { defineEntry } from '../../internal/define-entry';
 
-// The rule for a caller's array the client keeps - a header value or a trust store - is
-// shared with the domain matchers' allowlists. A `.params()` array is copied as `qs`
-// reads it instead (see `copyParamArrayValue`).
-export { copyArrayValue } from '../../internal/array-copy';
-
 /**
  * A `.params()` array value copied one level deep as `qs` reads it: every own enumerable
  * key, each read once - an index, or a name set on the array (`a[extra]=y`) - so the copy

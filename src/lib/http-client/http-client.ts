@@ -22,6 +22,7 @@ import { guardAbortListeners } from '../internal/guarded-abort-signal';
 import { RetryPolicy } from '../retry-utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
 import {
+  HEADER_VALUE_LABEL,
   assertNoBrowserRestrictedHeaders,
   copyHeaderRecord,
   lowerCaseHeaderName,
@@ -163,7 +164,7 @@ import {
   assertOptionsObject,
   fieldNames,
 } from '../internal/known-fields';
-import { copyArrayValue } from './internal/array-copy';
+import { copyArrayValue } from '../internal/array-copy';
 import {
   adoptPromise,
   adoptResult,
@@ -2429,7 +2430,7 @@ export class BaseHTTPClient {
         const lower = lowerCaseHeaderName(key);
 
         if (CROSS_ORIGIN_SAFE_HEADERS.has(lower)) {
-          safeHeaders[lower] = copyArrayValue(value);
+          safeHeaders[lower] = copyArrayValue(value, HEADER_VALUE_LABEL);
         }
       }
 
@@ -3898,6 +3899,7 @@ export class BaseHTTPClient {
           if (Object.hasOwn(sentRequest.headers, key)) {
             redirectRequestHeaders[key] = copyArrayValue(
               sentRequest.headers[key],
+              HEADER_VALUE_LABEL,
             );
           } else {
             delete redirectRequestHeaders[key];
@@ -3912,7 +3914,10 @@ export class BaseHTTPClient {
         const authoredHeaders = attemptRequest.headers;
         for (const key of ['content-length', 'content-type']) {
           if (Object.hasOwn(authoredHeaders, key)) {
-            redirectRequestHeaders[key] = copyArrayValue(authoredHeaders[key]);
+            redirectRequestHeaders[key] = copyArrayValue(
+              authoredHeaders[key],
+              HEADER_VALUE_LABEL,
+            );
           } else {
             delete redirectRequestHeaders[key];
           }

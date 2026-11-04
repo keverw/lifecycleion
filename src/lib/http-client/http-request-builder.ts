@@ -6,7 +6,10 @@ import { generateID } from '../id-helpers';
 import { validateMaxResponseBytes, validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { defineEntry } from '../internal/define-entry';
-import { lowerCaseHeaderName } from './internal/header-utils';
+import {
+  HEADER_VALUE_LABEL,
+  lowerCaseHeaderName,
+} from './internal/header-utils';
 import { isBlankText } from '../internal/ascii-text';
 import { copyRequestBody } from './internal/request-body-copy';
 import { isFormData } from './internal/form-entries';
@@ -15,7 +18,8 @@ import {
   assertOptionsObject,
   fieldNames,
 } from '../internal/known-fields';
-import { copyArrayValue, copyParamArrayValue } from './internal/array-copy';
+import { copyParamArrayValue } from './internal/array-copy';
+import { copyArrayValue } from '../internal/array-copy';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -161,7 +165,7 @@ export class HTTPRequestBuilder<T = unknown> {
       defineEntry(
         this._headers,
         lowerCaseHeaderName(key),
-        copyArrayValue(value, 'HTTPClient header value'),
+        copyArrayValue(value, HEADER_VALUE_LABEL),
       );
     }
     return this;

@@ -14,7 +14,7 @@ import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { describeValue } from '../internal/describe-value';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
-import { copyArrayValue } from './internal/array-copy';
+import { copyArrayValue } from '../internal/array-copy';
 import { isFormData } from './internal/form-entries';
 import { readUnknownMember } from '../internal/read-member';
 import { isUint8ArrayValue } from '../internal/binary-view';

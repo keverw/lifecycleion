@@ -62,8 +62,7 @@ import {
   notifyUploadSourceWait,
   readUploadSourceWaitListener,
 } from '../internal/upload-source-wait';
-import { copyArrayValue } from '../internal/array-copy';
-import { readArrayLength } from '../../internal/array-copy';
+import { copyArrayValue, readArrayLength } from '../../internal/array-copy';
 import { isFormData } from '../internal/form-entries';
 import {
   assertKnownFields,

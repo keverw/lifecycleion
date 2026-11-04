@@ -1,5 +1,5 @@
 import { isPlainRecord } from './internal/plain-record';
-import { copyArrayValue } from './internal/array-copy';
+import { copyArrayValue } from '../internal/array-copy';
 import { describeValue } from '../internal/describe-value';
 import { assertKnownFields } from '../internal/known-fields';
 import { parse } from 'tldts';

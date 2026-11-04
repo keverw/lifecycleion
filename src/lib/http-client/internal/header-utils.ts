@@ -8,7 +8,7 @@ import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
 import { isFormData } from './form-entries';
 import { isHTTPToken } from './http-token';
-import { copyArrayValue } from './array-copy';
+import { copyArrayValue, readArrayLength } from '../../internal/array-copy';
 import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 import type { RequestHeadersInput } from '../types';
 
@@ -18,6 +18,9 @@ import type { RequestHeadersInput } from '../types';
  * into the valid `x-key`, and grouping it with a real `x-key`.
  */
 export const lowerCaseHeaderName: (name: string) => string = asciiLowercase;
+
+/** What a header value is named as in a refusal: never by its name, which may be a value. */
+export const HEADER_VALUE_LABEL = 'HTTPClient header value';
 
 /**
  * A header value as every header normalizer reads it - the one rule they share, so a
@@ -41,8 +44,14 @@ export function presentHeaderValue(
     // eslint-disable-next-line @typescript-eslint/no-base-to-string -- a caller's value, converted as every header value is
     return String(value);
   }
+  // By index, each item read once, as every caller array is (see `copyArrayValue`): not
+  // through the array's own iterator, which could yield items it does not hold. A hole
+  // reads as the `undefined` it is, and is skipped.
+  const list = value as unknown[];
+  const length = readArrayLength(list, HEADER_VALUE_LABEL);
   const items: string[] = [];
-  for (const item of value as unknown[]) {
+  for (let index = 0; index < length; index++) {
+    const item = list[index];
     if (!isNullish(item)) {
       // eslint-disable-next-line @typescript-eslint/no-base-to-string -- as above
       items.push(String(item));
@@ -61,7 +70,7 @@ export function copyHeaderRecord(
 ): Record<string, string | string[]> {
   const copy: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(headers)) {
-    defineEntry(copy, name, copyArrayValue(value));
+    defineEntry(copy, name, copyArrayValue(value, HEADER_VALUE_LABEL));
   }
   return copy;
 }

@@ -4,9 +4,34 @@ import {
   describeRefusedHeader,
   isBrowserRestrictedHeader,
   materializeRequestHeaders,
+  presentHeaderValue,
   requestHeaderPairs,
 } from './header-utils';
 import { errorText } from '../test-helpers/error-text';
+
+describe('presentHeaderValue', () => {
+  test("reads an array by index, not through the array's own iterator", () => {
+    const value = ['a', null, 'b'];
+    Object.defineProperty(value, Symbol.iterator, {
+      value: function* () {
+        yield 'injected';
+      },
+    });
+
+    expect(presentHeaderValue(value)).toEqual(['a', 'b']);
+  });
+
+  test('refuses an array whose length is not one an array can have', () => {
+    const value = new Proxy(['a'], {
+      get: (target, key, receiver) =>
+        key === 'length' ? Infinity : Reflect.get(target, key, receiver),
+    });
+
+    expect(() => presentHeaderValue(value)).toThrow(
+      new TypeError('HTTPClient header value has no array length'),
+    );
+  });
+});
 
 describe('isBrowserRestrictedHeader', () => {
   test('detects exact-match browser restricted headers', () => {
