@@ -2,16 +2,9 @@ import { safeHandleCallback } from '../safe-handle-callback';
 import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 import {
   indicesFrom,
-  inheritsNoIndices,
   SPARSE_RUN,
   SPARSE_RUN_PER_ENTRY,
 } from '../internal/array-indices';
-
-/**
- * How often the default size estimate checks an index `in` reported held against
- * `Object.hasOwn` (see `calculateSize`).
- */
-const OWN_INDEX_CHECK_EVERY = 4096;
 
 /**
  * TTL-aware LRU (Least Recently Used) Cache implementation
@@ -483,37 +476,20 @@ export class LRUCache<K, V> {
         let holes = 0;
         let entries = 0;
         let sparseFrom: number | undefined;
-        // `in` when no prototype the array inherits from holds an index, as `deepClone`'s
-        // walk reads one: `Object.hasOwn` costs hundreds of times as much per index on a
-        // large array on JavaScriptCore, and this only estimates - a `Proxy`'s `has`, or a
-        // prototype given an index during the walk, can only move the estimate. One that
-        // holds an index is read by `Object.hasOwn`, so a hole it fills counts for nothing.
-        let isOwnOnly = !inheritsNoIndices(items);
 
         for (let index = 0; index < length; index++) {
           let isOwn: boolean;
 
+          // `in` while the array's prototype, read before each index, is this realm's
+          // `Array.prototype`, as `deepClone`'s walk reads one: `Object.hasOwn` costs
+          // hundreds of times as much per index on a large array on JavaScriptCore. Any
+          // other prototype - one an entry read before swapped in included - can answer
+          // `in` for a hole, so the array is read by `Object.hasOwn` while it has one.
           try {
-            isOwn = isOwnOnly ? Object.hasOwn(items, index) : index in items;
-
-            // Told again by `Object.hasOwn` once every `OWN_INDEX_CHECK_EVERY` indices: a
-            // `Proxy` prototype's `has` can answer for a hole it lists no key for, and read
-            // by `in` alone every index of a sparse array would count as held and its
-            // whole length be walked. One that answers so is read again from the start by
-            // `Object.hasOwn`, past the run of holes that ends a sparse walk.
-            if (
-              isOwn &&
-              !isOwnOnly &&
-              index % OWN_INDEX_CHECK_EVERY === 0 &&
-              !Object.hasOwn(items, index)
-            ) {
-              isOwnOnly = true;
-              estimatedSize = 40;
-              holes = 0;
-              entries = 0;
-              index = -1;
-              continue;
-            }
+            isOwn =
+              Reflect.getPrototypeOf(items) === Array.prototype
+                ? index in items
+                : Object.hasOwn(items, index);
           } catch {
             return estimatedSize + 1000;
           }

@@ -1016,6 +1016,13 @@ export class NodeAdapter implements HTTPAdapter {
           | undefined;
 
         /**
+         * The request's abort listener, set once it is. The stream setup runs it itself for
+         * a signal that reads as aborted without having dispatched `abort` - otherwise the
+         * factory would still be called, or its sink kept, for a request nothing answers.
+         */
+        let answerAbort: (() => void) | undefined;
+
+        /**
          * Whether the server has already answered.
          *
          * A body write that fails after this is not the failure worth reporting. A server is
@@ -1931,6 +1938,11 @@ export class NodeAdapter implements HTTPAdapter {
                 // request's listener is one of them; from the event's own turn the error
                 // would go first, to no listener at all - an uncaught exception.
                 await Promise.resolve(undefined);
+                // Read as aborted meanwhile without an `abort` event: answered as the
+                // listener answers one.
+                if (!streamAbort.signal.aborted && readIsAborted()) {
+                  answerAbort?.();
+                }
                 // Cancelled, timed out, or the response failed meanwhile: the factory is
                 // not asked for a sink nothing will write to.
                 if (streamAbort.signal.aborted) {
@@ -1965,6 +1977,12 @@ export class NodeAdapter implements HTTPAdapter {
                   // is a sync factory's handoff, so its listeners attach in that turn.
                   writable = returned as
                     WritableLike | null | StreamResponseCancel;
+                }
+
+                // As before the call, while the setup is still pending: an abort read now,
+                // the factory's own sync code having flipped it included, is one during setup.
+                if (!streamAbort.signal.aborted && readIsAborted()) {
+                  answerAbort?.();
                 }
 
                 // A factory that forgot its `return` hands back `undefined`, which is neither
@@ -2569,6 +2587,7 @@ export class NodeAdapter implements HTTPAdapter {
           abortListenerRemovers.push(() => {
             signal.removeEventListener('abort', onAbort);
           });
+          answerAbort = onAbort;
         }
 
         // 0% upload progress before any bytes leave the process, once a signal already

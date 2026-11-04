@@ -10100,6 +10100,124 @@ test('a signal that reads as aborted without dispatching abort still settles a s
   }
 });
 
+test('a signal that reads as aborted without dispatching abort during stream setup settles it', async () => {
+  const outcomes: Record<string, unknown> = {};
+  for (const when of [
+    'before the factory',
+    'in a sync factory',
+    'in an async factory',
+  ] as const) {
+    let respond: ((res: http.IncomingMessage) => void) | undefined;
+    const request = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      setHeader: () => {},
+      getHeaders: () => ({}),
+      end: () => {},
+      destroy() {
+        this.destroyed = true;
+        return this;
+      },
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(((
+      _options: unknown,
+      callback: (res: http.IncomingMessage) => void,
+    ) => {
+      respond = callback;
+      return request;
+    }) as unknown as typeof http.request);
+    let isAborted = false;
+    const signal = {
+      get aborted() {
+        return isAborted;
+      },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    } as unknown as AbortSignal;
+    let factoryCalls = 0;
+    const sink = makeMemoryWritable().stream;
+    try {
+      const sending = new NodeAdapter().send(
+        makeAdapterRequest('http://example.test', {
+          signal,
+          streamResponse:
+            when === 'in an async factory'
+              ? async () => {
+                  factoryCalls++;
+                  await new Promise((resolve) => setTimeout(resolve, 10));
+                  isAborted = true;
+                  return sink;
+                }
+              : () => {
+                  factoryCalls++;
+                  isAborted = true;
+                  return sink;
+                },
+        }),
+      );
+      // Flipped by a microtask the response's status read queues: after the response
+      // callback's own check, before the factory would be called.
+      respond?.(
+        Object.assign(new EventEmitter(), {
+          get statusCode() {
+            if (when === 'before the factory') {
+              queueMicrotask(() => {
+                isAborted = true;
+              });
+            }
+            return 200;
+          },
+          headers: { 'set-cookie': ['id=1'] },
+          complete: false,
+        }) as unknown as http.IncomingMessage,
+      );
+      const caught = await Promise.race([
+        sending.then(
+          () => 'resolved',
+          (error: unknown) => error,
+        ),
+        new Promise((resolve) => setTimeout(() => resolve('unsettled'), 300)),
+      ]);
+      outcomes[when] = {
+        name: (caught as Error).name,
+        factoryCalls,
+        isRequestDestroyed: request.destroyed,
+        isSinkDestroyed: sink.destroyed,
+      };
+      if (when === 'before the factory') {
+        const tags = caught as Record<PropertyKey, unknown>;
+        expect(tags[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
+        expect(tags[STREAM_ABORT_STATUS_KEY]).toBe(200);
+        expect(tags[STREAM_ABORT_HEADERS_KEY]).toEqual({
+          'set-cookie': ['id=1'],
+        });
+      }
+    } finally {
+      requestSpy.mockRestore();
+    }
+  }
+
+  expect(outcomes).toEqual({
+    'before the factory': {
+      name: 'AbortError',
+      factoryCalls: 0,
+      isRequestDestroyed: true,
+      isSinkDestroyed: false,
+    },
+    'in a sync factory': {
+      name: 'AbortError',
+      factoryCalls: 1,
+      isRequestDestroyed: true,
+      isSinkDestroyed: true,
+    },
+    'in an async factory': {
+      name: 'AbortError',
+      factoryCalls: 1,
+      isRequestDestroyed: true,
+      isSinkDestroyed: true,
+    },
+  });
+});
+
 test('an aborted compressed download lets go of a sink whose destroy says nothing', async () => {
   // The abort releases the decoded body, and a destroyed one delivers nothing more - not
   // even the `'close'` a destroyed raw response still emits - so left to those events,

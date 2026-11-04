@@ -1326,23 +1326,64 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(1048);
     });
 
-    test("does not walk a sparse array's length when a Proxy prototype's has answers for every hole", () => {
-      const value: unknown[] = ['abc'];
-      value.length = 2 ** 32 - 1;
-      Object.setPrototypeOf(
-        value,
-        new Proxy(Object.create(Array.prototype) as object, {
-          has: () => true,
-        }),
-      );
+    test("neither reads nor walks the holes a Proxy prototype's has answers for", () => {
+      let inheritedReads = 0;
+      const prototype = new Proxy(Object.create(Array.prototype) as object, {
+        // Unheld at every 4096th index, held at every other.
+        has: (_target, key) => Number(key) % 4096 !== 0,
+        get: (target, key, receiver) => {
+          if (typeof key === 'string' && /^\d+$/.test(key)) {
+            inheritedReads++;
+            return 'inherited-value';
+          }
+          return Reflect.get(target, key, receiver) as unknown;
+        },
+      });
+      const sparse: unknown[] = ['abc'];
+      sparse.length = 2 ** 32 - 1;
+      Object.setPrototypeOf(sparse, prototype);
+      const short: unknown[] = ['ab'];
+      short.length = 2;
+      Object.setPrototypeOf(short, prototype);
       const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
-      const started = performance.now();
+
+      cache.set('sparse', sparse);
+      // 40 for the array and 2 bytes per UTF-16 unit of its one string.
+      expect(cache.byteSize).toBe(46);
+
+      cache.set('short', short);
+      expect(cache.byteSize).toBe(46 + 44);
+      expect(inheritedReads).toBe(0);
+    });
+
+    test('reads by Object.hasOwn once an entry swaps in a prototype that answers for holes', () => {
+      let inheritedReads = 0;
+      const value: unknown[] = [];
+      Object.defineProperty(value, 0, {
+        enumerable: true,
+        get: () => {
+          Object.setPrototypeOf(
+            value,
+            new Proxy(Object.create(Array.prototype) as object, {
+              has: () => true,
+              get: (target, key, receiver) => {
+                if (typeof key === 'string' && /^\d+$/.test(key)) {
+                  inheritedReads++;
+                }
+                return Reflect.get(target, key, receiver) as unknown;
+              },
+            }),
+          );
+          return 'abc';
+        },
+      });
+      value.length = 2 ** 32 - 1;
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
 
       cache.set('a', value);
 
-      // 40 for the array and 2 bytes per UTF-16 unit of its one string.
       expect(cache.byteSize).toBe(46);
-      expect(performance.now() - started).toBeLessThan(5000);
+      expect(inheritedReads).toBe(0);
     });
 
     test('charges the fallback once and stops when whether an index is held cannot be told', () => {
