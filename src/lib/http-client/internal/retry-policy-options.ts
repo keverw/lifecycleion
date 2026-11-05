@@ -74,10 +74,6 @@ export function snapshotRetryPolicyOptions(
   // A function is no options object, though `RetryPolicy` would read it as one, nor is an
   // array: refused as any other value that is not one, as their fields could not be checked.
   assertOptionsObject(options, RETRY_POLICY_LABEL);
-  if (options === undefined) {
-    // `RetryPolicy` refuses it as no options object, so this never returns.
-    return Object.freeze(new RetryPolicy(options).policyInfo);
-  }
   // A misspelled field (`maxRetryAttemps: 5`, meant to raise the limit), or the other
   // strategy's (`delayMS` on an exponential policy), would be read as absent and the
   // default applied. Both are refused before a value is checked, so they are named ahead
