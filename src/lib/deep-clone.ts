@@ -510,9 +510,10 @@ class ObjectFrame implements Frame {
  * holds as its own is copied, so a hole stays a hole, one emptied before its turn
  * included. Each is told by {@link holdsOwnIndex}, so a prototype swapped in during the
  * walk fills no hole after it; a `Proxy` array's own `has` trap is answered as it answers.
- * Past enough holes the rest is read by its own
- * keys (see {@link isMostlyHoles}). Then the named entries: a match result's and `arrayKeys`' - the
- * others are not listed, which would cost a dense array many times its clone.
+ * Past enough holes the rest is read by its own keys (see {@link isMostlyHoles}), listed
+ * once there, so an index an entry fills after that is not read. Then the named entries: a
+ * match result's and `arrayKeys`' - the others are not listed, which would cost a dense
+ * array many times its clone.
  */
 class ArrayFrame implements Frame {
   private readonly length: number;

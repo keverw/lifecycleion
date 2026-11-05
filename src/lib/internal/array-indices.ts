@@ -92,8 +92,9 @@ export function inheritsNoIndices(array: object): boolean {
 /**
  * Runs `visit` for each index below `length` that `source` holds as its own, in order,
  * each told by `Object.hasOwn`. Past enough holes (see {@link isMostlyHoles}) the rest
- * are found from its own keys and each checked again as it is reached - an entry visited
- * before can have removed it - so a sparse array's length is not walked.
+ * are found from its own keys, listed once, and each checked again as it is reached - an
+ * entry visited before can have removed it, and one it adds is not visited - so a sparse
+ * array's length is not walked.
  */
 export function forEachOwnIndex(
   source: unknown[],
