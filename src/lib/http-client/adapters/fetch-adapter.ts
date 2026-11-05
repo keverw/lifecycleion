@@ -57,7 +57,7 @@ import {
   readBinaryByteLength,
   isUint8ArrayValue,
 } from '../../internal/binary-view';
-import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
+import { asciiLowercase } from '../../internal/ascii-text';
 import {
   BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES,
   RESPONSE_DECODE_ERROR_KEY,
@@ -888,12 +888,8 @@ function isRuntimeDecodeFailure(
   error: unknown,
   headers: Record<string, string | string[]>,
 ): boolean {
-  const encoding = headers['content-encoding'];
-  const encodings = (Array.isArray(encoding) ? encoding.join(',') : encoding)
-    ?.split(',')
-    .map((token) => asciiLowercase(trimHTTPWhitespace(token)))
-    .filter((token) => token !== '' && token !== 'identity');
-  if (encodings === undefined || encodings.length === 0) {
+  const encoding = scalarHeader(headers, 'content-encoding');
+  if (encoding === undefined || isIdentityContentEncoding(encoding)) {
     return false;
   }
 

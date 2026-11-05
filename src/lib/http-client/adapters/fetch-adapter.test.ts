@@ -3460,6 +3460,26 @@ describe('FetchAdapter - a body that only fails to decode', () => {
       'identity',
       false,
     ],
+    [
+      'a decoder code on a body that is identity once trimmed and lowercased',
+      Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('incorrect header check'), {
+          code: 'Z_DATA_ERROR',
+        }),
+      }),
+      'IDENTITY,\t ',
+      false,
+    ],
+    [
+      'a decoder code on a body with one real coding beside identity',
+      Object.assign(new TypeError('terminated'), {
+        cause: Object.assign(new Error('incorrect header check'), {
+          code: 'Z_DATA_ERROR',
+        }),
+      }),
+      'identity, gzip',
+      true,
+    ],
   ])(
     'a 503 whose body fails as %s is retried only when it only failed to decode',
     async (_name, error, encoding, isRetried) => {
