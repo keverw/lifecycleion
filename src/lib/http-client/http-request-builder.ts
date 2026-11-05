@@ -18,7 +18,7 @@ import {
   assertOptionsObject,
   fieldNames,
 } from '../internal/known-fields';
-import { copyParamArrayValue } from './internal/array-copy';
+import { copyParamArrayValue } from './internal/param-array-copy';
 import { copyArrayValue } from '../internal/array-copy';
 import {
   assertOptionalHeaderRecord,

@@ -3,8 +3,19 @@ import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 import {
   holdsOwnIndex,
   indicesFrom,
+  inheritsNoIndices,
   isMostlyHoles,
 } from '../internal/array-indices';
+
+/**
+ * How many of the first indices `in` reports held on an Array subclass's or another
+ * realm's array the default size estimate checks with `Object.hasOwn`, every one (see
+ * `calculateSize`).
+ */
+const CHECKED_LEAD = 4096;
+
+/** The widest gap between later checks, each drawn at random up to it. */
+const CHECK_GAP = 128;
 
 /**
  * TTL-aware LRU (Least Recently Used) Cache implementation
@@ -476,14 +487,50 @@ export class LRUCache<K, V> {
         let holes = 0;
         let entries = 0;
         let sparseFrom: number | undefined;
+        // As `deepClone`'s walk tells an index held - `in` on this realm's
+        // `Array.prototype`, `Object.hasOwn` otherwise, which costs hundreds of times as
+        // much per index on a large array on JavaScriptCore - save on an Array subclass's
+        // or another realm's array whose prototypes list no index: that one is read by
+        // `in` too, while its prototype is the one it had when sizing began. A `Proxy`
+        // prototype can answer `in` for a hole whatever keys it lists, so what `in` reports
+        // held is checked with `Object.hasOwn` - every one of the first, then one at random
+        // every so often, which the prototype is never asked about and cannot foresee - and
+        // one caught answering for a hole is sized again from the start by
+        // `Object.hasOwn`, so its holes count for nothing and a sparse one's length is not
+        // walked.
+        let checkedPrototype: object | null | undefined = inheritsNoIndices(
+          items,
+        )
+          ? Reflect.getPrototypeOf(items)
+          : undefined;
+        let untilCheck = 1;
 
         for (let index = 0; index < length; index++) {
           let isOwn: boolean;
 
-          // As `deepClone`'s walk tells one. An Array subclass's or another realm's array is
-          // read by `Object.hasOwn`, and a large one sized faster by a `sizeCalculator`.
           try {
-            isOwn = holdsOwnIndex(items, index);
+            if (
+              checkedPrototype !== undefined &&
+              checkedPrototype !== Array.prototype &&
+              Reflect.getPrototypeOf(items) === checkedPrototype
+            ) {
+              isOwn = index in items;
+
+              if (isOwn && (index < CHECKED_LEAD || --untilCheck === 0)) {
+                untilCheck = 1 + Math.floor(Math.random() * CHECK_GAP);
+
+                if (!Object.hasOwn(items, index)) {
+                  checkedPrototype = undefined;
+                  estimatedSize = 40;
+                  holes = 0;
+                  entries = 0;
+                  index = -1;
+                  continue;
+                }
+              }
+            } else {
+              isOwn = holdsOwnIndex(items, index);
+            }
           } catch {
             return estimatedSize + 1000;
           }
@@ -498,6 +545,8 @@ export class LRUCache<K, V> {
             continue;
           }
 
+          // Counted as held whether or not its read throws, as `deepClone` counts one.
+          entries++;
           let entry: unknown;
 
           try {
@@ -507,7 +556,6 @@ export class LRUCache<K, V> {
             continue;
           }
 
-          entries++;
           estimatedSize += this.calculateSize(entry, visitedArrays);
         }
 

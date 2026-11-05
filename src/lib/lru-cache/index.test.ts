@@ -1345,6 +1345,65 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(104);
     });
 
+    test('counts an entry whose read throws as held, so the holes after it are walked as deepClone walks them', () => {
+      let ownKeysCalls = 0;
+      const target: unknown[] = [];
+      for (let index = 0; index < 2000; index++) {
+        target[index] = index;
+      }
+      target[72_000] = 1;
+      const value = new Proxy(target, {
+        get: (array, key, receiver) => {
+          if (typeof key === 'string' && Number(key) < 2000) {
+            throw new Error('unreadable entry');
+          }
+          return Reflect.get(array, key, receiver) as unknown;
+        },
+        ownKeys: (array) => {
+          ownKeysCalls++;
+          return Reflect.ownKeys(array);
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 10_000_000 });
+
+      cache.set('a', value);
+
+      // 40 for the array, 1000 for each entry that throws, 8 for the number past the holes.
+      expect(cache.byteSize).toBe(40 + 2000 * 1000 + 8);
+      // 70,000 holes, short of 64 per entry held: walked, not listed.
+      expect(ownKeysCalls).toBe(0);
+    });
+
+    test("catches a Proxy prototype that answers for holes only past the first checked indices, reading at most a gap's worth", () => {
+      let inheritedReads = 0;
+      const value: unknown[] = new (class List extends Array<unknown> {})();
+      for (let index = 0; index < 5000; index++) {
+        value.push(1);
+      }
+      value.length = 2 ** 32 - 1;
+      Object.setPrototypeOf(
+        value,
+        new Proxy(Object.getPrototypeOf(value) as object, {
+          has: (target, key) =>
+            Number(key) >= 5000 ? true : Reflect.has(target, key),
+          get: (target, key, receiver) => {
+            if (typeof key === 'string' && Number(key) >= 5000) {
+              inheritedReads++;
+              return 'inherited-value';
+            }
+            return Reflect.get(target, key, receiver) as unknown;
+          },
+        }),
+      );
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1_000_000 });
+
+      cache.set('a', value);
+
+      // 40 for the array and 8 for each of its own numbers: sized again once caught.
+      expect(cache.byteSize).toBe(40 + 5000 * 8);
+      expect(inheritedReads).toBeLessThanOrEqual(128);
+    });
+
     test("neither reads nor walks the holes a Proxy prototype's has answers for", () => {
       let inheritedReads = 0;
       const prototype = new Proxy(Object.create(Array.prototype) as object, {

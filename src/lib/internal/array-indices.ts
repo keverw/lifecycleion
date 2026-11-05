@@ -39,6 +39,56 @@ export function holdsOwnIndex(array: unknown[], index: number): boolean {
     : Object.hasOwn(array, index);
 }
 
+/** The most prototypes {@link inheritsNoIndices} reads before it answers no. */
+const MAX_PROTOTYPE_DEPTH = 64;
+
+/** Whether `key` is an array index: a canonical integer string below `2 ** 32 - 1`. */
+function isIndexKey(key: string | symbol): boolean {
+  if (typeof key !== 'string') {
+    return false;
+  }
+
+  const index = Number(key);
+  return (
+    index >>> 0 === index && index !== 2 ** 32 - 1 && String(index) === key
+  );
+}
+
+/**
+ * Whether no prototype `array` inherits from lists an index of its own as it stands now -
+ * an Array subclass's prototype or another realm's `Array.prototype` as much as this
+ * realm's, which with `Object.prototype` is taken as listing none. A chain that cannot be
+ * read, or one over 64 deep, is answered no. Not proof that `in` tells `array`'s own
+ * indices: a `Proxy` prototype answers `has` as its trap does, whatever keys it lists, so
+ * a walk that reads by `in` on this answer checks what it reads (see `LRUCache`'s size
+ * estimate).
+ */
+export function inheritsNoIndices(array: object): boolean {
+  try {
+    let prototype = Reflect.getPrototypeOf(array);
+
+    for (let depth = 0; depth < MAX_PROTOTYPE_DEPTH; depth++) {
+      if (
+        prototype === null ||
+        prototype === Array.prototype ||
+        prototype === Object.prototype
+      ) {
+        return true;
+      }
+
+      if (Reflect.ownKeys(prototype).some(isIndexKey)) {
+        return false;
+      }
+
+      prototype = Reflect.getPrototypeOf(prototype);
+    }
+  } catch {
+    // Read by `Object.hasOwn` instead.
+  }
+
+  return false;
+}
+
 /**
  * Runs `visit` for each index below `length` that `source` holds as its own, in order,
  * each told by `Object.hasOwn`. Past enough holes (see {@link isMostlyHoles}) the rest
