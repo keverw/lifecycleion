@@ -28,7 +28,10 @@ export function isMostlyHoles(holes: number, entries: number): boolean {
  * JavaScriptCore - and by `Object.hasOwn` otherwise. Any other prototype, one an entry
  * read a moment ago swapped in included, can answer `in` for a hole: an Array subclass's
  * or another realm's as much as any, since one that lists no index can still be a `Proxy`
- * whose `has` answers for every hole, and nothing here tells one apart.
+ * whose `has` answers for every hole, and nothing here tells one apart. A `Proxy` array is
+ * answered as its own traps answer, its `getPrototypeOf` and `has` included - a hole it
+ * says it holds is read as an entry, as `Object.hasOwn` would read one its
+ * `getOwnPropertyDescriptor` says it holds.
  */
 export function holdsOwnIndex(array: unknown[], index: number): boolean {
   return Reflect.getPrototypeOf(array) === Array.prototype

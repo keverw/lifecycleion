@@ -1830,27 +1830,14 @@ export class NodeAdapter implements HTTPAdapter {
               // the factory is setting up (`pendingStreamSetup`) or its writable is
               // streaming (`activeResponseStream`) - and not once the stream has
               // finished, so a factory's abort cleanup never undoes a completed body.
-              // Already cancelled: the factory is not asked to open a sink nothing will
-              // write to. That listener has settled the request; settled here too - the
-              // first answer stands - for a signal that reads as aborted without having
-              // dispatched `abort`, which would otherwise hold the request open. As that
-              // listener answers an abort before the factory is called: with the status and
-              // headers that arrived, so the client keeps them and stores the cookies.
-              if (request.signal && readIsAborted()) {
-                abortStream();
-                releaseResponseBody?.();
-                destroyRequestQuietly(req);
-                failRequest(
-                  makeResponseStreamAbortError(
-                    req,
-                    request.headers,
-                    status,
-                    headers,
-                    'Request aborted before the streamResponse factory was called',
-                  ),
-                );
-                return;
-              }
+              // A signal that reads as aborted without having dispatched `abort` would hold
+              // the request open: read at each step of the setup, and answered by that
+              // listener as it answers one dispatched then - the first answer stands.
+              const answerUndispatchedAbort = (): void => {
+                if (!streamAbort.signal.aborted && readIsAborted()) {
+                  answerAbort?.();
+                }
+              };
 
               let writable: WritableLike | null | StreamResponseCancel;
               // Whether the factory's return is a cancel, decided once: a `cancel` getter
@@ -1920,6 +1907,13 @@ export class NodeAdapter implements HTTPAdapter {
                 };
 
                 pendingStreamSetup = setup;
+                // Already cancelled: the factory is not asked to open a sink nothing will
+                // write to, and the status and headers that arrived are kept, so the
+                // client stores the cookies.
+                answerUndispatchedAbort();
+                if (streamAbort.signal.aborted) {
+                  return;
+                }
                 // Response-side termination may never emit a request-side error.
                 // Listen before awaiting caller code so a stalled factory cannot hide it.
                 res.once('error', setupFailed);
@@ -1938,11 +1932,7 @@ export class NodeAdapter implements HTTPAdapter {
                 // request's listener is one of them; from the event's own turn the error
                 // would go first, to no listener at all - an uncaught exception.
                 await Promise.resolve(undefined);
-                // Read as aborted meanwhile without an `abort` event: answered as the
-                // listener answers one.
-                if (!streamAbort.signal.aborted && readIsAborted()) {
-                  answerAbort?.();
-                }
+                answerUndispatchedAbort();
                 // Cancelled, timed out, or the response failed meanwhile: the factory is
                 // not asked for a sink nothing will write to.
                 if (streamAbort.signal.aborted) {
@@ -1979,11 +1969,9 @@ export class NodeAdapter implements HTTPAdapter {
                     WritableLike | null | StreamResponseCancel;
                 }
 
-                // As before the call, while the setup is still pending: an abort read now,
-                // the factory's own sync code having flipped it included, is one during setup.
-                if (!streamAbort.signal.aborted && readIsAborted()) {
-                  answerAbort?.();
-                }
+                // While the setup is still pending: an abort read now, the factory's own
+                // sync code having flipped it included, is one during setup.
+                answerUndispatchedAbort();
 
                 // A factory that forgot its `return` hands back `undefined`, which is neither
                 // a cancel nor a sink. Refused here, as a setup failure of the factory's own,
