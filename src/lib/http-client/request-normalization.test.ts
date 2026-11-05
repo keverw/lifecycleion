@@ -12416,6 +12416,34 @@ test("a MockAdapter route cookie name is held to the jar's rule, not an HTTP tok
   }
 });
 
+test('a MockAdapter route cookie whose value, path or domain cannot be written is named by its position, not its name', async () => {
+  const name = 'Authorization: Bearer abc123';
+  const entries = [
+    'x;y',
+    { value: 'x;y' },
+    { value: 'x', path: '/a;b' },
+    { value: 'x', domain: 'a.test;b' },
+  ];
+  const parts = ['value', 'value', 'path', 'domain'];
+
+  for (const [index, entry] of entries.entries()) {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/login', () => ({
+      status: 200,
+      cookies: { theme: 'dark', [name]: entry },
+    }));
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://mock.test',
+    }).get('/login');
+    await builder.send();
+
+    expect(builder.error?.cause?.message).toBe(
+      `MockAdapter cookie at position 1 ${parts[index]} cannot be written into a Set-Cookie line`,
+    );
+  }
+});
+
 test('a MockAdapter route that returns nothing is named by its registered pattern, not the request path', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get(

@@ -1141,7 +1141,7 @@ function isKnownUncodedBody(
   const contentEncoding = answer.headers['content-encoding'];
 
   if (contentEncoding !== undefined) {
-    return isIdentityContentEncoding(contentEncoding as string);
+    return isIdentityContentEncoding(contentEncoding);
   }
 
   const pageOrigin = readPageOrigin();

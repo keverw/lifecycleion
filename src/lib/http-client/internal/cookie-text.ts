@@ -1,3 +1,5 @@
+import { trimSpacesAndTabs } from '../../internal/ascii-text';
+
 /**
  * Whether every character of `text` can be written into a `Cookie` header as part of
  * one cookie-pair: no control character other than a tab (a CR LF is a header injection,
@@ -33,4 +35,14 @@ export function isHeaderSafeCookieText(text: string, extra: string): boolean {
   }
 
   return true;
+}
+
+/**
+ * Whether `name` is one the jar stores as given beside a value: no `=` (its own
+ * delimiter), none of what {@link isHeaderSafeCookieText} refuses, and no space or tab at
+ * its edges, which a server reading it back would trim off - inside it they are kept, as
+ * RFC 6265bis keeps them. An empty name is a nameless cookie, held to rules of its own.
+ */
+export function isWritableCookieName(name: string): boolean {
+  return isHeaderSafeCookieText(name, '=') && trimSpacesAndTabs(name) === name;
 }

@@ -22,7 +22,10 @@ import {
   copyArrayValue,
   MAX_COPIED_ARRAY_LENGTH,
 } from '../internal/array-copy';
-import { isHeaderSafeCookieText } from './internal/cookie-text';
+import {
+  isHeaderSafeCookieText,
+  isWritableCookieName,
+} from './internal/cookie-text';
 
 /** {@link MAX_COOKIE_LIFETIME_SECONDS} in milliseconds. */
 const MAX_COOKIE_LIFETIME_MS = MAX_COOKIE_LIFETIME_SECONDS * 1000;
@@ -2103,8 +2106,7 @@ export class CookieJar {
     // space; Chrome refuses a tab, Firefox keeps it); at the edges of a name or a value
     // they would be trimmed off what a server reads back.
     return (
-      isHeaderSafeCookieText(name, '=') &&
-      trimSpacesAndTabs(name) === name &&
+      isWritableCookieName(name) &&
       trimSpacesAndTabs(value) === value &&
       isHeaderSafeCookieText(value, '')
     );

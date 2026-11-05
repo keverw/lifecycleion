@@ -127,11 +127,14 @@ export function streamErrorAnswer(
 
 /**
  * Whether a `Content-Encoding` value applies no coding: each of its comma-separated
- * tokens, trimmed of HTTP whitespace, is empty or `identity` in any ASCII case. A body
- * sent so is its own decoded bytes, so its `Content-Length`, or the bytes counted as it
- * arrives, are the decoded size.
+ * tokens - an array's, as one header seen more than once - trimmed of HTTP whitespace, is
+ * empty or `identity` in any ASCII case (see `contentCodings`). A body sent so is its own
+ * decoded bytes, so its `Content-Length`, or the bytes counted as it arrives, are the
+ * decoded size.
  */
-export function isIdentityContentEncoding(contentEncoding: string): boolean {
+export function isIdentityContentEncoding(
+  contentEncoding: string | string[],
+): boolean {
   return contentCodings(contentEncoding).length === 0;
 }
 

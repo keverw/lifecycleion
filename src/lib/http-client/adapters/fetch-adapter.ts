@@ -20,7 +20,6 @@ import {
 } from '../internal/adapter-error';
 import {
   extractFetchHeaders,
-  scalarHeader,
   derivedRedirectFields,
   resolveBrowserDispatchURL,
 } from '../utils';
@@ -454,7 +453,7 @@ async function readResponseBody(
   // not when a coding is applied, nor when one may be hidden. A browser exposes
   // `Content-Encoding` on a cross-origin (`cors`) response only when the server lists it
   // in `Access-Control-Expose-Headers`, so its absence there proves nothing.
-  const contentEncoding = scalarHeader(answered.headers, 'content-encoding');
+  const contentEncoding = answered.headers['content-encoding'];
   const isIdentityEncoded =
     contentEncoding === undefined
       ? answered.type !== 'cors'
@@ -888,7 +887,7 @@ function isRuntimeDecodeFailure(
   error: unknown,
   headers: Record<string, string | string[]>,
 ): boolean {
-  const encoding = scalarHeader(headers, 'content-encoding');
+  const encoding = headers['content-encoding'];
   if (encoding === undefined || isIdentityContentEncoding(encoding)) {
     return false;
   }

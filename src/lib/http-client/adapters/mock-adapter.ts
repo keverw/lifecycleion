@@ -1,6 +1,9 @@
 import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
 import { isNullish } from '../../internal/is-nullish';
-import { isHeaderSafeCookieText } from '../internal/cookie-text';
+import {
+  isHeaderSafeCookieText,
+  isWritableCookieName,
+} from '../internal/cookie-text';
 import { formEntries, isFormData } from '../internal/form-entries';
 import {
   assertKnownFields,
@@ -1083,7 +1086,8 @@ function cookiesToSetCookieHeaders(
   return Object.entries(cookies).map(([name, entry], index) => {
     // A `;` or `=` in a name, or a `;` in a value or attribute, would rewrite the line -
     // `abc; Domain=other.test` sets a Domain the route never asked for. A route mistake.
-    // A name refused is named by its position: it may itself be the text pasted wrong.
+    // A refusal names the cookie by its position, never its text: a name or value may
+    // itself be the text pasted wrong - a secret included.
     assertCookieText(name, `name at position ${String(index)}`, true);
     // null pairs with the string shorthand below: both use Path=/.
     // Scoped deletes need explicit path/domain so the cookie identity matches.
@@ -1093,7 +1097,7 @@ function cookiesToSetCookieHeaders(
 
     // string → session cookie: no expiry, defaults to Path=/.
     if (typeof entry === 'string') {
-      assertCookieText(entry, `"${name}" value`);
+      assertCookieText(entry, `at position ${String(index)} value`);
       return `${name}=${entry}; Path=/`;
     }
 
@@ -1109,8 +1113,7 @@ function cookiesToSetCookieHeaders(
  * checked is the copy written. A field of the wrong type is a route mistake, not a value
  * to coerce: a `value` of `undefined` would be written as `undefined`, and
  * `httpOnly: 'false'` would set HttpOnly. It is named by the cookie's position, as a
- * refused name is; text of the right type that cannot be written, by the cookie's
- * (already vetted) name.
+ * refused name is, and so is text of the right type that cannot be written.
  */
 function readMockCookieOptions(
   name: string,
@@ -1160,7 +1163,7 @@ function readMockCookieOptions(
       `MockAdapter cookie ${position} value must be a string (got ${describeValue(value)})`,
     );
   }
-  assertCookieText(value, `"${name}" value`);
+  assertCookieText(value, `${position} value`);
   for (const [attribute, text] of [
     ['path', path],
     ['domain', domain],
@@ -1173,7 +1176,7 @@ function readMockCookieOptions(
         `MockAdapter cookie ${position} ${attribute} must be a string (got ${describeValue(text)})`,
       );
     }
-    assertCookieText(text, `"${name}" ${attribute}`);
+    assertCookieText(text, `${position} ${attribute}`);
   }
   // The typed attributes, held to their types: a string in `sameSite` or `maxAge` would
   // be written into the line as it is, and either flag would be read by truthiness.
@@ -1697,9 +1700,7 @@ function asRouteMistake<R>(step: () => R): R {
  */
 function assertCookieText(text: string, part: string, isName = false): void {
   const isWritable = isName
-    ? text !== '' &&
-      trimSpacesAndTabs(text) === text &&
-      isHeaderSafeCookieText(text, '=')
+    ? text !== '' && isWritableCookieName(text)
     : isHeaderSafeCookieText(text, '');
 
   if (!isWritable) {
