@@ -19,7 +19,7 @@ import type * as http from 'node:http';
 import { Transform, type TransformCallback } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
-import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
+import { contentCodings } from './content-codings';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { isErrorValue } from '../../to-error';
 
@@ -97,13 +97,9 @@ export function createResponseBodySource(
     return raw;
   }
 
-  const codings = (
-    Array.isArray(contentEncoding) ? contentEncoding.join(',') : contentEncoding
-  )
-    .split(',')
-    .map((token) => asciiLowercase(trimHTTPWhitespace(token)))
-    .filter((token) => token !== '' && token !== 'identity')
-    .map((token) => (token === 'x-gzip' ? 'gzip' : token));
+  const codings = contentCodings(contentEncoding).map((token) =>
+    token === 'x-gzip' ? 'gzip' : token,
+  );
 
   if (
     codings.length === 0 ||

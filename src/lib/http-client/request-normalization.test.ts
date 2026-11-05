@@ -12369,6 +12369,53 @@ test('a MockAdapter route cookie name that cannot be written is named by its pos
   );
 });
 
+test("a MockAdapter route cookie name is held to the jar's rule, not an HTTP token's", async () => {
+  const names = ['cart[1]', 'my cookie', 'user:id'];
+  const viaShorthand = new CookieJar();
+  const viaHeader = new CookieJar();
+  const adapter = new MockAdapter();
+  adapter.routes.get('/shorthand', () => ({
+    status: 200,
+    cookies: Object.fromEntries(names.map((name) => [name, 'x'])),
+  }));
+  adapter.routes.get('/header', () => ({
+    status: 200,
+    headers: { 'set-cookie': names.map((name) => `${name}=x; Path=/`) },
+  }));
+
+  for (const [path, cookieJar] of [
+    ['/shorthand', viaShorthand],
+    ['/header', viaHeader],
+  ] as const) {
+    await new HTTPClient({ adapter, baseURL: 'http://mock.test', cookieJar })
+      .get(path)
+      .send();
+  }
+
+  expect(viaShorthand.getCookieHeaderString('http://mock.test/')).toBe(
+    'cart[1]=x; my cookie=x; user:id=x',
+  );
+  expect(viaShorthand.getCookieHeaderString('http://mock.test/')).toBe(
+    viaHeader.getCookieHeaderString('http://mock.test/'),
+  );
+
+  for (const [index, name] of ['', ' padded', 'a=b'].entries()) {
+    adapter.routes.get(`/refused-${index}`, () => ({
+      status: 200,
+      cookies: { [name]: 'x' },
+    }));
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://mock.test',
+    }).get(`/refused-${index}`);
+    await builder.send();
+
+    expect(builder.error?.cause?.message).toBe(
+      'MockAdapter cookie name at position 0 cannot be written into a Set-Cookie line',
+    );
+  }
+});
+
 test('a MockAdapter route that returns nothing is named by its registered pattern, not the request path', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get(

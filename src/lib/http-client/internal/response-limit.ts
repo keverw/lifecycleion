@@ -3,11 +3,7 @@
  * {@link AdapterRequest.maxResponseBytes}.
  */
 
-import {
-  asciiLowercase,
-  asciiUppercase,
-  trimHTTPWhitespace,
-} from '../../internal/ascii-text';
+import { asciiUppercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 import {
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
@@ -20,6 +16,7 @@ import {
   readBinaryByteLength,
 } from '../../internal/binary-view';
 import { utf8ByteLength } from './utf8-length';
+import { contentCodings } from './content-codings';
 
 /**
  * The limit an adapter enforces for `request`: `maxResponseBytes`, or `Infinity` when it
@@ -135,11 +132,7 @@ export function streamErrorAnswer(
  * arrives, are the decoded size.
  */
 export function isIdentityContentEncoding(contentEncoding: string): boolean {
-  return contentEncoding
-    .split(',')
-    .every((token) =>
-      ['', 'identity'].includes(asciiLowercase(trimHTTPWhitespace(token))),
-    );
+  return contentCodings(contentEncoding).length === 0;
 }
 
 /**

@@ -1,6 +1,5 @@
 import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
 import { isNullish } from '../../internal/is-nullish';
-import { isHTTPToken } from '../internal/http-token';
 import { isHeaderSafeCookieText } from '../internal/cookie-text';
 import { formEntries, isFormData } from '../internal/form-entries';
 import {
@@ -1689,18 +1688,21 @@ function asRouteMistake<R>(step: () => R): R {
 }
 
 /**
- * Throw when `text` is not an RFC 9110 token where `shouldBeToken` (a cookie name,
- * RFC 6265), or otherwise fails the jar's own rule for cookie text: a `;` or control
- * character that would change a `Set-Cookie` line's framing, or a character above U+00FF,
- * which a real server's `setHeader` refuses and the jar drops. A tab passes, as it does
- * in a raw `set-cookie` the jar reads.
+ * Throw when `text` fails the jar's own rule for cookie text: a `;` or control character
+ * that would change a `Set-Cookie` line's framing, or a character above U+00FF, which a
+ * real server's `setHeader` refuses and the jar drops. A tab passes, as it does in a raw
+ * `set-cookie` the jar reads. A name (`isName`) is held to the jar's rule for one too:
+ * no `=`, and no space or tab at its edges, which the jar would trim off - and not empty:
+ * a nameless cookie is written as a raw `set-cookie`.
  */
-function assertCookieText(
-  text: string,
-  part: string,
-  shouldBeToken = false,
-): void {
-  if (shouldBeToken ? !isHTTPToken(text) : !isHeaderSafeCookieText(text, '')) {
+function assertCookieText(text: string, part: string, isName = false): void {
+  const isWritable = isName
+    ? text !== '' &&
+      trimSpacesAndTabs(text) === text &&
+      isHeaderSafeCookieText(text, '=')
+    : isHeaderSafeCookieText(text, '');
+
+  if (!isWritable) {
     throw new TypeError(
       `MockAdapter cookie ${part} cannot be written into a Set-Cookie line`,
     );
