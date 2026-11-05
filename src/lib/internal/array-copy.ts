@@ -74,7 +74,7 @@ function refusal(error: TypeError): TypeError {
  * own `constructor`, which `slice` builds the copy through, nor a `Symbol.iterator`, which
  * a spread runs. A hole stays a hole - one its prototype fills included, as only its own
  * entries are read - so a check that reads every index reads it as the `undefined` it is.
- * Past a long run of holes the rest are read by its own keys (see {@link forEachOwnIndex}).
+ * Past enough holes the rest are read by its own keys (see {@link forEachOwnIndex}).
  * A length an array cannot have, or one over {@link MAX_COPIED_ARRAY_LENGTH}, is refused
  * (see {@link readArrayLength}).
  */

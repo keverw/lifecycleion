@@ -15,7 +15,7 @@ describe('indicesFrom', () => {
 });
 
 describe('forEachOwnIndex', () => {
-  test('visits own indices in order, past a long run of holes too, and not a hole a prototype fills', () => {
+  test('visits own indices in order, past enough holes too, and not a hole a prototype fills', () => {
     const source: unknown[] = ['a', 'b'];
     source.length = SPARSE_RUN * 4;
     source[SPARSE_RUN * 3] = 'c';

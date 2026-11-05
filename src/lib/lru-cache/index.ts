@@ -3,7 +3,7 @@ import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 import {
   holdsOwnIndex,
   indicesFrom,
-  isLongHoleRun,
+  isMostlyHoles,
 } from '../internal/array-indices';
 
 /**
@@ -454,7 +454,7 @@ export class LRUCache<K, V> {
 
       // Rough estimate for arrays: their own entries, by index, not through the array's
       // own `reduce`, which a cached value may replace - a hole, one its prototype fills
-      // included, counts for nothing, and past a long run of them the rest are read by the
+      // included, counts for nothing, and past enough of them the rest are read by the
       // array's own index keys, so a sparse array's length is not walked. What cannot be
       // read takes the fallback estimate a circular array does, rather than failing
       // `set()`: an array whose length is not one an array can have, an entry whose read
@@ -489,9 +489,9 @@ export class LRUCache<K, V> {
           }
 
           if (!isOwn) {
-            // A long run of holes, as `deepClone` measures one: the rest by the array's
-            // own index keys.
-            if (isLongHoleRun(++holes, entries)) {
+            // Enough holes, as `deepClone` counts them: the rest by the array's own index
+            // keys.
+            if (isMostlyHoles(++holes, entries)) {
               sparseFrom = index + 1;
               break;
             }

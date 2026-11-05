@@ -78,7 +78,7 @@ describe('deepClone', () => {
       expect(Object.keys(cloned)).toEqual(['0', '1']);
     });
 
-    test('finds an item past a run of holes', () => {
+    test('finds an item past enough holes', () => {
       const original: unknown[] = [1, 2, 3];
       original[53] = { last: true };
 
@@ -1291,7 +1291,7 @@ describe('deepClone', () => {
       expect(deepClone(original).list).toEqual([1, 2, 3]);
     });
 
-    test('past a run of holes, every own index is copied, a non-enumerable one included, and no named key', () => {
+    test('past enough holes, every own index is copied, a non-enumerable one included, and no named key', () => {
       const original: unknown[] = [1];
       Object.defineProperty(original, 100_000, {
         value: 'hidden',
@@ -1308,7 +1308,7 @@ describe('deepClone', () => {
       expect(cloned[100_000]).toBe('hidden');
     });
 
-    test('past a run of holes, an index deleted before its turn stays a hole', () => {
+    test('past enough holes, an index deleted before its turn stays a hole', () => {
       const original: unknown[] = [];
       original[100_000] = 1;
       Object.defineProperty(original, 100_001, {

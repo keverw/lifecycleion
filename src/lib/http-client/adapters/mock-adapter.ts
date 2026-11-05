@@ -1373,10 +1373,6 @@ const MOCK_RESPONSE_FIELDS = fieldNames<MockResponse>({
   transportError: true,
 });
 
-/**
- * The route's answer with each field read once, into a plain object: only the fields it
- * has, so an absent one stays absent.
- */
 /** A value read, or the error reading it threw, to be answered later. */
 type CapturedRead<T> = { value: T } | { error: unknown };
 
@@ -1397,6 +1393,10 @@ function unwrapCaptured<T>(captured: CapturedRead<T>): T {
   return captured.value;
 }
 
+/**
+ * The route's answer with each field read once, into a plain object: only the fields it
+ * has, so an absent one stays absent.
+ */
 function snapshotMockResponse(response: MockResponse): MockResponse {
   const snapshot = { status: response.status } as MockResponse;
   const fields = [

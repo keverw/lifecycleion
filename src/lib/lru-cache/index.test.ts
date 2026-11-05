@@ -1197,7 +1197,7 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(48);
     });
 
-    test('counts a non-enumerable own entry past a run of holes', () => {
+    test('counts a non-enumerable own entry past enough holes', () => {
       const value: unknown[] = [];
       value.length = 200_000;
       Object.defineProperty(value, 150_000, { value: 'x'.repeat(10) });
@@ -1210,7 +1210,7 @@ describe('LRUCache', () => {
 
     test('reads a sparse array with an entry every so often by its keys, not its length', () => {
       // An entry every 1,000 indices across the whole length: no run of holes is long,
-      // but holes far outnumber entries.
+      // but holes far outnumber entries, counted over the whole walk.
       const length = 2 ** 28;
       const value: unknown[] = [];
       for (let index = 0; index < length; index += 1000) {

@@ -13,7 +13,7 @@ import { defineEntry } from './internal/define-entry';
 import {
   holdsOwnIndex,
   indicesFrom,
-  isLongHoleRun,
+  isMostlyHoles,
 } from './internal/array-indices';
 import {
   MAX_COPIED_ARRAY_LENGTH,
@@ -511,7 +511,7 @@ class ObjectFrame implements Frame {
  * included. Each is told by {@link holdsOwnIndex}, so a prototype swapped in during the
  * walk fills no hole after it; a `Proxy` array's own `has` trap is answered as it answers.
  * Past enough holes the rest is read by its own
- * keys (see {@link isLongHoleRun}). Then the named entries: a match result's and `arrayKeys`' - the
+ * keys (see {@link isMostlyHoles}). Then the named entries: a match result's and `arrayKeys`' - the
  * others are not listed, which would cost a dense array many times its clone.
  */
 class ArrayFrame implements Frame {
@@ -519,7 +519,7 @@ class ArrayFrame implements Frame {
   private index = 0;
   private holes = 0;
   private entries = 0;
-  /** The indices left past a run of holes, read by the array's own keys. */
+  /** The indices left past enough holes, read by the array's own keys. */
   private tail: number[] | undefined;
   private tailPosition = 0;
   private named: readonly string[] | undefined;
@@ -559,7 +559,7 @@ class ArrayFrame implements Frame {
           continue;
         }
 
-        if (isLongHoleRun(++holes, entries)) {
+        if (isMostlyHoles(++holes, entries)) {
           this.tail = indicesFrom(source, index, length);
           break;
         }

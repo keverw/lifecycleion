@@ -13,10 +13,11 @@ export const SPARSE_RUN = 65_536;
 export const SPARSE_RUN_PER_ENTRY = 64;
 
 /**
- * Whether `holes` holes in a row, with `entries` entries read before them, is a long run
- * (see {@link SPARSE_RUN}): the rest of the array is then read by its own keys.
+ * Whether `holes` holes met so far, with `entries` entries among them, are enough that the
+ * rest of the array is read by its own keys (see {@link SPARSE_RUN}): counted over the whole
+ * walk, not per run, so an entry every 1,000 indices is as sparse as one far-off entry.
  */
-export function isLongHoleRun(holes: number, entries: number): boolean {
+export function isMostlyHoles(holes: number, entries: number): boolean {
   return holes > SPARSE_RUN && holes > entries * SPARSE_RUN_PER_ENTRY;
 }
 
@@ -37,7 +38,7 @@ export function holdsOwnIndex(array: unknown[], index: number): boolean {
 
 /**
  * Runs `visit` for each index below `length` that `source` holds as its own, in order,
- * each told by `Object.hasOwn`. Past a long run of holes (see {@link SPARSE_RUN}) the rest
+ * each told by `Object.hasOwn`. Past enough holes (see {@link isMostlyHoles}) the rest
  * are found from its own keys and each checked again as it is reached - an entry visited
  * before can have removed it - so a sparse array's length is not walked.
  */
@@ -56,7 +57,7 @@ export function forEachOwnIndex(
       continue;
     }
 
-    if (isLongHoleRun(++holes, entries)) {
+    if (isMostlyHoles(++holes, entries)) {
       for (const at of indicesFrom(source, index + 1, length)) {
         if (Object.hasOwn(source, at)) {
           visit(at);
