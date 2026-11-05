@@ -1833,10 +1833,13 @@ export class NodeAdapter implements HTTPAdapter {
               // A signal that reads as aborted without having dispatched `abort` would hold
               // the request open: read at each step of the setup, and answered by that
               // listener as it answers one dispatched then - the first answer stands.
-              const answerUndispatchedAbort = (): void => {
+              // Answers whether the factory's signal is aborted once that is done.
+              const answerAbortIfRead = (): boolean => {
                 if (!streamAbort.signal.aborted && readIsAborted()) {
                   answerAbort?.();
                 }
+
+                return streamAbort.signal.aborted;
               };
 
               let writable: WritableLike | null | StreamResponseCancel;
@@ -1910,8 +1913,7 @@ export class NodeAdapter implements HTTPAdapter {
                 // Already cancelled: the factory is not asked to open a sink nothing will
                 // write to, and the status and headers that arrived are kept, so the
                 // client stores the cookies.
-                answerUndispatchedAbort();
-                if (streamAbort.signal.aborted) {
+                if (answerAbortIfRead()) {
                   return;
                 }
                 // Response-side termination may never emit a request-side error.
@@ -1932,10 +1934,9 @@ export class NodeAdapter implements HTTPAdapter {
                 // request's listener is one of them; from the event's own turn the error
                 // would go first, to no listener at all - an uncaught exception.
                 await Promise.resolve(undefined);
-                answerUndispatchedAbort();
                 // Cancelled, timed out, or the response failed meanwhile: the factory is
                 // not asked for a sink nothing will write to.
-                if (streamAbort.signal.aborted) {
+                if (answerAbortIfRead()) {
                   return;
                 }
                 setup.didCallFactory = true;
@@ -1970,8 +1971,9 @@ export class NodeAdapter implements HTTPAdapter {
                 }
 
                 // While the setup is still pending: an abort read now, the factory's own
-                // sync code having flipped it included, is one during setup.
-                answerUndispatchedAbort();
+                // sync code having flipped it included, is one during setup. The sink it
+                // handed over is closed by the abort check after this setup settles.
+                answerAbortIfRead();
 
                 // A factory that forgot its `return` hands back `undefined`, which is neither
                 // a cancel nor a sink. Refused here, as a setup failure of the factory's own,

@@ -3,30 +3,48 @@ import { runInNewContext } from 'node:vm';
 import {
   forEachOwnIndex,
   indicesFrom,
-  inheritsNoIndices,
+  indexFreePrototype,
   SPARSE_RUN,
 } from './array-indices';
 
-describe('inheritsNoIndices', () => {
-  test("holds for this realm's arrays, an Array subclass's and another realm's", () => {
+describe('indexFreePrototype', () => {
+  test("is the prototype of this realm's arrays, an Array subclass's and another realm's", () => {
     class List extends Array<unknown> {}
+    const foreign = runInNewContext('[1, 2]') as object;
 
-    expect(inheritsNoIndices([1, 2])).toBe(true);
-    expect(inheritsNoIndices(new List())).toBe(true);
-    expect(inheritsNoIndices(runInNewContext('[1, 2]') as object)).toBe(true);
-    expect(inheritsNoIndices(Object.setPrototypeOf([], null) as object)).toBe(
-      true,
-    );
+    expect(indexFreePrototype([1, 2])).toBe(Array.prototype);
+    expect(indexFreePrototype(new List())).toBe(List.prototype);
+    expect(indexFreePrototype(foreign)).toBe(Reflect.getPrototypeOf(foreign));
+    expect(
+      indexFreePrototype(Object.setPrototypeOf([], null) as object),
+    ).toBeNull();
   });
 
-  test('does not hold once a prototype on the chain has an index of its own', () => {
+  test("reads the array's prototype once", () => {
+    let reads = 0;
+    const array = new Proxy([1], {
+      getPrototypeOf: () => {
+        reads++;
+        return Array.prototype;
+      },
+    });
+
+    expect(indexFreePrototype(array)).toBe(Array.prototype);
+    expect(reads).toBe(1);
+  });
+
+  test('is undefined once a prototype on the chain has an index of its own', () => {
     const withIndex = Object.defineProperty(Object.create(Array.prototype), 0, {
       value: 'inherited',
     }) as object;
     const deeper = Object.create(Object.create(withIndex) as object) as object;
 
-    expect(inheritsNoIndices(Object.setPrototypeOf([], withIndex))).toBe(false);
-    expect(inheritsNoIndices(Object.setPrototypeOf([], deeper))).toBe(false);
+    expect(
+      indexFreePrototype(Object.setPrototypeOf([], withIndex)),
+    ).toBeUndefined();
+    expect(
+      indexFreePrototype(Object.setPrototypeOf([], deeper)),
+    ).toBeUndefined();
   });
 
   test('is not misled by a key that only reads like an index', () => {
@@ -36,10 +54,12 @@ describe('inheritsNoIndices', () => {
     prototype[String(2 ** 32 - 1)] = 'c';
     prototype[Symbol.for('0') as unknown as string] = 'd';
 
-    expect(inheritsNoIndices(Object.setPrototypeOf([], prototype))).toBe(true);
+    expect(indexFreePrototype(Object.setPrototypeOf([], prototype))).toBe(
+      prototype,
+    );
   });
 
-  test('does not hold for a chain that cannot be read or does not end', () => {
+  test('is undefined for a chain that cannot be read or does not end', () => {
     const unreadable = new Proxy(Object.create(Array.prototype) as object, {
       ownKeys: () => {
         throw new Error('keys');
@@ -50,10 +70,12 @@ describe('inheritsNoIndices', () => {
       { getPrototypeOf: (): object => endless },
     );
 
-    expect(inheritsNoIndices(Object.setPrototypeOf([], unreadable))).toBe(
-      false,
-    );
-    expect(inheritsNoIndices(Object.setPrototypeOf([], endless))).toBe(false);
+    expect(
+      indexFreePrototype(Object.setPrototypeOf([], unreadable)),
+    ).toBeUndefined();
+    expect(
+      indexFreePrototype(Object.setPrototypeOf([], endless)),
+    ).toBeUndefined();
   });
 });
 

@@ -54,17 +54,18 @@ function isIndexKey(key: string | symbol): boolean {
 }
 
 /**
- * Whether no prototype `array` inherits from lists an index of its own as it stands now -
- * an Array subclass's prototype or another realm's `Array.prototype` as much as this
- * realm's, which with `Object.prototype` is taken as listing none. A chain that cannot be
- * read, or one over 64 deep, is answered no. Not proof that `in` tells `array`'s own
- * indices: a `Proxy` prototype answers `has` as its trap does, whatever keys it lists, so
- * a walk that reads by `in` on this answer checks what it reads (see `LRUCache`'s size
- * estimate).
+ * `array`'s prototype, read once, when no prototype it inherits from lists an index of its
+ * own as it stands now - an Array subclass's prototype or another realm's
+ * `Array.prototype` as much as this realm's, which with `Object.prototype` is taken as
+ * listing none - and `undefined` otherwise: for a chain that cannot be read, or one over
+ * 64 deep, too. Not proof that `in` tells `array`'s own indices: a `Proxy` prototype
+ * answers `has` as its trap does, whatever keys it lists, so a walk that reads by `in` on
+ * this answer checks what it reads (see `LRUCache`'s size estimate).
  */
-export function inheritsNoIndices(array: object): boolean {
+export function indexFreePrototype(array: object): object | null | undefined {
   try {
-    let prototype = Reflect.getPrototypeOf(array);
+    const arrayPrototype = Reflect.getPrototypeOf(array);
+    let prototype = arrayPrototype;
 
     for (let depth = 0; depth < MAX_PROTOTYPE_DEPTH; depth++) {
       if (
@@ -72,11 +73,11 @@ export function inheritsNoIndices(array: object): boolean {
         prototype === Array.prototype ||
         prototype === Object.prototype
       ) {
-        return true;
+        return arrayPrototype;
       }
 
       if (Reflect.ownKeys(prototype).some(isIndexKey)) {
-        return false;
+        return undefined;
       }
 
       prototype = Reflect.getPrototypeOf(prototype);
@@ -85,7 +86,7 @@ export function inheritsNoIndices(array: object): boolean {
     // Read by `Object.hasOwn` instead.
   }
 
-  return false;
+  return undefined;
 }
 
 /**

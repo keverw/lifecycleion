@@ -1374,6 +1374,29 @@ describe('LRUCache', () => {
       expect(ownKeysCalls).toBe(0);
     });
 
+    test('takes the fallback, not a failing set(), for an array whose prototype stops reading once its prototypes are listed', () => {
+      let wasListed = false;
+      const prototype = new Proxy(Object.create(Array.prototype) as object, {
+        ownKeys: (target) => {
+          wasListed = true;
+          return Reflect.ownKeys(target);
+        },
+      });
+      const value = new Proxy([1, 2, 3], {
+        getPrototypeOf: () => {
+          if (wasListed) {
+            throw new Error('prototype trap');
+          }
+          return prototype;
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 10_000_000 });
+
+      expect(() => cache.set('a', value)).not.toThrow();
+      // 40 for the array, then the fallback once its first index cannot be told.
+      expect(cache.byteSize).toBe(40 + 1000);
+    });
+
     test("catches a Proxy prototype that answers for holes only past the first checked indices, reading at most a gap's worth", () => {
       let inheritedReads = 0;
       const value: unknown[] = new (class List extends Array<unknown> {})();

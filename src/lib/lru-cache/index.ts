@@ -2,15 +2,15 @@ import { safeHandleCallback } from '../safe-handle-callback';
 import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 import {
   holdsOwnIndex,
+  indexFreePrototype,
   indicesFrom,
-  inheritsNoIndices,
   isMostlyHoles,
 } from '../internal/array-indices';
 
 /**
- * How many of the first indices `in` reports held on an Array subclass's or another
- * realm's array the default size estimate checks with `Object.hasOwn`, every one (see
- * `calculateSize`).
+ * The index below which every entry `in` reports held on an Array subclass's or another
+ * realm's array is checked with `Object.hasOwn` by the default size estimate (see
+ * `calculateSize`); past it, one at random every so often.
  */
 const CHECKED_LEAD = 4096;
 
@@ -493,18 +493,14 @@ export class LRUCache<K, V> {
         // or another realm's array whose prototypes list no index: that one is read by
         // `in` too, while its prototype is the one it had when sizing began. A `Proxy`
         // prototype can answer `in` for a hole whatever keys it lists, so what `in` reports
-        // held is checked with `Object.hasOwn` - every one of the first, then one at random
-        // every so often, which the prototype is never asked about and cannot foresee - and
-        // one caught answering for a hole is sized again from the start by
+        // held is checked with `Object.hasOwn` - every one below `CHECKED_LEAD`, then one
+        // at random every so often, which the prototype is never asked about and cannot
+        // foresee - and one caught answering for a hole is sized again from the start by
         // `Object.hasOwn`, so its holes count for nothing and a sparse one's length is not
         // walked. An array whose prototypes answer `in` truly is sized the same every time;
         // only one that answers for a hole can be caught at a different index from one
         // `set()` to the next, its getters run up to a gap's worth of times before it is.
-        let checkedPrototype: object | null | undefined = inheritsNoIndices(
-          items,
-        )
-          ? Reflect.getPrototypeOf(items)
-          : undefined;
+        let checkedPrototype = indexFreePrototype(items);
         let untilCheck = 1;
 
         for (let index = 0; index < length; index++) {
