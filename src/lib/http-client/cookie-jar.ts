@@ -23,8 +23,8 @@ import {
   MAX_COPIED_ARRAY_LENGTH,
 } from '../internal/array-copy';
 import {
-  isHeaderSafeCookieText,
   isWritableCookieName,
+  isWritableCookieValue,
 } from './internal/cookie-text';
 
 /** {@link MAX_COOKIE_LIFETIME_SECONDS} in milliseconds. */
@@ -2096,20 +2096,15 @@ export class CookieJar {
     if (name === '') {
       return (
         value !== '' &&
-        trimSpacesAndTabs(value) === value &&
         cookieNamePrefix(value) === null &&
-        isHeaderSafeCookieText(value, '')
+        isWritableCookieValue(value)
       );
     }
 
     // Spaces and tabs inside a name are kept, as RFC 6265bis keeps them (browsers keep a
     // space; Chrome refuses a tab, Firefox keeps it); at the edges of a name or a value
     // they would be trimmed off what a server reads back.
-    return (
-      isWritableCookieName(name) &&
-      trimSpacesAndTabs(value) === value &&
-      isHeaderSafeCookieText(value, '')
-    );
+    return isWritableCookieName(name) && isWritableCookieValue(value);
   }
 
   /** Copies `key` from `from` to `to` only when it is present. */

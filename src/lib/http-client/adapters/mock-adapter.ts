@@ -1,8 +1,8 @@
 import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
 import { isNullish } from '../../internal/is-nullish';
 import {
-  isHeaderSafeCookieText,
   isWritableCookieName,
+  isWritableCookieValue,
 } from '../internal/cookie-text';
 import { formEntries, isFormData } from '../internal/form-entries';
 import {
@@ -1692,16 +1692,22 @@ function asRouteMistake<R>(step: () => R): R {
 
 /**
  * Throw when `text` fails the jar's own rule for cookie text: a `;` or control character
- * that would change a `Set-Cookie` line's framing, or a character above U+00FF, which a
- * real server's `setHeader` refuses and the jar drops. A tab passes, as it does in a raw
- * `set-cookie` the jar reads. A name (`isName`) is held to the jar's rule for one too:
- * no `=`, and no space or tab at its edges, which the jar would trim off - and not empty:
- * a nameless cookie is written as a raw `set-cookie`.
+ * that would change a `Set-Cookie` line's framing, a character above U+00FF, which a real
+ * server's `setHeader` refuses and the jar drops, or a space or tab at its edges, which
+ * the jar would trim off what it stores. A tab inside it passes, as it does in a raw
+ * `set-cookie` the jar reads. A name (`isName`) is held to the jar's rule for one too -
+ * no `=` - and is not empty: a nameless cookie is written as a raw `set-cookie`.
  */
 function assertCookieText(text: string, part: string, isName = false): void {
+  if (trimSpacesAndTabs(text) !== text) {
+    throw new TypeError(
+      `MockAdapter cookie ${part} has a space or tab at an edge, which the cookie jar would trim off`,
+    );
+  }
+
   const isWritable = isName
     ? text !== '' && isWritableCookieName(text)
-    : isHeaderSafeCookieText(text, '');
+    : isWritableCookieValue(text);
 
   if (!isWritable) {
     throw new TypeError(

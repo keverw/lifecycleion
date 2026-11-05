@@ -1280,12 +1280,12 @@ test('a misspelled config or request option is refused rather than read as absen
     client
       .get('/x')
       .retryPolicy({ strategy: 'exponential', facter: 2 } as never),
-  ).toThrow('HTTPClient retryPolicy has no "facter" field');
+  ).toThrow('HTTPRequestBuilder retryPolicy has no "facter" field');
   expect(() =>
     client
       .get('/x')
       .retryPolicy({ strategy: 'exponential', delayMS: 5 } as never),
-  ).toThrow('HTTPClient retryPolicy has no "delayMS" field');
+  ).toThrow('HTTPRequestBuilder retryPolicy has no "delayMS" field');
 
   expect(() => client.listRequests({ lable: 'search' } as never)).toThrow(
     'HTTPClient.listRequests() filter has no "lable" field',
@@ -12399,7 +12399,14 @@ test("a MockAdapter route cookie name is held to the jar's rule, not an HTTP tok
     viaHeader.getCookieHeaderString('http://mock.test/'),
   );
 
-  for (const [index, name] of ['', ' padded', 'a=b'].entries()) {
+  for (const [index, [name, reason]] of [
+    ['', 'cannot be written into a Set-Cookie line'],
+    [
+      ' padded',
+      'has a space or tab at an edge, which the cookie jar would trim off',
+    ],
+    ['a=b', 'cannot be written into a Set-Cookie line'],
+  ].entries()) {
     adapter.routes.get(`/refused-${index}`, () => ({
       status: 200,
       cookies: { [name]: 'x' },
@@ -12411,7 +12418,7 @@ test("a MockAdapter route cookie name is held to the jar's rule, not an HTTP tok
     await builder.send();
 
     expect(builder.error?.cause?.message).toBe(
-      'MockAdapter cookie name at position 0 cannot be written into a Set-Cookie line',
+      `MockAdapter cookie name at position 0 ${reason}`,
     );
   }
 });
@@ -12440,6 +12447,28 @@ test('a MockAdapter route cookie whose value, path or domain cannot be written i
 
     expect(builder.error?.cause?.message).toBe(
       `MockAdapter cookie at position 1 ${parts[index]} cannot be written into a Set-Cookie line`,
+    );
+  }
+
+  // Text the jar would trim off what it stores, refused as that.
+  for (const [index, entry] of [
+    ' padded',
+    { value: 'x', path: '/a\t' },
+    { value: 'x', domain: ' a.test' },
+  ].entries()) {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/login', () => ({
+      status: 200,
+      cookies: { [name]: entry },
+    }));
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://mock.test',
+    }).get('/login');
+    await builder.send();
+
+    expect(builder.error?.cause?.message).toBe(
+      `MockAdapter cookie at position 0 ${['value', 'path', 'domain'][index]} has a space or tab at an edge, which the cookie jar would trim off`,
     );
   }
 });

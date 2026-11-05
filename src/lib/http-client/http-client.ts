@@ -495,7 +495,10 @@ export class BaseHTTPClient {
       cookieJar: snapshot.cookieJar,
       retryPolicy: isNullish(configuredRetryPolicy)
         ? undefined
-        : snapshotRetryPolicyOptions(configuredRetryPolicy),
+        : snapshotRetryPolicyOptions(
+            configuredRetryPolicy,
+            'HTTPClient retryPolicy',
+          ),
       retryNonIdempotentMethods: snapshot.retryNonIdempotentMethods ?? false,
       includeRequestID: snapshot.includeRequestID ?? false,
       includeAttemptHeader: snapshot.includeAttemptHeader ?? false,

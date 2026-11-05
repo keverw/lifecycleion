@@ -2488,6 +2488,11 @@ export class NodeAdapter implements HTTPAdapter {
 
           const signal = request.signal;
 
+          // Not answered only once: it answers whatever the request holds when it runs, so
+          // an abort answered before the response arrived is answered again, by a setup
+          // step (`answerAbortIfRead`), for the stream setup that late response starts.
+          // Each step is safe to repeat - the first settle stands, and a torn-down request
+          // or released body is left as it is.
           const onAbort = (): void => {
             // Notify a pending factory first, while its cleanup still has ownership.
             pendingStreamSetup?.abort();

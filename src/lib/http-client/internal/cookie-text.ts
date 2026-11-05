@@ -46,3 +46,14 @@ export function isHeaderSafeCookieText(text: string, extra: string): boolean {
 export function isWritableCookieName(name: string): boolean {
   return isHeaderSafeCookieText(name, '=') && trimSpacesAndTabs(name) === name;
 }
+
+/**
+ * Whether `value` - a cookie's value, or a `Path` or `Domain` written beside it - is one
+ * the jar stores as given: none of what {@link isHeaderSafeCookieText} refuses, and no
+ * space or tab at its edges, which a server reading it back would trim off.
+ */
+export function isWritableCookieValue(value: string): boolean {
+  return (
+    trimSpacesAndTabs(value) === value && isHeaderSafeCookieText(value, '')
+  );
+}

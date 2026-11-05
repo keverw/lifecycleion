@@ -1,8 +1,15 @@
 import { expect, test } from 'bun:test';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
-import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
+import { snapshotRetryPolicyOptions as snapshotLabelled } from './internal/retry-policy-options';
 import type { RetryPolicyOptions } from '../retry-utils';
+
+/** A policy snapshotted as the client's own `retryPolicy` option is. */
+function snapshotRetryPolicyOptions(
+  options: RetryPolicyOptions,
+): RetryPolicyOptions {
+  return snapshotLabelled(options, 'HTTPClient retryPolicy');
+}
 
 test('sub-clients reuse only immutable validated retry snapshots', () => {
   const callerPolicy = {

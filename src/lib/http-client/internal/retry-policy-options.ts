@@ -38,8 +38,6 @@ function retryPolicyFields(
   return strategy === 'fixed' ? FIXED_FIELDS : EXPONENTIAL_FIELDS;
 }
 
-const RETRY_POLICY_LABEL = 'HTTPClient retryPolicy';
-
 const validatedSnapshots = new WeakSet<RetryPolicyOptions>();
 
 /**
@@ -64,16 +62,20 @@ function keyShape(options: object): Record<string, true | null | undefined> {
   return shape;
 }
 
-/** Validate once at the public configuration boundary and retain plain policy data. */
+/**
+ * Validate once at the public configuration boundary and retain plain policy data. A
+ * refusal names `label`, the API the policy was handed to.
+ */
 export function snapshotRetryPolicyOptions(
   options: RetryPolicyOptions,
+  label: string,
 ): RetryPolicyOptions {
   if (validatedSnapshots.has(options)) {
     return options;
   }
   // A function is no options object, though `RetryPolicy` would read it as one, nor is an
   // array: refused as any other value that is not one, as their fields could not be checked.
-  assertOptionsObject(options, RETRY_POLICY_LABEL);
+  assertOptionsObject(options, label);
   // A misspelled field (`maxRetryAttemps: 5`, meant to raise the limit), or the other
   // strategy's (`delayMS` on an exponential policy), would be read as absent and the
   // default applied. Both are refused before a value is checked, so they are named ahead
@@ -87,15 +89,15 @@ export function snapshotRetryPolicyOptions(
     strategy = options.strategy;
   } catch (error) {
     // A misspelling is still named ahead of the getter's own failure.
-    assertKnownFields(shape, ANY_STRATEGY_FIELDS, RETRY_POLICY_LABEL);
+    assertKnownFields(shape, ANY_STRATEGY_FIELDS, label);
     throw error;
   }
 
   if (strategy !== 'fixed' && strategy !== 'exponential') {
     // Named ahead of the strategy's refusal: one there before the getter ran, and one it
     // added.
-    assertKnownFields(shape, ANY_STRATEGY_FIELDS, RETRY_POLICY_LABEL);
-    assertKnownFields(options, ANY_STRATEGY_FIELDS, RETRY_POLICY_LABEL);
+    assertKnownFields(shape, ANY_STRATEGY_FIELDS, label);
+    assertKnownFields(options, ANY_STRATEGY_FIELDS, label);
     // `RetryPolicy` refuses the strategy, handed it as a plain value so a getter is not
     // read again: this never returns.
     return Object.freeze(
@@ -104,7 +106,7 @@ export function snapshotRetryPolicyOptions(
   }
 
   const fields = retryPolicyFields(strategy);
-  assertKnownFields(shape, fields, RETRY_POLICY_LABEL);
+  assertKnownFields(shape, fields, label);
 
   // That strategy's fields, each read once, into a plain policy `RetryPolicy` reads.
   const source = options as unknown as Record<string, unknown>;
@@ -117,7 +119,7 @@ export function snapshotRetryPolicyOptions(
 
   // And again once every getter has run: one that added a field it does not take - a
   // misspelling - is refused rather than left at the default.
-  assertKnownFields(options, fields, RETRY_POLICY_LABEL);
+  assertKnownFields(options, fields, label);
 
   const snapshot = Object.freeze(
     new RetryPolicy(plain as unknown as RetryPolicyOptions).policyInfo,

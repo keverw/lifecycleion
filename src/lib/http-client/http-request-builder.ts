@@ -323,7 +323,7 @@ export class HTTPRequestBuilder<T = unknown> {
     this._assertNotSent('retryPolicy');
     this._retryPolicy = isNullish(options)
       ? options
-      : snapshotRetryPolicyOptions(options);
+      : snapshotRetryPolicyOptions(options, 'HTTPRequestBuilder retryPolicy');
     return this;
   }
 
