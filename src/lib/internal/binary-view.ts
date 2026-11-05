@@ -1,3 +1,4 @@
+import { MAX_PROTOTYPE_DEPTH } from './prototype-depth';
 import { readUnknownMember } from './read-member';
 
 /**
@@ -291,20 +292,27 @@ export function hasBufferTagInChain(value: object): boolean {
   );
 }
 
-/** Whether `matches` holds for some prototype in `value`'s chain; `false` if it throws. */
+/**
+ * Whether `matches` holds for some prototype in `value`'s chain, up to
+ * {@link MAX_PROTOTYPE_DEPTH} of them; `false` if it throws.
+ */
 function someInPrototypeChain(
   value: object,
   matches: (prototype: object) => boolean,
 ): boolean {
   try {
-    for (
-      let prototype = Object.getPrototypeOf(value) as object | null;
-      prototype !== null;
-      prototype = Object.getPrototypeOf(prototype) as object | null
-    ) {
+    let prototype = Object.getPrototypeOf(value) as object | null;
+
+    for (let depth = 1; prototype !== null; depth++) {
       if (matches(prototype)) {
         return true;
       }
+
+      if (depth === MAX_PROTOTYPE_DEPTH) {
+        break;
+      }
+
+      prototype = Object.getPrototypeOf(prototype) as object | null;
     }
   } catch {
     // A hostile chain: not bytes as far as can be told.

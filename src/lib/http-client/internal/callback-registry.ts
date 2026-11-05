@@ -4,6 +4,7 @@ import {
   MAX_COPIED_ARRAY_LENGTH,
   readArrayLength,
 } from '../../internal/array-copy';
+import { MAX_PROTOTYPE_DEPTH } from '../../internal/prototype-depth';
 import { isRealmRootPrototype } from './plain-record';
 import {
   hasNonHTTPWhitespaceEdge,
@@ -188,12 +189,23 @@ interface FilterFields {
  * The walk stops at a realm's root prototype (see `isRealmRootPrototype`), so a plain
  * object from a `vm` context or an iframe stops at that realm's `Object.prototype` as one
  * from this realm stops at ours. An inherited method is behaviour rather than a field and
- * is skipped; an own field is a field whatever its value.
+ * is skipped; an own field is a field whatever its value. A chain over
+ * {@link MAX_PROTOTYPE_DEPTH} prototypes deep, past the filter's own, throws a `RangeError`.
  */
 function filterFieldsOf(filter: object): FilterFields {
   const names = new Set<string>();
   let current: object | null = filter;
-  while (current !== null && !isRealmRootPrototype(current)) {
+  for (
+    let depth = 0;
+    current !== null && !isRealmRootPrototype(current);
+    depth++
+  ) {
+    if (depth > MAX_PROTOTYPE_DEPTH) {
+      throw new RangeError(
+        `The prototype chain is over ${MAX_PROTOTYPE_DEPTH} deep`,
+      );
+    }
+
     for (const name of Object.getOwnPropertyNames(current)) {
       const descriptor = Object.getOwnPropertyDescriptor(current, name);
       const isInheritedMethod =
@@ -209,7 +221,7 @@ function filterFieldsOf(filter: object): FilterFields {
 
 /**
  * {@link filterFieldsOf}, with a walk the caller's code makes throw - a `Proxy` whose
- * `ownKeys` or `getPrototypeOf` trap throws - refused as a `TypeError` naming `label`, its
+ * `ownKeys` or `getPrototypeOf` trap throws, or a chain too deep to walk - refused as a `TypeError` naming `label`, its
  * error as the `cause`.
  */
 function listFilterFields(filter: object, label: string): FilterFields {

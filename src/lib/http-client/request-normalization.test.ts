@@ -1050,6 +1050,48 @@ test('a throwing methods getter, or a filter whose fields cannot be listed, is r
   }
 });
 
+test('a filter whose prototype chain never ends is refused, and one 64 prototypes deep is read', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  let steps = 0;
+  const endless = (): object =>
+    new Proxy(
+      {},
+      {
+        getPrototypeOf: () => {
+          if (++steps > 10_000) {
+            throw new Error('walked on');
+          }
+          return endless();
+        },
+      },
+    );
+
+  let caught: unknown;
+  try {
+    client.addRequestInterceptor((request) => request, endless());
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(TypeError);
+  expect((caught as Error).message).toBe(
+    'HTTPClient request interceptor filter fields could not be read',
+  );
+  expect((caught as Error).cause).toBeInstanceOf(RangeError);
+  // Each prototype is read twice: to step to it, and to tell a realm's root.
+  expect(steps).toBeLessThanOrEqual(2 * 66);
+
+  let deep: object = Object.prototype;
+  for (let depth = 0; depth < 63; depth++) {
+    deep = Object.create(deep) as object;
+  }
+  const filter = Object.create(deep) as { methods?: string[] };
+  filter.methods = ['GET'];
+  expect(() =>
+    client.addRequestInterceptor((request) => request, filter),
+  ).not.toThrow();
+});
+
 test('a filter list is read no further than the entry it is refused at', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
   const read: number[] = [];

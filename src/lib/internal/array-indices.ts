@@ -1,3 +1,5 @@
+import { MAX_PROTOTYPE_DEPTH } from './prototype-depth';
+
 /**
  * How many holes an array is walked through index by index, at the least, before the rest
  * of it is read by its own keys instead: a dense array never reaches it, and one item at
@@ -38,9 +40,6 @@ export function holdsOwnIndex(array: unknown[], index: number): boolean {
     ? index in array
     : Object.hasOwn(array, index);
 }
-
-/** The most prototypes {@link inheritsNoIndices} reads before it answers no. */
-const MAX_PROTOTYPE_DEPTH = 64;
 
 /** Whether `key` is an array index: a canonical integer string below `2 ** 32 - 1`. */
 function isIndexKey(key: string | symbol): boolean {
