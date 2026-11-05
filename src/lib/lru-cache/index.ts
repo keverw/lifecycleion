@@ -497,7 +497,9 @@ export class LRUCache<K, V> {
         // every so often, which the prototype is never asked about and cannot foresee - and
         // one caught answering for a hole is sized again from the start by
         // `Object.hasOwn`, so its holes count for nothing and a sparse one's length is not
-        // walked.
+        // walked. An array whose prototypes answer `in` truly is sized the same every time;
+        // only one that answers for a hole can be caught at a different index from one
+        // `set()` to the next, its getters run up to a gap's worth of times before it is.
         let checkedPrototype: object | null | undefined = inheritsNoIndices(
           items,
         )

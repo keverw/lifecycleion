@@ -134,14 +134,13 @@ export function indicesFrom(
   const indices: number[] = [];
 
   for (const key of Object.getOwnPropertyNames(source)) {
+    if (!isIndexKey(key)) {
+      continue;
+    }
+
     const index = Number(key);
 
-    if (
-      index >>> 0 === index &&
-      String(index) === key &&
-      index >= start &&
-      index < length
-    ) {
+    if (index >= start && index < length) {
       indices.push(index);
     }
   }
