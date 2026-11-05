@@ -13,6 +13,29 @@ export const SPARSE_RUN = 65_536;
 export const SPARSE_RUN_PER_ENTRY = 64;
 
 /**
+ * Whether `holes` holes in a row, with `entries` entries read before them, is a long run
+ * (see {@link SPARSE_RUN}): the rest of the array is then read by its own keys.
+ */
+export function isLongHoleRun(holes: number, entries: number): boolean {
+  return holes > SPARSE_RUN && holes > entries * SPARSE_RUN_PER_ENTRY;
+}
+
+/**
+ * Whether `array` holds `index` as its own, for a walk that reads each entry as it goes:
+ * told by `in` while its prototype, read now, is this realm's `Array.prototype` -
+ * `Object.hasOwn` costs hundreds of times as much per index on a large array on
+ * JavaScriptCore - and by `Object.hasOwn` otherwise. Any other prototype, one an entry
+ * read a moment ago swapped in included, can answer `in` for a hole: an Array subclass's
+ * or another realm's as much as any, since one that lists no index can still be a `Proxy`
+ * whose `has` answers for every hole, and nothing here tells one apart.
+ */
+export function holdsOwnIndex(array: unknown[], index: number): boolean {
+  return Reflect.getPrototypeOf(array) === Array.prototype
+    ? index in array
+    : Object.hasOwn(array, index);
+}
+
+/**
  * Runs `visit` for each index below `length` that `source` holds as its own, in order,
  * each told by `Object.hasOwn`. Past a long run of holes (see {@link SPARSE_RUN}) the rest
  * are found from its own keys and each checked again as it is reached - an entry visited
@@ -33,7 +56,7 @@ export function forEachOwnIndex(
       continue;
     }
 
-    if (++holes > SPARSE_RUN && holes > entries * SPARSE_RUN_PER_ENTRY) {
+    if (isLongHoleRun(++holes, entries)) {
       for (const at of indicesFrom(source, index + 1, length)) {
         if (Object.hasOwn(source, at)) {
           visit(at);

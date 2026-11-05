@@ -1,9 +1,9 @@
 import { safeHandleCallback } from '../safe-handle-callback';
 import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 import {
+  holdsOwnIndex,
   indicesFrom,
-  SPARSE_RUN,
-  SPARSE_RUN_PER_ENTRY,
+  isLongHoleRun,
 } from '../internal/array-indices';
 
 /**
@@ -480,19 +480,10 @@ export class LRUCache<K, V> {
         for (let index = 0; index < length; index++) {
           let isOwn: boolean;
 
-          // `in` while the array's prototype, read before each index, is this realm's
-          // `Array.prototype`, as `deepClone`'s walk reads one: `Object.hasOwn` costs
-          // hundreds of times as much per index on a large array on JavaScriptCore. Any
-          // other prototype - one an entry read before swapped in included - can answer
-          // `in` for a hole, so the array is read by `Object.hasOwn` while it has one. An
-          // Array subclass's and another realm's array too: a prototype that lists no
-          // index can still be a `Proxy` whose `has` answers for every hole, and nothing
-          // here tells one apart. A large one is sized faster by a `sizeCalculator`.
+          // As `deepClone`'s walk tells one. An Array subclass's or another realm's array is
+          // read by `Object.hasOwn`, and a large one sized faster by a `sizeCalculator`.
           try {
-            isOwn =
-              Reflect.getPrototypeOf(items) === Array.prototype
-                ? index in items
-                : Object.hasOwn(items, index);
+            isOwn = holdsOwnIndex(items, index);
           } catch {
             return estimatedSize + 1000;
           }
@@ -500,10 +491,7 @@ export class LRUCache<K, V> {
           if (!isOwn) {
             // A long run of holes, as `deepClone` measures one: the rest by the array's
             // own index keys.
-            if (
-              ++holes > SPARSE_RUN &&
-              holes > entries * SPARSE_RUN_PER_ENTRY
-            ) {
+            if (isLongHoleRun(++holes, entries)) {
               sparseFrom = index + 1;
               break;
             }

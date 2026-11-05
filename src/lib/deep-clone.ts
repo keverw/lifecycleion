@@ -11,9 +11,9 @@
 
 import { defineEntry } from './internal/define-entry';
 import {
+  holdsOwnIndex,
   indicesFrom,
-  SPARSE_RUN,
-  SPARSE_RUN_PER_ENTRY,
+  isLongHoleRun,
 } from './internal/array-indices';
 import {
   MAX_COPIED_ARRAY_LENGTH,
@@ -508,16 +508,14 @@ class ObjectFrame implements Frame {
  * An array being filled, to the length it had when met, by index - not through an own
  * `Symbol.iterator` - so one that grows while it is read is not followed. Each index it
  * holds as its own is copied, so a hole stays a hole, one emptied before its turn
- * included. They are told by `in`, far cheaper, on an array whose prototype is
- * `Array.prototype`, and otherwise by `Object.hasOwn`: on that path a `Proxy`'s `has` trap
- * is answered as it answers, and a prototype swapped in during the walk can fill a hole
- * after it. Past enough holes the rest is read by its own
- * keys (see {@link SPARSE_RUN}). Then the named entries: a match result's and `arrayKeys`' - the
+ * included. Each is told by {@link holdsOwnIndex}, so a prototype swapped in during the
+ * walk fills no hole after it; a `Proxy` array's own `has` trap is answered as it answers.
+ * Past enough holes the rest is read by its own
+ * keys (see {@link isLongHoleRun}). Then the named entries: a match result's and `arrayKeys`' - the
  * others are not listed, which would cost a dense array many times its clone.
  */
 class ArrayFrame implements Frame {
   private readonly length: number;
-  private readonly isOwnOnly: boolean;
   private index = 0;
   private holes = 0;
   private entries = 0;
@@ -535,7 +533,6 @@ class ArrayFrame implements Frame {
     private readonly target: unknown[],
   ) {
     this.length = target.length;
-    this.isOwnOnly = Reflect.getPrototypeOf(source) !== Array.prototype;
   }
 
   public step(state: CloneState): boolean {
@@ -545,13 +542,13 @@ class ArrayFrame implements Frame {
     if (this.tail === undefined) {
       // Walked in locals, written back when the walk stops: the loop is the whole cost of
       // cloning a dense array of primitives.
-      const { length, isOwnOnly } = this;
+      const { length } = this;
       let { index, holes, entries } = this;
 
       while (index < length) {
         const at = index++;
 
-        if (isOwnOnly ? Object.hasOwn(source, at) : at in source) {
+        if (holdsOwnIndex(source, at)) {
           target[at] = cloneValue(source[at], state);
           entries++;
 
@@ -562,7 +559,7 @@ class ArrayFrame implements Frame {
           continue;
         }
 
-        if (++holes > SPARSE_RUN && holes > entries * SPARSE_RUN_PER_ENTRY) {
+        if (isLongHoleRun(++holes, entries)) {
           this.tail = indicesFrom(source, index, length);
           break;
         }

@@ -1183,6 +1183,51 @@ describe('deepClone', () => {
       expect(Object.keys(deepClone(original))).toEqual(['0', '2']);
     });
 
+    test('a hole stays a hole once an entry swaps in a prototype that fills it', () => {
+      const original: unknown[] = [];
+      original.length = 5;
+      Object.defineProperty(original, 0, {
+        enumerable: true,
+        configurable: true,
+        get: () => {
+          Object.setPrototypeOf(
+            original,
+            Object.assign(Object.create(Array.prototype) as object, {
+              3: 'inherited',
+            }),
+          );
+          return 'x';
+        },
+      });
+
+      const cloned = deepClone(original);
+
+      expect(Object.keys(cloned)).toEqual(['0']);
+      expect(cloned).toHaveLength(5);
+    });
+
+    test("does not walk a sparse array's length once an entry swaps in a Proxy prototype answering for every hole", () => {
+      const original: unknown[] = [];
+      Object.defineProperty(original, 0, {
+        enumerable: true,
+        configurable: true,
+        get: () => {
+          Object.setPrototypeOf(
+            original,
+            new Proxy(Object.create(Array.prototype) as object, {
+              has: () => true,
+            }),
+          );
+          return 'x';
+        },
+      });
+      original.length = 2 ** 24;
+
+      const cloned = deepClone(original);
+
+      expect(Object.keys(cloned)).toEqual(['0']);
+    });
+
     test('a match result is told by a string first entry and an own index; arrayKeys reads own keys only', () => {
       const numbered = Object.assign([1], { index: 0, input: { secret: 1 } });
       const inheriting = Object.setPrototypeOf(
