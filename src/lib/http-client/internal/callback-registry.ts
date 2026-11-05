@@ -221,8 +221,8 @@ function filterFieldsOf(filter: object): FilterFields {
 
 /**
  * {@link filterFieldsOf}, with a walk the caller's code makes throw - a `Proxy` whose
- * `ownKeys` or `getPrototypeOf` trap throws, or a chain too deep to walk - refused as a `TypeError` naming `label`, its
- * error as the `cause`.
+ * `ownKeys` or `getPrototypeOf` trap throws, or a chain too deep to walk - refused as a
+ * `TypeError` naming `label`, its error as the `cause`.
  */
 function listFilterFields(filter: object, label: string): FilterFields {
   try {
