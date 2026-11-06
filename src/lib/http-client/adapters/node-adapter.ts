@@ -2242,10 +2242,13 @@ export class NodeAdapter implements HTTPAdapter {
               // would hold the body twice over. Empty bytes for a body that arrived
               // empty, as FetchAdapter and XHRAdapter hand one over; `null` for an answer
               // with no body (`HEAD`, `204`, `205`, `304`), as they hand that over. One
-              // that cannot be joined - too large for one array, under a
-              // `maxResponseBytes` of `Infinity` - is a stream error, as a body that
-              // failed while arriving is: thrown from this listener, it would be an
-              // uncaught exception, and the request would never settle.
+              // that cannot be joined is a stream error, as a body that failed while
+              // arriving is: thrown from this listener, it would be an uncaught exception,
+              // and the request would never settle. Kept a `stream_response_error`, and
+              // terminal, when it is too large for one array (a `RangeError`, under a
+              // `maxResponseBytes` of `Infinity`): as `response_too_large` a retryable
+              // status would fetch the same body again. Its message says what would take
+              // it instead, where a factory is called - for a 2xx alone.
               let responseBody: Uint8Array | null;
               try {
                 responseBody = hasBody
@@ -2253,7 +2256,9 @@ export class NodeAdapter implements HTTPAdapter {
                   : null;
               } catch (error) {
                 settleBufferedStreamError(
-                  'Response body could not be joined',
+                  error instanceof RangeError
+                    ? `Response body is too large to hold in one array${isSuccessStatus(status) ? '; use streamResponse' : ''}`
+                    : 'Response body could not be joined',
                   error as Error,
                 );
                 return;

@@ -226,7 +226,11 @@ test('a buffered body that cannot be joined settles as a stream error, not an un
 
     expect(response.status).toBe(200);
     expect(response.isStreamError).toBe(true);
+    // Terminal, as a stream error is: a retryable status would fetch the same body again.
     expect(response.streamErrorCode).toBe('stream_response_error');
+    expect((response.errorCause as Error).message).toContain(
+      'Response body is too large to hold in one array; use streamResponse',
+    );
     expect((response.errorCause as Error).cause).toBe(tooLarge);
   } finally {
     concatSpy.mockRestore();

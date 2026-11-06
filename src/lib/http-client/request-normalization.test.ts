@@ -12405,6 +12405,7 @@ test("a MockAdapter route cookie name is held to the jar's rule, not an HTTP tok
       ' padded',
       'has a space or tab at an edge, which the cookie jar would trim off',
     ],
+    [' a;b', 'cannot be written into a Set-Cookie line'],
     ['a=b', 'cannot be written into a Set-Cookie line'],
   ].entries()) {
     adapter.routes.get(`/refused-${index}`, () => ({
@@ -12447,6 +12448,29 @@ test('a MockAdapter route cookie whose value, path or domain cannot be written i
 
     expect(builder.error?.cause?.message).toBe(
       `MockAdapter cookie at position 1 ${parts[index]} cannot be written into a Set-Cookie line`,
+    );
+  }
+
+  // Padded text that also holds what no trim would cure is refused for that.
+  for (const [index, entry] of [
+    ' x; Domain=evil.test',
+    ' v\r\nSet-Cookie: b=1',
+    { value: 'x', path: ' /a;b' },
+    { value: 'x', domain: ' a.test;b' },
+  ].entries()) {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/login', () => ({
+      status: 200,
+      cookies: { [name]: entry },
+    }));
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://mock.test',
+    }).get('/login');
+    await builder.send();
+
+    expect(builder.error?.cause?.message).toBe(
+      `MockAdapter cookie at position 0 ${['value', 'value', 'path', 'domain'][index]} cannot be written into a Set-Cookie line`,
     );
   }
 

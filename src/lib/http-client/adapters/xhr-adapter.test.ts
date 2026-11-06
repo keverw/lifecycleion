@@ -595,7 +595,8 @@ describe('XHRAdapter', () => {
 
       // An XHR outside a browser that hands back text, `responseType` aside.
       lastXHR.status = 200;
-      lastXHR.response = 'too large';
+      // Two UTF-16 code units, under the limit; six UTF-8 bytes, over it.
+      lastXHR.response = '日本';
       lastXHR.simulateLoad();
       const response = await promise;
 

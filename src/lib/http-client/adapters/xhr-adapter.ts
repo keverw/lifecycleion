@@ -28,6 +28,7 @@ import {
 import {
   tooLargeAnswer,
   hasResponseBody,
+  isAnsweredBodyOverLimit,
   isIdentityContentEncoding,
   parseContentLength,
   streamErrorAnswer,
@@ -1217,9 +1218,8 @@ interface AnsweredHeaders {
 const RESPONSE_UNREADABLE = Symbol('response unreadable');
 
 /**
- * What `readResponseBody` answers for text over the limit before it is encoded: its UTF-8
- * bytes are never fewer than its UTF-16 code units, so one with more units than the limit
- * allows is over it, and is not copied to be refused.
+ * What `readResponseBody` answers for text whose UTF-8 bytes are over the limit, measured
+ * before it is encoded (see `isAnsweredBodyOverLimit`), so it is not copied to be refused.
  */
 const RESPONSE_TOO_LARGE = Symbol('response too large');
 
@@ -1275,7 +1275,7 @@ function readResponseBody(
   // as FetchAdapter takes a polyfilled body's. A browser answers `null` only when it could
   // not allocate the buffer.
   if (typeof response === 'string') {
-    return response.length > maxResponseBytes
+    return isAnsweredBodyOverLimit(response, maxResponseBytes)
       ? RESPONSE_TOO_LARGE
       : new TextEncoder().encode(response);
   }

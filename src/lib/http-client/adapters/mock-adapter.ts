@@ -1,6 +1,7 @@
 import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
 import { isNullish } from '../../internal/is-nullish';
 import {
+  isHeaderSafeCookieText,
   isWritableCookieName,
   isWritableCookieValue,
 } from '../internal/cookie-text';
@@ -1704,11 +1705,16 @@ function assertCookieText(text: string, part: string, isName = false): void {
     : isWritableCookieValue(text);
 
   if (!isWritable) {
-    // The jar's rule decides; only the reason given is told apart here.
+    // The jar's rule decides; only the reason given is told apart here. Edge whitespace is
+    // named only when it is all that is wrong: text that also holds a `;`, a control
+    // character or one above U+00FF is refused for that, which trimming would not cure.
+    const isOnlyPadded =
+      trimSpacesAndTabs(text) !== text &&
+      isHeaderSafeCookieText(text, isName ? '=' : '');
     throw new TypeError(
-      trimSpacesAndTabs(text) === text
-        ? `MockAdapter cookie ${part} cannot be written into a Set-Cookie line`
-        : `MockAdapter cookie ${part} has a space or tab at an edge, which the cookie jar would trim off`,
+      isOnlyPadded
+        ? `MockAdapter cookie ${part} has a space or tab at an edge, which the cookie jar would trim off`
+        : `MockAdapter cookie ${part} cannot be written into a Set-Cookie line`,
     );
   }
 }
