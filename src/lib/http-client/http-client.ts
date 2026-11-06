@@ -3218,6 +3218,9 @@ export class BaseHTTPClient {
       let didAdapterResolve = false;
       // Set when the caller's cookie jar is what threw, so the error says so.
       let didCookieJarFail = false;
+      // Set when the resolved answer's headers are handed to the cookie jar: an answer
+      // refused before that - its status, its headers - never reached it.
+      let didJarSeeAnswer = false;
       // The status that answer carried, so `onAttemptEnd` and the final response report
       // it rather than `0` when a throw after `send()` resolved ends the attempt, and its
       // headers once they have been normalized.
@@ -3713,6 +3716,7 @@ export class BaseHTTPClient {
         // in-time one's is. Only an abandoned attempt's answer is ignored, and that one
         // never reaches here.
         if (cookieJar) {
+          didJarSeeAnswer = true;
           try {
             cookieJar.processResponseHeaders(
               adapterResponse.headers,
@@ -4046,9 +4050,9 @@ export class BaseHTTPClient {
             : undefined;
         // Or, for an adapter that tagged neither, the answer its factory was announced: its
         // headers had arrived, so its `Set-Cookie` is stored as a tagged one's is. Not once
-        // the adapter resolved: that answer's headers went to the jar on the resolved path.
+        // the resolved answer's headers went to the jar: that answer is the one stored.
         const announcedResponse =
-          !didAdapterResolve &&
+          !didJarSeeAnswer &&
           didCallStreamFactory &&
           streamFactoryHeaders !== undefined
             ? { status: streamFactoryStatus, headers: streamFactoryHeaders }

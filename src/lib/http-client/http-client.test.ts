@@ -3590,6 +3590,38 @@ describe('HTTPClient — adapter marker flags', () => {
     );
   });
 
+  test('a malformed answer after a sink still stores the cookie the factory was announced', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node' as const,
+      send: async (request): Promise<AdapterResponse> => {
+        await request.streamResponse?.(
+          {
+            status: 200,
+            headers: { 'set-cookie': 's=1; Path=/' },
+            url: request.requestURL,
+            attempt: 1,
+            requestID: '',
+          },
+          { signal: new AbortController().signal },
+        );
+        // A status no answer has, refused before the jar is reached.
+        return { status: 1000, headers: {}, body: null, isStreamed: true };
+      },
+    };
+    const cookieJar = new CookieJar();
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'https://a.test',
+      cookieJar,
+    })
+      .get('/file')
+      .streamResponse((): WritableLike => makeQuietSink());
+    await builder.send();
+
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(cookieJar.getCookieHeaderString('https://a.test/')).toBe('s=1');
+  });
+
   test('an XHR browser timeout over an answer is a timeout, whatever the cookie jar throws on it', async () => {
     class ThrowingJar extends CookieJar {
       public override processResponseHeaders(): void {
