@@ -4045,9 +4045,12 @@ export class BaseHTTPClient {
             ? getResponseStreamAbortInfo(error)
             : undefined;
         // Or, for an adapter that tagged neither, the answer its factory was announced: its
-        // headers had arrived, so its `Set-Cookie` is stored as a tagged one's is.
+        // headers had arrived, so its `Set-Cookie` is stored as a tagged one's is. Not once
+        // the adapter resolved: that answer's headers went to the jar on the resolved path.
         const announcedResponse =
-          didCallStreamFactory && streamFactoryHeaders !== undefined
+          !didAdapterResolve &&
+          didCallStreamFactory &&
+          streamFactoryHeaders !== undefined
             ? { status: streamFactoryStatus, headers: streamFactoryHeaders }
             : undefined;
         const answeredBeforeFailure =

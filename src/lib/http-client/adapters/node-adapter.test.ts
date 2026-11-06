@@ -664,6 +664,52 @@ test('a streamed download the abort takes while its sink is ending reports no 10
   }
 });
 
+test("a streamed answer's cookie jar is asked once, even when it throws", async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Set-Cookie': 's=1; Path=/' });
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  let jarCalls = 0;
+  class FlakyJar extends CookieJar {
+    public override processResponseHeaders(
+      ...args: Parameters<CookieJar['processResponseHeaders']>
+    ): void {
+      jarCalls++;
+      if (jarCalls === 1) {
+        throw new Error('jar broke');
+      }
+      super.processResponseHeaders(...args);
+    }
+  }
+  try {
+    const builder = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL: `http://127.0.0.1:${String(address.port)}`,
+      cookieJar: new FlakyJar(),
+    })
+      .get('/file')
+      .streamResponse(
+        () =>
+          new Writable({
+            write(_chunk, _encoding, callback) {
+              callback();
+            },
+          }),
+      );
+    await builder.send();
+
+    expect(jarCalls).toBe(1);
+    expect(builder.error?.code).toBe('adapter_error');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('an abort while a streamed writable is finishing fires the factory signal', async () => {
   // The body has fully arrived and the adapter is waiting on `end`'s callback, which this
   // writable never calls, so only the abort listener can fire the stream signal.
