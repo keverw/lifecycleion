@@ -2031,10 +2031,13 @@ export class BaseHTTPClient {
                   // moved an `http:` target to `https:` on the same host and port, as
                   // the retry phase reads one (see `upgradedHopURL`): the safer choice is
                   // no third host, and must not cost the credential it added for it.
-                  fromURL: upgradedHopURL(
-                    redirectTargetURL,
-                    redirectEnd.request.requestURL,
-                  ),
+                  fromURL:
+                    upgradedHopURL(
+                      redirectTargetURL,
+                      redirectEnd.request.requestURL,
+                    ) === redirectTargetURL
+                      ? redirectTargetURL
+                      : redirectEnd.request.requestURL,
                   cookieJar: jar ?? undefined,
                 },
               );
@@ -6783,7 +6786,8 @@ function upgradedHopURL(hopURL: string, interceptedURL: string): string {
       hop.protocol !== 'http:' ||
       intercepted.protocol !== 'https:' ||
       // As the hold reads a host (see `comparableHost`): a trailing dot is the same host.
-      comparableHost(hopURL) !== comparableHost(interceptedURL)
+      trimEndWhere(asciiLowercase(hop.hostname), isDot) !==
+        trimEndWhere(asciiLowercase(intercepted.hostname), isDot)
     ) {
       return hopURL;
     }

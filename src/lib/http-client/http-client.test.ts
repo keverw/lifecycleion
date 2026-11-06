@@ -3189,6 +3189,11 @@ describe('HTTPClient — adapter marker flags', () => {
     for (const [rewrite, expected] of [
       [(url: string) => url, 'Bearer for-target'],
       [(url: string) => url.replace(/^http:/, 'https:'), 'Bearer for-target'],
+      // The same host with a trailing dot, as the retry phase reads it.
+      [
+        (url: string) => url.replace('http://a.test/', 'https://a.test./'),
+        'Bearer for-target',
+      ],
       [(url: string) => url.replace('a.test', 'b.test'), undefined],
     ] as const) {
       sent.length = 0;

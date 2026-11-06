@@ -1934,14 +1934,15 @@ export class NodeAdapter implements HTTPAdapter {
                     // other failure - a socket error, a response cut short - is the
                     // connection failing on its own, and an upload still running on it is
                     // reported as it is for a buffered body.
-                    if (isDecodeFailure(error)) {
-                      tearDownAfterResponse();
-                    } else {
-                      releaseConnectionAfterResponse();
-                    }
                     // The factory's signal after the settle: a cleanup listener the factory
-                    // added that cancels the request cannot stand in for the failure.
+                    // added that cancels the request cannot stand in for the failure. The
+                    // teardown inside it, under its guard.
                     settleStreamFailure(() => {
+                      if (isDecodeFailure(error)) {
+                        tearDownAfterResponse();
+                      } else {
+                        releaseConnectionAfterResponse();
+                      }
                       settleResponse({
                         status,
                         headers,
@@ -2049,10 +2050,11 @@ export class NodeAdapter implements HTTPAdapter {
                 // Factory threw — non-retryable setup error, equivalent to an
                 // interceptor throw. Destroy the request, propagate it as a setup failure,
                 // then abort the stream signal so any partial cleanup listeners run.
-                tearDownAfterResponse();
                 // The factory's signal after the reject: a cleanup listener that cancels
-                // the request cannot stand in for the factory's error.
+                // the request cannot stand in for the factory's error. The teardown
+                // inside it, under its guard.
                 settleStreamFailure(() => {
+                  tearDownAfterResponse();
                   failRequest(
                     markStreamFactoryError(error, req, request.headers, {
                       status,
