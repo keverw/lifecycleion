@@ -46,6 +46,7 @@ import type {
   RedirectHopInfo,
   RequestInterceptorContext,
   SubClientConfig,
+  WritableLike,
 } from './types';
 import { hostileRejections } from '../internal/hostile-promise-test-utils';
 import { sleep } from '../sleep';
@@ -3245,6 +3246,56 @@ describe('HTTPClient — adapter marker flags', () => {
 
     expect(sent[1]?.['x-caller']).toBe('kept');
     expect(sent[1]?.['x-amz-date']).toBeUndefined();
+  });
+
+  test('a plain rejection after the stream factory opened a sink is not retried', async () => {
+    let sends = 0;
+    let factoryCalls = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node' as const,
+      send: async (request): Promise<AdapterResponse> => {
+        sends++;
+        // The sink is opened, then the transfer fails with an ordinary error.
+        await request.streamResponse?.(
+          {
+            status: 200,
+            headers: {},
+            url: request.requestURL,
+            attempt: 1,
+            requestID: '',
+          },
+          { signal: new AbortController().signal },
+        );
+        throw new Error('socket hang up');
+      },
+    };
+    const builder = new HTTPClient({ adapter, baseURL: 'https://a.test' })
+      .get('/file')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 })
+      .streamResponse((): WritableLike => {
+        factoryCalls++;
+        return {
+          write: (_chunk, callback) => {
+            callback?.(null);
+            return true;
+          },
+          end: (callback) => {
+            callback?.();
+          },
+          on() {
+            return this;
+          },
+          once() {
+            return this;
+          },
+          destroy: () => {},
+        };
+      });
+    await builder.send();
+
+    expect(sends).toBe(1);
+    expect(factoryCalls).toBe(1);
+    expect(builder.error).toBeDefined();
   });
 
   test('an XHR browser timeout over an answer is a timeout, whatever the cookie jar throws on it', async () => {

@@ -2031,6 +2031,9 @@ export class BaseHTTPClient {
                   // moved an `http:` target to `https:` on the same host and port, as
                   // the retry phase reads one (see `upgradedHopURL`): the safer choice is
                   // no third host, and must not cost the credential it added for it.
+                  // `upgradedHopURL` tells whether the interceptor asked for exactly
+                  // that upgrade; the URL it returns is the retry phase's, and here the
+                  // interceptor's own URL is what goes out.
                   fromURL:
                     upgradedHopURL(
                       redirectTargetURL,
@@ -2750,9 +2753,9 @@ export class BaseHTTPClient {
       let isTimedOut = false;
       // Set when a stream this attempt's factory started ended before any cancel - the
       // timer fired, or `NodeAdapter` settled a failure of it (see
-      // `listenForStreamFailureSettled`): that is the outcome (see `settleByStreamEnd`), and a cancel the
-      // attempt's teardown provokes - the caller's own signal aborted from the factory's
-      // cleanup listener - is not.
+      // `listenForStreamFailureSettled`): that is the outcome (see `settleByStreamEnd`),
+      // and a cancel the attempt's teardown provokes - the caller's own signal aborted
+      // from the factory's cleanup listener - is not.
       let isStreamEndedFirst = false;
       // Whether this attempt's adapter is the built-in `NodeAdapter`, whose timeout of a
       // stream its factory started always ends the request (`stream_response_error`, or
@@ -4412,10 +4415,15 @@ export class BaseHTTPClient {
         // carries no adapter response, so delivery is unproven - and a timed-out answer
         // (one that arrived after the timer fired) proves it but is still a timeout.
         // Either way a non-idempotent method is not retried.
+        // Nor is an attempt whose stream factory started a stream, or has a sink on its
+        // way, as for an abandoned one above: part of the body may be in the caller's
+        // sink, and a retry would open a second one for the same request - whatever the
+        // adapter rejected with, flagged or not. A factory that declined opened none.
         if (
           policy &&
           !isCancelOutcome() &&
           !isUploadAbandoned &&
+          streamFactoryState === 'none' &&
           (allowNonIdempotentRetry ||
             IDEMPOTENT_METHODS.has(sentRequest.method))
         ) {
@@ -6771,11 +6779,11 @@ function withoutAddedCrossOriginCredentials(
 /**
  * A cross-origin hop's own URL, upgraded to `https:` when an interceptor asked for exactly
  * that: the hop is `http:`, the interceptor's URL is `https:` on the same host, and the
- * port is unchanged - both each scheme's
- * default, or the same port number on both, however the URL writes it (`https://h:443` is
- * read as `https://h`, `http://h:80` as `http://h`). Everything else of the hop's URL -
- * path, query, userinfo - stays its own, as it does for any other change; so does a URL
- * that cannot be read.
+ * port is unchanged - both each scheme's default, or the same port number on both,
+ * however the URL writes it (`https://h:443` is read as `https://h`, `http://h:80` as
+ * `http://h`). Everything else of the hop's URL - path, query, userinfo - stays its own,
+ * as it does for any other change; so does a URL that cannot be read. The host is read as
+ * the retry hold reads it (see `comparableHost`): a trailing dot is the same host.
  */
 function upgradedHopURL(hopURL: string, interceptedURL: string): string {
   try {
@@ -6785,9 +6793,7 @@ function upgradedHopURL(hopURL: string, interceptedURL: string): string {
     if (
       hop.protocol !== 'http:' ||
       intercepted.protocol !== 'https:' ||
-      // As the hold reads a host (see `comparableHost`): a trailing dot is the same host.
-      trimEndWhere(asciiLowercase(hop.hostname), isDot) !==
-        trimEndWhere(asciiLowercase(intercepted.hostname), isDot)
+      comparableHost(hopURL) !== comparableHost(interceptedURL)
     ) {
       return hopURL;
     }
