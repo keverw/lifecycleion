@@ -3116,6 +3116,12 @@ export class BaseHTTPClient {
         });
       }
 
+      // Whether this attempt handed its body to the caller's stream: a stream error after
+      // that is no whole answer - part of the body is in the caller's sink - whatever the
+      // adapter reports, so it is never retried or followed as a failed decode.
+      // Declared before the timer, which reads it.
+      let didCallStreamFactory = false;
+
       // Armed after the retry-phase interceptors, as the initial phase's run before any
       // attempt is timed: one that refreshes a token on a retry does not spend the
       // attempt's timeout, and cannot time the attempt out before it is sent.
@@ -3232,10 +3238,6 @@ export class BaseHTTPClient {
       // out is not taken for this attempt's.
       const dispatchNumber = noteUploadDispatch(uploadActivity);
 
-      // Whether this attempt handed its body to the caller's stream: a stream error after
-      // that is no whole answer - part of the body is in the caller's sink - whatever the
-      // adapter reports, so it is never retried or followed as a failed decode.
-      let didCallStreamFactory = false;
       // What the factory answered, so an attempt abandoned after it started a stream - a
       // sink, or one still on its way - is not retried either (see the catch below): a
       // retry would open a second sink for the request. A factory that threw, or answered
@@ -6599,6 +6601,11 @@ function comparableHost(url: string): string {
   return trimEndWhere(asciiLowercase(extractHostname(url)), isDot);
 }
 
+/** {@link comparableHost} for a URL already parsed. */
+function comparableHostOf(url: URL): string {
+  return trimEndWhere(asciiLowercase(url.hostname), isDot);
+}
+
 /** Whether `code` is `.`. */
 function isDot(code: number): boolean {
   return code === 0x2e;
@@ -6851,8 +6858,7 @@ function exactHTTPSUpgradeOf(
     if (
       hop.protocol !== 'http:' ||
       intercepted.protocol !== 'https:' ||
-      trimEndWhere(asciiLowercase(hop.hostname), isDot) !==
-        trimEndWhere(asciiLowercase(intercepted.hostname), isDot)
+      comparableHostOf(hop) !== comparableHostOf(intercepted)
     ) {
       return undefined;
     }

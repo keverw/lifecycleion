@@ -1470,10 +1470,10 @@ export class NodeAdapter implements HTTPAdapter {
 
         /**
          * Settles the request with a failure of the stream its factory started, through
-         * `settle` once `teardown` has run, both under its guard, and tells `HTTPClient`
-         * it did (see `listenForStreamFailureSettled`) - only when it is this failure that
-         * settled it, not one a timeout or a cancel had already answered, nor one the
-         * teardown caused - before the factory's signal fires, so a cleanup listener on it
+         * `settle` once `teardown` has run, each under its own guard, and tells
+         * `HTTPClient` it did (see `listenForStreamFailureSettled`) - only when it is this
+         * failure that settled it, not one a timeout or a cancel had already answered, nor
+         * one the teardown caused - before the factory's signal fires, so a cleanup listener on it
          * that cancels the request cannot stand in for the failure. Then fires it. A
          * throw fails the request with that throw instead - or, for one already answered,
          * is reported to the host channel, as the response task's own failures are - and
@@ -1485,12 +1485,17 @@ export class NodeAdapter implements HTTPAdapter {
           settle: () => void,
           abortStream: () => void,
         ): void => {
-          let wasOpen = false;
+          // A teardown that throws is reported, and the failure still settles: it is the
+          // answer, whatever tearing the response down then did.
           try {
             teardown();
-            // Read after the teardown: a settle the teardown itself caused - an answer
-            // its destroy ran - is no settle of this failure's.
-            wasOpen = !didSettleRequest;
+          } catch (error) {
+            reportCallbackError('NodeAdapter response task', error);
+          }
+          // Read after the teardown: a settle the teardown itself caused - an answer its
+          // destroy ran - is no settle of this failure's.
+          let wasOpen = !didSettleRequest;
+          try {
             settle();
           } catch (error) {
             if (didSettleRequest) {
