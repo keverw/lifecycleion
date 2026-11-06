@@ -10578,6 +10578,71 @@ test('a stream failure whose settle throws still fails the request and fires the
   }
 });
 
+test('a streamed download whose answer cannot be settled reports no 100% progress', async () => {
+  let respond: ((res: http.IncomingMessage) => void) | undefined;
+  const request = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    setHeader: () => {},
+    // Read when the delivered download is answered, to report the headers sent.
+    getHeaders: () => {
+      throw new Error('headers unreadable');
+    },
+    end: () => {},
+    destroy() {
+      this.destroyed = true;
+      return this;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    _options: unknown,
+    callback: (res: http.IncomingMessage) => void,
+  ) => {
+    respond = callback;
+    return request;
+  }) as unknown as typeof http.request);
+  const progress: number[] = [];
+  const response = Object.assign(new EventEmitter(), {
+    statusCode: 200,
+    headers: {},
+    complete: false,
+    pause() {
+      return this;
+    },
+    resume() {
+      return this;
+    },
+    destroy() {
+      return this;
+    },
+  });
+  try {
+    const sending = new NodeAdapter().send(
+      makeAdapterRequest('http://example.test', {
+        onDownloadProgress: (event) => {
+          progress.push(event.progress);
+        },
+        streamResponse: () => makeMemoryWritable().stream,
+      }),
+    );
+    respond?.(response as unknown as http.IncomingMessage);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    response.emit('data', Buffer.from('body'));
+    response.emit('end');
+
+    let caught: unknown;
+    try {
+      await sending;
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as Error).message).toBe('headers unreadable');
+    expect(progress).not.toContain(1);
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
 test('a signal that reads as aborted without dispatching abort during stream setup settles it', async () => {
   const outcomes: Record<string, unknown> = {};
   for (const when of [

@@ -3250,7 +3250,8 @@ export class BaseHTTPClient {
       let streamFactoryStatus = 0;
       // Whether the factory started a stream, or has a sink on its way. A factory that
       // declined opened no sink: a cancel answer, told by its own `cancel` data field
-      // alone, never a getter of the caller's - one that answered the adapter otherwise
+      // alone, never a getter of the caller's (a `Proxy`'s descriptor trap answers it, as
+      // it answers any read) - one that answered the adapter otherwise
       // is read as the stream it may have started. Asked only where it decides the
       // outcome, so the answer is not inspected on the paths that do not need it.
       const didStartStream = (): boolean => {
@@ -4441,16 +4442,12 @@ export class BaseHTTPClient {
         // Network / adapter / per-attempt timeout — retry if policy allows. A throw
         // carries no adapter response, so delivery is unproven - and a timed-out answer
         // (one that arrived after the timer fired) proves it but is still a timeout.
-        // Either way a non-idempotent method is not retried.
-        // Nor is an attempt whose stream factory started a stream, or has a sink on its
-        // way, as for an abandoned one above: part of the body may be in the caller's
-        // sink, and a retry would open a second one for the same request - whatever the
-        // adapter rejected with, flagged or not. A factory that declined opened none.
-        // So is one whose adapter rejected, unflagged, once its factory had started a
-        // stream: the cut stream, ended as one given up on is, not a plain network
-        // failure a caller would retry on.
-        const isStreamStarted = !isCancelOutcome() && didStartStream();
-        if (isStreamStarted) {
+        // Either way a non-idempotent method is not retried. Nor is an attempt whose
+        // stream factory started a stream, or has a sink on its way: part of the body may
+        // be in the caller's sink, and a retry would open a second one for the same
+        // request. It is the cut stream, ended as one given up on is, not a plain network
+        // failure a caller would retry on. A factory that declined opened none.
+        if (!isCancelOutcome() && didStartStream()) {
           return endAsCutStream();
         }
 
@@ -4458,7 +4455,6 @@ export class BaseHTTPClient {
           policy &&
           !isCancelOutcome() &&
           !isUploadAbandoned &&
-          !isStreamStarted &&
           (allowNonIdempotentRetry ||
             IDEMPOTENT_METHODS.has(sentRequest.method))
         ) {

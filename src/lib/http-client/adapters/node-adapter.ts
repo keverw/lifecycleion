@@ -1496,7 +1496,8 @@ export class NodeAdapter implements HTTPAdapter {
           }
           // Told whenever this call is what settled the request, with the failure or a
           // throw that took its place: either ends it - the client does not retry an
-          // attempt whose factory was called - and a cleanup cancel stands in for neither.
+          // attempt whose factory started a stream, nor one whose factory threw, which is
+          // flagged so - and a cleanup cancel stands in for neither.
           if (wasOpen && didSettleRequest) {
             notifyStreamFailureSettled(streamFailureSettledListener);
           }
@@ -2933,9 +2934,11 @@ async function streamResponseBody(
       stopSignal.removeEventListener('abort', onStop);
     };
 
-    const settle = (result: StreamResponseBodyResult): void => {
+    // Whether it settled the stream as `result`: not when it had already, or when
+    // answering the result threw and rejected the stream instead.
+    const settle = (result: StreamResponseBodyResult): boolean => {
       if (isSettled) {
-        return;
+        return false;
       }
 
       isSettled = true;
@@ -2948,9 +2951,10 @@ async function streamResponseBody(
         onSettled(result);
       } catch (error) {
         reject(normalizeError(error));
-        return;
+        return false;
       }
       resolve(result);
+      return true;
     };
 
     // Register the drain handler once at this level (depth 2) rather than
@@ -3136,8 +3140,10 @@ async function streamResponseBody(
           // finds the stream finished - its factory's signal does not fire over a whole
           // body, as the docs promise - and is the client's late cancel, not this
           // stream's abort. Then the 100% download progress, which no chunk sends.
-          settle(true);
-          onProgress?.(completeProgressEvent(handedBytes));
+          // Only for a download that did settle as delivered.
+          if (settle(true)) {
+            onProgress?.(completeProgressEvent(handedBytes));
+          }
         });
       } catch (error) {
         // Same reasoning as the `write` throw above: a throw out of `end` means the
