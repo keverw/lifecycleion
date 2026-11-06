@@ -1484,10 +1484,7 @@ export function validateConfigEntry(
   // rather than accept `foo://bücher.example` or `foo://1。2。3。4` and never match it.
   // Read without the entry's port or trailing slash.
   const hostOrigin = `${scheme}://${host}`;
-  if (
-    isOpaqueHost &&
-    normalizeOrigin(hostOrigin) === ''
-  ) {
+  if (isOpaqueHost && normalizeOrigin(hostOrigin) === '') {
     return {
       valid: false,
       info: 'origin host is not one a non-special scheme can match (use ASCII)',
