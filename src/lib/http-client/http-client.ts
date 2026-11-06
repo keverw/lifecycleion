@@ -6782,7 +6782,8 @@ function upgradedHopURL(hopURL: string, interceptedURL: string): string {
     if (
       hop.protocol !== 'http:' ||
       intercepted.protocol !== 'https:' ||
-      hop.hostname !== intercepted.hostname
+      // As the hold reads a host (see `comparableHost`): a trailing dot is the same host.
+      comparableHost(hopURL) !== comparableHost(interceptedURL)
     ) {
       return hopURL;
     }

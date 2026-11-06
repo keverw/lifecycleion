@@ -14522,6 +14522,15 @@ test('a retry interceptor may upgrade a cross-origin http hop to https, and noth
       },
       expected: 'https://evil.example:80/next',
     },
+    // The same host with a trailing dot, as the hold reads it: the upgrade is kept.
+    {
+      target: 'http://evil.example/next',
+      rewrite: (url) => {
+        url.protocol = 'https:';
+        url.hostname = 'evil.example.';
+      },
+      expected: 'https://evil.example/next',
+    },
     // An upgrade that also changes the port is discarded.
     {
       target: 'http://evil.example/next',
