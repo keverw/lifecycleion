@@ -10492,8 +10492,8 @@ test('a stream failure whose settle throws still fails the request and fires the
         return makeMemoryWritable().stream;
       },
     });
-    // An ordinary failure took the stream failure's place, so the client is not told
-    // a stream failure settled it: one it may retry, and cancel.
+    // The throw took the stream failure's place and settled the request, so the client is
+    // told: a cleanup cancel after it stands in for neither.
     listenForStreamFailureSettled(adapterRequest, () => {
       settledCalls++;
     });
@@ -10514,7 +10514,7 @@ test('a stream failure whose settle throws still fails the request and fires the
 
     expect((caught as Error).message).toBe('headers unreadable');
     expect(didFireSignal).toBe(true);
-    expect(settledCalls).toBe(0);
+    expect(settledCalls).toBe(1);
   } finally {
     requestSpy.mockRestore();
   }

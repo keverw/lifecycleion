@@ -3298,6 +3298,48 @@ describe('HTTPClient — adapter marker flags', () => {
     expect(builder.error).toBeDefined();
   });
 
+  test('a plain rejection after the stream factory declined is retried, as no sink was opened', async () => {
+    for (const decline of ['sync', 'async'] as const) {
+      let sends = 0;
+      const adapter: HTTPAdapter = {
+        getType: () => 'node' as const,
+        send: async (request): Promise<AdapterResponse> => {
+          sends++;
+          if (sends === 1) {
+            // The factory declines, then the transfer fails with an ordinary error.
+            await request.streamResponse?.(
+              {
+                status: 200,
+                headers: {},
+                url: request.requestURL,
+                attempt: 1,
+                requestID: '',
+              },
+              { signal: new AbortController().signal },
+            );
+            throw new Error('socket hang up');
+          }
+          return { status: 200, headers: {}, body: null };
+        },
+      };
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'https://a.test',
+      })
+        .get('/file')
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 })
+        .streamResponse(() =>
+          decline === 'sync'
+            ? { cancel: true }
+            : Promise.resolve({ cancel: true as const }),
+        )
+        .send();
+
+      expect(sends).toBe(2);
+      expect(response.status).toBe(200);
+    }
+  });
+
   test('an XHR browser timeout over an answer is a timeout, whatever the cookie jar throws on it', async () => {
     class ThrowingJar extends CookieJar {
       public override processResponseHeaders(): void {

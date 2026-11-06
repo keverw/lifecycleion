@@ -2029,18 +2029,14 @@ export class BaseHTTPClient {
                   // request, of which they were handed a copy: compared with what they
                   // returned, never with itself. Read as upgraded where the interceptor
                   // moved an `http:` target to `https:` on the same host and port, as
-                  // the retry phase reads one (see `upgradedHopURL`): the safer choice is
+                  // the retry phase reads one (see `isExactHTTPSUpgrade`): the safer choice is
                   // no third host, and must not cost the credential it added for it.
-                  // `upgradedHopURL` tells whether the interceptor asked for exactly
-                  // that upgrade; the URL it returns is the retry phase's, and here the
-                  // interceptor's own URL is what goes out.
-                  fromURL:
-                    upgradedHopURL(
-                      redirectTargetURL,
-                      redirectEnd.request.requestURL,
-                    ) === redirectTargetURL
-                      ? redirectTargetURL
-                      : redirectEnd.request.requestURL,
+                  fromURL: isExactHTTPSUpgrade(
+                    redirectTargetURL,
+                    redirectEnd.request.requestURL,
+                  )
+                    ? redirectEnd.request.requestURL
+                    : redirectTargetURL,
                   cookieJar: jar ?? undefined,
                 },
               );
@@ -4419,11 +4415,23 @@ export class BaseHTTPClient {
         // way, as for an abandoned one above: part of the body may be in the caller's
         // sink, and a retry would open a second one for the same request - whatever the
         // adapter rejected with, flagged or not. A factory that declined opened none.
+        // A cancel answer read once here, the adapter having already rejected: it cannot
+        // race the adapter's own read, and a factory that declined opened no sink.
+        // Widened: the factory wrapper sets it from a closure, which narrowing above does
+        // not see.
+        const factoryState = streamFactoryState as StreamFactoryState;
+        const didStartStream =
+          factoryState === 'pending' ||
+          (factoryState === 'answered' &&
+            !(
+              streamFactoryAnswer !== undefined &&
+              readUnknownMember(streamFactoryAnswer, 'cancel') === true
+            ));
         if (
           policy &&
           !isCancelOutcome() &&
           !isUploadAbandoned &&
-          streamFactoryState === 'none' &&
+          !didStartStream &&
           (allowNonIdempotentRetry ||
             IDEMPOTENT_METHODS.has(sentRequest.method))
         ) {
@@ -6777,15 +6785,14 @@ function withoutAddedCrossOriginCredentials(
 }
 
 /**
- * A cross-origin hop's own URL, upgraded to `https:` when an interceptor asked for exactly
- * that: the hop is `http:`, the interceptor's URL is `https:` on the same host, and the
- * port is unchanged - both each scheme's default, or the same port number on both,
- * however the URL writes it (`https://h:443` is read as `https://h`, `http://h:80` as
- * `http://h`). Everything else of the hop's URL - path, query, userinfo - stays its own,
- * as it does for any other change; so does a URL that cannot be read. The host is read as
- * the retry hold reads it (see `comparableHost`): a trailing dot is the same host.
+ * Whether `interceptedURL` is `hopURL` upgraded to `https:` and nothing more of its origin:
+ * the hop is `http:`, the interceptor's URL is `https:` on the same host, and the port is
+ * unchanged - both each scheme's default, or the same port number on both, however the
+ * URL writes it (`https://h:443` is read as `https://h`, `http://h:80` as `http://h`). The
+ * host is read as the retry hold reads it (see `comparableHost`): a trailing dot is the
+ * same host. A URL that cannot be read is no upgrade.
  */
-function upgradedHopURL(hopURL: string, interceptedURL: string): string {
+function isExactHTTPSUpgrade(hopURL: string, interceptedURL: string): boolean {
   try {
     const hop = new URL(hopURL);
     const intercepted = new URL(interceptedURL);
@@ -6795,21 +6802,35 @@ function upgradedHopURL(hopURL: string, interceptedURL: string): string {
       intercepted.protocol !== 'https:' ||
       comparableHost(hopURL) !== comparableHost(interceptedURL)
     ) {
-      return hopURL;
+      return false;
     }
 
     const isDefaultPorts = hop.port === '' && intercepted.port === '';
-    const hopPort = hop.port === '' ? '80' : hop.port;
-    const interceptedPort = intercepted.port === '' ? '443' : intercepted.port;
-    if (!isDefaultPorts && hopPort !== interceptedPort) {
-      return hopURL;
-    }
-
-    hop.protocol = 'https:';
-    // Set again: a scheme change drops a port that is the new scheme's default.
-    hop.port = isDefaultPorts ? '' : hopPort;
-    return hop.href;
+    return isDefaultPorts || (hop.port || '80') === (intercepted.port || '443');
   } catch {
+    return false;
+  }
+}
+
+/**
+ * A cross-origin hop's own URL, upgraded to `https:` when an interceptor asked for exactly
+ * that (see {@link isExactHTTPSUpgrade}). Everything else of the hop's URL - path, query,
+ * userinfo - stays its own, as it does for any other change.
+ */
+function upgradedHopURL(hopURL: string, interceptedURL: string): string {
+  if (!isExactHTTPSUpgrade(hopURL, interceptedURL)) {
     return hopURL;
   }
+
+  const hop = new URL(hopURL);
+  // The port the hop is on, written out unless both are their scheme's default: `http://h`
+  // upgraded for `https://h:80` stays on port 80.
+  const port =
+    hop.port === '' && new URL(interceptedURL).port === ''
+      ? ''
+      : hop.port || '80';
+  hop.protocol = 'https:';
+  // Set again: a scheme change drops a port that is the new scheme's default.
+  hop.port = port;
+  return hop.href;
 }
