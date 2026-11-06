@@ -869,7 +869,8 @@ function isSameList(
  *
  * Validation:
  * - Origin-style patterns (e.g., "https://*.example.com") are NOT allowed in domain lists.
- *   If any entry contains "://", an error will be thrown to surface misconfiguration early.
+ *   An entry that starts with a scheme and `://` throws, whether or not there is a domain
+ *   to match, to surface misconfiguration early.
  * - Empty or whitespace-only entries are ignored.
  * Use `matchesOriginList` for origin-style patterns.
  */
@@ -877,9 +878,11 @@ export function matchesDomainList(
   domain: string,
   allowedDomains: string[],
 ): boolean {
-  // Before the early exit below, so a list that is no list is refused on every call; its
-  // entries are checked when it is compiled.
+  // Before the early exit below, so a list that is no list is refused on every call.
   assertEntryListIsArray(allowedDomains, 'matchesDomainList', 'allowedDomains');
+  // Compiled before the early exit too, so an entry that is no string, or one that is an
+  // origin, is refused whether or not there is a domain to match.
+  const list = compiledDomainList(allowedDomains);
   const normalizedDomain = normalizeDomain(domain);
 
   // Early exit: invalid input cannot match any allowed domain. Nor can `"null"`, the
@@ -891,8 +894,6 @@ export function matchesDomainList(
 
   // Asked once, for every wildcard entry, and only if one is reached.
   let isIP: boolean | undefined;
-
-  const list = compiledDomainList(allowedDomains);
 
   for (let index = 0; index < list.cleaned.length; index++) {
     const entry = compiledDomainEntry(list, index);
@@ -946,7 +947,8 @@ function isAllowedExactHostname(normalizedHostname: string): boolean {
 
 /**
  * Validate a configuration entry for either domain or origin contexts.
- * Non-throwing: returns { valid, info? } where info can carry non-fatal hints.
+ * Returns { valid, info? }, where info can carry non-fatal hints, for any entry; throws a
+ * `TypeError` only for a context or option that is a configuration mistake.
  *
  * - Domain context: accepts exact domains and domain wildcard patterns.
  * - Origin context: accepts
@@ -1002,6 +1004,21 @@ export function validateConfigEntry(
     ['allowGlobalWildcard', 'allowProtocolWildcard'],
     'validateConfigEntry options',
   );
+  // Each option read once, its default for `null` or `undefined` as for one left out -
+  // before the entry, so a bad option is refused whatever the entry is.
+  const opts = {
+    allowGlobalWildcard: readBooleanOption(
+      options?.allowGlobalWildcard,
+      false,
+      'validateConfigEntry options.allowGlobalWildcard',
+    ),
+    allowProtocolWildcard: readBooleanOption(
+      options?.allowProtocolWildcard,
+      true,
+      'validateConfigEntry options.allowProtocolWildcard',
+    ),
+  };
+
   if (typeof entry !== 'string' && !isNullish(entry)) {
     return {
       valid: false,
@@ -1021,20 +1038,6 @@ export function validateConfigEntry(
   if (!raw) {
     return { valid: false, info: 'empty entry', wildcardKind: 'none' };
   }
-
-  // Each option read once, its default for `null` or `undefined` as for one left out.
-  const opts = {
-    allowGlobalWildcard: readBooleanOption(
-      options?.allowGlobalWildcard,
-      false,
-      'validateConfigEntry options.allowGlobalWildcard',
-    ),
-    allowProtocolWildcard: readBooleanOption(
-      options?.allowProtocolWildcard,
-      true,
-      'validateConfigEntry options.allowProtocolWildcard',
-    ),
-  };
 
   // Helper: validate non-wildcard labels (punycode + DNS limits)
   function validateConcreteLabels(pattern: string): boolean {
@@ -1544,6 +1547,18 @@ export function validateConfigEntry(
 }
 
 /**
+ * {@link parseExactOriginForMatching} for an allowlist entry, which is refused - `null` -
+ * when a tab, CR or LF is left inside it, as `validateConfigEntry` refuses it, rather
+ * than read with them deleted as the URL parser reads an `Origin`: `https://exa\tmple.com`
+ * is no entry for `https://example.com`.
+ */
+function parseExactOriginEntry(
+  entry: string,
+): ReturnType<typeof parseExactOriginForMatching> {
+  return /[\t\n\r]/.test(entry) ? null : parseExactOriginForMatching(entry);
+}
+
+/**
  * Parse an exact origin for list matching.
  * Rejects userinfo, non-empty paths, queries, and fragments so malformed inputs
  * are not silently normalized into broader origins.
@@ -1782,7 +1797,7 @@ export function matchesOriginList(
       );
     }
 
-    const parsedAllowed = parseExactOriginForMatching(allowed);
+    const parsedAllowed = parseExactOriginEntry(allowed);
     if (!parsedAllowed) {
       return false;
     }
@@ -1882,7 +1897,7 @@ export function matchesCORSCredentialsList(
       continue;
     }
 
-    const parsedAllowed = parseExactOriginForMatching(allowed);
+    const parsedAllowed = parseExactOriginEntry(allowed);
     if (!parsedAllowed) {
       continue;
     }

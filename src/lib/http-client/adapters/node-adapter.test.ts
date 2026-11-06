@@ -276,6 +276,113 @@ test('a buffered body cancelled from its final progress event is not joined', as
   }
 });
 
+test('an abort the moment a streamed body finishes leaves it delivered, its factory cleanup unrun', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Length': '5' });
+    res.end('hello');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const controller = new AbortController();
+  let didRunCleanup = false;
+  let written = 0;
+  try {
+    const response = await new NodeAdapter().send(
+      makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+        signal: controller.signal,
+        streamResponse: (_info, context) => {
+          context.signal.addEventListener('abort', () => {
+            didRunCleanup = true;
+          });
+          const sink = new Writable({
+            write(chunk: Buffer, _encoding, callback) {
+              written += chunk.length;
+              callback();
+            },
+          });
+          // A caller that tears its batch down once the file is complete.
+          sink.on('finish', () => {
+            controller.abort();
+          });
+          return sink;
+        },
+      }),
+    );
+
+    expect(response.isStreamed).toBe(true);
+    expect(written).toBe(5);
+    expect(didRunCleanup).toBe(false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('an abort mid-stream destroys the sink once', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200);
+    res.write(Buffer.alloc(1024));
+    // Never ended: the abort is what stops it.
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const controller = new AbortController();
+  let destroyCalls = 0;
+  let cleanups = 0;
+  const sink: WritableLike = {
+    write: (_chunk, callback) => {
+      setImmediate(() => {
+        callback?.(null);
+        controller.abort();
+      });
+      return true;
+    },
+    end: (callback) => {
+      callback?.();
+    },
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
+    destroy: () => {
+      destroyCalls++;
+    },
+  };
+  try {
+    let caught: unknown;
+    try {
+      await new NodeAdapter().send(
+        makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+          signal: controller.signal,
+          streamResponse: (_info, context) => {
+            context.signal.addEventListener('abort', () => {
+              cleanups++;
+            });
+            return sink;
+          },
+        }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect((caught as Error).name).toBe('AbortError');
+    expect(destroyCalls).toBe(1);
+    expect(cleanups).toBe(1);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('an abort while a streamed writable is finishing fires the factory signal', async () => {
   // The body has fully arrived and the adapter is waiting on `end`'s callback, which this
   // writable never calls, so only the abort listener can fire the stream signal.

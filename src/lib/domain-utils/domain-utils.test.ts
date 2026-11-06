@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, test } from 'bun:test';
 import {
   safeParseURL,
   normalizeDomain,
@@ -4089,5 +4089,43 @@ describe('matcher options and the validateConfigEntry context', () => {
     expect(() => validateConfigEntry('a.test', undefined as never)).toThrow(
       "validateConfigEntry: context must be 'domain' or 'origin' (got undefined)",
     );
+  });
+});
+
+describe('allowlist entries the validator refuses', () => {
+  test('an exact-origin entry with a tab, CR or LF inside it matches nothing', () => {
+    for (const [entry, origin] of [
+      ['https://exa\tmple.com', 'https://example.com'],
+      ['ht\ttps://example.com', 'https://example.com'],
+      ['https://exam\nple.com', 'https://example.com'],
+      ['https://example.com:80\r80', 'https://example.com:8080'],
+    ]) {
+      expect(validateConfigEntry(entry, 'origin').valid).toBe(false);
+      expect(matchesOriginList(origin, [entry])).toBe(false);
+      expect(matchesCORSCredentialsList(origin, [entry])).toBe(false);
+    }
+    // Trimmed at its edges, as every entry is.
+    expect(
+      matchesOriginList('https://example.com', ['\thttps://example.com\n']),
+    ).toBe(true);
+  });
+
+  test('matchesDomainList refuses a malformed list whether or not there is a domain to match', () => {
+    for (const domain of [undefined, '', 'null'] as unknown as string[]) {
+      expect(() => matchesDomainList(domain, ['a.com', 42 as never])).toThrow(
+        TypeError,
+      );
+      expect(() => matchesDomainList(domain, ['https://a.com'])).toThrow();
+    }
+  });
+
+  test('validateConfigEntry refuses a bad option whatever the entry is', () => {
+    for (const entry of ['', null, 42, ' x.com', 'x.com']) {
+      expect(() =>
+        validateConfigEntry(entry as never, 'origin', {
+          allowGlobalWildcard: 'yes' as never,
+        }),
+      ).toThrow(TypeError);
+    }
   });
 });

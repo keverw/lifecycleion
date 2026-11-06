@@ -2070,37 +2070,40 @@ export class NodeAdapter implements HTTPAdapter {
               // A sink from here on: neither `null` nor a cancel, and checked for shape.
               const sink = writable as WritableLike;
 
-              activeResponseStream = {
+              const streaming = {
                 status,
                 headers,
                 writable: sink,
                 abortStream,
               };
+              activeResponseStream = streaming;
 
               const totalBytes = declaredBodyLength(headers, isDecoded) ?? 0;
 
-              // Pipe the response into the caller's writable. Extracted to a
-              // module-level function to keep callback nesting within ESLint's
-              // max-nested-callbacks limit. Returns true on success, or the
-              // writable error when the local sink fails (disk full, etc.).
-              const streamResult = await streamResponseBody(
-                body,
-                sink,
-                totalBytes,
-                streamAbort.signal,
-                guardedDownloadProgress,
-              );
+              // Answered in the same turn the stream ends, not after an `await`: an abort
+              // in between would find the stream still active and answer a finished
+              // body as aborted, running the factory's cleanup on it. Nothing here for a
+              // stream the abort listener already took: it answered the request, and
+              // destroyed the sink once.
+              const answerStreamResult = (
+                streamResult: StreamResponseBodyResult,
+              ): void => {
+                if (activeResponseStream !== streaming) {
+                  return;
+                }
 
-              if (streamResult === true) {
                 activeResponseStream = undefined;
-                settleResponse({
-                  status,
-                  headers,
-                  body: null,
-                  isStreamed: true,
-                });
-              } else {
-                activeResponseStream = undefined;
+
+                if (streamResult === true) {
+                  settleResponse({
+                    status,
+                    headers,
+                    body: null,
+                    isStreamed: true,
+                  });
+                  return;
+                }
+
                 // Body streaming failure after headers (disk full, writable
                 // destroyed, upstream socket reset, etc.)
                 //
@@ -2123,7 +2126,20 @@ export class NodeAdapter implements HTTPAdapter {
                 // listener that cancels the request cannot stand in for the failure.
                 abortStream();
                 destroyWritableQuietly(sink);
-              }
+              };
+
+              // Pipe the response into the caller's writable. Extracted to a
+              // module-level function to keep callback nesting within ESLint's
+              // max-nested-callbacks limit. Settles with true on success, or the
+              // writable error when the local sink fails (disk full, etc.).
+              await streamResponseBody(
+                body,
+                sink,
+                totalBytes,
+                streamAbort.signal,
+                guardedDownloadProgress,
+                answerStreamResult,
+              );
 
               return;
             }
@@ -2805,17 +2821,19 @@ const UPLOAD_STALL_GRACE_MS = 5_000;
 // Extracted to module scope so its internal callback nesting starts from 1,
 // keeping each level within ESLint's max-nested-callbacks limit of 3.
 //
-// Returns true when the response body was fully written to the writable, or the
+// Settles with true when the response body was fully written to the writable, or the
 // underlying streaming failure when delivery fails after headers (disk full,
-// writable destroyed, upstream response stream error, etc.). The caller maps
-// that error into isStreamError rather than throwing, so the real HTTP status
-// is preserved and the failure stays non-retryable once streaming has started.
+// writable destroyed, upstream response stream error, etc.) - handed to `onSettled`
+// in the turn it is decided, then resolved. The caller maps that error into
+// isStreamError rather than throwing, so the real HTTP status is preserved and the
+// failure stays non-retryable once streaming has started.
 async function streamResponseBody(
   res: ResponseBodySource,
   writable: WritableLike,
   totalBytes: number,
   stopSignal: AbortSignal,
-  onProgress?: (e: AdapterProgressEvent) => void,
+  onProgress: ((e: AdapterProgressEvent) => void) | undefined,
+  onSettled: (result: StreamResponseBodyResult) => void,
 ): Promise<StreamResponseBodyResult> {
   return await new Promise((resolve) => {
     let loadedBytes = 0;
@@ -2878,6 +2896,8 @@ async function streamResponseBody(
 
       isSettled = true;
       cleanup();
+      // In this turn, before the promise's continuation: see `answerStreamResult`.
+      onSettled(result);
       resolve(result);
     };
 

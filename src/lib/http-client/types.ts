@@ -371,7 +371,12 @@ export interface StreamResponseInfo {
  * co-located with the stream setup code instead of scattered across observers.
  */
 export interface StreamResponseContext {
-  /** Fires on cancel, timeout, or stream write failure for this attempt. */
+  /**
+   * Fires when this attempt is cancelled, times out or fails before its body is delivered
+   * whole - the sink or the response failing, the factory throwing or returning
+   * something it should not - and when the factory declines (`null` or
+   * `{ cancel: true }`); never once the body is delivered.
+   */
   signal: AbortSignal;
 }
 

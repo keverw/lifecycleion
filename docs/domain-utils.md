@@ -227,7 +227,7 @@ Checks if an origin matches any entry in a list. The runtime `origin` input must
 
 Invalid inputs are handled internally. Callers do not need to wrap this helper in `try/catch`. Malformed origin strings simply return `false`.
 
-Allowlist entries are trimmed of spaces, tabs, CRs and LFs, and blank ones are ignored. An entry with other whitespace left at an end - a no-break space picked up from pasted config - never matches, as `validateConfigEntry` refuses it and `normalizeOrigin` refuses the same text.
+Allowlist entries are trimmed of spaces, tabs, CRs and LFs, and blank ones are ignored. An entry with other whitespace left at an end - a no-break space picked up from pasted config - never matches, and `validateConfigEntry` refuses it. Nor does an exact-origin entry with a tab, CR or LF left inside it (`https://exa\tmple.com`), which `validateConfigEntry` refuses too, though the URL parser would delete them.
 
 - Exact origin entries may include a port: `https://example.com:8443`
 - Exact origin and bare-domain entries are normalized before comparison, including canonical IP literal handling
@@ -256,7 +256,7 @@ Credentials-safe origin matching. Exact-only by default, with optional subdomain
 
 Invalid inputs are handled internally. Callers do not need to wrap this helper in `try/catch`. Malformed origin strings simply return `false`.
 
-Allowlist entries are trimmed of spaces, tabs, CRs and LFs, and blank ones are ignored. An entry with other whitespace left at an end - a no-break space picked up from pasted config - never matches, as `validateConfigEntry` refuses it and `normalizeOrigin` refuses the same text.
+Allowlist entries are trimmed of spaces, tabs, CRs and LFs, and blank ones are ignored. An entry with other whitespace left at an end - a no-break space picked up from pasted config - never matches, and `validateConfigEntry` refuses it. Nor does an exact-origin entry with a tab, CR or LF left inside it (`https://exa\tmple.com`), which `validateConfigEntry` refuses too, though the URL parser would delete them.
 
 Exact origin and bare-domain entries are normalized before comparison, including canonical IP literal handling. Exact origin or bare-domain entries that equal a public suffix such as `com` or `co.uk` are never matched - for a special scheme's origin; an opaque host (`foo://com`) matches as written. Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries.
 
@@ -278,7 +278,7 @@ matchesCORSCredentialsList('null', ['null']); // true
 
 ### validateConfigEntry
 
-Validates a domain or origin config entry. Non-throwing, returns a result object. Exact origins may include an explicit port, but it must be in the range `0-65535`. See [Configuration & validation](#configuration--validation) for usage guidance.
+Validates a domain or origin config entry, returning a result object for any entry; it throws a `TypeError` only for a context or option that is a configuration mistake (see below). Exact origins may include an explicit port, but it must be in the range `0-65535`. See [Configuration & validation](#configuration--validation) for usage guidance.
 
 For exact origins with bracketed hosts, the bracket contents must be a valid IPv6 literal.
 
@@ -546,7 +546,7 @@ const ok = matchesOriginList(
   - Exact origins and bare domains are validated, origins must not include path/query/fragment/userinfo, bracketed IPv6 is supported.
 
 - `matchesDomainList(domain, allowedDomains)`
-  - Domains only (no schemes). Throws if any entry contains `://`.
+  - Domains only (no schemes). Throws if any entry looks like an origin URL (a scheme followed by `://`), whether or not there is a domain to match.
   - If you do not want `"*"` to match all, pre-validate and reject it.
 
 - `matchesOriginList(origin, allowedOrigins, { treatNoOriginAsAllowed })`
