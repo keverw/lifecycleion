@@ -1869,8 +1869,8 @@ export class BaseHTTPClient {
                 redirectIntercept = redirectRunResult;
               } else {
                 // Snapshotted as the initial phase does; see there. Even with no
-                // interceptor registered: this request's headers come from the adapter's
-                // record of what it sent, not from `mergeHeaders`, so the snapshot is
+                // interceptor registered: this request's headers are those the attempt
+                // was handed, carried forward, not from `mergeHeaders`, so the snapshot is
                 // still what puts them in the shape the other phases' requests have.
                 // The raw result first, so a snapshot that throws still reports it.
                 failedRedirectRequest = redirectRunResult;
@@ -4108,18 +4108,12 @@ export class BaseHTTPClient {
           return endCancelled(reportedSentRequest);
         }
 
-        // An attempt given up on once its factory had started a stream is the cut stream
-        // it left behind, not a timeout to retry: the answer's headers had arrived and
-        // part of its body may be in the caller's sink, so a retry would open a second
-        // sink for the same request. A sink still on its way counts, as it may yet open.
-        // Ended as the stream error a well-behaved adapter reports when the timer cuts a
-        // stream, with the status it announced to the factory. A cancel stays the cancel
-        // it is, below.
-        if (
-          isAbandoned &&
-          streamFactoryState !== 'none' &&
-          !isCancelOutcome()
-        ) {
+        // The cut stream an attempt whose factory started one ends as: the answer's headers
+        // had arrived and part of its body may be in the caller's sink, so a retry would
+        // open a second sink for the same request. Ended as the stream error a
+        // well-behaved adapter reports when a stream is cut, with the status the factory
+        // was announced. A cancel stays the cancel it is.
+        const endAsCutStream = () => {
           const streamCause = normalizeError(error);
 
           emitAttemptEnd({
@@ -4143,7 +4137,7 @@ export class BaseHTTPClient {
               body: null,
               isStreamed: true,
               isStreamError: true,
-              streamErrorCode: 'stream_response_error',
+              streamErrorCode: 'stream_response_error' as const,
               errorCause: streamCause,
             },
             sentRequest,
@@ -4151,9 +4145,19 @@ export class BaseHTTPClient {
             wasCancelled: false,
             wasTimeout: isTimedOut,
             isRetriesExhausted: false,
-            errorCode: 'stream_response_error',
+            errorCode: 'stream_response_error' as const,
             adapterCause: streamCause,
           };
+        };
+
+        // An attempt given up on once its factory had started a stream - a sink still on
+        // its way counts, as it may yet open - is that cut stream, not a timeout to retry.
+        if (
+          isAbandoned &&
+          streamFactoryState !== 'none' &&
+          !isCancelOutcome()
+        ) {
+          return endAsCutStream();
         }
 
         if (isResponseStreamAbortError(error)) {
@@ -4415,8 +4419,9 @@ export class BaseHTTPClient {
         // way, as for an abandoned one above: part of the body may be in the caller's
         // sink, and a retry would open a second one for the same request - whatever the
         // adapter rejected with, flagged or not. A factory that declined opened none.
-        // A cancel answer read once here, the adapter having already rejected: it cannot
-        // race the adapter's own read, and a factory that declined opened no sink.
+        // A factory that declined opened no sink: a cancel answer, told by its own data
+        // field alone, so no getter of the caller's runs again here - one that answered
+        // the adapter otherwise is read as the stream it may have started.
         // Widened: the factory wrapper sets it from a closure, which narrowing above does
         // not see.
         const factoryState = streamFactoryState as StreamFactoryState;
@@ -4425,8 +4430,15 @@ export class BaseHTTPClient {
           (factoryState === 'answered' &&
             !(
               streamFactoryAnswer !== undefined &&
-              readUnknownMember(streamFactoryAnswer, 'cancel') === true
+              isOwnCancelAnswer(streamFactoryAnswer)
             ));
+        // So is one whose adapter rejected, unflagged, once its factory had started a
+        // stream: the cut stream, ended as one given up on is, not a plain network
+        // failure a caller would retry on.
+        if (didStartStream && !isCancelOutcome()) {
+          return endAsCutStream();
+        }
+
         if (
           policy &&
           !isCancelOutcome() &&
@@ -6134,6 +6146,23 @@ function stableUploadError(value: unknown): Error {
  * (`pending` - a promise not yet settled, or a thenable the client does not follow).
  */
 type StreamFactoryState = 'none' | 'pending' | 'answered';
+
+/**
+ * Whether a factory's answer is a cancel by its own `cancel` data field being `true`: a
+ * getter is not called (see {@link watchStreamFactoryAnswer}), and one is no cancel here.
+ */
+function isOwnCancelAnswer(answer: object): boolean {
+  try {
+    const descriptor = Reflect.getOwnPropertyDescriptor(answer, 'cancel');
+    return (
+      descriptor !== undefined &&
+      'value' in descriptor &&
+      descriptor.value === true
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Watch a `streamResponse` factory's answer, reading nothing of it: the adapter reads it -

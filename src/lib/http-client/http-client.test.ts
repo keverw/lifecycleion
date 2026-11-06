@@ -3291,11 +3291,23 @@ describe('HTTPClient — adapter marker flags', () => {
           destroy: () => {},
         };
       });
-    await builder.send();
+    const ends: Array<{ willRetry: boolean; reason: unknown }> = [];
+    builder.onAttemptEnd((event) => {
+      ends.push({
+        willRetry: event.willRetry,
+        reason: event.retrySuppressedReason,
+      });
+    });
+    const response = await builder.send();
 
     expect(sends).toBe(1);
     expect(factoryCalls).toBe(1);
-    expect(builder.error).toBeDefined();
+    // The cut stream it left, as for an attempt given up on - not a network failure a
+    // caller would retry on.
+    expect(builder.error?.code).toBe('stream_response_error');
+    expect(response.isStreamError).toBe(true);
+    expect(response.isNetworkError).toBe(false);
+    expect(ends).toEqual([{ willRetry: false, reason: undefined }]);
   });
 
   test('a plain rejection after the stream factory declined is retried, as no sink was opened', async () => {
@@ -3338,6 +3350,60 @@ describe('HTTPClient — adapter marker flags', () => {
       expect(sends).toBe(2);
       expect(response.status).toBe(200);
     }
+  });
+
+  test('a sink whose cancel getter answers true on a later read is still a stream started, not retried', async () => {
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node' as const,
+      send: async (request): Promise<AdapterResponse> => {
+        sends++;
+        await request.streamResponse?.(
+          {
+            status: 200,
+            headers: {},
+            url: request.requestURL,
+            attempt: 1,
+            requestID: '',
+          },
+          { signal: new AbortController().signal },
+        );
+        throw new Error('socket hang up');
+      },
+    };
+    let cancelReads = 0;
+    await new HTTPClient({ adapter, baseURL: 'https://a.test' })
+      .get('/file')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 })
+      .streamResponse(
+        (): WritableLike =>
+          ({
+            get cancel() {
+              return ++cancelReads > 1;
+            },
+            write: (
+              _chunk: unknown,
+              callback?: (error?: Error | null) => void,
+            ) => {
+              callback?.(null);
+              return true;
+            },
+            end: (callback?: () => void) => {
+              callback?.();
+            },
+            on() {
+              return this;
+            },
+            once() {
+              return this;
+            },
+            destroy: () => {},
+          }) as unknown as WritableLike,
+      )
+      .send();
+
+    expect(sends).toBe(1);
+    expect(cancelReads).toBe(0);
   });
 
   test('an XHR browser timeout over an answer is a timeout, whatever the cookie jar throws on it', async () => {
