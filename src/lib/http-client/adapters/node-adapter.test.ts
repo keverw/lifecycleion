@@ -608,6 +608,62 @@ test("a cancel from a streamed body's final progress event finds it delivered: t
   }
 });
 
+test('a streamed download the abort takes while its sink is ending reports no 100% progress', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200);
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const controller = new AbortController();
+  const progress: number[] = [];
+  let pendingEnd: (() => void) | undefined;
+  // A sink still flushing when the abort lands, whose destroy finishes its end cleanly.
+  const sink: WritableLike = {
+    write: (_chunk, callback) => {
+      callback?.(null);
+      return true;
+    },
+    end: (callback) => {
+      pendingEnd = () => callback?.();
+      setTimeout(() => controller.abort(), 10);
+    },
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
+    destroy: () => {
+      pendingEnd?.();
+    },
+  };
+  try {
+    let caught: unknown;
+    try {
+      await new NodeAdapter().send(
+        makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+          signal: controller.signal,
+          onDownloadProgress: (event) => {
+            progress.push(event.progress);
+          },
+          streamResponse: () => sink,
+        }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as Error).name).toBe('AbortError');
+    expect(progress).not.toContain(1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('an abort while a streamed writable is finishing fires the factory signal', async () => {
   // The body has fully arrived and the adapter is waiting on `end`'s callback, which this
   // writable never calls, so only the abort listener can fire the stream signal.

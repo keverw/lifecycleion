@@ -2133,11 +2133,13 @@ export class NodeAdapter implements HTTPAdapter {
               // body as aborted, running the factory's cleanup on it. Nothing here for a
               // stream the abort listener already took: it answered the request, and
               // destroyed the sink once.
+              // Whether it answered the request as delivered: not for a stream the abort
+              // listener already took, nor for a failure.
               const answerStreamResult = (
                 streamResult: StreamResponseBodyResult,
-              ): void => {
+              ): boolean => {
                 if (activeResponseStream !== streaming) {
-                  return;
+                  return false;
                 }
 
                 activeResponseStream = undefined;
@@ -2149,7 +2151,7 @@ export class NodeAdapter implements HTTPAdapter {
                     body: null,
                     isStreamed: true,
                   });
-                  return;
+                  return true;
                 }
 
                 // Body streaming failure after headers (disk full, writable
@@ -2176,6 +2178,7 @@ export class NodeAdapter implements HTTPAdapter {
                   });
                 }, abortStream);
                 destroyWritableQuietly(sink);
+                return false;
               };
 
               // Pipe the response into the caller's writable. Extracted to a
@@ -2883,7 +2886,7 @@ async function streamResponseBody(
   totalBytes: number,
   stopSignal: AbortSignal,
   onProgress: ((e: AdapterProgressEvent) => void) | undefined,
-  onSettled: (result: StreamResponseBodyResult) => void,
+  onSettled: (result: StreamResponseBodyResult) => boolean,
 ): Promise<StreamResponseBodyResult> {
   return await new Promise((resolve, reject) => {
     let loadedBytes = 0;
@@ -2934,8 +2937,9 @@ async function streamResponseBody(
       stopSignal.removeEventListener('abort', onStop);
     };
 
-    // Whether it settled the stream as `result`: not when it had already, or when
-    // answering the result threw and rejected the stream instead.
+    // Whether `result` was answered as delivered (see `answerStreamResult`): not when the
+    // stream had settled already, when the abort listener had taken it, or when
+    // answering it threw and rejected the stream instead.
     const settle = (result: StreamResponseBodyResult): boolean => {
       if (isSettled) {
         return false;
@@ -2947,14 +2951,15 @@ async function streamResponseBody(
       // from a writable's or the response's own event, where a throw would be an
       // uncaught exception: one is the promise's rejection instead, which the caller's
       // task failure handling answers as it answers any throw of its own.
+      let isDelivered: boolean;
       try {
-        onSettled(result);
+        isDelivered = onSettled(result);
       } catch (error) {
         reject(normalizeError(error));
         return false;
       }
       resolve(result);
-      return true;
+      return isDelivered;
     };
 
     // Register the drain handler once at this level (depth 2) rather than

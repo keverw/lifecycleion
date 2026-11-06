@@ -4141,8 +4141,11 @@ export class BaseHTTPClient {
             status: streamFactoryStatus,
           });
 
+          // The upload's outcome and the headers the adapter recorded sending, as the
+          // stream error a tagged rejection carries reports them.
           return {
             adapterResponse: {
+              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               status: streamFactoryStatus,
               ...derivedRedirectFields(
                 sentRequest.requestURL,
@@ -4155,8 +4158,14 @@ export class BaseHTTPClient {
               isStreamError: true,
               streamErrorCode: 'stream_response_error' as const,
               errorCause: streamCause,
+              effectiveRequestHeaders:
+                getEffectiveRequestHeadersFromError(error),
             },
-            sentRequest,
+            sentRequest: sentRequestForObservedAdapterError(
+              sentRequest,
+              error,
+              observedSentRequest,
+            ),
             attemptCount: attemptNumber,
             wasCancelled: false,
             wasTimeout: isTimedOut,
@@ -4168,11 +4177,7 @@ export class BaseHTTPClient {
 
         // An attempt given up on once its factory had started a stream - a sink still on
         // its way counts, as it may yet open - is that cut stream, not a timeout to retry.
-        if (
-          isAbandoned &&
-          streamFactoryState !== 'none' &&
-          !isCancelOutcome()
-        ) {
+        if (isAbandoned && didStartStream() && !isCancelOutcome()) {
           return endAsCutStream();
         }
 
