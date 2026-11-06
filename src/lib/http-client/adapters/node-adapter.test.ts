@@ -10405,6 +10405,7 @@ test('a response arriving after the signal aborted does not call the streamRespo
   const request = Object.assign(new EventEmitter(), {
     destroyed: false,
     setHeader: () => {},
+    getHeaders: () => ({}),
     end: () => {},
     destroy() {
       this.destroyed = true;
