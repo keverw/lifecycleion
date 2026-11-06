@@ -3250,6 +3250,9 @@ export class BaseHTTPClient {
       // The status the adapter announced to the factory, for the stream error an
       // abandoned attempt ends as.
       let streamFactoryStatus = 0;
+      // And the headers it announced, normalized as an answer's are, for the cut stream
+      // to report and the jar to store: `undefined` for none that can be read.
+      let streamFactoryHeaders: Record<string, string | string[]> | undefined;
       // Whether the factory started a stream, or has a sink on its way. A factory that
       // declined opened no sink: a cancel answer, told by its own `cancel` data field
       // alone, never a getter of the caller's (a `Proxy`'s descriptor trap answers it, as
@@ -3316,6 +3319,21 @@ export class BaseHTTPClient {
                     announcedStatus <= 999
                   ) {
                     streamFactoryStatus = announcedStatus;
+                  }
+                  // Read on the way to the caller's factory, where a throw would replace
+                  // its call: headers that cannot be read are none.
+                  try {
+                    const announcedHeaders = readUnknownMember(
+                      args[0],
+                      'headers',
+                    );
+                    streamFactoryHeaders = isPlainRecord(announcedHeaders)
+                      ? normalizeAdapterResponseHeaders(
+                          announcedHeaders as Record<string, string | string[]>,
+                        )
+                      : undefined;
+                  } catch {
+                    streamFactoryHeaders = undefined;
                   }
                   const returned: unknown = Reflect.apply(
                     streamResponse,
@@ -4026,8 +4044,14 @@ export class BaseHTTPClient {
             hasAdapterMarker(error, STREAM_FACTORY_ERROR_FLAG))
             ? getResponseStreamAbortInfo(error)
             : undefined;
+        // Or, for an adapter that tagged neither, the answer its factory was announced: its
+        // headers had arrived, so its `Set-Cookie` is stored as a tagged one's is.
+        const announcedResponse =
+          didCallStreamFactory && streamFactoryHeaders !== undefined
+            ? { status: streamFactoryStatus, headers: streamFactoryHeaders }
+            : undefined;
         const answeredBeforeFailure =
-          abortedResponse ?? factoryAnsweredResponse;
+          abortedResponse ?? factoryAnsweredResponse ?? announcedResponse;
 
         if (cookieJar && answeredBeforeFailure) {
           try {
@@ -4152,9 +4176,9 @@ export class BaseHTTPClient {
               ...derivedRedirectFields(
                 sentRequest.requestURL,
                 streamFactoryStatus,
-                {},
+                streamFactoryHeaders ?? {},
               ),
-              headers: {},
+              headers: streamFactoryHeaders ?? {},
               body: null,
               isStreamed: true,
               isStreamError: true,

@@ -1494,7 +1494,7 @@ export class NodeAdapter implements HTTPAdapter {
           }
           // Read after the teardown: a settle the teardown itself caused - an answer its
           // destroy ran - is no settle of this failure's.
-          let wasOpen = !didSettleRequest;
+          const wasOpen = !didSettleRequest;
           try {
             settle();
           } catch (error) {
@@ -1503,7 +1503,6 @@ export class NodeAdapter implements HTTPAdapter {
             } else {
               // Not retried, as the failure it took the place of was not: the factory
               // was called, and its sink may hold part of the body.
-              wasOpen = true;
               failRequest(nonRetryableAdapterErrorFrom(error));
             }
           }

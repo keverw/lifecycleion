@@ -3556,6 +3556,40 @@ describe('HTTPClient — adapter marker flags', () => {
     expect(seen[0]?.['x-sent']).toBe('yes');
   });
 
+  test("the cut stream an unflagged rejection after a sink ends as keeps the announced answer's headers and stores its cookie", async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node' as const,
+      send: async (request): Promise<AdapterResponse> => {
+        await request.streamResponse?.(
+          {
+            status: 200,
+            headers: { 'Set-Cookie': ['session=abc; Path=/'], etag: '"v1"' },
+            url: request.requestURL,
+            attempt: 1,
+            requestID: '',
+          },
+          { signal: new AbortController().signal },
+        );
+        throw new Error('socket hang up');
+      },
+    };
+    const cookieJar = new CookieJar();
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'https://a.test',
+      cookieJar,
+    })
+      .get('/file')
+      .streamResponse((): WritableLike => makeQuietSink())
+      .send();
+
+    expect(response.isStreamError).toBe(true);
+    expect(response.headers.etag).toBe('"v1"');
+    expect(cookieJar.getCookieHeaderString('https://a.test/')).toBe(
+      'session=abc',
+    );
+  });
+
   test('an XHR browser timeout over an answer is a timeout, whatever the cookie jar throws on it', async () => {
     class ThrowingJar extends CookieJar {
       public override processResponseHeaders(): void {
