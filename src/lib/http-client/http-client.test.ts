@@ -3483,6 +3483,46 @@ describe('HTTPClient — adapter marker flags', () => {
     expect(response.isStreamError).toBe(true);
   });
 
+  test('a factory decline the adapter reports after the timer fired is that cancel, not a timeout retried', async () => {
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node' as const,
+      send: async (request): Promise<AdapterResponse> => {
+        sends++;
+        await request.streamResponse?.(
+          {
+            status: 200,
+            headers: {},
+            url: request.requestURL,
+            attempt: 1,
+            requestID: '',
+          },
+          { signal: new AbortController().signal },
+        );
+        // Reported late, after the attempt's timer fired.
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        throw Object.assign(
+          new Error('Request cancelled by streamResponse factory'),
+          {
+            name: 'AbortError',
+            [STREAM_FACTORY_CANCEL_KEY]: 'nope',
+          },
+        );
+      },
+    };
+    const builder = new HTTPClient({ adapter, baseURL: 'https://a.test' })
+      .get('/file')
+      .timeout(10)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 })
+      .streamResponse(() => null);
+    const response = await builder.send();
+
+    expect(sends).toBe(1);
+    expect(response.isCancelled).toBe(true);
+    expect(response.isTimeout).toBe(false);
+    expect(builder.error?.cancelReason).toBe('nope');
+  });
+
   test('an XHR browser timeout over an answer is a timeout, whatever the cookie jar throws on it', async () => {
     class ThrowingJar extends CookieJar {
       public override processResponseHeaders(): void {

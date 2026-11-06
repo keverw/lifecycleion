@@ -2892,11 +2892,6 @@ async function streamResponseBody(
     // count and say `loaded: 0` for a body the sink had taken whole.
     let handedBytes = 0;
 
-    // Deduplication guard — same as buffered download: when Content-Length is
-    // known and the last write callback fills the body exactly, progress: 1
-    // fires there. The `end` → writable.end callback fires unconditionally
-    // afterward, so skip the completion event if the write already reported 100%.
-    let didFireDownload100 = false;
     let isPaused = false;
     let isSettled = false;
     let didReceiveEnd = false;
@@ -3056,14 +3051,14 @@ async function streamResponseBody(
           loadedBytes += chunk.length;
 
           // progress: -1 when Content-Length is absent — callers treat -1 as
-          // "length unknown". Track 100% to avoid a duplicate from onResponseEnd.
+          // "length unknown". The 100% event is the end's, sent once the body is
+          // delivered (see below), never this chunk's: a cancel from it then finds the
+          // stream finished, not one to abort over a sink still ending.
           const event = byteProgressEvent(loadedBytes, totalBytes);
 
-          if (event.progress === 1) {
-            didFireDownload100 = true;
+          if (event.progress !== 1) {
+            onProgress?.(event);
           }
-
-          onProgress?.(event);
         });
       } catch (error) {
         // The throw came out of `write`, which means the stream is being torn down and
@@ -3137,14 +3132,12 @@ async function streamResponseBody(
             return;
           }
 
-          // Fire 100% download progress on successful completion, unless a
-          // data chunk already reported exactly 100% (Content-Length known and
-          // last chunk completed the body).
-          if (!didFireDownload100) {
-            onProgress?.(completeProgressEvent(handedBytes));
-          }
-
+          // Settled first: the body is delivered, so a cancel the 100% event below makes
+          // finds the stream finished - its factory's signal does not fire over a whole
+          // body, as the docs promise - and is the client's late cancel, not this
+          // stream's abort. Then the 100% download progress, which no chunk sends.
           settle(true);
+          onProgress?.(completeProgressEvent(handedBytes));
         });
       } catch (error) {
         // Same reasoning as the `write` throw above: a throw out of `end` means the

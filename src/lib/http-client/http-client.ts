@@ -3248,6 +3248,21 @@ export class BaseHTTPClient {
       // The status the adapter announced to the factory, for the stream error an
       // abandoned attempt ends as.
       let streamFactoryStatus = 0;
+      // Whether the factory started a stream, or has a sink on its way. A factory that
+      // declined opened no sink: a cancel answer, told by its own `cancel` data field
+      // alone, never a getter of the caller's - one that answered the adapter otherwise
+      // is read as the stream it may have started. Asked only where it decides the
+      // outcome, so the answer is not inspected on the paths that do not need it.
+      const didStartStream = (): boolean => {
+        return (
+          streamFactoryState === 'pending' ||
+          (streamFactoryState === 'answered' &&
+            !(
+              streamFactoryAnswer !== undefined &&
+              isOwnCancelAnswer(streamFactoryAnswer)
+            ))
+        );
+      };
       // Set once the attempt has given up on the adapter (see `awaitAdapterSend`): the
       // hooks it was handed are dead from then on, so an adapter that calls them late
       // reaches none of the caller's, opens no sink beside a retry's, and does not make
@@ -4150,22 +4165,6 @@ export class BaseHTTPClient {
           };
         };
 
-        // Whether the factory started a stream, or has a sink on its way. A factory that
-        // declined opened no sink: a cancel answer, told by its own `cancel` data field
-        // alone, never a getter of the caller's - one that answered the adapter otherwise
-        // is read as the stream it may have started. Asked only where it decides the
-        // outcome, so the answer is not inspected on the paths that do not need it.
-        const didStartStream = (): boolean => {
-          return (
-            streamFactoryState === 'pending' ||
-            (streamFactoryState === 'answered' &&
-              !(
-                streamFactoryAnswer !== undefined &&
-                isOwnCancelAnswer(streamFactoryAnswer)
-              ))
-          );
-        };
-
         // An attempt given up on once its factory had started a stream - a sink still on
         // its way counts, as it may yet open - is that cut stream, not a timeout to retry.
         if (
@@ -4266,7 +4265,9 @@ export class BaseHTTPClient {
           (!isFlaggedAdapterFailure || isCancelOutcome())
         ) {
           // User/parent cancellation — never retry (even if a timeout fired in the same window).
-          if (isCancelOutcome()) {
+          // Not over the factory's own decline, which came first: the adapter rejected
+          // with it before the factory's signal ran a cleanup that cancels.
+          if (isCancelOutcome() && (!isFactoryCancel || didAdapterResolve)) {
             return endCancelled(reportedSentRequest);
           }
 
@@ -4275,7 +4276,9 @@ export class BaseHTTPClient {
           // AbortError thrown while reading an answered response, with neither the
           // request cancelled nor the attempt timed out, is not a cancel either: it falls
           // through to the answered response's adapter_error below.
-          if (!isTimedOut && !didAdapterResolve) {
+          // A factory's own decline is that cancel even once the timer has fired: it was
+          // the first cause, and nothing was opened to time out.
+          if ((!isTimedOut || isFactoryCancel) && !didAdapterResolve) {
             // Check for a browser-fired XHR timeout (xhr.timeout = 0 but the browser
             // has its own hard limit). Treat it the same as our own timeout so it gets
             // retried and classified as isTimeout rather than isCancelled.
@@ -4293,10 +4296,14 @@ export class BaseHTTPClient {
                 error,
                 STREAM_FACTORY_CANCEL_KEY,
               );
+              // The decline's own reason, or - for one with none - that of a cancel its
+              // cleanup listener made after it.
               const factoryCancelReason =
                 typeof factoryCancelValue === 'string'
                   ? factoryCancelValue
-                  : undefined;
+                  : isCancelOutcome()
+                    ? getSignalCancelReason(cancelSignal)
+                    : undefined;
               params.markCancelled(factoryCancelReason);
 
               emitAttemptEnd({

@@ -485,6 +485,19 @@ test("a cancel a factory's cleanup listener makes after a stream failure leaves 
 
     expect(declinedResponse.isCancelled).toBe(true);
     expect(cancelAnswer).toBe('cancelled');
+    // The decline came first, so its reason is the one kept.
+    expect(declined.error?.cancelReason).toBe('declined');
+
+    // One with no reason of its own takes that of the cancel its cleanup made.
+    const reasonless = client.get('/file').streamResponse((_info, context) => {
+      context.signal.addEventListener('abort', () => {
+        reasonless.cancel('shutdown');
+      });
+      return null;
+    });
+    await reasonless.send();
+
+    expect(reasonless.error?.cancelReason).toBe('shutdown');
 
     // A cancel of the caller's own is still a cancel.
     const controller = new AbortController();
@@ -545,6 +558,51 @@ test('a factory that fails after a cancel answered the request is not told to th
 
     expect((caught as Error).name).toBe('AbortError');
     expect(settledCalls).toBe(0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("a cancel from a streamed body's final progress event finds it delivered: the factory signal does not fire over the whole body", async () => {
+  const server = http.createServer((req, res) => {
+    // With and without a Content-Length: the 100% event is the end's either way.
+    res.writeHead(200, req.url === '/sized' ? { 'Content-Length': '4' } : {});
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  try {
+    for (const path of ['/file', '/sized']) {
+      let didRunCleanup = false;
+      let cancelAnswer: unknown;
+      const builder = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${String(address.port)}`,
+      }).get(path);
+      builder
+        .onDownloadProgress((event) => {
+          if (event.progress === 1) {
+            cancelAnswer = builder.cancel('done');
+          }
+        })
+        .streamResponse((_info, context) => {
+          context.signal.addEventListener('abort', () => {
+            didRunCleanup = true;
+          });
+          return new Writable({
+            write(_chunk, _encoding, callback) {
+              callback();
+            },
+          });
+        });
+      await builder.send();
+
+      expect(cancelAnswer).toBeDefined();
+      expect(didRunCleanup).toBe(false);
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
