@@ -1470,15 +1470,15 @@ export class NodeAdapter implements HTTPAdapter {
 
         /**
          * Settles the request with a failure of the stream its factory started, through
-         * `settle` once `teardown` has run, both under its guard, and tells `HTTPClient` it did (see `listenForStreamFailureSettled`) -
-         * only when it is this failure that settled it, not one a timeout or a cancel had
-         * already answered - before the factory's signal fires, so a cleanup listener on
-         * it that cancels the request cannot stand in for the failure. Then fires it. A
-         * `settle` that throws fails the request with that throw instead - or, for one
-         * already answered, is reported to the host channel, as the response task's own
-         * failures are - and the signal still fires: this runs from a socket's or a
-         * stream's own event, where a throw would be an uncaught exception, the factory's
-         * cleanup never run.
+         * `settle` once `teardown` has run, both under its guard, and tells `HTTPClient`
+         * it did (see `listenForStreamFailureSettled`) - only when it is this failure that
+         * settled it, not one a timeout or a cancel had already answered, nor one the
+         * teardown caused - before the factory's signal fires, so a cleanup listener on it
+         * that cancels the request cannot stand in for the failure. Then fires it. A
+         * throw fails the request with that throw instead - or, for one already answered,
+         * is reported to the host channel, as the response task's own failures are - and
+         * the signal still fires: this runs from a socket's or a stream's own event, where
+         * a throw would be an uncaught exception, the factory's cleanup never run.
          */
         const settleStreamFailure = (
           teardown: () => void,
