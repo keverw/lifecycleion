@@ -835,14 +835,23 @@ export class MockAdapter implements HTTPAdapter {
       unwrapCaptured(routeCookieEntries),
     );
 
+    // Every spelling of the route's own `Set-Cookie` is gathered first, in key order as the
+    // normalizer joins them: one left under `Set-Cookie` would be joined after the
+    // shorthand and win over it.
     if (setCookieEntries.length > 0) {
-      const existing = responseHeaders['set-cookie'];
-      const existingArr =
-        existing === undefined
-          ? []
-          : Array.isArray(existing)
-            ? existing
-            : [existing];
+      const existingArr: string[] = [];
+      for (const key of Object.keys(responseHeaders)) {
+        if (lowerCaseHeaderName(key) !== 'set-cookie') {
+          continue;
+        }
+        const existing = responseHeaders[key];
+        delete responseHeaders[key];
+        if (Array.isArray(existing)) {
+          existingArr.push(...existing);
+        } else if (existing !== undefined) {
+          existingArr.push(existing);
+        }
+      }
       responseHeaders['set-cookie'] = [...existingArr, ...setCookieEntries];
     }
 

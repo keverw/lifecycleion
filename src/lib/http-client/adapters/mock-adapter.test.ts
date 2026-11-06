@@ -650,6 +650,23 @@ describe('MockAdapter via HTTPClient', () => {
     expect(setCookie.join('\n')).not.toContain('injected');
   });
 
+  test('the cookies shorthand wins over a route set-cookie spelled in another case', async () => {
+    const cookieAdapter = new MockAdapter();
+    cookieAdapter.routes.get('/test', () => ({
+      status: 200,
+      headers: { 'set-cookie': 'b=1', 'Set-Cookie': 'a=raw' },
+      cookies: { a: 'shorthand' },
+    }));
+
+    const response = await cookieAdapter.send(makeAdapterRequest());
+
+    expect(response.headers['set-cookie']).toEqual([
+      'b=1',
+      'a=raw',
+      'a=shorthand; Path=/',
+    ]);
+  });
+
   test('null adapter default delay uses zero', async () => {
     const nullableAdapter = new MockAdapter({ defaultDelay: null });
     nullableAdapter.routes.get('/test', () => ({ status: 200, delay: null }));
