@@ -1442,16 +1442,12 @@ export function validateConfigEntry(
   }
 
   // Exact origin: allow any scheme; validate host as domain or IP. Every acceptance
-  // below is held to what the matcher can match - see `exactOriginVerdict`. The entry is
-  // normalized once, for that and for the opaque-host check below.
-  let normalizedEntry: string | undefined;
-  const readNormalizedEntry = (): string =>
-    (normalizedEntry ??= normalizeOrigin(raw));
-  // A tab, CR or LF left inside - after the trim - is refused wherever it sits, as the
-  // matchers refuse it (`parseExactOriginEntry`): the URL parser would delete one, and
-  // the host's own check trims one at its edges (`https://\texample.com`).
+  // below is held to what the matcher can match - see `exactOriginVerdict`.
+  // Asked of the matchers' own parser, so an entry is valid only if they can match it:
+  // one with a tab, CR or LF left inside (`https://\texample.com`), which the host's own
+  // check would trim at its edges, or one the URL parser does not read as written.
   const exactOriginVerdict = (result: ValidationResult): ValidationResult =>
-    result.valid && (/[\t\n\r]/.test(raw) || readNormalizedEntry() === '')
+    result.valid && parseExactOriginEntry(raw) === null
       ? {
           valid: false,
           info: 'origin is not one the URL parser reads as written (it can never match)',
@@ -1486,14 +1482,11 @@ export function validateConfigEntry(
   // dots included, which are not folded for it - and a matched origin is read through
   // `normalizeOrigin`, which refuses that: say so here, ahead of every branch below,
   // rather than accept `foo://bücher.example` or `foo://1。2。3。4` and never match it.
-  // Read without the entry's port or trailing slash - the entry itself when it has
-  // neither, normalized once for this and `exactOriginVerdict`.
+  // Read without the entry's port or trailing slash.
   const hostOrigin = `${scheme}://${host}`;
   if (
     isOpaqueHost &&
-    (hostOrigin === raw
-      ? readNormalizedEntry()
-      : normalizeOrigin(hostOrigin)) === ''
+    normalizeOrigin(hostOrigin) === ''
   ) {
     return {
       valid: false,
