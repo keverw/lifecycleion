@@ -234,6 +234,44 @@ test('a buffered body that cannot be joined settles as a stream error, not an un
   }
 });
 
+test('a buffered body cancelled from its final progress event is not joined', async () => {
+  const server = http.createServer((_req, res) => {
+    // No Content-Length, so the 100% event comes from the end of the body.
+    res.writeHead(200);
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const controller = new AbortController();
+  const concatSpy = spyOn(concatChunksModule, 'concatChunks');
+  try {
+    let caught: unknown;
+    try {
+      await new NodeAdapter().send(
+        makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+          signal: controller.signal,
+          onDownloadProgress: (event) => {
+            if (event.progress === 1) {
+              controller.abort();
+            }
+          },
+        }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as Error).name).toBe('AbortError');
+    expect(concatSpy).not.toHaveBeenCalled();
+  } finally {
+    concatSpy.mockRestore();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('an abort while a streamed writable is finishing fires the factory signal', async () => {
   // The body has fully arrived and the adapter is waiting on `end`'s callback, which this
   // writable never calls, so only the abort listener can fire the stream signal.

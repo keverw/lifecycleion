@@ -2231,6 +2231,13 @@ export class NodeAdapter implements HTTPAdapter {
                 guardedDownloadProgress?.(completeProgressEvent(loadedBytes));
               }
 
+              // Cancelled from that event: the request is already answered, and the body
+              // is not copied for no one.
+              if (activeBufferedResponse === undefined) {
+                chunks.length = 0;
+                return;
+              }
+
               // Copied once, into a fresh array: `Buffer.concat` and a copy of its result
               // would hold the body twice over. Empty bytes for a body that arrived
               // empty, as FetchAdapter and XHRAdapter hand one over; `null` for an answer

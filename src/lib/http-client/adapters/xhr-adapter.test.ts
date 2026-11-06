@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import vm from 'node:vm';
 import { XHRAdapter } from './xhr-adapter';
 import type { AdapterRequest } from '../types';
@@ -581,6 +581,29 @@ describe('XHRAdapter', () => {
 
     expect(response.body).toBeNull();
     expect(response.streamErrorCode).toBeUndefined();
+  });
+
+  test('text handed back over the limit is refused before it is encoded', async () => {
+    const encode = spyOn(TextEncoder.prototype, 'encode');
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/big',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 4,
+      });
+
+      // An XHR outside a browser that hands back text, `responseType` aside.
+      lastXHR.status = 200;
+      lastXHR.response = 'too large';
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.streamErrorCode).toBe('response_too_large');
+      expect(encode).not.toHaveBeenCalled();
+    } finally {
+      encode.mockRestore();
+    }
   });
 
   test('the final upload event is sent before an oversized answer is refused', async () => {

@@ -1699,19 +1699,16 @@ function asRouteMistake<R>(step: () => R): R {
  * no `=` - and is not empty: a nameless cookie is written as a raw `set-cookie`.
  */
 function assertCookieText(text: string, part: string, isName = false): void {
-  if (trimSpacesAndTabs(text) !== text) {
-    throw new TypeError(
-      `MockAdapter cookie ${part} has a space or tab at an edge, which the cookie jar would trim off`,
-    );
-  }
-
   const isWritable = isName
     ? text !== '' && isWritableCookieName(text)
     : isWritableCookieValue(text);
 
   if (!isWritable) {
+    // The jar's rule decides; only the reason given is told apart here.
     throw new TypeError(
-      `MockAdapter cookie ${part} cannot be written into a Set-Cookie line`,
+      trimSpacesAndTabs(text) === text
+        ? `MockAdapter cookie ${part} cannot be written into a Set-Cookie line`
+        : `MockAdapter cookie ${part} has a space or tab at an edge, which the cookie jar would trim off`,
     );
   }
 }

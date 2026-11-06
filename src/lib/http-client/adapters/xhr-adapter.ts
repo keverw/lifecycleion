@@ -840,7 +840,7 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
-          const body = readResponseBody(method, status, xhr);
+          const body = readResponseBody(method, status, xhr, maxResponseBytes);
 
           // The server answered and what failed is taking delivery, so a stream error with
           // the real status, as FetchAdapter reports a body it could not read. Left as no
@@ -864,7 +864,10 @@ export class XHRAdapter implements HTTPAdapter {
           // runtime may count a compressed response encoded there, and a body that is or
           // may be compressed is not stopped on them - and a runtime need not report
           // progress at all, so the whole body is checked once more here.
-          if (body !== null && body.length > maxResponseBytes) {
+          if (
+            body === RESPONSE_TOO_LARGE ||
+            (body !== null && body.length > maxResponseBytes)
+          ) {
             resolve(
               tooLargeAnswer(
                 answeredURL,
@@ -1214,6 +1217,13 @@ interface AnsweredHeaders {
 const RESPONSE_UNREADABLE = Symbol('response unreadable');
 
 /**
+ * What `readResponseBody` answers for text over the limit before it is encoded: its UTF-8
+ * bytes are never fewer than its UTF-16 code units, so one with more units than the limit
+ * allows is over it, and is not copied to be refused.
+ */
+const RESPONSE_TOO_LARGE = Symbol('response too large');
+
+/**
  * The response for a redirect the browser followed on its own: `status: 0` with the
  * final URL, which the client reports as `redirect_disabled`. A `responseURL` that does
  * not parse reports no `detectedRedirectURL`, as a `Location` that does not resolve
@@ -1243,7 +1253,8 @@ function readResponseBody(
   method: string,
   status: number,
   xhr: XMLHttpRequest,
-): Uint8Array | null | typeof RESPONSE_UNREADABLE {
+  maxResponseBytes: number,
+): Uint8Array | null | typeof RESPONSE_UNREADABLE | typeof RESPONSE_TOO_LARGE {
   // The shared rule, so a `205` or `1xx` is bodiless here as in the other adapters.
   if (!hasResponseBody(method, status)) {
     return null;
@@ -1264,7 +1275,9 @@ function readResponseBody(
   // as FetchAdapter takes a polyfilled body's. A browser answers `null` only when it could
   // not allocate the buffer.
   if (typeof response === 'string') {
-    return new TextEncoder().encode(response);
+    return response.length > maxResponseBytes
+      ? RESPONSE_TOO_LARGE
+      : new TextEncoder().encode(response);
   }
 
   return RESPONSE_UNREADABLE;
