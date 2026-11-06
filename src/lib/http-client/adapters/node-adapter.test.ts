@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import * as zlib from 'node:zlib';
 import { NodeAdapter } from './node-adapter';
+import * as concatChunksModule from '../internal/concat-chunks';
 import { readTypedArrayByteOffset } from '../../internal/binary-view';
 import { MAX_COPIED_ARRAY_LENGTH } from '../../internal/array-copy';
 import { isBuiltInNetworkSend } from '../internal/built-in-adapter';
@@ -199,6 +200,39 @@ test.each(['abort', 'close'] as const)(
     }
   },
 );
+
+test('a buffered body that cannot be joined settles as a stream error, not an uncaught exception', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Length': '4' });
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  // As one array too large to allocate fails, under a `maxResponseBytes` of `Infinity`.
+  const tooLarge = new RangeError('Array buffer allocation failed');
+  const concatSpy = spyOn(
+    concatChunksModule,
+    'concatChunks',
+  ).mockImplementation(() => {
+    throw tooLarge;
+  });
+  try {
+    const response = await new NodeAdapter().send(
+      makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+    expect(response.streamErrorCode).toBe('stream_response_error');
+    expect((response.errorCause as Error).cause).toBe(tooLarge);
+  } finally {
+    concatSpy.mockRestore();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
 
 test('an abort while a streamed writable is finishing fires the factory signal', async () => {
   // The body has fully arrived and the adapter is waiting on `end`'s callback, which this

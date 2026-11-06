@@ -2231,15 +2231,28 @@ export class NodeAdapter implements HTTPAdapter {
                 guardedDownloadProgress?.(completeProgressEvent(loadedBytes));
               }
 
-              activeBufferedResponse = undefined;
-
               // Copied once, into a fresh array: `Buffer.concat` and a copy of its result
               // would hold the body twice over. Empty bytes for a body that arrived
               // empty, as FetchAdapter and XHRAdapter hand one over; `null` for an answer
-              // with no body (`HEAD`, `204`, `205`, `304`), as they hand that over.
-              const responseBody = hasBody
-                ? concatChunks(chunks, loadedBytes)
-                : null;
+              // with no body (`HEAD`, `204`, `205`, `304`), as they hand that over. One
+              // that cannot be joined - too large for one array, under a
+              // `maxResponseBytes` of `Infinity` - is a stream error, as a body that
+              // failed while arriving is: thrown from this listener, it would be an
+              // uncaught exception, and the request would never settle.
+              let responseBody: Uint8Array | null;
+              try {
+                responseBody = hasBody
+                  ? concatChunks(chunks, loadedBytes)
+                  : null;
+              } catch (error) {
+                settleBufferedStreamError(
+                  'Response body could not be joined',
+                  error as Error,
+                );
+                return;
+              }
+
+              activeBufferedResponse = undefined;
 
               // The pieces let go once copied: an early-ack upload still running keeps
               // this closure alive, and would hold the body twice over until it finishes.

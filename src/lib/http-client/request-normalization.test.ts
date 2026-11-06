@@ -12365,7 +12365,7 @@ test('a MockAdapter route cookie name that cannot be written is named by its pos
   await builder.send();
 
   expect(builder.error?.cause?.message).toBe(
-    'MockAdapter cookie name at position 1 cannot be written into a Set-Cookie line',
+    'MockAdapter cookie at position 1 name cannot be written into a Set-Cookie line',
   );
 });
 
@@ -12418,7 +12418,7 @@ test("a MockAdapter route cookie name is held to the jar's rule, not an HTTP tok
     await builder.send();
 
     expect(builder.error?.cause?.message).toBe(
-      `MockAdapter cookie name at position 0 ${reason}`,
+      `MockAdapter cookie at position 0 name ${reason}`,
     );
   }
 });

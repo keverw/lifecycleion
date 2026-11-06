@@ -1088,7 +1088,7 @@ function cookiesToSetCookieHeaders(
     // `abc; Domain=other.test` sets a Domain the route never asked for. A route mistake.
     // A refusal names the cookie by its position, never its text: a name or value may
     // itself be the text pasted wrong - a secret included.
-    assertCookieText(name, `name at position ${String(index)}`, true);
+    assertCookieText(name, `at position ${String(index)} name`, true);
     // null pairs with the string shorthand below: both use Path=/.
     // Scoped deletes need explicit path/domain so the cookie identity matches.
     if (entry === null) {
