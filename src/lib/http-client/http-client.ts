@@ -2031,7 +2031,7 @@ export class BaseHTTPClient {
                   // moved an `http:` target to `https:` on the same host and port, as
                   // the retry phase reads one (see `upgradedHopURL`): the safer choice is
                   // no third host, and must not cost the credential it added for it.
-                  fromURL: sameHostUpgradeOf(
+                  fromURL: upgradedHopURL(
                     redirectTargetURL,
                     redirectEnd.request.requestURL,
                   ),
@@ -6766,24 +6766,9 @@ function withoutAddedCrossOriginCredentials(
 }
 
 /**
- * `targetURL` upgraded to `https:` (see {@link upgradedHopURL}) when `interceptedURL` is
- * that upgrade on the same host, and `targetURL` as it is otherwise - another host, or a
- * URL that cannot be read.
- */
-function sameHostUpgradeOf(targetURL: string, interceptedURL: string): string {
-  try {
-    return new URL(targetURL).hostname === new URL(interceptedURL).hostname
-      ? upgradedHopURL(targetURL, interceptedURL)
-      : targetURL;
-  } catch {
-    return targetURL;
-  }
-}
-
-/**
- * A cross-origin hop's own URL, upgraded to `https:` when a retry-phase interceptor asked
- * for exactly that: the hop is `http:`, the interceptor's URL is `https:` on the same host
- * (the caller has already compared them), and the port is unchanged - both each scheme's
+ * A cross-origin hop's own URL, upgraded to `https:` when an interceptor asked for exactly
+ * that: the hop is `http:`, the interceptor's URL is `https:` on the same host, and the
+ * port is unchanged - both each scheme's
  * default, or the same port number on both, however the URL writes it (`https://h:443` is
  * read as `https://h`, `http://h:80` as `http://h`). Everything else of the hop's URL -
  * path, query, userinfo - stays its own, as it does for any other change; so does a URL
@@ -6794,7 +6779,11 @@ function upgradedHopURL(hopURL: string, interceptedURL: string): string {
     const hop = new URL(hopURL);
     const intercepted = new URL(interceptedURL);
 
-    if (hop.protocol !== 'http:' || intercepted.protocol !== 'https:') {
+    if (
+      hop.protocol !== 'http:' ||
+      intercepted.protocol !== 'https:' ||
+      hop.hostname !== intercepted.hostname
+    ) {
       return hopURL;
     }
 

@@ -4104,6 +4104,16 @@ describe('allowlist entries the validator refuses', () => {
       expect(matchesOriginList(origin, [entry])).toBe(false);
       expect(matchesCORSCredentialsList(origin, [entry])).toBe(false);
     }
+    // A bracketed IPv6 entry too, which the URL parser would read with them deleted.
+    for (const entry of ['[::\t1]', '[::\n1]', '[2001:db8::\r1]']) {
+      expect(validateConfigEntry(entry, 'domain').valid).toBe(false);
+      expect(matchesDomainList('[::1]', [entry])).toBe(false);
+      expect(matchesDomainList('[2001:db8::1]', [entry])).toBe(false);
+      expect(matchesOriginList('http://[::1]', [entry])).toBe(false);
+      expect(matchesCORSCredentialsList('http://[::1]', [entry])).toBe(false);
+    }
+    expect(normalizeDomain('[2001:db8::\r1]')).toBe('');
+
     // Trimmed at its edges, as every entry is.
     expect(
       matchesOriginList('https://example.com', ['\thttps://example.com\n']),

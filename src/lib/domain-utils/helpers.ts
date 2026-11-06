@@ -253,6 +253,12 @@ function canonicalizeIPAddressLiteral(host: string): string | null {
   }
 
   if (isBracketed) {
+    // A tab, CR or LF inside is refused, not deleted as the URL parser deletes it:
+    // `[::\t1]` is no address, as `validateConfigEntry` says.
+    if (/[\t\n\r]/.test(host)) {
+      return null;
+    }
+
     try {
       const hostname = new URL(`http://${host}/`).hostname;
 

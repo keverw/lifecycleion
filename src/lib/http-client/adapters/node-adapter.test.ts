@@ -10473,6 +10473,7 @@ test('a stream failure whose settle throws still fails the request and fires the
     return request;
   }) as unknown as typeof http.request);
   let didFireSignal = false;
+  let settledCalls = 0;
   const response = Object.assign(new EventEmitter(), {
     statusCode: 200,
     headers: {},
@@ -10482,17 +10483,21 @@ test('a stream failure whose settle throws still fails the request and fires the
     },
   });
   try {
-    const sending = new NodeAdapter().send(
-      makeAdapterRequest('http://example.test', {
-        streamResponse: async (_info, context) => {
-          context.signal.addEventListener('abort', () => {
-            didFireSignal = true;
-          });
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          return makeMemoryWritable().stream;
-        },
-      }),
-    );
+    const adapterRequest = makeAdapterRequest('http://example.test', {
+      streamResponse: async (_info, context) => {
+        context.signal.addEventListener('abort', () => {
+          didFireSignal = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return makeMemoryWritable().stream;
+      },
+    });
+    // An ordinary failure took the stream failure's place, so the client is not told
+    // a stream failure settled it: one it may retry, and cancel.
+    listenForStreamFailureSettled(adapterRequest, () => {
+      settledCalls++;
+    });
+    const sending = new NodeAdapter().send(adapterRequest);
     respond?.(response as unknown as http.IncomingMessage);
     await new Promise((resolve) => setTimeout(resolve, 10));
     // The response fails while the factory is still opening its sink.
@@ -10509,6 +10514,7 @@ test('a stream failure whose settle throws still fails the request and fires the
 
     expect((caught as Error).message).toBe('headers unreadable');
     expect(didFireSignal).toBe(true);
+    expect(settledCalls).toBe(0);
   } finally {
     requestSpy.mockRestore();
   }

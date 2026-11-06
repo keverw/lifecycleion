@@ -1485,8 +1485,10 @@ export class NodeAdapter implements HTTPAdapter {
           abortStream: () => void,
         ): void => {
           const wasOpen = !didSettleRequest;
+          let didSettleAsFailure = false;
           try {
             settle();
+            didSettleAsFailure = true;
           } catch (error) {
             if (didSettleRequest) {
               reportCallbackError('NodeAdapter response task', error);
@@ -1494,7 +1496,9 @@ export class NodeAdapter implements HTTPAdapter {
               failRequest(normalizeError(error));
             }
           }
-          if (wasOpen && didSettleRequest) {
+          // Told only for the stream failure itself: a throw that took its place is an
+          // ordinary failure, which the client may retry, and a cancel then is still one.
+          if (wasOpen && didSettleAsFailure && didSettleRequest) {
             notifyStreamFailureSettled(streamFailureSettledListener);
           }
           abortStream();
@@ -2155,11 +2159,11 @@ export class NodeAdapter implements HTTPAdapter {
                 // isStreamError rather than throwing/retrying.
                 //   - The stream signal fires so factory cleanup listeners run
                 //   - Non-retryable once streaming has started
-                tearDownAfterResponse();
                 // The factory's signal after the settle, as every teardown that runs
                 // caller code is: a cleanup listener that cancels the request cannot
-                // stand in for the failure.
+                // stand in for the failure. The teardown inside it, under its guard.
                 settleStreamFailure(() => {
+                  tearDownAfterResponse();
                   settleResponse({
                     status,
                     headers,
