@@ -2117,7 +2117,13 @@ export class NodeAdapter implements HTTPAdapter {
                     ? readUnknownMember(writable, 'reason')
                     : undefined;
 
-                tearDownAfterResponse();
+                // A teardown that throws is reported, and the decline still answers, as
+                // for a stream failure (see `settleStreamFailure`).
+                try {
+                  tearDownAfterResponse();
+                } catch (error) {
+                  reportCallbackError('NodeAdapter response task', error);
+                }
                 const abortErr = makeAbortError(
                   'Request cancelled by streamResponse factory',
                 );

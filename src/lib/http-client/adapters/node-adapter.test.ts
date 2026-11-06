@@ -10823,6 +10823,75 @@ test('a stream failure whose teardown throws still settles as that failure', asy
   }
 });
 
+test('a factory decline whose teardown throws still answers as the decline', async () => {
+  let respond: ((res: http.IncomingMessage) => void) | undefined;
+  let isTornDown = false;
+  const request = Object.assign(new EventEmitter(), {
+    setHeader: () => {},
+    getHeaders: () => ({}),
+    end: () => {},
+    destroy() {
+      return this;
+    },
+  });
+  // Read when the response is torn down, and refused then.
+  Object.defineProperty(request, 'destroyed', {
+    get() {
+      if (isTornDown) {
+        throw new Error('teardown refused');
+      }
+      return false;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    _options: unknown,
+    callback: (res: http.IncomingMessage) => void,
+  ) => {
+    respond = callback;
+    return request;
+  }) as unknown as typeof http.request);
+  const onError = (event: Event): void => {
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onError);
+  try {
+    const sending = new NodeAdapter().send(
+      makeAdapterRequest('http://example.test', {
+        streamResponse: () => {
+          isTornDown = true;
+          return { cancel: true, reason: 'not_needed' };
+        },
+      }),
+    );
+    respond?.(
+      Object.assign(new EventEmitter(), {
+        statusCode: 200,
+        headers: {},
+        complete: false,
+        destroy() {
+          return this;
+        },
+      }) as unknown as http.IncomingMessage,
+    );
+
+    let caught: unknown;
+    try {
+      await sending;
+    } catch (error) {
+      caught = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The decline's cancel, not the teardown's failure.
+    expect((caught as Error).name).toBe('AbortError');
+    expect(errorText(caught)).not.toContain('teardown refused');
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    isTornDown = false;
+    requestSpy.mockRestore();
+  }
+});
+
 test('a signal that reads as aborted without dispatching abort during stream setup settles it', async () => {
   const outcomes: Record<string, unknown> = {};
   for (const when of [

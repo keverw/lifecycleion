@@ -52,7 +52,6 @@ import {
   assertSupportedAdapterRuntimeAndConfig,
   assertSupportedRequestBody,
   buildURL,
-  extractHostname,
   isAbsoluteWebURL,
   isBrowserEnvironment,
   isCrossOrigin,
@@ -6629,7 +6628,13 @@ function getSignalCancelReason(signal: AbortSignal): string | undefined {
  * cookies a host was given.
  */
 function comparableHost(url: string): string {
-  return trimEndWhere(asciiLowercase(extractHostname(url)), isDot);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return '';
+  }
+  return comparableHostOf(parsed);
 }
 
 /** {@link comparableHost} for a URL already parsed. */
