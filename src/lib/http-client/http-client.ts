@@ -3323,17 +3323,15 @@ export class BaseHTTPClient {
                     streamFactoryStatus = announcedStatus;
                   }
                   // Read on the way to the caller's factory, where a throw would replace
-                  // its call: headers that cannot be read are none.
+                  // its call: headers that cannot be read, or are not a header record,
+                  // are none.
                   try {
-                    const announcedHeaders = readUnknownMember(
-                      args[0],
-                      'headers',
+                    streamFactoryHeaders = normalizeAdapterResponseHeaders(
+                      readUnknownMember(args[0], 'headers') as Record<
+                        string,
+                        string | string[]
+                      >,
                     );
-                    streamFactoryHeaders = isPlainRecord(announcedHeaders)
-                      ? normalizeAdapterResponseHeaders(
-                          announcedHeaders as Record<string, string | string[]>,
-                        )
-                      : undefined;
                   } catch {
                     streamFactoryHeaders = undefined;
                   }

@@ -1469,6 +1469,18 @@ export class NodeAdapter implements HTTPAdapter {
         };
 
         /**
+         * Runs a teardown of the response, reporting a throw to the host channel rather
+         * than letting it replace the answer the caller is about to settle with.
+         */
+        const runTeardownGuarded = (teardown: () => void): void => {
+          try {
+            teardown();
+          } catch (error) {
+            reportCallbackError('NodeAdapter response task', error);
+          }
+        };
+
+        /**
          * Settles the request with a failure of the stream its factory started, through
          * `settle` once `teardown` has run, each under its own guard, and tells
          * `HTTPClient` it did (see `listenForStreamFailureSettled`) - only when it is this
@@ -1487,11 +1499,7 @@ export class NodeAdapter implements HTTPAdapter {
         ): void => {
           // A teardown that throws is reported, and the failure still settles: it is the
           // answer, whatever tearing the response down then did.
-          try {
-            teardown();
-          } catch (error) {
-            reportCallbackError('NodeAdapter response task', error);
-          }
+          runTeardownGuarded(teardown);
           // Read after the teardown: a settle the teardown itself caused - an answer its
           // destroy ran - is no settle of this failure's.
           const wasOpen = !didSettleRequest;
@@ -2117,13 +2125,8 @@ export class NodeAdapter implements HTTPAdapter {
                     ? readUnknownMember(writable, 'reason')
                     : undefined;
 
-                // A teardown that throws is reported, and the decline still answers, as
-                // for a stream failure (see `settleStreamFailure`).
-                try {
-                  tearDownAfterResponse();
-                } catch (error) {
-                  reportCallbackError('NodeAdapter response task', error);
-                }
+                // A teardown that throws is reported, and the decline still answers.
+                runTeardownGuarded(tearDownAfterResponse);
                 const abortErr = makeAbortError(
                   'Request cancelled by streamResponse factory',
                 );
