@@ -63,6 +63,10 @@ import {
   readUploadSourceWaitListener,
 } from '../internal/upload-source-wait';
 import {
+  notifyStreamFailureSettled,
+  readStreamFailureSettledListener,
+} from '../internal/stream-failure-settled';
+import {
   copyArrayValue,
   isArrayLengthRefusal,
   MAX_COPIED_ARRAY_LENGTH,
@@ -517,6 +521,10 @@ export class NodeAdapter implements HTTPAdapter {
     // other members are. See `listenForUploadSourceWait`.
     const uploadSourceWaitListener =
       readUploadSourceWaitListener(adapterRequest);
+    // `HTTPClient`'s, when it built this request: told when a stream failure is settled,
+    // before the factory's signal fires (see `listenForStreamFailureSettled`).
+    const streamFailureSettledListener =
+      readStreamFailureSettledListener(adapterRequest);
     let request: AdapterRequest;
     try {
       request = snapshotAdapterRequest(adapterRequest, fields);
@@ -1905,6 +1913,7 @@ export class NodeAdapter implements HTTPAdapter {
                     });
                     // After the settle: a cleanup listener the factory added that cancels
                     // the request cannot stand in for the failure.
+                    notifyStreamFailureSettled(streamFailureSettledListener);
                     abortStream();
                   },
                 };
@@ -2013,6 +2022,7 @@ export class NodeAdapter implements HTTPAdapter {
                 );
                 // After the reject: a cleanup listener that cancels the request cannot
                 // stand in for the factory's error.
+                notifyStreamFailureSettled(streamFailureSettledListener);
                 abortStream();
                 return;
               } finally {
@@ -2124,6 +2134,7 @@ export class NodeAdapter implements HTTPAdapter {
                 });
                 // After the settle, as every teardown that runs caller code is: a cleanup
                 // listener that cancels the request cannot stand in for the failure.
+                notifyStreamFailureSettled(streamFailureSettledListener);
                 abortStream();
                 destroyWritableQuietly(sink);
               };

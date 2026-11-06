@@ -289,6 +289,9 @@ export const BUILT_IN_NETWORK_SEND_KEY = Symbol.for(
 export const UPLOAD_SOURCE_WAIT_LISTENER_KEY = Symbol.for(
   'lifecycleion.uploadSourceWaitListener.v1',
 );
+export const STREAM_FAILURE_SETTLED_LISTENER_KEY = Symbol.for(
+  'lifecycleion.streamFailureSettledListener.v1',
+);
 
 /**
  * How long the body writer may wait on its *source* after the response arrived before

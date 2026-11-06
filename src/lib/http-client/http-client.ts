@@ -158,6 +158,7 @@ import {
 } from './internal/request-body-copy';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
 import { listenForUploadSourceWait } from './internal/upload-source-wait';
+import { listenForStreamFailureSettled } from './internal/stream-failure-settled';
 import { formEntries, isFormData } from './internal/form-entries';
 import {
   assertKnownFields,
@@ -1107,12 +1108,13 @@ export class BaseHTTPClient {
       let initialRequestURL = url;
 
       /**
-       * Whether a timeout that cut a stream its factory had started settled the request
-       * (see `settleByStreamTimeout`): a cancel that landed after it - the caller's own
-       * signal, aborted from the factory's cleanup listener - does not turn the request
+       * Whether a stream its factory had started ended the request before any cancel - a
+       * timeout that cut it, or a failure of the sink, the response or the factory (see
+       * `settleByStreamEnd`): a cancel that landed after it - the caller's own signal,
+       * aborted from the factory's cleanup listener - does not turn the request
        * cancelled below.
        */
-      let wasSettledByStreamTimeout = false;
+      let wasSettledByStreamEnd = false;
 
       /**
        * Where the redirect loop below has got to: the request of the hop being followed,
@@ -1419,8 +1421,8 @@ export class BaseHTTPClient {
             markCancelled: (reason) => {
               cancelEntry(trackedRequest, reason);
             },
-            settleByStreamTimeout: () => {
-              wasSettledByStreamTimeout = true;
+            settleByStreamEnd: () => {
+              wasSettledByStreamEnd = true;
               // The tracked request only, which is what a cancel reads: the builder turns
               // `failed` with its response and error, as for every other outcome.
               trackedRequest.state = 'failed';
@@ -2184,8 +2186,9 @@ export class BaseHTTPClient {
         }
       } catch (error) {
         // As the initial phase's interceptor failure: a cancel made before it ends the
-        // request cancelled.
-        const isCancelled = cancelSignal.aborted;
+        // request cancelled. Not one made after a stream's own end settled it (see
+        // `settleByStreamEnd`).
+        const isCancelled = cancelSignal.aborted && !wasSettledByStreamEnd;
         // The one exit that settles the request without reaching `finalResponse` below,
         // so it attaches the upload outcome itself: a throw *between* hops - a hostile
         // header read on a redirect, say - lands here after a hop that had a body.
@@ -2249,7 +2252,7 @@ export class BaseHTTPClient {
       if (
         cancelSignal.aborted &&
         !response.isCancelled &&
-        !wasSettledByStreamTimeout
+        !wasSettledByStreamEnd
       ) {
         response = this._buildResponse<T>({
           adapterResponse: null,
@@ -2505,12 +2508,13 @@ export class BaseHTTPClient {
      */
     markCancelled: (reason: string | undefined) => void;
     /**
-     * Settle the tracked request as failed, for a timeout that cuts a stream its factory started:
-     * that timeout is not retried, so it is the outcome from the moment it fires, and a
-     * cancel made while the attempt is torn down - by a cleanup listener on the factory's
+     * Settle the tracked request as failed, for a stream its factory started that ended
+     * before any cancel - a timeout that cut it, or the sink, the response or the factory
+     * failing: neither is retried, so it is the outcome from that moment, and a cancel
+     * made while the attempt is torn down - by a cleanup listener on the factory's
      * signal - finds the request settled, as `fetch`, got and axios keep the first cause.
      */
-    settleByStreamTimeout: () => void;
+    settleByStreamEnd: () => void;
     /**
      * Set to the request's body of each attempt as it is dispatched - the client's own
      * copy, which no caller holds (see `copyRequestBody`) - so a 307/308 replays that
@@ -2741,11 +2745,12 @@ export class BaseHTTPClient {
       // activity. Set timeout <= 0 to disable the per-attempt timer.
       const timeoutController = new AbortController();
       let isTimedOut = false;
-      // Set when the timer fired, before any cancel, on an attempt whose stream factory had
-      // started a stream: the timeout is the outcome (see `settleByStreamTimeout`), and a
-      // cancel the attempt's teardown provokes - the caller's own signal aborted from the
-      // factory's cleanup listener - is not.
-      let isStreamTimeoutFirst = false;
+      // Set when a stream this attempt's factory started ended before any cancel - the
+      // timer fired, or `NodeAdapter` settled a failure of it (see
+      // `listenForStreamFailureSettled`): that is the outcome (see `settleByStreamEnd`), and a cancel the
+      // attempt's teardown provokes - the caller's own signal aborted from the factory's
+      // cleanup listener - is not.
+      let isStreamEndedFirst = false;
       // Whether this attempt's adapter is the built-in `NodeAdapter`, whose timeout of a
       // stream its factory started always ends the request (`stream_response_error`, or
       // `stream_setup_error` for a factory still opening its sink), never retried: only
@@ -2753,9 +2758,16 @@ export class BaseHTTPClient {
       // after it, or answer within the abort grace.
       let isBuiltInNodeSend = false;
       // Whether the attempt ended cancelled, read at each exit as the cancel signal is,
-      // except when the timeout came first (see `isStreamTimeoutFirst`).
+      // except when the stream's own end came first (see `isStreamEndedFirst`).
       const isCancelOutcome = (): boolean =>
-        cancelSignal.aborted && !isStreamTimeoutFirst;
+        cancelSignal.aborted && !isStreamEndedFirst;
+      // The stream's own end, before any cancel: see `isStreamEndedFirst`.
+      const markStreamEndedFirst = (): void => {
+        if (!cancelSignal.aborted && !isStreamEndedFirst) {
+          isStreamEndedFirst = true;
+          params.settleByStreamEnd();
+        }
+      };
       let timeoutID: ReturnType<typeof setTimeout> | undefined;
 
       // The settle deadline's teardown. Giving up on this attempt's upload at that
@@ -3108,13 +3120,8 @@ export class BaseHTTPClient {
       if (timeout > 0) {
         timeoutID = setTimeout(() => {
           isTimedOut = true;
-          if (
-            didCallStreamFactory &&
-            isBuiltInNodeSend &&
-            !cancelSignal.aborted
-          ) {
-            isStreamTimeoutFirst = true;
-            params.settleByStreamTimeout();
+          if (didCallStreamFactory && isBuiltInNodeSend) {
+            markStreamEndedFirst();
           }
           timeoutController.abort();
         }, timeout);
@@ -3390,6 +3397,19 @@ export class BaseHTTPClient {
           listenForUploadSourceWait(adapterRequest, (isWaiting) => {
             if (!isAbandoned && uploadActivity.dispatches === dispatchNumber) {
               noteUploadSourceWait(uploadActivity, isWaiting);
+            }
+          });
+        }
+        // Told when the adapter has settled a failure of the stream this attempt's factory
+        // started, before it fires the factory's signal: a cancel a cleanup listener on
+        // that signal makes is then no stand-in for the failure. `NodeAdapter` tells it,
+        // whether the client drives it or an adapter wrapping it does. Dead once the
+        // attempt is abandoned, as the progress hook is, and for a failure before the
+        // factory was called. See `listenForStreamFailureSettled`.
+        if (typeof streamResponse === 'function') {
+          listenForStreamFailureSettled(adapterRequest, () => {
+            if (!isAbandoned && didCallStreamFactory) {
+              markStreamEndedFirst();
             }
           });
         }

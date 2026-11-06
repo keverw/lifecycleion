@@ -383,6 +383,129 @@ test('an abort mid-stream destroys the sink once', async () => {
   }
 });
 
+test("a cancel a factory's cleanup listener makes after a stream failure leaves the failure the outcome", async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+    if (req.url === '/cut') {
+      // Cut mid-body: the response fails, not the sink.
+      res.write('part');
+      setTimeout(() => res.socket?.destroy(), 20);
+      return;
+    }
+    res.end('body-bytes');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const client = new HTTPClient({
+    adapter: new NodeAdapter(),
+    baseURL: `http://127.0.0.1:${String(address.port)}`,
+  });
+  try {
+    for (const [kind, code, cause] of [
+      ['write fails', 'stream_write_error', 'disk full'],
+      ['factory throws', 'stream_setup_error', 'cannot open sink'],
+      ['response fails', 'stream_response_error', undefined],
+    ] as const) {
+      const controller = new AbortController();
+      const builder = client
+        .get(kind === 'response fails' ? '/cut' : '/file')
+        .label('batch')
+        .signal(controller.signal)
+        .streamResponse((_info, context) => {
+          // The rest of a batch, torn down when one of its downloads fails - in a
+          // capture listener, which Bun runs ahead of every other.
+          context.signal.addEventListener(
+            'abort',
+            () => {
+              // By the label for the response failure, by the controller otherwise.
+              if (kind === 'response fails') {
+                client.cancelAllWithLabel('batch');
+              } else {
+                controller.abort('cleanup');
+              }
+            },
+            true,
+          );
+          if (kind === 'factory throws') {
+            throw new Error('cannot open sink');
+          }
+          return new Writable({
+            write(_chunk, _encoding, callback) {
+              callback(
+                kind === 'response fails' ? null : new Error('disk full'),
+              );
+            },
+          });
+        });
+      const response = await builder.send();
+
+      expect(response.isCancelled).toBe(false);
+      expect(builder.error?.code).toBe(code);
+      if (cause !== undefined) {
+        expect(builder.error?.cause?.message).toBe(cause);
+      }
+    }
+
+    // The response failing while an async factory still opens its sink.
+    {
+      const controller = new AbortController();
+      const builder = client
+        .get('/cut')
+        .signal(controller.signal)
+        .streamResponse(async (_info, context) => {
+          context.signal.addEventListener('abort', () => {
+            controller.abort('cleanup');
+          });
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return new Writable({
+            write(_chunk, _encoding, callback) {
+              callback();
+            },
+          });
+        });
+      const response = await builder.send();
+
+      expect(response.isCancelled).toBe(false);
+      expect(builder.error?.code).toBe('stream_response_error');
+    }
+
+    // A factory's own decline is no failure: a cancel its cleanup makes still cancels.
+    let cancelAnswer: unknown;
+    const declined = client.get('/file').streamResponse((_info, context) => {
+      context.signal.addEventListener('abort', () => {
+        cancelAnswer = declined.cancel('late');
+      });
+      return { cancel: true, reason: 'declined' };
+    });
+    const declinedResponse = await declined.send();
+
+    expect(declinedResponse.isCancelled).toBe(true);
+    expect(cancelAnswer).toBe('cancelled');
+
+    // A cancel of the caller's own is still a cancel.
+    const controller = new AbortController();
+    const builder = client
+      .get('/file')
+      .signal(controller.signal)
+      .streamResponse(() => {
+        controller.abort('caller');
+        return new Writable({
+          write(_chunk, _encoding, callback) {
+            callback();
+          },
+        });
+      });
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('an abort while a streamed writable is finishing fires the factory signal', async () => {
   // The body has fully arrived and the adapter is waiting on `end`'s callback, which this
   // writable never calls, so only the abort listener can fire the stream signal.

@@ -1757,7 +1757,7 @@ interface StreamResponseInfo {
 }
 
 interface StreamResponseContext {
-  signal: AbortSignal; // Fires when the request is cancelled, times out or fails before the body is delivered whole - the sink failing, the response failing during setup or mid-body, the factory throwing or returning something it should not - and when the factory declines (`null` or `{ cancel: true }`); never once the body is delivered. On a timeout the request is settled first: a cancel its cleanup makes (the rest of a batch) finds nothing to cancel, and the timeout stays the outcome.
+  signal: AbortSignal; // Fires when the request is cancelled, times out or fails before the body is delivered whole - the sink failing, the response failing during setup or mid-body, the factory throwing or returning something it should not - and when the factory declines (`null` or `{ cancel: true }`); never once the body is delivered. On a timeout or a failure the request is settled first: a cancel its cleanup makes (the rest of a batch) finds nothing to cancel, and the timeout or failure (`stream_write_error`, `stream_response_error`, `stream_setup_error`) stays the outcome.
 }
 
 interface StreamResponseCancel {
