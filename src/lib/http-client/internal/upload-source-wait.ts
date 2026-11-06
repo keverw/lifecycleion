@@ -1,5 +1,9 @@
 import { UPLOAD_SOURCE_WAIT_LISTENER_KEY } from '../consts';
-import { readUnknownMember } from '../../internal/read-member';
+import {
+  notifyHiddenRequestListener,
+  readHiddenRequestListener,
+  setHiddenRequestListener,
+} from './hidden-request-listener';
 import type { AdapterRequest } from '../types';
 
 /** Told `true` when a body writer parks on its source, and `false` when it comes back. */
@@ -28,12 +32,7 @@ export function listenForUploadSourceWait(
   request: AdapterRequest,
   listener: UploadSourceWaitListener,
 ): void {
-  Object.defineProperty(request, UPLOAD_SOURCE_WAIT_LISTENER_KEY, {
-    value: listener,
-    enumerable: false,
-    configurable: true,
-    writable: true,
-  });
+  setHiddenRequestListener(request, UPLOAD_SOURCE_WAIT_LISTENER_KEY, listener);
 }
 
 /**
@@ -44,11 +43,10 @@ export function listenForUploadSourceWait(
 export function readUploadSourceWaitListener(
   request: AdapterRequest,
 ): UploadSourceWaitListener | undefined {
-  const listener = readUnknownMember(request, UPLOAD_SOURCE_WAIT_LISTENER_KEY);
-
-  return typeof listener === 'function'
-    ? (listener as UploadSourceWaitListener)
-    : undefined;
+  return readHiddenRequestListener<UploadSourceWaitListener>(
+    request,
+    UPLOAD_SOURCE_WAIT_LISTENER_KEY,
+  );
 }
 
 /**
@@ -61,13 +59,5 @@ export function notifyUploadSourceWait(
   listener: UploadSourceWaitListener | undefined,
   isWaiting: boolean,
 ): void {
-  if (listener === undefined) {
-    return;
-  }
-
-  try {
-    Reflect.apply(listener, undefined, [isWaiting]);
-  } catch {
-    // See above: nothing to fail, and nowhere the writer could report it to.
-  }
+  notifyHiddenRequestListener(listener, isWaiting);
 }

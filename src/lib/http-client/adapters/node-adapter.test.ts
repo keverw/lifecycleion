@@ -16,6 +16,7 @@ import vm from 'node:vm';
 import * as zlib from 'node:zlib';
 import { NodeAdapter } from './node-adapter';
 import * as concatChunksModule from '../internal/concat-chunks';
+import { listenForStreamFailureSettled } from '../internal/stream-failure-settled';
 import { readTypedArrayByteOffset } from '../../internal/binary-view';
 import { MAX_COPIED_ARRAY_LENGTH } from '../../internal/array-copy';
 import { isBuiltInNetworkSend } from '../internal/built-in-adapter';
@@ -501,6 +502,49 @@ test("a cancel a factory's cleanup listener makes after a stream failure leaves 
     const response = await builder.send();
 
     expect(response.isCancelled).toBe(true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('a factory that fails after a cancel answered the request is not told to the client as the stream failure that settled it', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200);
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const controller = new AbortController();
+  let settledCalls = 0;
+  const request = makeAdapterRequest(
+    `http://127.0.0.1:${String(address.port)}/`,
+    {
+      signal: controller.signal,
+      streamResponse: async () => {
+        // Cancelled while the sink is opening, and the factory then fails.
+        controller.abort();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        throw new Error('cannot open sink');
+      },
+    },
+  );
+  listenForStreamFailureSettled(request, () => {
+    settledCalls++;
+  });
+  try {
+    let caught: unknown;
+    try {
+      await new NodeAdapter().send(request);
+    } catch (error) {
+      caught = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect((caught as Error).name).toBe('AbortError');
+    expect(settledCalls).toBe(0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

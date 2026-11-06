@@ -1,5 +1,9 @@
 import { STREAM_FAILURE_SETTLED_LISTENER_KEY } from '../consts';
-import { readUnknownMember } from '../../internal/read-member';
+import {
+  notifyHiddenRequestListener,
+  readHiddenRequestListener,
+  setHiddenRequestListener,
+} from './hidden-request-listener';
 import type { AdapterRequest } from '../types';
 
 /** Told that the adapter has settled a stream failure, before it fires the factory's signal. */
@@ -23,12 +27,11 @@ export function listenForStreamFailureSettled(
   request: AdapterRequest,
   listener: StreamFailureSettledListener,
 ): void {
-  Object.defineProperty(request, STREAM_FAILURE_SETTLED_LISTENER_KEY, {
-    value: listener,
-    enumerable: false,
-    configurable: true,
-    writable: true,
-  });
+  setHiddenRequestListener(
+    request,
+    STREAM_FAILURE_SETTLED_LISTENER_KEY,
+    listener,
+  );
 }
 
 /**
@@ -39,14 +42,10 @@ export function listenForStreamFailureSettled(
 export function readStreamFailureSettledListener(
   request: AdapterRequest,
 ): StreamFailureSettledListener | undefined {
-  const listener = readUnknownMember(
+  return readHiddenRequestListener<StreamFailureSettledListener>(
     request,
     STREAM_FAILURE_SETTLED_LISTENER_KEY,
   );
-
-  return typeof listener === 'function'
-    ? (listener as StreamFailureSettledListener)
-    : undefined;
 }
 
 /**
@@ -57,13 +56,5 @@ export function readStreamFailureSettledListener(
 export function notifyStreamFailureSettled(
   listener: StreamFailureSettledListener | undefined,
 ): void {
-  if (listener === undefined) {
-    return;
-  }
-
-  try {
-    Reflect.apply(listener, undefined, []);
-  } catch {
-    // See above.
-  }
+  notifyHiddenRequestListener(listener);
 }

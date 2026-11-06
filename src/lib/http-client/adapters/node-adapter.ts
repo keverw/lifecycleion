@@ -1469,6 +1469,25 @@ export class NodeAdapter implements HTTPAdapter {
         };
 
         /**
+         * Settles the request with a failure of the stream its factory started, through
+         * `settle`, and tells `HTTPClient` it did (see `listenForStreamFailureSettled`) -
+         * only when it is this failure that settled it, not one a timeout or a cancel had
+         * already answered - before the factory's signal fires, so a cleanup listener on
+         * it that cancels the request cannot stand in for the failure. Then fires it.
+         */
+        const settleStreamFailure = (
+          settle: () => void,
+          abortStream: () => void,
+        ): void => {
+          const wasOpen = !didSettleRequest;
+          settle();
+          if (wasOpen && didSettleRequest) {
+            notifyStreamFailureSettled(streamFailureSettledListener);
+          }
+          abortStream();
+        };
+
+        /**
          * Whether the caller's signal has aborted, read guarded: a read that throws counts
          * as "not aborted".
          *
@@ -1903,18 +1922,18 @@ export class NodeAdapter implements HTTPAdapter {
                     } else {
                       releaseConnectionAfterResponse();
                     }
-                    settleResponse({
-                      status,
-                      headers,
-                      body: null,
-                      isStreamError: true,
-                      streamErrorCode: 'stream_response_error',
-                      errorCause: error,
-                    });
-                    // After the settle: a cleanup listener the factory added that cancels
-                    // the request cannot stand in for the failure.
-                    notifyStreamFailureSettled(streamFailureSettledListener);
-                    abortStream();
+                    // The factory's signal after the settle: a cleanup listener the factory
+                    // added that cancels the request cannot stand in for the failure.
+                    settleStreamFailure(() => {
+                      settleResponse({
+                        status,
+                        headers,
+                        body: null,
+                        isStreamError: true,
+                        streamErrorCode: 'stream_response_error',
+                        errorCause: error,
+                      });
+                    }, abortStream);
                   },
                 };
 
@@ -2014,16 +2033,16 @@ export class NodeAdapter implements HTTPAdapter {
                 // interceptor throw. Destroy the request, propagate it as a setup failure,
                 // then abort the stream signal so any partial cleanup listeners run.
                 tearDownAfterResponse();
-                failRequest(
-                  markStreamFactoryError(error, req, request.headers, {
-                    status,
-                    headers,
-                  }),
-                );
-                // After the reject: a cleanup listener that cancels the request cannot
-                // stand in for the factory's error.
-                notifyStreamFailureSettled(streamFailureSettledListener);
-                abortStream();
+                // The factory's signal after the reject: a cleanup listener that cancels
+                // the request cannot stand in for the factory's error.
+                settleStreamFailure(() => {
+                  failRequest(
+                    markStreamFactoryError(error, req, request.headers, {
+                      status,
+                      headers,
+                    }),
+                  );
+                }, abortStream);
                 return;
               } finally {
                 pendingStreamSetup = undefined;
@@ -2124,18 +2143,19 @@ export class NodeAdapter implements HTTPAdapter {
                 //   - The stream signal fires so factory cleanup listeners run
                 //   - Non-retryable once streaming has started
                 tearDownAfterResponse();
-                settleResponse({
-                  status,
-                  headers,
-                  body: null,
-                  isStreamError: true,
-                  streamErrorCode: streamResult.code,
-                  errorCause: streamResult.cause,
-                });
-                // After the settle, as every teardown that runs caller code is: a cleanup
-                // listener that cancels the request cannot stand in for the failure.
-                notifyStreamFailureSettled(streamFailureSettledListener);
-                abortStream();
+                // The factory's signal after the settle, as every teardown that runs
+                // caller code is: a cleanup listener that cancels the request cannot
+                // stand in for the failure.
+                settleStreamFailure(() => {
+                  settleResponse({
+                    status,
+                    headers,
+                    body: null,
+                    isStreamError: true,
+                    streamErrorCode: streamResult.code,
+                    errorCause: streamResult.cause,
+                  });
+                }, abortStream);
                 destroyWritableQuietly(sink);
               };
 
@@ -2846,7 +2866,7 @@ async function streamResponseBody(
   onProgress: ((e: AdapterProgressEvent) => void) | undefined,
   onSettled: (result: StreamResponseBodyResult) => void,
 ): Promise<StreamResponseBodyResult> {
-  return await new Promise((resolve) => {
+  return await new Promise((resolve, reject) => {
     let loadedBytes = 0;
     // Every byte handed to `write`, whether or not its optional callback is ever called:
     // a sink that reports failure by `'error'` alone never calls it, and the terminal
@@ -2907,8 +2927,16 @@ async function streamResponseBody(
 
       isSettled = true;
       cleanup();
-      // In this turn, before the promise's continuation: see `answerStreamResult`.
-      onSettled(result);
+      // In this turn, before the promise's continuation: see `answerStreamResult`. Run
+      // from a writable's or the response's own event, where a throw would be an
+      // uncaught exception: one is the promise's rejection instead, which the caller's
+      // task failure handling answers as it answers any throw of its own.
+      try {
+        onSettled(result);
+      } catch (error) {
+        reject(normalizeError(error));
+        return;
+      }
       resolve(result);
     };
 

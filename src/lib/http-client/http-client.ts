@@ -3402,11 +3402,13 @@ export class BaseHTTPClient {
         }
         // Told when the adapter has settled a failure of the stream this attempt's factory
         // started, before it fires the factory's signal: a cancel a cleanup listener on
-        // that signal makes is then no stand-in for the failure. `NodeAdapter` tells it,
-        // whether the client drives it or an adapter wrapping it does. Dead once the
-        // attempt is abandoned, as the progress hook is, and for a failure before the
-        // factory was called. See `listenForStreamFailureSettled`.
-        if (typeof streamResponse === 'function') {
+        // that signal makes is then no stand-in for the failure. Only for the built-in
+        // `NodeAdapter` the client drives, as the timer's stream timeout is: an adapter
+        // wrapping one may go on with the attempt - another host, a backoff - after its
+        // inner send failed, and a cancel then must still be one. Dead once the attempt
+        // is abandoned, as the progress hook is, and for a failure before the factory was
+        // called. See `listenForStreamFailureSettled`.
+        if (isBuiltInNodeSend && typeof streamResponse === 'function') {
           listenForStreamFailureSettled(adapterRequest, () => {
             if (!isAbandoned && didCallStreamFactory) {
               markStreamEndedFirst();
