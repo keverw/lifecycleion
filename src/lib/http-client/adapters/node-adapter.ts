@@ -1473,14 +1473,21 @@ export class NodeAdapter implements HTTPAdapter {
          * `settle`, and tells `HTTPClient` it did (see `listenForStreamFailureSettled`) -
          * only when it is this failure that settled it, not one a timeout or a cancel had
          * already answered - before the factory's signal fires, so a cleanup listener on
-         * it that cancels the request cannot stand in for the failure. Then fires it.
+         * it that cancels the request cannot stand in for the failure. Then fires it. A
+         * `settle` that throws fails the request with that throw instead, and the signal
+         * still fires: this runs from a socket's or a stream's own event, where a throw
+         * would be an uncaught exception, the factory's cleanup never run.
          */
         const settleStreamFailure = (
           settle: () => void,
           abortStream: () => void,
         ): void => {
           const wasOpen = !didSettleRequest;
-          settle();
+          try {
+            settle();
+          } catch (error) {
+            failRequest(normalizeError(error));
+          }
           if (wasOpen && didSettleRequest) {
             notifyStreamFailureSettled(streamFailureSettledListener);
           }
