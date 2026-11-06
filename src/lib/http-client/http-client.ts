@@ -1478,8 +1478,8 @@ export class BaseHTTPClient {
           ) {
             response = this._buildResponse<T>({
               // Pass a synthetic status-0 response so wasRedirectDetected is
-              // preserved — null would lose the flag since _buildResponse
-              // computes it as `adapterResponse?.wasRedirectDetected ?? false`.
+              // preserved: with null, `_buildResponse` would have no adapter
+              // redirect fields to report it from.
               adapterResponse: unfollowedRedirectAnswer(
                 adapterResponse,
                 attemptResult.sentRequest.requestURL,
@@ -2025,8 +2025,14 @@ export class BaseHTTPClient {
                   //
                   // The target as it was before the interceptors ran, from the hop's own
                   // request, of which they were handed a copy: compared with what they
-                  // returned, never with itself.
-                  fromURL: redirectTargetURL,
+                  // returned, never with itself. Read as upgraded where the interceptor
+                  // moved an `http:` target to `https:` on the same host and port, as
+                  // the retry phase reads one (see `upgradedHopURL`): the safer choice is
+                  // no third host, and must not cost the credential it added for it.
+                  fromURL: sameHostUpgradeOf(
+                    redirectTargetURL,
+                    redirectEnd.request.requestURL,
+                  ),
                   cookieJar: jar ?? undefined,
                 },
               );
@@ -3886,28 +3892,16 @@ export class BaseHTTPClient {
             : 'stream_write_error'
           : undefined;
 
-        // Observers retain the wire snapshot, but Node-generated Host and URL
-        // Basic auth must not become caller headers on the next hop. The adapter
-        // will regenerate them for that hop; explicit caller headers still carry
-        // through same-origin redirects and caller-directed failover retries. Arrays
-        // copied: taken before the redirect-phase observers are handed the attempt's
-        // request, so an item one of them changes in place does not reach the next hop.
-        const redirectRequestHeaders = copyHeaderRecord(
-          observedSentRequest.headers,
-        );
-        // `accept-encoding` with them: NodeAdapter adds its own, and carried forward as a
-        // caller's it would stand in the way of the `identity` a later hop's `Range` asks
-        // for.
-        for (const key of ['host', 'authorization', 'accept-encoding']) {
-          if (Object.hasOwn(sentRequest.headers, key)) {
-            redirectRequestHeaders[key] = copyArrayValue(
-              sentRequest.headers[key],
-              HEADER_VALUE_LABEL,
-            );
-          } else {
-            delete redirectRequestHeaders[key];
-          }
-        }
+        // Observers retain the wire snapshot, but nothing an adapter reports it added -
+        // Node-generated Host, URL Basic auth, its own `accept-encoding` (which would
+        // stand in the way of the `identity` a later hop's `Range` asks for), or a
+        // custom adapter's signature headers - becomes a caller header on the next hop:
+        // the adapter will generate its own for that hop. The headers the attempt was
+        // handed carry through same-origin redirects and caller-directed failover
+        // retries. Arrays copied: taken before the redirect-phase observers are handed
+        // the attempt's request, so an item one of them changes in place does not reach
+        // the next hop.
+        const redirectRequestHeaders = copyHeaderRecord(sentRequest.headers);
 
         // Body headers inferred by the client or adapter describe this attempt's
         // body, which a redirect interceptor may replace or remove. Carry only
@@ -4005,8 +3999,14 @@ export class BaseHTTPClient {
             // failure is not reported. (On the resolved path a whole answer's jar failure
             // is the answered response's adapter_error, timer or not - except a transport
             // failure answered after the timer fired, which is the timeout there too.)
-            // A factory's own cancel is a cancel too.
-            if (!isCancelOutcome() && !isTimedOut && !isFactoryCancel) {
+            // A factory's own cancel is a cancel too, and a timeout the runtime's own XHR
+            // fired over the answer is a timeout, as it is below.
+            if (
+              !isCancelOutcome() &&
+              !isTimedOut &&
+              !isXHRBrowserTimeout(error) &&
+              !isFactoryCancel
+            ) {
               // The jar threw on headers the server did send, so this ends as the
               // answered response's adapter_error, named for the jar, as on the
               // resolved path - not as a stream error, and never re-sent.
@@ -4285,11 +4285,15 @@ export class BaseHTTPClient {
           error,
           NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
         );
+        // After an answer, the timer's own reason alone (see `isLateTransportFailure`):
+        // an `AbortError` a caller's cookie jar or a response getter throws while the late
+        // answer is read is that failure, not the timeout.
         const didTimeoutThisAttempt =
           isTimedOut &&
           !isFlaggedAdapterFailure &&
-          (isAbortError(error) ||
-            (!didAdapterResolve && !isNonRetryableClientCallbackFailure));
+          (didAdapterResolve
+            ? error === timeoutController.signal.reason
+            : isAbortError(error) || !isNonRetryableClientCallbackFailure);
         const isNonRetryableAdapterFailure =
           (didAdapterResolve && !didTimeoutThisAttempt) ||
           isFlaggedAdapterFailure;
@@ -4841,8 +4845,8 @@ export class BaseHTTPClient {
    * 2. isTimeout → timeout, over every override but a stream code: a streamed-body
    *    failure keeps its stream_* code while still surfacing `isTimeout: true`
    * 3. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error,
-   *    adapter_error, stream_write_error, stream_response_error, stream_setup_error,
-   *    response_too_large)
+   *    adapter_error, interceptor_error, stream_write_error, stream_response_error,
+   *    stream_setup_error, response_too_large)
    * 4. Default fallback → network_error
    *
    * Key distinction:
@@ -6737,6 +6741,21 @@ function withoutAddedCrossOriginCredentials(
     headers,
     body: droppedBody !== undefined ? droppedBody.body : hopRequest.body,
   };
+}
+
+/**
+ * `targetURL` upgraded to `https:` (see {@link upgradedHopURL}) when `interceptedURL` is
+ * that upgrade on the same host, and `targetURL` as it is otherwise - another host, or a
+ * URL that cannot be read.
+ */
+function sameHostUpgradeOf(targetURL: string, interceptedURL: string): string {
+  try {
+    return new URL(targetURL).hostname === new URL(interceptedURL).hostname
+      ? upgradedHopURL(targetURL, interceptedURL)
+      : targetURL;
+  } catch {
+    return targetURL;
+  }
 }
 
 /**

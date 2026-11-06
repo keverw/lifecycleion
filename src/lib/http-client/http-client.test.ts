@@ -16,6 +16,7 @@ import {
   restoreConsoleError,
 } from '../internal/console-test-utils';
 import { CookieJar } from './cookie-jar';
+import { markResponseStreamAbort } from './internal/adapter-error';
 import { startTestServer, type TestServer } from './test-helpers/test-server';
 import { scalarHeader } from './utils';
 import {
@@ -3162,6 +3163,120 @@ describe('HTTPClient — adapter marker flags', () => {
 
     expect(response.isTimeout).toBe(true);
     expect(response.isCancelled).toBe(false);
+  });
+
+  test('a redirect-phase interceptor that upgrades a downgraded hop to https keeps the credential it added; one that moves it to another host does not', async () => {
+    const sent: Array<{ url: string; authorization: unknown }> = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock' as const,
+      send: (request): Promise<AdapterResponse> => {
+        sent.push({
+          url: request.requestURL,
+          authorization: request.headers.authorization,
+        });
+        return Promise.resolve<AdapterResponse>(
+          new URL(request.requestURL).pathname === '/start'
+            ? {
+                status: 302,
+                headers: { location: 'http://a.test/next' },
+                body: null,
+              }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+
+    for (const [rewrite, expected] of [
+      [(url: string) => url, 'Bearer for-target'],
+      [(url: string) => url.replace(/^http:/, 'https:'), 'Bearer for-target'],
+      [(url: string) => url.replace('a.test', 'b.test'), undefined],
+    ] as const) {
+      sent.length = 0;
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'https://a.test',
+        followRedirects: true,
+      });
+      client.addRequestInterceptor(
+        (request) => ({
+          ...request,
+          requestURL: rewrite(request.requestURL),
+          headers: { ...request.headers, authorization: 'Bearer for-target' },
+        }),
+        { phases: ['redirect'] },
+      );
+      await client.get('/start').send();
+
+      expect(sent[1]?.authorization).toBe(expected);
+    }
+    expect(sent[1]?.url).toBe('http://b.test/next');
+  });
+
+  test("a header an adapter reports it added is not carried to the next same-origin hop as the caller's", async () => {
+    const sent: Array<Record<string, string | string[]>> = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock' as const,
+      send: (request): Promise<AdapterResponse> => {
+        sent.push({ ...request.headers });
+        const isStart = new URL(request.requestURL).pathname === '/start';
+        return Promise.resolve<AdapterResponse>({
+          status: isStart ? 307 : 200,
+          headers: isStart ? { location: '/next' } : {},
+          body: null,
+          // A signing adapter's own header, reported for the observers.
+          effectiveRequestHeaders: {
+            ...request.headers,
+            'x-amz-date': isStart ? 'first' : 'second',
+          },
+        });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://a.test',
+      followRedirects: true,
+    });
+    await client.get('/start').headers({ 'x-caller': 'kept' }).send();
+
+    expect(sent[1]?.['x-caller']).toBe('kept');
+    expect(sent[1]?.['x-amz-date']).toBeUndefined();
+  });
+
+  test('an XHR browser timeout over an answer is a timeout, whatever the cookie jar throws on it', async () => {
+    class ThrowingJar extends CookieJar {
+      public override processResponseHeaders(): void {
+        throw new TypeError('jar broke');
+      }
+    }
+
+    for (const cookieJar of [undefined, new ThrowingJar()]) {
+      // What XHRAdapter throws when the runtime's XHR times out after headers arrived.
+      const error = Object.assign(
+        markResponseStreamAbort(
+          Object.assign(new Error('Request aborted'), { name: 'AbortError' }),
+          200,
+          { 'content-type': 'text/plain' },
+        ),
+        { [XHR_BROWSER_TIMEOUT_FLAG]: true },
+      );
+      // An XHR adapter, in a runtime that has one (restored after each test).
+      (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+      const builder = new HTTPClient({
+        adapter: {
+          getType: () => 'xhr' as const,
+          send: (): Promise<AdapterResponse> =>
+            Promise.resolve().then(() => {
+              throw error;
+            }),
+        },
+        baseURL: 'http://api.test',
+        ...(cookieJar ? { cookieJar } : {}),
+      }).get('/x');
+      const response = await builder.send();
+
+      expect(response.isTimeout).toBe(true);
+      expect(builder.error?.code).toBe('stream_response_error');
+    }
   });
 
   test('an XHR browser-timeout marker set to false stays a cancel', async () => {
@@ -10271,10 +10386,10 @@ describe('a cancel or timeout wins over a cookie jar that throws', () => {
     }
   });
 
-  test('an attempt that timed out before its answer was read is a timeout, retried', async () => {
+  test('a jar that throws an AbortError on an answer that arrived after the timer fired is that jar failure, not a timeout', async () => {
     // The timer fires before the adapter's late answer is read; the jar then throws an
-    // AbortError on it. The attempt timed out, so it is a timeout, not an answered
-    // adapter_error.
+    // AbortError of its own on it. Only the timer's own reason is the timeout: the answer
+    // arrived whole, so this is its adapter_error, not sent again.
     const { jar, restore } = throwingJar(
       new DOMException('read aborted', 'AbortError'),
     );
@@ -10305,14 +10420,14 @@ describe('a cancel or timeout wins over a cookie jar that throws', () => {
         });
       const response = await request.send();
 
-      expect(sends).toBe(2);
-      expect(request.error?.code).toBe('timeout');
-      expect(response.isTimeout).toBe(true);
-      expect(response.status).toBe(0);
-      expect(ends).toEqual([
-        { status: 0, willRetry: true },
-        { status: 0, willRetry: false },
-      ]);
+      expect(sends).toBe(1);
+      expect(request.error?.code).toBe('adapter_error');
+      expect(request.error?.message).toBe(
+        'Cookie jar failed to process response headers',
+      );
+      expect(response.isTimeout).toBe(false);
+      expect(response.status).toBe(200);
+      expect(ends).toEqual([{ status: 200, willRetry: false }]);
     } finally {
       restore();
     }
