@@ -156,6 +156,12 @@ async function runObservers<Filter, Args extends unknown[]>(
       continue;
     }
 
+    // Asked again: the filter reads the response - a body getter, say - and a cancel made
+    // there stops the chain before this observer runs.
+    if (cancelSignal?.aborted) {
+      return;
+    }
+
     await safeHandleCallbackAndWait(label, fn, ...argsFor());
   }
 }

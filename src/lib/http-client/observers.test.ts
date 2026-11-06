@@ -124,6 +124,37 @@ describe('ResponseObserverManager', () => {
     }
   });
 
+  test('a cancel made while a filter reads the response runs no later observer', async () => {
+    const controller = new AbortController();
+    const mgr = new ResponseObserverManager();
+    const calls: string[] = [];
+    mgr.add(
+      () => {
+        calls.push('guarded');
+      },
+      { bodyContainsKeys: ['token'] },
+    );
+    mgr.add(() => {
+      calls.push('after');
+    });
+
+    await mgr.snapshot()(
+      makeResponse({
+        body: {
+          get token() {
+            controller.abort();
+            return 'x';
+          },
+        },
+      }),
+      makeRequest(),
+      { type: 'final' },
+      controller.signal,
+    );
+
+    expect(calls).toEqual([]);
+  });
+
   test('calls observers in order', async () => {
     const mgr = new ResponseObserverManager();
     const order: number[] = [];

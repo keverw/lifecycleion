@@ -445,6 +445,70 @@ describe('RequestInterceptorManager', () => {
     expect(calls).toBe(0);
   });
 
+  test.each([
+    'the copy of the previous result',
+    'the filter',
+    'the preparation',
+  ] as const)(
+    'a cancel made from caller code %s runs ends the chain before the next interceptor',
+    async (where) => {
+      let isCancelled = false;
+      const mgr = new RequestInterceptorManager();
+      const calls: string[] = [];
+      mgr.add((req) => {
+        calls.push('first');
+        const result = { ...req };
+        if (where === 'the copy of the previous result') {
+          const url = req.requestURL;
+          Object.defineProperty(result, 'requestURL', {
+            enumerable: true,
+            get() {
+              isCancelled = true;
+              return url;
+            },
+          });
+        }
+        if (where === 'the filter') {
+          result.body = {
+            get token() {
+              isCancelled = true;
+              return 'x';
+            },
+          };
+        }
+        return result;
+      });
+      mgr.add(
+        (req) => {
+          calls.push('second');
+          return req;
+        },
+        where === 'the filter' ? { bodyContainsKeys: ['token'] } : undefined,
+      );
+
+      const result = await mgr.snapshot()(
+        makeRequest(),
+        { type: 'initial' },
+        makeContext(),
+        {
+          isCancelled: () => isCancelled,
+          ...(where === 'the preparation'
+            ? {
+                prepareRequest: (req: InterceptedRequest) => {
+                  isCancelled = true;
+                  return req;
+                },
+              }
+            : {}),
+        },
+      );
+
+      expect(isInterceptorCancel(result)).toBe(true);
+      // The preparation runs before the first interceptor; the others after it.
+      expect(calls).toEqual(where === 'the preparation' ? [] : ['first']);
+    },
+  );
+
   test('phase context is passed to the interceptor', async () => {
     const mgr = new RequestInterceptorManager();
     const received: RequestPhase[] = [];

@@ -185,6 +185,13 @@ async function runInterceptors(
       pendingPrepare = undefined;
     }
 
+    // Asked again: the copy, the filter and the preparation above run caller code - a
+    // getter, a `toJSON` - and a cancel made there ends the chain before this interceptor
+    // runs, as one made by an earlier interceptor does.
+    if (isCancelled?.()) {
+      break;
+    }
+
     onInterceptorCalled?.();
 
     // Caller code may keep the body it is handed and change it in place, so a JSON copy
