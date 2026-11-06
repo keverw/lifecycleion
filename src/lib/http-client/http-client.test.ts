@@ -3406,6 +3406,83 @@ describe('HTTPClient — adapter marker flags', () => {
     expect(cancelReads).toBe(0);
   });
 
+  test("an adapter's own AbortError after the stream factory opened a sink is the cut stream, not a cancel", async () => {
+    let sends = 0;
+    let factoryCalls = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node' as const,
+      send: async (request): Promise<AdapterResponse> => {
+        sends++;
+        await request.streamResponse?.(
+          {
+            status: 200,
+            headers: {},
+            url: request.requestURL,
+            attempt: 1,
+            requestID: '',
+          },
+          { signal: new AbortController().signal },
+        );
+        // A pipe the adapter stopped with a controller of its own.
+        throw Object.assign(new Error('pipe stopped'), { name: 'AbortError' });
+      },
+    };
+    const builder = new HTTPClient({ adapter, baseURL: 'https://a.test' })
+      .get('/file')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 })
+      .streamResponse((): WritableLike => {
+        factoryCalls++;
+        return makeQuietSink();
+      });
+    const response = await builder.send();
+
+    expect(sends).toBe(1);
+    expect(factoryCalls).toBe(1);
+    expect(response.isCancelled).toBe(false);
+    expect(response.isStreamError).toBe(true);
+    expect(builder.error?.code).toBe('stream_response_error');
+  });
+
+  test('a sink whose cancel getter answers true is a stream started on an abandoned attempt too, its getter not run', async () => {
+    let factoryCalls = 0;
+    let cancelReads = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node' as const,
+      // Calls the factory, then ignores its abort and never settles.
+      send: (request): Promise<AdapterResponse> => {
+        void request.streamResponse?.(
+          {
+            status: 200,
+            headers: {},
+            url: request.requestURL,
+            attempt: 1,
+            requestID: '',
+          },
+          { signal: new AbortController().signal },
+        );
+        return new Promise(() => {});
+      },
+    };
+    const builder = new HTTPClient({ adapter, baseURL: 'https://a.test' })
+      .get('/file')
+      .timeout(50)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 })
+      .streamResponse((): WritableLike => {
+        factoryCalls++;
+        return Object.defineProperty(makeQuietSink(), 'cancel', {
+          get() {
+            cancelReads++;
+            return true;
+          },
+        });
+      });
+    const response = await builder.send();
+
+    expect(factoryCalls).toBe(1);
+    expect(cancelReads).toBe(0);
+    expect(response.isStreamError).toBe(true);
+  });
+
   test('an XHR browser timeout over an answer is a timeout, whatever the cookie jar throws on it', async () => {
     class ThrowingJar extends CookieJar {
       public override processResponseHeaders(): void {
@@ -11120,3 +11197,23 @@ describe('HTTPClient — redirect hop header copies', () => {
     },
   );
 });
+
+/** A sink that takes every write and does nothing else. */
+function makeQuietSink(): WritableLike {
+  return {
+    write: (_chunk, callback) => {
+      callback?.(null);
+      return true;
+    },
+    end: (callback) => {
+      callback?.();
+    },
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
+    destroy: () => {},
+  };
+}

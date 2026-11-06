@@ -4150,6 +4150,22 @@ export class BaseHTTPClient {
           };
         };
 
+        // Whether the factory started a stream, or has a sink on its way. A factory that
+        // declined opened no sink: a cancel answer, told by its own `cancel` data field
+        // alone, never a getter of the caller's - one that answered the adapter otherwise
+        // is read as the stream it may have started. Asked only where it decides the
+        // outcome, so the answer is not inspected on the paths that do not need it.
+        const didStartStream = (): boolean => {
+          return (
+            streamFactoryState === 'pending' ||
+            (streamFactoryState === 'answered' &&
+              !(
+                streamFactoryAnswer !== undefined &&
+                isOwnCancelAnswer(streamFactoryAnswer)
+              ))
+          );
+        };
+
         // An attempt given up on once its factory had started a stream - a sink still on
         // its way counts, as it may yet open - is that cut stream, not a timeout to retry.
         if (
@@ -4266,6 +4282,10 @@ export class BaseHTTPClient {
             if (isXHRBrowserTimeout(error)) {
               isTimedOut = true;
               // Fall through to the normal timeout retry path below.
+            } else if (!isFactoryCancel && didStartStream()) {
+              // An adapter's own AbortError once the factory had started a stream is no
+              // cancel anyone made: the cut stream, as any unflagged rejection then is.
+              return endAsCutStream();
             } else {
               // AbortError without our timeout flag — treat as non-retryable cancel.
               // This path includes StreamResponseFactory returning null / { cancel: true }.
@@ -4419,23 +4439,11 @@ export class BaseHTTPClient {
         // way, as for an abandoned one above: part of the body may be in the caller's
         // sink, and a retry would open a second one for the same request - whatever the
         // adapter rejected with, flagged or not. A factory that declined opened none.
-        // A factory that declined opened no sink: a cancel answer, told by its own data
-        // field alone, so no getter of the caller's runs again here - one that answered
-        // the adapter otherwise is read as the stream it may have started.
-        // Widened: the factory wrapper sets it from a closure, which narrowing above does
-        // not see.
-        const factoryState = streamFactoryState as StreamFactoryState;
-        const didStartStream =
-          factoryState === 'pending' ||
-          (factoryState === 'answered' &&
-            !(
-              streamFactoryAnswer !== undefined &&
-              isOwnCancelAnswer(streamFactoryAnswer)
-            ));
         // So is one whose adapter rejected, unflagged, once its factory had started a
         // stream: the cut stream, ended as one given up on is, not a plain network
         // failure a caller would retry on.
-        if (didStartStream && !isCancelOutcome()) {
+        const isStreamStarted = !isCancelOutcome() && didStartStream();
+        if (isStreamStarted) {
           return endAsCutStream();
         }
 
@@ -4443,7 +4451,7 @@ export class BaseHTTPClient {
           policy &&
           !isCancelOutcome() &&
           !isUploadAbandoned &&
-          !didStartStream &&
+          !isStreamStarted &&
           (allowNonIdempotentRetry ||
             IDEMPOTENT_METHODS.has(sentRequest.method))
         ) {
@@ -6224,7 +6232,9 @@ function watchStreamFactoryAnswer(
  * (`pending`). Read only here, once the adapter that ignored the abort is given up on.
  */
 function tearDownStreamFactoryAnswer(answer: object): StreamFactoryState {
-  if (readUnknownMember(answer, 'cancel') === true) {
+  // A decline told as the retry gate tells one (see `isOwnCancelAnswer`), never by a
+  // getter of the caller's.
+  if (isOwnCancelAnswer(answer)) {
     return 'none';
   }
 
