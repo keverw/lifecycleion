@@ -1470,7 +1470,7 @@ export class NodeAdapter implements HTTPAdapter {
 
         /**
          * Settles the request with a failure of the stream its factory started, through
-         * `settle`, and tells `HTTPClient` it did (see `listenForStreamFailureSettled`) -
+         * `settle` once `teardown` has run, both under its guard, and tells `HTTPClient` it did (see `listenForStreamFailureSettled`) -
          * only when it is this failure that settled it, not one a timeout or a cancel had
          * already answered - before the factory's signal fires, so a cleanup listener on
          * it that cancels the request cannot stand in for the failure. Then fires it. A
@@ -1481,11 +1481,16 @@ export class NodeAdapter implements HTTPAdapter {
          * cleanup never run.
          */
         const settleStreamFailure = (
+          teardown: () => void,
           settle: () => void,
           abortStream: () => void,
         ): void => {
-          const wasOpen = !didSettleRequest;
+          let wasOpen = false;
           try {
+            teardown();
+            // Read after the teardown: a settle the teardown itself caused - an answer
+            // its destroy ran - is no settle of this failure's.
+            wasOpen = !didSettleRequest;
             settle();
           } catch (error) {
             if (didSettleRequest) {
@@ -1493,6 +1498,7 @@ export class NodeAdapter implements HTTPAdapter {
             } else {
               // Not retried, as the failure it took the place of was not: the factory
               // was called, and its sink may hold part of the body.
+              wasOpen = true;
               failRequest(nonRetryableAdapterErrorFrom(error));
             }
           }
@@ -1938,22 +1944,27 @@ export class NodeAdapter implements HTTPAdapter {
                     // reported as it is for a buffered body.
                     // The factory's signal after the settle: a cleanup listener the factory
                     // added that cancels the request cannot stand in for the failure. The
-                    // teardown inside it, under its guard.
-                    settleStreamFailure(() => {
-                      if (isDecodeFailure(error)) {
-                        tearDownAfterResponse();
-                      } else {
-                        releaseConnectionAfterResponse();
-                      }
-                      settleResponse({
-                        status,
-                        headers,
-                        body: null,
-                        isStreamError: true,
-                        streamErrorCode: 'stream_response_error',
-                        errorCause: error,
-                      });
-                    }, abortStream);
+                    // teardown run first, under its guard.
+                    settleStreamFailure(
+                      () => {
+                        if (isDecodeFailure(error)) {
+                          tearDownAfterResponse();
+                        } else {
+                          releaseConnectionAfterResponse();
+                        }
+                      },
+                      () => {
+                        settleResponse({
+                          status,
+                          headers,
+                          body: null,
+                          isStreamError: true,
+                          streamErrorCode: 'stream_response_error',
+                          errorCause: error,
+                        });
+                      },
+                      abortStream,
+                    );
                   },
                 };
 
@@ -2054,16 +2065,19 @@ export class NodeAdapter implements HTTPAdapter {
                 // then abort the stream signal so any partial cleanup listeners run.
                 // The factory's signal after the reject: a cleanup listener that cancels
                 // the request cannot stand in for the factory's error. The teardown
-                // inside it, under its guard.
-                settleStreamFailure(() => {
-                  tearDownAfterResponse();
-                  failRequest(
-                    markStreamFactoryError(error, req, request.headers, {
-                      status,
-                      headers,
-                    }),
-                  );
-                }, abortStream);
+                // run first, under its guard.
+                settleStreamFailure(
+                  tearDownAfterResponse,
+                  () => {
+                    failRequest(
+                      markStreamFactoryError(error, req, request.headers, {
+                        status,
+                        headers,
+                      }),
+                    );
+                  },
+                  abortStream,
+                );
                 return;
               } finally {
                 pendingStreamSetup = undefined;
@@ -2167,18 +2181,21 @@ export class NodeAdapter implements HTTPAdapter {
                 //   - Non-retryable once streaming has started
                 // The factory's signal after the settle, as every teardown that runs
                 // caller code is: a cleanup listener that cancels the request cannot
-                // stand in for the failure. The teardown inside it, under its guard.
-                settleStreamFailure(() => {
-                  tearDownAfterResponse();
-                  settleResponse({
-                    status,
-                    headers,
-                    body: null,
-                    isStreamError: true,
-                    streamErrorCode: streamResult.code,
-                    errorCause: streamResult.cause,
-                  });
-                }, abortStream);
+                // stand in for the failure. The teardown run first, under its guard.
+                settleStreamFailure(
+                  tearDownAfterResponse,
+                  () => {
+                    settleResponse({
+                      status,
+                      headers,
+                      body: null,
+                      isStreamError: true,
+                      streamErrorCode: streamResult.code,
+                      errorCause: streamResult.cause,
+                    });
+                  },
+                  abortStream,
+                );
                 destroyWritableQuietly(sink);
                 return false;
               };
