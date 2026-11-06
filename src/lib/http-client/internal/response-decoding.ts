@@ -3,11 +3,12 @@
  *
  * `fetch` (undici, Bun) and browsers decode a compressed response before handing over its
  * body, and so do axios and got on Node; Node's own `http.request` does not. NodeAdapter
- * decodes as they do, so a well-formed compressed body is the same on every adapter:
+ * decodes as they do, so a well-formed body with one coding is the same on every adapter:
  * otherwise a server or CDN that sends `Content-Encoding: gzip` would give NodeAdapter
  * callers the raw gzip bytes - a JSON response that fails to parse - where FetchAdapter
  * gives the JSON. A malformed one can differ: decoding here is strict, and a runtime's
- * `fetch` is more lenient in places.
+ * `fetch` is more lenient in places. So can a stacked one (`br, gzip`): undici and
+ * browsers decode every coding, as this does, but Bun's `fetch` hands it over undecoded.
  *
  * The decoded body is offered through the same events the raw `IncomingMessage` emits -
  * `data`, `end`, `error`, `aborted`, `close` - and its `pause` / `resume`, so the buffered
@@ -85,7 +86,8 @@ const createZstdDecompress = (
  * decoding on a teardown. `contentEncoding` is `undefined` for a body not to decode - an
  * answer with none (see `hasResponseBody`), or one asked for as sent - and an unknown
  * coding hands the body over as it came. A stacked coding (`gzip, br`, or a repeated
- * `Content-Encoding` Node joined) is decoded in reverse order, as `fetch` decodes it;
+ * `Content-Encoding` Node joined) is decoded in reverse order, as undici and browsers
+ * decode it;
  * `identity` is skipped.
  */
 export function createResponseBodySource(
