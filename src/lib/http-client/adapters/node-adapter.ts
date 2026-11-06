@@ -1491,13 +1491,15 @@ export class NodeAdapter implements HTTPAdapter {
             if (didSettleRequest) {
               reportCallbackError('NodeAdapter response task', error);
             } else {
-              failRequest(normalizeError(error));
+              // Not retried, as the failure it took the place of was not: the factory
+              // was called, and its sink may hold part of the body.
+              failRequest(nonRetryableAdapterErrorFrom(error));
             }
           }
           // Told whenever this call is what settled the request, with the failure or a
-          // throw that took its place: either ends it - the client does not retry an
-          // attempt whose factory started a stream, nor one whose factory threw, which is
-          // flagged so - and a cleanup cancel stands in for neither.
+          // throw that took its place: either ends it - both are flagged non-retryable, or
+          // are a stream the client does not retry - and a cleanup cancel stands in for
+          // neither.
           if (wasOpen && didSettleRequest) {
             notifyStreamFailureSettled(streamFailureSettledListener);
           }

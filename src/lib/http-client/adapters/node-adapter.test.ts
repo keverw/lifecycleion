@@ -10627,6 +10627,12 @@ test('a stream failure whose settle throws still fails the request and fires the
     }
 
     expect((caught as Error).message).toBe('headers unreadable');
+    // Not retried, as the stream failure it took the place of was not.
+    expect(
+      (caught as Record<PropertyKey, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
     expect(didFireSignal).toBe(true);
     expect(settledCalls).toBe(1);
   } finally {

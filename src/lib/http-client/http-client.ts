@@ -6832,14 +6832,18 @@ function withoutAddedCrossOriginCredentials(
 }
 
 /**
- * Whether `interceptedURL` is `hopURL` upgraded to `https:` and nothing more of its origin:
- * the hop is `http:`, the interceptor's URL is `https:` on the same host, and the port is
- * unchanged - both each scheme's default, or the same port number on both, however the
- * URL writes it (`https://h:443` is read as `https://h`, `http://h:80` as `http://h`). The
- * host is read as the retry hold reads it (see `comparableHost`): a trailing dot is the
- * same host. A URL that cannot be read is no upgrade.
+ * `hopURL` upgraded to `https:`, parsed, when `interceptedURL` is that upgrade and nothing
+ * more of its origin: the hop is `http:`, the interceptor's URL is `https:` on the same
+ * host, and the port is unchanged - both each scheme's default, or the same port number on
+ * both, however the URL writes it (`https://h:443` is read as `https://h`, `http://h:80`
+ * as `http://h`). The host is read as the retry hold reads it (see `comparableHost`): a
+ * trailing dot is the same host. `undefined` for anything else, and for a URL that cannot
+ * be read.
  */
-function isExactHTTPSUpgrade(hopURL: string, interceptedURL: string): boolean {
+function exactHTTPSUpgradeOf(
+  hopURL: string,
+  interceptedURL: string,
+): URL | undefined {
   try {
     const hop = new URL(hopURL);
     const intercepted = new URL(interceptedURL);
@@ -6847,37 +6851,38 @@ function isExactHTTPSUpgrade(hopURL: string, interceptedURL: string): boolean {
     if (
       hop.protocol !== 'http:' ||
       intercepted.protocol !== 'https:' ||
-      comparableHost(hopURL) !== comparableHost(interceptedURL)
+      trimEndWhere(asciiLowercase(hop.hostname), isDot) !==
+        trimEndWhere(asciiLowercase(intercepted.hostname), isDot)
     ) {
-      return false;
+      return undefined;
     }
 
     const isDefaultPorts = hop.port === '' && intercepted.port === '';
-    return isDefaultPorts || (hop.port || '80') === (intercepted.port || '443');
+    const hopPort = hop.port || '80';
+    if (!isDefaultPorts && hopPort !== (intercepted.port || '443')) {
+      return undefined;
+    }
+
+    hop.protocol = 'https:';
+    // Set again: a scheme change drops a port that is the new scheme's default, and
+    // `http://h` upgraded for `https://h:80` stays on port 80.
+    hop.port = isDefaultPorts ? '' : hopPort;
+    return hop;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/** Whether `interceptedURL` is exactly `hopURL` upgraded (see {@link exactHTTPSUpgradeOf}). */
+function isExactHTTPSUpgrade(hopURL: string, interceptedURL: string): boolean {
+  return exactHTTPSUpgradeOf(hopURL, interceptedURL) !== undefined;
 }
 
 /**
  * A cross-origin hop's own URL, upgraded to `https:` when an interceptor asked for exactly
- * that (see {@link isExactHTTPSUpgrade}). Everything else of the hop's URL - path, query,
+ * that (see {@link exactHTTPSUpgradeOf}). Everything else of the hop's URL - path, query,
  * userinfo - stays its own, as it does for any other change.
  */
 function upgradedHopURL(hopURL: string, interceptedURL: string): string {
-  if (!isExactHTTPSUpgrade(hopURL, interceptedURL)) {
-    return hopURL;
-  }
-
-  const hop = new URL(hopURL);
-  // The port the hop is on, written out unless both are their scheme's default: `http://h`
-  // upgraded for `https://h:80` stays on port 80.
-  const port =
-    hop.port === '' && new URL(interceptedURL).port === ''
-      ? ''
-      : hop.port || '80';
-  hop.protocol = 'https:';
-  // Set again: a scheme change drops a port that is the new scheme's default.
-  hop.port = port;
-  return hop.href;
+  return exactHTTPSUpgradeOf(hopURL, interceptedURL)?.href ?? hopURL;
 }
