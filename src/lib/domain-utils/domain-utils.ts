@@ -1447,8 +1447,11 @@ export function validateConfigEntry(
   let normalizedEntry: string | undefined;
   const readNormalizedEntry = (): string =>
     (normalizedEntry ??= normalizeOrigin(raw));
+  // A tab, CR or LF left inside - after the trim - is refused wherever it sits, as the
+  // matchers refuse it (`parseExactOriginEntry`): the URL parser would delete one, and
+  // the host's own check trims one at its edges (`https://\texample.com`).
   const exactOriginVerdict = (result: ValidationResult): ValidationResult =>
-    result.valid && readNormalizedEntry() === ''
+    result.valid && (/[\t\n\r]/.test(raw) || readNormalizedEntry() === '')
       ? {
           valid: false,
           info: 'origin is not one the URL parser reads as written (it can never match)',

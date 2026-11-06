@@ -4099,6 +4099,13 @@ describe('allowlist entries the validator refuses', () => {
       ['ht\ttps://example.com', 'https://example.com'],
       ['https://exam\nple.com', 'https://example.com'],
       ['https://example.com:80\r80', 'https://example.com:8080'],
+      // At the host's edges too, where the host's own check would trim one.
+      ['https://\texample.com', 'https://example.com'],
+      ['https://\nexample.com', 'https://example.com'],
+      ['https://example.com\t:8443', 'https://example.com:8443'],
+      ['https://example.com\t/', 'https://example.com'],
+      ['https://\t127.0.0.1', 'https://127.0.0.1'],
+      ['http://[::1]\t:8080', 'http://[::1]:8080'],
     ]) {
       expect(validateConfigEntry(entry, 'origin').valid).toBe(false);
       expect(matchesOriginList(origin, [entry])).toBe(false);

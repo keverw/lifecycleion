@@ -10823,6 +10823,36 @@ test('a stream failure whose teardown throws still settles as that failure', asy
   }
 });
 
+test('a 205 that carries bytes is answered bodiless, its bytes neither measured nor reported', async () => {
+  // Node's parser reads a 205's bytes as a body, as it reads none for a 204 or 304.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(205, { 'content-length': '2000' });
+    res.end('x'.repeat(2000));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const loaded: number[] = [];
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/`,
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1000,
+      onDownloadProgress: (event) => {
+        loaded.push(event.loaded);
+      },
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.streamErrorCode).toBeUndefined();
+    expect(response.isStreamError).not.toBe(true);
+    expect(response.body).toBeNull();
+    expect(loaded.every((bytes) => bytes === 0)).toBe(true);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test('a factory decline whose teardown throws still answers as the decline', async () => {
   let respond: ((res: http.IncomingMessage) => void) | undefined;
   let isTornDown = false;

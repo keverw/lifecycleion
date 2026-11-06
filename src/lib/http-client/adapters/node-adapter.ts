@@ -2288,6 +2288,13 @@ export class NodeAdapter implements HTTPAdapter {
                 return;
               }
 
+              // A bodiless answer's bytes - a `205` that carries some, which Node's parser
+              // reads as a body as it reads none for a `204` or `304` - are drained, not
+              // counted, kept or reported: no body is handed over, so none is measured.
+              if (!hasBody) {
+                return;
+              }
+
               loadedBytes += chunk.length;
 
               // Counted before the chunk is kept, so a body over the limit is never held
