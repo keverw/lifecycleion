@@ -654,6 +654,13 @@ export class XHRAdapter implements HTTPAdapter {
        * that keeps a bodiless answer's bytes does not hold them all first.
        */
       const answerBodilessEarly = (answer: AnsweredHeaders): void => {
+        // A browser-followed redirect is reported as the redirect, as `refuseTooLargeBody`
+        // and `load` report it: the answer may be read here for the first time.
+        if (answer.redirectURL !== undefined) {
+          settleFollowedRedirect(answer.redirectURL);
+          return;
+        }
+
         // A cancel from that upload callback ends the send as the cancel.
         if (!emitFinalUpload()) {
           return;

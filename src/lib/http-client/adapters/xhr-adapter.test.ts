@@ -5342,6 +5342,33 @@ describe('XHRAdapter - one way to end at a followed redirect, and a hidden timeo
     expect(downloads).toEqual([{ loaded: 0, progress: 1 }]);
   });
 
+  test('a redirect to a 205 first seen by the size limit is reported as the redirect', async () => {
+    const downloads: Array<{ loaded: number; progress: number }> = [];
+    const response = await withPageOrigin('https://api.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 4,
+        onDownloadProgress: ({ loaded, progress }) => {
+          downloads.push({ loaded, progress });
+        },
+      });
+      const xhr = lastXHR;
+
+      // Read only once the bytes pass the limit: before then the XHR reports no answer.
+      xhr.readyState = 1;
+      xhr.status = 205;
+      xhr.responseURL = 'https://api.test/elsewhere';
+      xhr.simulateDownloadProgress(10, 0);
+      return await promise;
+    });
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.status).toBe(0);
+    expect(downloads).toEqual([{ loaded: 0, progress: 1 }]);
+  });
+
   test("a browser-fired timeout's tag is kept out of a serialized error", async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/data',
