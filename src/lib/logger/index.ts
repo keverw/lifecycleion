@@ -1,4 +1,8 @@
 import { isNullish } from '../internal/is-nullish';
+import {
+  MAX_COPIED_ARRAY_LENGTH,
+  readArrayLength,
+} from '../internal/array-copy';
 import { isObjectLike } from '../internal/is-object-like';
 import {
   noop,
@@ -307,8 +311,11 @@ export class Logger extends EventEmitter {
       'Logger closeTimeoutMS',
     );
 
-    this.sinks = copySinkList(options.sinks);
-    this.diagnosticSinks = copySinkList(options.diagnosticSinks);
+    this.sinks = copySinkList(options.sinks, 'Logger sinks');
+    this.diagnosticSinks = copySinkList(
+      options.diagnosticSinks,
+      'Logger diagnosticSinks',
+    );
     this.redactFunction = options.redactFunction;
     this.callProcessExit = options.callProcessExit ?? true;
     this.beforeExitCallback = options.beforeExitCallback;
@@ -2467,9 +2474,15 @@ function isMutedConsoleSink(sink: LogSink): boolean {
   }
 }
 
-/** Own the list by numeric membership; caller iterators do not select destinations. */
+/**
+ * Own the list by numeric membership; caller iterators do not select destinations. Its own
+ * entries only, to a length checked as an array's (see `readArrayLength`): a hole - one
+ * its prototype fills included - is kept as the `undefined` it is, for the write boundary
+ * to refuse as any malformed sink.
+ */
 function copySinkList(
   source: readonly LogSink[] | null | undefined,
+  label: string,
 ): LogSink[] {
   if (isNullish(source)) {
     return [];
@@ -2479,9 +2492,12 @@ function copySinkList(
   if (!Array.isArray(source)) {
     throw new TypeError('Logger sink lists must be arrays');
   }
+  const length = readArrayLength(entries, label, MAX_COPIED_ARRAY_LENGTH);
   const sinks: LogSink[] = [];
-  for (let index = 0, length = entries.length; index < length; index++) {
-    sinks.push(entries[index]);
+  for (let index = 0; index < length; index++) {
+    sinks.push(
+      Object.hasOwn(entries, index) ? entries[index] : (undefined as never),
+    );
   }
   return sinks;
 }

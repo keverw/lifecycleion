@@ -1,4 +1,7 @@
-import type { RequestState } from './types';
+import { describeValue } from '../internal/describe-value';
+import { isNullish } from '../internal/is-nullish';
+import { isSignalAbortedQuietly } from './internal/request-fields';
+import type { CancelResult, RequestState } from './types';
 
 export interface TrackedRequest {
   requestID: string;
@@ -6,6 +9,11 @@ export interface TrackedRequest {
   label?: string;
   state: RequestState;
   abortController: AbortController;
+  /**
+   * The caller's own signal for this request, when it gave one: a request it has aborted
+   * is cancelled already, though this controller has not fired.
+   */
+  callerSignal?: AbortSignal;
 }
 
 /**
@@ -36,18 +44,13 @@ export class RequestTracker {
   }
 
   /**
-   * Cancels a single request by ID. Returns 1 if cancelled, 0 if not found.
+   * Cancels a single request by ID. Returns 1 if this call cancelled it, 0 if it was not
+   * found or was cancelled already.
    */
   public cancel(requestID: string, reason?: string): number {
     const entry = this.requests.get(requestID);
 
-    if (entry) {
-      entry.state = 'cancelled';
-      entry.abortController.abort(reason);
-      return 1;
-    }
-
-    return 0;
+    return entry && cancelEntry(entry, reason) ? 1 : 0;
   }
 
   /**
@@ -55,15 +58,7 @@ export class RequestTracker {
    * Returns the number of requests cancelled.
    */
   public cancelAll(reason?: string): number {
-    let count = 0;
-
-    for (const entry of this.requests.values()) {
-      entry.state = 'cancelled';
-      entry.abortController.abort(reason);
-      count++;
-    }
-
-    return count;
+    return this.cancelWhere(() => true, reason);
   }
 
   /**
@@ -71,17 +66,7 @@ export class RequestTracker {
    * Returns the number of requests cancelled.
    */
   public cancelOwn(clientID: string, reason?: string): number {
-    let count = 0;
-
-    for (const entry of this.requests.values()) {
-      if (entry.clientID === clientID) {
-        entry.state = 'cancelled';
-        entry.abortController.abort(reason);
-        count++;
-      }
-    }
-
-    return count;
+    return this.cancelWhere((entry) => entry.clientID === clientID, reason);
   }
 
   /**
@@ -89,17 +74,7 @@ export class RequestTracker {
    * Returns the number of requests cancelled.
    */
   public cancelAllWithLabel(label: string, reason?: string): number {
-    let count = 0;
-
-    for (const entry of this.requests.values()) {
-      if (entry.label === label) {
-        entry.state = 'cancelled';
-        entry.abortController.abort(reason);
-        count++;
-      }
-    }
-
-    return count;
+    return this.cancelWhere((entry) => entry.label === label, reason);
   }
 
   /**
@@ -111,17 +86,10 @@ export class RequestTracker {
     label: string,
     reason?: string,
   ): number {
-    let count = 0;
-
-    for (const entry of this.requests.values()) {
-      if (entry.clientID === clientID && entry.label === label) {
-        entry.state = 'cancelled';
-        entry.abortController.abort(reason);
-        count++;
-      }
-    }
-
-    return count;
+    return this.cancelWhere(
+      (entry) => entry.clientID === clientID && entry.label === label,
+      reason,
+    );
   }
 
   /**
@@ -136,13 +104,19 @@ export class RequestTracker {
     requests: RequestInfo[];
   } {
     const requests: RequestInfo[] = [];
+    // Each read once, not once per entry: a getter answering differently on a later read
+    // would otherwise be checked as one value and compared as another.
+    const clientID = filter?.clientID;
+    const label = filter?.label;
 
-    for (const entry of this.requests.values()) {
-      if (filter?.clientID && entry.clientID !== filter.clientID) {
+    // A copy, as `cancelWhere` walks one: reading a caller's signal (`isEntryCancelled`)
+    // runs its code, which can start a request, and the live map would list it too.
+    for (const entry of [...this.requests.values()]) {
+      if (!isNullish(clientID) && entry.clientID !== clientID) {
         continue;
       }
 
-      if (filter?.label && entry.label !== filter.label) {
+      if (!isNullish(label) && entry.label !== label) {
         continue;
       }
 
@@ -150,11 +124,37 @@ export class RequestTracker {
         requestID: entry.requestID,
         clientID: entry.clientID,
         label: entry.label,
-        state: entry.state,
+        // A request the caller's own signal aborted reads `cancelled` at once, as one
+        // cancelled here or from its builder does, rather than its last in-flight state.
+        state:
+          !isEntrySettled(entry) && isEntryCancelled(entry)
+            ? 'cancelled'
+            : entry.state,
       });
     }
 
     return { count: requests.length, requests };
+  }
+
+  /**
+   * Cancels each tracked request `isMatch` accepts. Returns the number this call
+   * cancelled, not counting one that was cancelled already.
+   */
+  private cancelWhere(
+    isMatch: (entry: TrackedRequest) => boolean,
+    reason: string | undefined,
+  ): number {
+    let count = 0;
+
+    // A copy: an abort listener can start a request, and walking the live map would
+    // cancel and count it too.
+    for (const entry of [...this.requests.values()]) {
+      if (isMatch(entry) && cancelEntry(entry, reason)) {
+        count++;
+      }
+    }
+
+    return count;
   }
 }
 
@@ -163,4 +163,65 @@ export interface RequestInfo {
   clientID: string;
   label?: string;
   state: RequestState;
+}
+
+/**
+ * Refuses a cancel reason that is not a string, naming `method`: the request would be
+ * cancelled with the reason dropped - `cancelReason` reads only a string - and nothing said.
+ */
+export function assertCancelReason(reason: unknown, method: string): void {
+  if (reason !== undefined && typeof reason !== 'string') {
+    throw new TypeError(
+      `${method} reason must be a string (got ${describeValue(reason)})`,
+    );
+  }
+}
+
+/**
+ * Cancel one tracked request, answering whether this call is what cancelled it. One
+ * already settled or cancelled is left as it is and not counted, so the cancel methods
+ * count requests they cancelled, not requests they saw.
+ */
+export function cancelEntry(
+  entry: TrackedRequest,
+  reason: string | undefined,
+): boolean {
+  return cancelTrackedRequest(entry, reason) === 'cancelled';
+}
+
+/** As {@link cancelEntry}, saying why nothing was cancelled when nothing was. */
+export function cancelTrackedRequest(
+  entry: TrackedRequest,
+  reason: string | undefined,
+): CancelResult {
+  if (isEntrySettled(entry)) {
+    return 'already_settled';
+  }
+  if (isEntryCancelled(entry)) {
+    return 'already_cancelled';
+  }
+  entry.state = 'cancelled';
+  entry.abortController.abort(reason);
+  return 'cancelled';
+}
+
+/**
+ * Whether a tracked request is settled: its outcome decided, though its final observers
+ * may still be running.
+ */
+function isEntrySettled(entry: TrackedRequest): boolean {
+  return entry.state === 'completed' || entry.state === 'failed';
+}
+
+/**
+ * Whether a tracked request was cancelled: by its own controller (a cancel here or from its
+ * builder) or by the caller's signal, whose `aborted` is read guarded - unreadable is not
+ * aborted.
+ */
+function isEntryCancelled(entry: TrackedRequest): boolean {
+  return (
+    entry.state === 'cancelled' ||
+    entry.abortController.signal.aborted ||
+    isSignalAbortedQuietly(entry.callerSignal)
+  );
 }

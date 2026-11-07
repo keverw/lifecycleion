@@ -9,10 +9,8 @@ export interface RequestBodyWritable {
     data: string | Buffer | Uint8Array,
     callback?: (error: Error | null | undefined) => void,
   ): boolean;
-  once(event: 'drain', listener: () => void): this;
   once(event: 'close', listener: () => void): this;
   once(event: 'error', listener: (error: Error) => void): this;
-  off(event: 'drain', listener: () => void): this;
   off(event: 'close', listener: () => void): this;
   off(event: 'error', listener: (error: Error) => void): this;
   readonly destroyed: boolean;

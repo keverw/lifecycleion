@@ -1,4 +1,21 @@
 import { safeHandleCallback } from '../safe-handle-callback';
+import { copyArrayValue, readArrayLength } from '../internal/array-copy';
+import {
+  holdsOwnIndex,
+  indexFreePrototype,
+  indicesFrom,
+  isMostlyHoles,
+} from '../internal/array-indices';
+
+/**
+ * The index below which every entry `in` reports held on an Array subclass's or another
+ * realm's array is checked with `Object.hasOwn` by the default size estimate (see
+ * `calculateSize`); past it, one at random every so often.
+ */
+const CHECKED_LEAD = 4096;
+
+/** The widest gap between later checks, each drawn at random up to it. */
+const CHECK_GAP = 128;
 
 /**
  * TTL-aware LRU (Least Recently Used) Cache implementation
@@ -120,16 +137,32 @@ export class LRUCache<K, V> {
       throw new TypeError('onChange must be a function');
     }
 
-    if (options?.onChangeReasons !== undefined) {
-      if (!Array.isArray(options.onChangeReasons)) {
+    // Read once and copied by index (see `copyArrayValue`), so the reasons checked are
+    // the reasons kept: not through the list's own iterator, which could yield others on
+    // each pass. A hole reads as `undefined`, refused as any other reason it is not.
+    const givenReasons: unknown = options?.onChangeReasons;
+    let onChangeReasons: LRUCacheChangeReason[] | undefined;
+
+    if (givenReasons !== undefined) {
+      if (!Array.isArray(givenReasons)) {
         throw new TypeError('onChangeReasons must be an array');
       }
 
-      for (const reason of options.onChangeReasons) {
-        if (!VALID_CHANGE_REASONS.has(reason)) {
+      const reasons = copyArrayValue(
+        givenReasons as unknown[],
+        'onChangeReasons',
+      );
+
+      // eslint-disable-next-line unicorn/no-for-loop -- every index, holes included
+      for (let index = 0; index < reasons.length; index++) {
+        const reason = reasons[index];
+
+        if (!VALID_CHANGE_REASONS.has(reason as LRUCacheChangeReason)) {
           throw new RangeError(`Invalid onChange reason: ${String(reason)}`);
         }
       }
+
+      onChangeReasons = reasons as LRUCacheChangeReason[];
     }
 
     this.maxEntries = maxEntries;
@@ -137,8 +170,8 @@ export class LRUCache<K, V> {
     this.maxSize = options?.maxSize;
     this.sizeCalculator = options?.sizeCalculator;
     this.onChange = options?.onChange;
-    this.onChangeReasons = options?.onChangeReasons
-      ? new Set(options.onChangeReasons)
+    this.onChangeReasons = onChangeReasons
+      ? new Set(onChangeReasons)
       : undefined;
   }
 
@@ -430,18 +463,144 @@ export class LRUCache<K, V> {
 
       visitedArrays.add(value);
 
-      // Rough estimate for arrays
-      const estimatedSize =
-        40 +
-        value.reduce(
-          (acc: number, item: unknown) =>
-            acc + this.calculateSize(item, visitedArrays),
-          0,
-        );
+      // Rough estimate for arrays: their own entries, by index, not through the array's
+      // own `reduce`, which a cached value may replace - a hole, one its prototype fills
+      // included, counts for nothing, and past enough of them the rest are read by the
+      // array's own index keys, so a sparse array's length is not walked. What cannot be
+      // read takes the fallback estimate a circular array does, rather than failing
+      // `set()`: an array whose length is not one an array can have, an entry whose read
+      // throws - with the entries around it still counted - and, once for the rest of the
+      // array, an index whose presence cannot be told. A failure sizing an entry it did
+      // read is not caught here.
+      const items = value as unknown[];
 
-      visitedArrays.delete(value);
+      try {
+        let length: number;
 
-      return estimatedSize;
+        try {
+          length = readArrayLength(items, 'LRUCache value');
+        } catch {
+          return 1000;
+        }
+
+        let estimatedSize = 40;
+        let holes = 0;
+        let entries = 0;
+        let sparseFrom: number | undefined;
+        // As `deepClone`'s walk tells an index held - `in` on this realm's
+        // `Array.prototype`, `Object.hasOwn` otherwise, which costs hundreds of times as
+        // much per index on a large array on JavaScriptCore - save on an Array subclass's
+        // or another realm's array whose prototypes list no index: that one is read by
+        // `in` too, while its prototype is the one it had when sizing began. A `Proxy`
+        // prototype can answer `in` for a hole whatever keys it lists, so what `in` reports
+        // held is checked with `Object.hasOwn` - every one below `CHECKED_LEAD`, then one
+        // at random every so often, which the prototype is never asked about and cannot
+        // foresee - and one caught answering for a hole is sized again from the start by
+        // `Object.hasOwn`, so its holes count for nothing and a sparse one's length is not
+        // walked. An array whose prototypes answer `in` truly is sized the same every time;
+        // only one that answers for a hole can be caught at a different index from one
+        // `set()` to the next, its getters run up to a gap's worth of times before it is.
+        let checkedPrototype = indexFreePrototype(items);
+        let untilCheck = 1;
+
+        for (let index = 0; index < length; index++) {
+          let isOwn: boolean;
+
+          try {
+            if (
+              checkedPrototype !== undefined &&
+              checkedPrototype !== Array.prototype &&
+              Reflect.getPrototypeOf(items) === checkedPrototype
+            ) {
+              isOwn = index in items;
+
+              if (isOwn && (index < CHECKED_LEAD || --untilCheck === 0)) {
+                untilCheck = 1 + Math.floor(Math.random() * CHECK_GAP);
+
+                if (!Object.hasOwn(items, index)) {
+                  checkedPrototype = undefined;
+                  estimatedSize = 40;
+                  holes = 0;
+                  entries = 0;
+                  index = -1;
+                  continue;
+                }
+              }
+            } else {
+              isOwn = holdsOwnIndex(items, index);
+            }
+          } catch {
+            return estimatedSize + 1000;
+          }
+
+          if (!isOwn) {
+            // Enough holes, as `deepClone` counts them: the rest by the array's own index
+            // keys.
+            if (isMostlyHoles(++holes, entries)) {
+              sparseFrom = index + 1;
+              break;
+            }
+            continue;
+          }
+
+          // Counted as held whether or not its read throws, as `deepClone` counts one.
+          entries++;
+          let entry: unknown;
+
+          try {
+            entry = items[index];
+          } catch {
+            estimatedSize += 1000;
+            continue;
+          }
+
+          estimatedSize += this.calculateSize(entry, visitedArrays);
+        }
+
+        if (sparseFrom === undefined) {
+          return estimatedSize;
+        }
+
+        // Keys that cannot be listed take the fallback for the rest.
+        let tail: number[];
+
+        try {
+          tail = indicesFrom(items, sparseFrom, length);
+        } catch {
+          return estimatedSize + 1000;
+        }
+
+        for (const index of tail) {
+          let isOwn: boolean;
+
+          // Checked again, as `deepClone` checks its tail: an entry read before it can
+          // have removed it.
+          try {
+            isOwn = Object.hasOwn(items, index);
+          } catch {
+            return estimatedSize + 1000;
+          }
+
+          if (!isOwn) {
+            continue;
+          }
+
+          let entry: unknown;
+
+          try {
+            entry = items[index];
+          } catch {
+            estimatedSize += 1000;
+            continue;
+          }
+
+          estimatedSize += this.calculateSize(entry, visitedArrays);
+        }
+
+        return estimatedSize;
+      } finally {
+        visitedArrays.delete(value);
+      }
     } else if (typeof value === 'object') {
       try {
         // Rough estimate based on JSON size

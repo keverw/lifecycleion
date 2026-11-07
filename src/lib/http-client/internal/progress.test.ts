@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
-import { guardProgressCallback } from './progress';
+import {
+  byteProgressEvent,
+  guardProgressCallback,
+  knownBodyByteLength,
+} from './progress';
 import type { AdapterProgressEvent } from '../types';
 
 const event: AdapterProgressEvent = {
@@ -116,5 +120,50 @@ describe('guardProgressCallback', () => {
     });
 
     expect(events).toHaveLength(1);
+  });
+});
+
+describe('byteProgressEvent', () => {
+  test('reports a known length as a share of it', () => {
+    expect(byteProgressEvent(25, 100)).toEqual({
+      loaded: 25,
+      total: 100,
+      progress: 0.25,
+    });
+    expect(byteProgressEvent(100, 100).progress).toBe(1);
+  });
+
+  test('an unknown or overrun length is -1, with the bytes so far as the total', () => {
+    expect(byteProgressEvent(40, 0)).toEqual({
+      loaded: 40,
+      total: 40,
+      progress: -1,
+    });
+    expect(byteProgressEvent(120, 100)).toEqual({
+      loaded: 120,
+      total: 120,
+      progress: -1,
+    });
+  });
+});
+
+describe('knownBodyByteLength', () => {
+  test.each([
+    ['a string', '12'],
+    ['NaN', Number.NaN],
+    ['a negative', -1],
+    ['a fraction', 1.5],
+  ])('a Blob whose size reports %s has no known length', (_label, size) => {
+    class OddBlob extends Blob {
+      public override get size(): number {
+        return size as number;
+      }
+    }
+
+    expect(knownBodyByteLength(new OddBlob(['abc']))).toBeUndefined();
+  });
+
+  test('a Blob reports its size', () => {
+    expect(knownBodyByteLength(new Blob(['abc']))).toBe(3);
   });
 });

@@ -436,6 +436,75 @@ for (const key of ['sinks', 'diagnosticSinks'] as const) {
   });
 }
 
+for (const key of ['sinks', 'diagnosticSinks'] as const) {
+  test(`${key} refuses a length an array cannot have, naming the list`, () => {
+    const list = new Proxy([], {
+      get: (target, key, receiver) =>
+        key === 'length' ? Infinity : Reflect.get(target, key, receiver),
+    });
+
+    expect(() => new Logger({ callProcessExit: false, [key]: list })).toThrow(
+      new TypeError(`Logger ${key} has no array length`),
+    );
+  });
+
+  test(`${key} keeps its own entries whatever a Proxy's has trap answers`, async () => {
+    const sink = { write: (): void => {} };
+    const logger = new Logger({
+      callProcessExit: false,
+      [key]: new Proxy([sink], { has: () => false }),
+    });
+
+    const kept =
+      key === 'sinks' ? logger.getSinks() : logger.getDiagnosticSinks();
+    expect(kept).toEqual([sink]);
+    await logger.close();
+  });
+
+  test(`${key} keeps only its own entries: a hole its prototype fills is no sink`, async () => {
+    const list: unknown[] = [];
+    list.length = 1;
+    Object.setPrototypeOf(
+      list,
+      Object.assign(Object.create(Array.prototype), {
+        0: { write: (): void => {} },
+      }),
+    );
+    const logger = new Logger({
+      callProcessExit: false,
+      [key]: list as never,
+    });
+
+    const kept =
+      key === 'sinks' ? logger.getSinks() : logger.getDiagnosticSinks();
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toBeUndefined();
+    await logger.close();
+  });
+}
+
+for (const [key, removeMethod] of [
+  ['sinks', 'removeSink'],
+  ['diagnosticSinks', 'removeDiagnosticSink'],
+] as const) {
+  test(`${key}: a hole is kept through ${removeMethod}, still no sink`, async () => {
+    const sink = { write: (): void => {} };
+    const list: unknown[] = [];
+    list[1] = sink;
+    const logger = new Logger({
+      callProcessExit: false,
+      [key]: list as never,
+    });
+
+    expect(logger[removeMethod](sink)).toBe(true);
+    const kept =
+      key === 'sinks' ? logger.getSinks() : logger.getDiagnosticSinks();
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toBeUndefined();
+    await logger.close();
+  });
+}
+
 for (const addMethod of ['addSink', 'addDiagnosticSink'] as const) {
   for (const when of ['during', 'after'] as const) {
     test(`${addMethod} refuses new ownership ${when} close`, async () => {
