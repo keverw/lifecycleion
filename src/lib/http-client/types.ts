@@ -605,7 +605,8 @@ export interface HTTPRequestOptions {
    * undefined inherits the client's configured value.
    */
   maxResponseBytes?: number | null;
-  signal?: AbortSignal;
+  /** Null or undefined sets none, as `.signal(null)` clears one. */
+  signal?: AbortSignal | null;
   retryPolicy?: RetryPolicyOptions | null;
   /**
    * Per-request override for {@link HTTPClientConfig.retryNonIdempotentMethods}.

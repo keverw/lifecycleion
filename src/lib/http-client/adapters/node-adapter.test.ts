@@ -11816,10 +11816,43 @@ test('a 205 that answers an upload still going out is read as an early 200 is, b
         (error: unknown) => (error as Error).name,
       );
 
-    expect(outcome).not.toBe(205);
+    expect(outcome).toBe('AbortError');
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('a 205 that answers an upload and declares more than the limit is answered from its header', async () => {
+  // Parked for good, so the answer cannot wait on the upload.
+  const req = new MockClientRequest(() => true);
+  const res = new MockIncomingMessage(205, {
+    'content-length': String(10 * 1024 * 1024 * 1024),
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(
+    (_options, callback) => {
+      const cb = callback as ((res: http.IncomingMessage) => void) | undefined;
+      queueMicrotask(() => {
+        cb?.(res as unknown as http.IncomingMessage);
+      });
+      return req as unknown as http.ClientRequest;
+    },
+  );
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: 'http://example.test/upload',
+      method: 'POST',
+      headers: {},
+      body: 'x'.repeat(256 * 1024),
+      maxResponseBytes: 10,
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.body).toBeNull();
+    expect(req.destroyed).toBe(true);
+  } finally {
+    requestSpy.mockRestore();
   }
 });
 

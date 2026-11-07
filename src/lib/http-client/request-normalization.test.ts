@@ -2279,6 +2279,9 @@ test('a nullish signal() clears the signal, as the signal option and the other s
     expect(response.status).toBe(200);
     expect(response.isCancelled).toBe(false);
   }
+
+  // The `signal` option takes `null` too, as its type says.
+  expect((await client.get('/x', { signal: null }).send()).status).toBe(200);
 });
 
 test("a redirect observer that rewrites the hop's URL in place still loses cross-origin credentials", async () => {

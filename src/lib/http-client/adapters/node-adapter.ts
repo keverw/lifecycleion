@@ -2307,6 +2307,18 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
+            // One that says up front its bytes pass the limit is answered from that, as a
+            // body that says so is refused, rather than drained up to the limit first.
+            if (
+              status === 205 &&
+              asciiUppercase(request.method) !== 'HEAD' &&
+              declaredLength !== undefined &&
+              declaredLength > maxResponseBytes
+            ) {
+              answerBodiless();
+              return;
+            }
+
             const chunks: Buffer[] = [];
             let loadedBytes = 0;
             // A bodiless answer's bytes, drained unread (see `answerBodiless`).
