@@ -18,7 +18,7 @@ import {
 } from './domain-utils';
 import {
   checkDNSLength,
-  matchesMultiLabelPattern,
+  compileWildcardPattern,
   matchesWildcardLabels,
   normalizeWildcardPattern,
 } from './helpers';
@@ -3366,8 +3366,8 @@ describe('domain-utils', () => {
       expect(matchesWildcardLabels([], ['*'])).toBe(false);
       expect(matchesWildcardLabels(['a'], ['x', '**'])).toBe(false);
 
-      expect(matchesMultiLabelPattern('example.com', '*.*')).toBe(false);
-      expect(matchesMultiLabelPattern('example.com', 'example.com')).toBe(true);
+      expect(compileWildcardPattern('*.*')).toBeUndefined();
+      expect(compileWildcardPattern('example.com')).toBeUndefined();
 
       expect(normalizeWildcardPattern('*.example.com:443')).toBe('');
       expect(normalizeWildcardPattern('*.a..b')).toBe('');
@@ -3399,10 +3399,16 @@ describe('domain-utils', () => {
         false,
       );
 
-      // Via matchesMultiLabelPattern with an interior ** pattern
-      expect(matchesMultiLabelPattern('a.b.c', 'a.**.c')).toBe(true);
-      expect(matchesMultiLabelPattern('a.c', 'a.**.c')).toBe(true);
-      expect(matchesMultiLabelPattern('a.b.z', 'a.**.c')).toBe(false);
+      // Via matchesWildcardDomain with an interior ** pattern
+      expect(matchesWildcardDomain('a.b.example.com', 'a.**.example.com')).toBe(
+        true,
+      );
+      expect(matchesWildcardDomain('a.example.com', 'a.**.example.com')).toBe(
+        true,
+      );
+      expect(matchesWildcardDomain('a.b.example.org', 'a.**.example.com')).toBe(
+        false,
+      );
     });
   });
 

@@ -29,6 +29,7 @@ import {
   compileWildcardPattern,
   isIPAddress,
   matchesCompiledWildcard,
+  wildcardHostSuffix,
   type CompiledWildcardPattern,
 } from '../domain-utils/helpers';
 import type {
@@ -1616,11 +1617,12 @@ function readParsedHostname(hostname: string): string {
 
 /**
  * A request's hostname as one filter check reads it: normalized, and told whether it is
- * an IP address, each at most once and only if a pattern asks.
+ * an IP address, and its public suffix read, each at most once and only if a pattern asks.
  */
 class CheckedHost {
   private normalizedName: string | undefined;
   private isIPName: boolean | undefined;
+  private suffix: string | null | undefined;
 
   constructor(public readonly hostname: string) {}
 
@@ -1634,6 +1636,14 @@ class CheckedHost {
     this.isIPName ??= isIPAddress(this.normalized);
     return this.isIPName;
   }
+
+  /** Its public suffix, as a wildcard match checks it (see `wildcardHostSuffix`). */
+  public readonly readSuffix = (): string | null => {
+    if (this.suffix === undefined) {
+      this.suffix = wildcardHostSuffix(this.normalized);
+    }
+    return this.suffix;
+  };
 }
 
 /**
@@ -1668,7 +1678,12 @@ function matchesReadHostPattern(
     case 'wildcard':
       return (
         host.normalized !== '' &&
-        matchesCompiledWildcard(host.normalized, pattern.compiled, host.isIP)
+        matchesCompiledWildcard(
+          host.normalized,
+          pattern.compiled,
+          host.isIP,
+          host.readSuffix,
+        )
       );
   }
 }

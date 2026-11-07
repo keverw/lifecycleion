@@ -440,41 +440,7 @@ export function matchesWildcardLabels(
 }
 
 /**
- * Helper function for label-wise wildcard matching
- * Supports patterns like *.example.com, **.example.com, *.*.example.com, etc.
- */
-export function matchesMultiLabelPattern(
-  domain: string,
-  pattern: string,
-): boolean {
-  const domainLabels = domain.split('.');
-  const patternLabels = pattern.split('.');
-
-  // Guard against pathological label counts
-  if (domainLabels.length > MAX_LABELS || patternLabels.length > MAX_LABELS) {
-    return false;
-  }
-
-  // Pattern must have at least one non-wildcard label (the base domain)
-  if (
-    patternLabels.length === 0 ||
-    patternLabels.every((label) => label === '*' || label === '**')
-  ) {
-    return false;
-  }
-
-  const { fixedTailStart, fixedTail } =
-    extractFixedTailAfterLastWildcard(patternLabels);
-
-  return matchesSplitPattern(
-    domainLabels,
-    patternLabels.slice(0, fixedTailStart),
-    fixedTail,
-  );
-}
-
-/**
- * The label match behind {@link matchesMultiLabelPattern}, for a pattern already split
+ * The label match behind {@link matchesCompiledWildcard}, for a pattern already split
  * and checked: the labels up to and including its last wildcard, and the fixed tail
  * after it.
  */
@@ -867,6 +833,17 @@ export function compileWildcardPattern(
 }
 
 /**
+ * A normalized host's ICANN public suffix, as {@link matchesCompiledWildcard} checks a
+ * match against it: read without tldts's own hostname check, which answers `null` for a
+ * label with a hyphen at an edge (`evil-.os.hedmark.no`) - a host the URL parser, and so a
+ * `hosts` filter, reads (see `public-suffix.ts`). Exported so a caller checking one host
+ * against many patterns can read it once.
+ */
+export function wildcardHostSuffix(normalizedDomain: string): string | null {
+  return getPublicSuffix(normalizedDomain, { validateHostname: false });
+}
+
+/**
  * Whether a host, already normalized by `normalizeDomain`, matches a compiled pattern.
  * `isIP` is whether that host is an IP address, when the caller already knows it - one
  * host checked against several patterns is asked once.
@@ -875,6 +852,7 @@ export function matchesCompiledWildcard(
   normalizedDomain: string,
   compiled: CompiledWildcardPattern,
   isIP?: boolean,
+  readSuffix: () => string | null = () => wildcardHostSuffix(normalizedDomain),
 ): boolean {
   if (normalizedDomain === '') {
     return false; // invalid domain cannot match
@@ -911,12 +889,7 @@ export function matchesCompiledWildcard(
   // would (see `isUnmatchableWildcardTail`). Asked of a match alone, as a host the
   // pattern does not cover needs no lookup.
   const tail = compiled.fixedTail.join('.');
-  // Without tldts's own hostname check, which answers `null` for a label with a hyphen
-  // at an edge (`evil-.os.hedmark.no`) - a host the URL parser, and so a `hosts` filter,
-  // reads - and would skip this (see `public-suffix.ts`).
-  const suffix = getPublicSuffix(normalizedDomain, {
-    validateHostname: false,
-  });
+  const suffix = readSuffix();
   return !(
     suffix !== null &&
     suffix.length > tail.length &&
