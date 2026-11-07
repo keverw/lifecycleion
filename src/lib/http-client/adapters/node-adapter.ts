@@ -2289,7 +2289,8 @@ export class NodeAdapter implements HTTPAdapter {
 
             // A `205` to anything but a `HEAD`: bodiless, yet read by Node's parser as a
             // body (see below).
-            const isStray205 = !hasBody && status === 205;
+            const isStray205 =
+              status === 205 && asciiUppercase(request.method) !== 'HEAD';
 
             // A `205` has no body (RFC 9110), so FetchAdapter never reads what one carries
             // anyway. Node's parser reads it as a body - it reads none for a `HEAD`, a
