@@ -1189,6 +1189,11 @@ export class NodeAdapter implements HTTPAdapter {
          * whichever regular look comes after it.
          */
         const watchForStalledUpload = (): void => {
+          // One watch at a time: an early `205` arms it before its response closes.
+          if (stallWatchdogTimer !== undefined) {
+            return;
+          }
+
           let bytesAtLastTick = uploadedBytesSeen;
 
           /** What is left of the source grace while the writer waits, else `Infinity`. */
@@ -2298,16 +2303,26 @@ export class NodeAdapter implements HTTPAdapter {
               activeBufferedResponse = undefined;
               settleResponse({ status, headers, body: null });
 
-              // An upload still running is left to finish, as one an early `200` answers
-              // is: the bytes are drained unread meanwhile, and what is left of them cut
-              // once it has gone out. With none running, the connection is let go now.
-              if (isWritingBody && !req.writableEnded) {
-                body.resume();
-                req.once('finish', () => {
-                  if (!res.complete) {
+              // An upload still going out - its last bytes still buffered included - is
+              // left to finish, as one an early `200` answers is, and watched for a stall
+              // as that one is. The bytes the `205` carries are drained unread meanwhile,
+              // up to `maxResponseBytes`, past which the connection is let go at once. It
+              // is let go once the upload has gone out either way; with none going out,
+              // now.
+              if (!req.writableFinished) {
+                let drainedBytes = 0;
+                body.on('data', (chunk: Buffer) => {
+                  drainedBytes += chunk.length;
+                  if (drainedBytes > maxResponseBytes) {
                     tearDownAfterResponse();
                   }
                 });
+                // The request is answered: a failure of what is drained is no one's.
+                body.on('error', () => {});
+                if (isWritingBody) {
+                  watchForStalledUpload();
+                }
+                req.once('finish', tearDownAfterResponse);
               } else {
                 tearDownAfterResponse();
               }
