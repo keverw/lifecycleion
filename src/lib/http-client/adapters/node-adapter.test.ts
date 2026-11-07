@@ -10886,13 +10886,18 @@ test('a 205 whose bytes pass the limit is answered at once, not drained for as l
 
 for (const ending of [
   'declares more than the limit',
+  'declares a body within the limit that never arrives',
   'loses its connection',
 ] as const) {
   test(`a 205 that ${ending} is answered bodiless, not waited on or failed`, async () => {
     const server = http.createServer((_req, res) => {
-      if (ending === 'declares more than the limit') {
-        // Its headers alone, then held open: answered from what they say.
-        res.writeHead(205, { 'content-length': String(100 * 1024 * 1024) });
+      if (ending !== 'loses its connection') {
+        // Its headers alone, then held open: answered from them, as it is whole.
+        res.writeHead(205, {
+          'content-length': String(
+            ending === 'declares more than the limit' ? 100 * 1024 * 1024 : 10,
+          ),
+        });
         res.flushHeaders();
         return;
       }
@@ -10924,16 +10929,18 @@ for (const ending of [
   });
 }
 
-for (const [method, status] of [
-  ['HEAD', 200],
-  ['GET', 204],
-  ['GET', 304],
+for (const [method, status, length] of [
+  ['HEAD', 200, 100 * 1024 * 1024],
+  ['GET', 204, 100 * 1024 * 1024],
+  ['GET', 304, 100 * 1024 * 1024],
+  ['HEAD', 205, 100 * 1024 * 1024],
+  ['GET', 205, 0],
 ] as const) {
-  test(`a ${method} answered ${status} with a Content-Length past the limit keeps its connection`, async () => {
+  test(`a ${method} answered ${status} with a Content-Length of ${length} keeps its connection`, async () => {
     // Node's parser reads no bytes for it, so it ends on its own: nothing to cut short.
     let connections = 0;
     const server = http.createServer((_req, res) => {
-      res.writeHead(status, { 'content-length': String(100 * 1024 * 1024) });
+      res.writeHead(status, { 'content-length': String(length) });
       res.end();
     });
     server.on('connection', () => {

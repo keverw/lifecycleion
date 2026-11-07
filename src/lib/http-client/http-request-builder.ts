@@ -281,8 +281,8 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public signal(abortSignal: AbortSignal | null | undefined): this {
     this._assertNotSent('signal');
-    // Nullish clears it, as the `signal` request option reads one, and as `headers()`,
-    // `timeout()` and `maxResponseBytes()` read nullish.
+    // Nullish clears it, as the `signal` request option reads one, `headers()` reads
+    // nullish, and `timeout(null)` and `maxResponseBytes(null)` inherit.
     if (isNullish(abortSignal)) {
       this._signal = undefined;
       return this;
