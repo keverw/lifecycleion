@@ -279,8 +279,13 @@ export class HTTPRequestBuilder<T = unknown> {
     return this;
   }
 
-  public signal(abortSignal: AbortSignal): this {
+  public signal(abortSignal: AbortSignal | null | undefined): this {
     this._assertNotSent('signal');
+    // Nullish clears it, as the `signal` request option and the other setters read one.
+    if (isNullish(abortSignal)) {
+      this._signal = undefined;
+      return this;
+    }
     // Refused now when it plainly is not one: it is composed with the client's own signal,
     // which needs an `AbortSignal`. Checked by its built-in tag rather than `instanceof`,
     // so another realm's (an iframe's) signal and a polyfill's are accepted, as composing them

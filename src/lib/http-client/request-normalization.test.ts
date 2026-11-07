@@ -2262,6 +2262,25 @@ test('a builder whose send() rejects is left failed, not sending', async () => {
   );
 });
 
+test('a nullish signal() clears the signal, as the signal option and the other setters read one', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const controller = new AbortController();
+  controller.abort();
+
+  for (const none of [undefined, null]) {
+    const response = await client
+      .get('/x')
+      .signal(controller.signal)
+      .signal(none)
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(response.isCancelled).toBe(false);
+  }
+});
+
 test("a redirect observer that rewrites the hop's URL in place still loses cross-origin credentials", async () => {
   const adapter = new MockAdapter();
   const received: Array<Record<string, string | string[]>> = [];

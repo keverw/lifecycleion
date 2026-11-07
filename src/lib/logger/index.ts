@@ -1,8 +1,5 @@
 import { isNullish } from '../internal/is-nullish';
-import {
-  MAX_COPIED_ARRAY_LENGTH,
-  readArrayLength,
-} from '../internal/array-copy';
+import { copyArrayValue } from '../internal/array-copy';
 import { isObjectLike } from '../internal/is-object-like';
 import {
   noop,
@@ -2476,9 +2473,9 @@ function isMutedConsoleSink(sink: LogSink): boolean {
 
 /**
  * Own the list by numeric membership; caller iterators do not select destinations. Its own
- * entries only, to a length checked as an array's (see `readArrayLength`): a hole - one
- * its prototype fills included - is kept as the `undefined` it is, for the write boundary
- * to refuse as any malformed sink.
+ * entries only, to a length checked as an array's (see `copyArrayValue`): a hole - one
+ * its prototype fills included - is kept as a hole, read by index as the `undefined` it
+ * is, for the write boundary to refuse as any malformed sink.
  */
 function copySinkList(
   source: readonly LogSink[] | null | undefined,
@@ -2492,12 +2489,6 @@ function copySinkList(
   if (!Array.isArray(source)) {
     throw new TypeError('Logger sink lists must be arrays');
   }
-  const length = readArrayLength(entries, label, MAX_COPIED_ARRAY_LENGTH);
-  const sinks: LogSink[] = [];
-  for (let index = 0; index < length; index++) {
-    sinks.push(
-      Object.hasOwn(entries, index) ? entries[index] : (undefined as never),
-    );
-  }
-  return sinks;
+  // A fresh array, so the logger owns it whatever the caller typed it as.
+  return copyArrayValue(entries, label) as LogSink[];
 }

@@ -617,11 +617,15 @@ export class XHRAdapter implements HTTPAdapter {
       let isBodyKnownUncoded: boolean | undefined;
 
       /**
-       * Fail a body past `maxResponseBytes` as a stream error with the real status and
-       * headers of `answer`, and stop the download. A browser-followed redirect is reported
-       * as the redirect, as on `load`: the client refuses those whatever the body.
+       * Stop the download at `answer`, settled by `settle`. A browser-followed redirect is
+       * reported as the redirect instead, as on `load`: the client refuses those whatever
+       * the body, and the answer may be read here for the first time. Every way the
+       * download is stopped early goes through here, so none can skip that check.
        */
-      const refuseTooLargeBody = (answer: AnsweredHeaders): void => {
+      const endDownloadAt = (
+        answer: AnsweredHeaders,
+        settle: () => void,
+      ): void => {
         if (answer.redirectURL !== undefined) {
           settleFollowedRedirect(answer.redirectURL);
           return;
@@ -632,20 +636,30 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        resolve(
-          tooLargeAnswer(
-            answeredURL,
-            answer.status,
-            answer.headers,
-            maxResponseBytes,
-          ),
-        );
+        settle();
 
         try {
           xhr.abort();
         } catch {
-          // Whatever the body goes on to deliver is reported to no one.
+          // Whatever the answer goes on to deliver is reported to no one.
         }
+      };
+
+      /**
+       * Fail a body past `maxResponseBytes` as a stream error with the real status and
+       * headers of `answer`, and stop the download.
+       */
+      const refuseTooLargeBody = (answer: AnsweredHeaders): void => {
+        endDownloadAt(answer, () => {
+          resolve(
+            tooLargeAnswer(
+              answeredURL,
+              answer.status,
+              answer.headers,
+              maxResponseBytes,
+            ),
+          );
+        });
       };
 
       /**
@@ -654,31 +668,19 @@ export class XHRAdapter implements HTTPAdapter {
        * that keeps a bodiless answer's bytes does not hold them all first.
        */
       const answerBodilessEarly = (answer: AnsweredHeaders): void => {
-        // A browser-followed redirect is reported as the redirect, as `refuseTooLargeBody`
-        // and `load` report it: the answer may be read here for the first time.
-        if (answer.redirectURL !== undefined) {
-          settleFollowedRedirect(answer.redirectURL);
-          return;
-        }
-
-        // A cancel from that upload callback ends the send as the cancel.
-        if (!emitFinalUpload()) {
-          return;
-        }
-
-        reportDownloadComplete(0);
-        resolve({
-          status: answer.status,
-          ...derivedRedirectFields(answeredURL, answer.status, answer.headers),
-          headers: answer.headers,
-          body: null,
+        endDownloadAt(answer, () => {
+          reportDownloadComplete(0);
+          resolve({
+            status: answer.status,
+            ...derivedRedirectFields(
+              answeredURL,
+              answer.status,
+              answer.headers,
+            ),
+            headers: answer.headers,
+            body: null,
+          });
         });
-
-        try {
-          xhr.abort();
-        } catch {
-          // Whatever the answer goes on to deliver is reported to no one.
-        }
       };
 
       /**
