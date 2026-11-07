@@ -15,6 +15,7 @@ import {
   normalizeWildcardPattern,
   compileWildcardPattern,
   matchesCompiledWildcard,
+  wildcardHostSuffix,
   isUnmatchableWildcardTail,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
@@ -892,8 +893,14 @@ export function matchesDomainList(
     return false;
   }
 
-  // Asked once, for every wildcard entry, and only if one is reached.
+  // Asked once, for every wildcard entry, and only if one is reached - its public suffix
+  // only once one matches.
   let isIP: boolean | undefined;
+  let suffix: string | null | undefined;
+  const readSuffix = (): string | null =>
+    suffix === undefined
+      ? (suffix = wildcardHostSuffix(normalizedDomain))
+      : suffix;
 
   for (let index = 0; index < list.cleaned.length; index++) {
     const entry = compiledDomainEntry(list, index);
@@ -903,7 +910,12 @@ export function matchesDomainList(
       isIP ??= isIPAddress(normalizedDomain);
       if (
         entry.compiled !== undefined &&
-        matchesCompiledWildcard(normalizedDomain, entry.compiled, isIP)
+        matchesCompiledWildcard(
+          normalizedDomain,
+          entry.compiled,
+          isIP,
+          readSuffix,
+        )
       ) {
         return true;
       }

@@ -781,6 +781,8 @@ export type CompiledWildcardPattern =
       readonly leftLabels: readonly string[];
       /** The labels after it, matched exactly. */
       readonly fixedTail: readonly string[];
+      /** {@link fixedTail} joined, for the public-suffix check of a match. */
+      readonly tail: string;
       /** For a `**.` pattern, the normalized name it sits on, which it never matches. */
       readonly apex: string | undefined;
     };
@@ -824,6 +826,7 @@ export function compileWildcardPattern(
     kind: 'labels',
     leftLabels: labels.slice(0, fixedTailStart),
     fixedTail,
+    tail: fixedTail.join('.'),
     // "**." requires at least one label before the remainder, so a domain that
     // exactly equals the remainder can never match (e.g., "**.example.com" ≠ "example.com").
     apex: normalizedPattern.startsWith('**.')
@@ -888,7 +891,7 @@ export function matchesCompiledWildcard(
   // sits under it, `evil.os.hedmark.no` - another registrant's, as a tail over a suffix
   // would (see `isUnmatchableWildcardTail`). Asked of a match alone, as a host the
   // pattern does not cover needs no lookup.
-  const tail = compiled.fixedTail.join('.');
+  const tail = compiled.tail;
   const suffix = readSuffix();
   return !(
     suffix !== null &&
