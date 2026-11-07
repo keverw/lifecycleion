@@ -57,3 +57,36 @@ Status: not started. These modules were not touched by PR #34; the review rounds
 - **`src/lib/strings.ts` `characterAllowedOnly` JSDoc:**
   - The case-insensitive example (around line 225) claims `"Hello"`; the code returns `"hello"`. `docs/strings.md` already has this right.
   - The replacement example (around line 230) claims `"Hello---"`; the code returns `"Hello----"`, since four characters are disallowed.
+
+## 7. `generateID('ulid', 0)` ignores the seed
+
+- **Where:** `src/lib/id-helpers.ts`, around line 115: `return ulid(seedTime)`. `IDHelpers('ulid').generateID(0)` goes through the same call.
+- **Problem:** ulid 3.0.2 reads its seed as `!seedTime || isNaN(seedTime) ? Date.now() : seedTime`, so a seed of `0` is replaced by the current time. The JSDoc and docs promise any non-negative finite millisecond seed is embedded, and `uuid7` and `objectID` honour `0`.
+- **Repro:** `decodeTime(generateID('ulid', 0))` gives the current time, not `0`.
+- **Fix:** pass a seed of `0` to ulid in a form it accepts, for example through `monotonicFactory` or by encoding the time with `encodeTime(0, 10)` plus random characters. Test that `decodeTime` returns `0`.
+
+## 8. `generateID` seeds a format cannot hold are handled three ways
+
+- **Where:** `src/lib/id-helpers.ts`, lines 95-117.
+- **Problem:** the validation lets through any non-negative finite seed, but:
+  - a fractional seed (`1500.5`) is floored by `uuid7` and `objectID`, while `ulid` throws `ULIDError: Time must be an integer`, not the documented `TypeError`;
+  - a seed past the field's width wraps silently: `objectID` at 2^32 s gives timestamp field `00000001`, and `uuid7` at 2^48 ms gives `00000000-0000-…`, while `ulid` at 2^48 throws `ULIDError`.
+- **Fix:** decide one rule - floor fractions, and refuse a seed past the format's maximum (2^48 - 1 ms for `uuid7` and `ulid`, 2^32 - 1 s for `objectID`) with a `TypeError`, before any library is called. Document the maximum per format in `docs/id-helpers.md` and test each boundary.
+
+## 9. `LRUCache.set()` docs disagree on an oversized write and on expiry order
+
+- **Where:** `docs/lru-cache.md` around lines 96, 106 and 165; code in `src/lib/lru-cache/index.ts` around lines 256-280.
+- **Problem:** the code sweeps expired entries before it checks the write's size, so a skipped oversized write still removes unrelated expired entries and emits their `expired` events. The docs say the skip happens "without changing cache state" and "leaves the cache unchanged", and line 165 says expired entries are removed "after inserting the new value". The tests (`index.test.ts` around lines 734 and 820) pin the sweep-first behaviour.
+- **Fix:** keep the code and reword the docs: the skip leaves the key's entry and the written value untouched, expired entries are swept at the start of every `set()`, skipped or not, and the sweep runs before inserting.
+
+## 10. `formatJSON` returns the text `undefined`
+
+- **Where:** `src/lib/json-helpers.ts`, line 12.
+- **Problem:** for `undefined`, a function or a symbol, `JSON.stringify` returns `undefined`, and the concatenation turns it into the string `"undefined"` (or `"undefined\n"` with `isHuman`), which `JSON.parse` cannot read. The JSDoc promises "The formatted JSON string".
+- **Fix:** decide whether to throw a `TypeError` for a value JSON cannot represent, or to return `undefined` with the return type widened to match. Document it and test all three inputs.
+
+## 11. `removeEmptyStringsFromArray` docs don't say the kept strings are trimmed
+
+- **Where:** `src/lib/arrays.ts` lines 7-17; `docs/arrays.md` line 44.
+- **Problem:** the kept items come back trimmed (`['  hello  ', '', '\tworld\n']` gives `['hello', 'world']`), while the docs say only that each item "is trimmed before checking".
+- **Fix:** reword the docs to say the returned strings are trimmed, and add a JSDoc to match. No code change.
