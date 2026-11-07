@@ -11753,31 +11753,45 @@ test('an abort after the body arrived takes the pipe off a sink whose end never 
 });
 
 test('an upload a 205 answers early goes out in full while the server reads on', async () => {
+  // Each write is acknowledged only after the 205 has arrived, so the upload is still going
+  // out when it does, however much a real socket's buffers would have taken.
   const uploadSize = 4 * 1024 * 1024;
-  let receivedBytes: Promise<number> | undefined;
-  const server = http.createServer((req, res) => {
-    // Answered at once, with a stray body, then read on slowly.
-    res.writeHead(205, { 'content-length': '13' });
-    res.write('Reset Content');
-    receivedBytes = new Promise((resolve, reject) => {
-      let bytes = 0;
-      req.on('data', (chunk: Buffer) => {
-        bytes += chunk.length;
-        req.pause();
-        setTimeout(() => req.resume(), 2);
-      });
-      req.on('end', () => {
-        res.end();
-        resolve(bytes);
-      });
-      req.on('error', reject);
-    });
+  const parked: Array<() => void> = [];
+  let writtenBytes = 0;
+  const req = new MockClientRequest((data, callback) => {
+    writtenBytes += data.length;
+    parked.push(() => callback?.(null));
+    return true;
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const res = new MockIncomingMessage(205, { 'content-length': '13' });
+  // The upload's writes acknowledged one at a time, then the 205's end once it is all out.
+  const readOn = (): void => {
+    const acknowledge = parked.shift();
+
+    if (acknowledge !== undefined) {
+      acknowledge();
+    } else if (req.ended) {
+      res.emit('end');
+      return;
+    }
+
+    setImmediate(readOn);
+  };
+  const requestSpy = spyOn(http, 'request').mockImplementation(
+    (_options, callback) => {
+      const cb = callback as ((res: http.IncomingMessage) => void) | undefined;
+      queueMicrotask(() => {
+        cb?.(res as unknown as http.IncomingMessage);
+        res.emit('data', Buffer.from('Reset Content'));
+        setImmediate(readOn);
+      });
+      return req as unknown as http.ClientRequest;
+    },
+  );
+
   try {
-    const { port } = server.address() as AddressInfo;
     const response = await new NodeAdapter().send({
-      requestURL: `http://127.0.0.1:${port}/upload`,
+      requestURL: 'http://example.test/upload',
       method: 'PUT',
       headers: {},
       body: new Uint8Array(uploadSize).fill(0x61),
@@ -11786,10 +11800,11 @@ test('an upload a 205 answers early goes out in full while the server reads on',
     expect(response.status).toBe(205);
     expect(response.body).toBeNull();
     expect(await response.requestBodySettled).toBeUndefined();
-    expect(await receivedBytes).toBe(uploadSize);
+    expect(writtenBytes).toBe(uploadSize);
+    expect(req.ended).toBe(true);
+    expect(req.destroyed).toBe(false);
   } finally {
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    requestSpy.mockRestore();
   }
 });
 
