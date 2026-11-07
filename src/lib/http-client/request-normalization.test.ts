@@ -3920,6 +3920,36 @@ test('a late cancel on an answer that failed ends the request cancelled too', as
   expect(builder.error?.cancelReason).toBe('late');
 });
 
+test("a cancel made while an interceptor's failed result is read for the report ends the request cancelled", async () => {
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  let cancelResult: CancelResult | undefined;
+  // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
+  let builder: ReturnType<HTTPClient['get']>;
+  let reads = 0;
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    // Refused on the client's first read; the failure's report reads it again.
+    get requestURL() {
+      reads++;
+      if (reads === 1) {
+        throw new Error('first read');
+      }
+      cancelResult ??= builder.cancel('in-report');
+      return 'http://api.test/x';
+    },
+  }));
+  builder = client.get('/x');
+  const response = await builder.send();
+
+  expect(cancelResult).toBe('cancelled');
+  expect(response.isCancelled).toBe(true);
+  expect(builder.state).toBe('cancelled');
+  expect(builder.error?.cancelReason).toBe('in-report');
+});
+
 test('a cancel made before an early failure ends the request cancelled, as its true says', async () => {
   // An initial interceptor that cancels, then throws.
   const client = new HTTPClient({

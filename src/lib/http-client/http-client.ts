@@ -1286,35 +1286,40 @@ export class BaseHTTPClient {
               normalizeError(error),
             );
 
-            // And counted as it is there: `0`, a setup error before any attempt, not the
-            // `null` of a request the interceptors ended.
-            if (isSetupError) {
-              callbacks.setAttemptCount(0);
+            // The reads above run the interceptor's own getters, and a cancel made in one
+            // was told it cancelled the request: it ends cancelled, below, as one made
+            // before the failure does.
+            if (!cancelSignal.aborted) {
+              // And counted as it is there: `0`, a setup error before any attempt, not the
+              // `null` of a request the interceptors ended.
+              if (isSetupError) {
+                callbacks.setAttemptCount(0);
+              }
+
+              callbacks.setError(normalizedError);
+              trackedCallbacks.setState('failed');
+              callbacks.setResponse(response);
+
+              await this._runErrorObservers(
+                normalizedError,
+                this._bestEffortAttemptRequestFromPending(
+                  initialRequestCandidate,
+                  attemptLimits,
+                  requestID,
+                  // The URL the response and error name, so a host filter agrees with
+                  // them.
+                  { fallbackURL: url },
+                  // A body that failed to copy is not read a second time; it is reported
+                  // as it came.
+                  initialBodyCopy.didFail ? 'unbuildable' : undefined,
+                ),
+                {
+                  type: 'final',
+                },
+              );
+
+              return response;
             }
-
-            callbacks.setError(normalizedError);
-            trackedCallbacks.setState('failed');
-            callbacks.setResponse(response);
-
-            await this._runErrorObservers(
-              normalizedError,
-              this._bestEffortAttemptRequestFromPending(
-                initialRequestCandidate,
-                attemptLimits,
-                requestID,
-                // The URL the response and error name, so a host filter agrees with
-                // them.
-                { fallbackURL: url },
-                // A body that failed to copy is not read a second time; it is reported
-                // as it came.
-                initialBodyCopy.didFail ? 'unbuildable' : undefined,
-              ),
-              {
-                type: 'final',
-              },
-            );
-
-            return response;
           }
         }
 

@@ -2901,8 +2901,9 @@ export class NodeAdapter implements HTTPAdapter {
  * is a bound rather than a promise: a receiver that stops reading for longer than this
  * while still intending to read gets a truncated body, and the far more common shape - a
  * proxy that has answered and will never read again - costs one idle socket for five to
- * ten seconds, as the watchdog checks in five-second windows, instead of one held to that
- * server's timeout.
+ * ten seconds, as the watchdog checks in five-second windows - longer where the runtime
+ * reports a late chunk accepted, which counts as progress and starts the window again (Bun
+ * does, for a large body) - instead of one held to that server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
 
