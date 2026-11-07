@@ -2267,11 +2267,13 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            // A bodiless answer - a `205` that carries bytes - whose bytes pass the limit
-            // is answered at once, with no body, and the connection torn down, so they are
-            // not drained for as long as the server sends them. Its download is complete
-            // at `0` bytes, as one that ends on its own reports it.
-            const answerBodilessEarly = (): void => {
+            // A bodiless answer - a `205` that carries bytes - is whole once its headers
+            // are in, so it is answered, with no body, without waiting on those bytes:
+            // once they pass the limit, the connection torn down by `teardown` so they are
+            // not drained for as long as the server sends them, and when the connection
+            // fails while they drain, as FetchAdapter never reads them. Its download is
+            // complete at `0` bytes, as one that ends on its own reports it.
+            const answerBodilessEarly = (teardown?: () => void): void => {
               guardedDownloadProgress?.(completeProgressEvent(0));
 
               // Cancelled from that event: the request is already answered.
@@ -2280,7 +2282,7 @@ export class NodeAdapter implements HTTPAdapter {
               }
 
               activeBufferedResponse = undefined;
-              tearDownAfterResponse();
+              teardown?.();
               settleResponse({ status, headers, body: null });
             };
 
@@ -2288,6 +2290,17 @@ export class NodeAdapter implements HTTPAdapter {
               status,
               headers,
             };
+
+            // One that says up front it carries more than the limit is answered before a
+            // byte is read, as a body that says so is refused.
+            if (
+              !hasBody &&
+              declaredLength !== undefined &&
+              declaredLength > maxResponseBytes
+            ) {
+              answerBodilessEarly(tearDownAfterResponse);
+              return;
+            }
             const chunks: Buffer[] = [];
             let loadedBytes = 0;
             // A bodiless answer's bytes, counted only against the limit (see
@@ -2315,7 +2328,7 @@ export class NodeAdapter implements HTTPAdapter {
               if (!hasBody) {
                 drainedBytes += chunk.length;
                 if (drainedBytes > maxResponseBytes) {
-                  answerBodilessEarly();
+                  answerBodilessEarly(tearDownAfterResponse);
                 }
                 return;
               }
@@ -2425,6 +2438,13 @@ export class NodeAdapter implements HTTPAdapter {
               chunks.length = 0;
 
               if (!activeBufferedResponse) {
+                return;
+              }
+
+              // A bodiless answer's bytes failing is no failure of its body: it has none.
+              // The connection failed on its own, so nothing is torn down here.
+              if (!hasBody) {
+                answerBodilessEarly();
                 return;
               }
 

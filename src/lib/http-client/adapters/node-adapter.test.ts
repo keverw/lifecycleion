@@ -10884,6 +10884,46 @@ test('a 205 whose bytes pass the limit is answered at once, not drained for as l
   }
 });
 
+for (const ending of [
+  'declares more than the limit',
+  'loses its connection',
+] as const) {
+  test(`a 205 that ${ending} is answered bodiless, not waited on or failed`, async () => {
+    const server = http.createServer((_req, res) => {
+      if (ending === 'declares more than the limit') {
+        // Its headers alone, then held open: answered from what they say.
+        res.writeHead(205, { 'content-length': String(100 * 1024 * 1024) });
+        res.flushHeaders();
+        return;
+      }
+      res.writeHead(205, { 'transfer-encoding': 'chunked' });
+      res.write('x'.repeat(10), () => {
+        res.socket?.destroy();
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      const { port } = server.address() as AddressInfo;
+      const response = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/`,
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+      });
+
+      expect(response.status).toBe(205);
+      expect(response.isStreamError).not.toBe(true);
+      expect(response.streamErrorCode).toBeUndefined();
+      expect(response.body).toBeNull();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+}
+
 test('a factory decline whose teardown throws still answers as the decline', async () => {
   let respond: ((res: http.IncomingMessage) => void) | undefined;
   let isTornDown = false;

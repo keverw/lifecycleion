@@ -483,6 +483,28 @@ for (const key of ['sinks', 'diagnosticSinks'] as const) {
   });
 }
 
+for (const [key, removeMethod] of [
+  ['sinks', 'removeSink'],
+  ['diagnosticSinks', 'removeDiagnosticSink'],
+] as const) {
+  test(`${key}: a hole is kept through ${removeMethod}, still no sink`, async () => {
+    const sink = { write: (): void => {} };
+    const list: unknown[] = [];
+    list[1] = sink;
+    const logger = new Logger({
+      callProcessExit: false,
+      [key]: list as never,
+    });
+
+    expect(logger[removeMethod](sink)).toBe(true);
+    const kept =
+      key === 'sinks' ? logger.getSinks() : logger.getDiagnosticSinks();
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toBeUndefined();
+    await logger.close();
+  });
+}
+
 for (const addMethod of ['addSink', 'addDiagnosticSink'] as const) {
   for (const when of ['during', 'after'] as const) {
     test(`${addMethod} refuses new ownership ${when} close`, async () => {

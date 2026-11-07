@@ -667,6 +667,26 @@ describe('MockAdapter via HTTPClient', () => {
     ]);
   });
 
+  // Past the call-argument limit a spread into `push` would hit.
+  test('a long route set-cookie list is gathered with the cookies shorthand', async () => {
+    const cookieAdapter = new MockAdapter();
+    const routeCookies = Array.from(
+      { length: 1_000_000 },
+      (_, index) => `c${index}=1`,
+    );
+    cookieAdapter.routes.get('/test', () => ({
+      status: 200,
+      headers: { 'set-cookie': routeCookies },
+      cookies: { a: 'shorthand' },
+    }));
+
+    const response = await cookieAdapter.send(makeAdapterRequest());
+    const setCookie = response.headers['set-cookie'] as string[];
+
+    expect(setCookie).toHaveLength(1_000_001);
+    expect(setCookie.at(-1)).toBe('a=shorthand; Path=/');
+  });
+
   test('null adapter default delay uses zero', async () => {
     const nullableAdapter = new MockAdapter({ defaultDelay: null });
     nullableAdapter.routes.get('/test', () => ({ status: 200, delay: null }));

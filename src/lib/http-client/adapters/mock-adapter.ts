@@ -847,7 +847,11 @@ export class MockAdapter implements HTTPAdapter {
         const existing = responseHeaders[key];
         delete responseHeaders[key];
         if (Array.isArray(existing)) {
-          existingArr.push(...existing);
+          // By index, not spread into `push`: a long list would pass the call's argument
+          // limit.
+          for (const entry of existing) {
+            existingArr.push(entry);
+          }
         } else if (existing !== undefined) {
           existingArr.push(existing);
         }
