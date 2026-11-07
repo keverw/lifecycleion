@@ -649,6 +649,14 @@ export class XHRAdapter implements HTTPAdapter {
       };
 
       /**
+       * Whether an answer's status says it carries no body (see `hasResponseBody`). Not a
+       * `0`, the status an XHR reads before it has an answer - a followed redirect's, say -
+       * which is left to the size limit and `load`, as it was.
+       */
+      const isBodilessAnswer = (status: number): boolean =>
+        status !== 0 && !hasResponseBody(method, status);
+
+      /**
        * Act on the answer as it is first read: a redirect the browser followed ends the send, and
        * any other ends the upload - and the send too, for a body whose `Content-Length`
        * says up front it is past `maxResponseBytes`, as FetchAdapter refuses one before
@@ -734,10 +742,19 @@ export class XHRAdapter implements HTTPAdapter {
           // Answered by now, for an XHR that reports no change of state too: read once, so
           // a failure later keeps it. One that cannot be read yet is read again where it
           // is needed: past the limit, and on `load`.
-          readAndActOnAnswer();
+          const answeredSoFar = readAndActOnAnswer();
 
           // Ended by that answer, or by a cancel from its upload callback.
           if (didSettle) {
+            return;
+          }
+
+          // A bodiless answer's bytes - a `205` that carries some - are neither measured
+          // nor reported: no body is handed over, as `load` hands over none.
+          if (
+            answeredSoFar !== undefined &&
+            isBodilessAnswer(answeredSoFar.status)
+          ) {
             return;
           }
 
@@ -750,7 +767,7 @@ export class XHRAdapter implements HTTPAdapter {
             const answer = readAndActOnAnswer() ?? readAnswer();
 
             // Ended by the answer, read for the first time here.
-            if (didSettle) {
+            if (didSettle || isBodilessAnswer(answer.status)) {
               return;
             }
 

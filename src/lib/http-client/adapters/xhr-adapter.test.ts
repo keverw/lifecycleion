@@ -789,6 +789,31 @@ describe('XHRAdapter', () => {
     expect(response.body).toBeNull();
   });
 
+  test('a 205 that carries bytes is answered bodiless, its bytes neither measured nor reported', async () => {
+    const downloads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/reset',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+      onDownloadProgress: (event) => {
+        downloads.push(event.loaded);
+      },
+    });
+
+    lastXHR.status = 205;
+    lastXHR.getAllResponseHeadersResult = 'content-encoding: identity\r\n';
+    lastXHR.simulateDownloadProgress(100, 100);
+    lastXHR.response = textBody('x'.repeat(100));
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.status).toBe(205);
+    expect(response.streamErrorCode).toBeUndefined();
+    expect(response.body).toBeNull();
+    expect(downloads.every((loaded) => loaded === 0)).toBe(true);
+  });
+
   test('a body refused mid-download still ends with the final upload event', async () => {
     const uploads: number[] = [];
     const promise = new XHRAdapter().send({
