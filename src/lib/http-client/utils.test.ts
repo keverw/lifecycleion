@@ -1416,6 +1416,8 @@ describe('matchesFilter', () => {
       for (const requestURL of [
         'https://os.hedmark.no/x',
         'https://evil.os.hedmark.no/x',
+        // A label with a hyphen at an edge, which the URL parser reads.
+        'https://evil-.os.hedmark.no/x',
       ]) {
         expect(matchesFilter({ hosts }, { requestURL }, 'request')).toBe(false);
       }

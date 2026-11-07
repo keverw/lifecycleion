@@ -911,7 +911,12 @@ export function matchesCompiledWildcard(
   // would (see `isUnmatchableWildcardTail`). Asked of a match alone, as a host the
   // pattern does not cover needs no lookup.
   const tail = compiled.fixedTail.join('.');
-  const suffix = getPublicSuffix(normalizedDomain);
+  // Without tldts's own hostname check, which answers `null` for a label with a hyphen
+  // at an edge (`evil-.os.hedmark.no`) - a host the URL parser, and so a `hosts` filter,
+  // reads - and would skip this (see `public-suffix.ts`).
+  const suffix = getPublicSuffix(normalizedDomain, {
+    validateHostname: false,
+  });
   return !(
     suffix !== null &&
     suffix.length > tail.length &&
