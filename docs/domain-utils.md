@@ -123,6 +123,7 @@ const ok = matchesOriginList(
 - A tail under a Public Suffix List wildcard rule is refused too: `*.kawasaki.jp` and `*.sch.uk` are rules that make every label beneath the tail a public suffix, so `*.kawasaki.jp` would match the suffix `foo.kawasaki.jp` and the apex `city.kawasaki.jp`
 - A pattern whose tail has a public suffix listed beneath it matches no host under that suffix: `*.hedmark.no` is valid and matches `api.hedmark.no`, but not the suffix `os.hedmark.no`, and `**.hedmark.no` does not match `evil.os.hedmark.no`, which another registrant holds
 - Only the ICANN section of the Public Suffix List guards a tail. A private suffix - `github.io`, `vercel.app`, `s3.amazonaws.com` - is an ordinary domain here, so `*.github.io` is valid and matches every tenant's site, `matchesCORSCredentialsList` with `allowWildcardSubdomains` included. Name the tenant (`*.mine.github.io`) unless every tenant is meant
+- The Public Suffix List ships compiled into the `tldts` peer dependency and is looked up offline - nothing is downloaded at runtime - so these guards use a snapshot frozen at the installed `tldts` version. A suffix added to the list later is guarded once `tldts` is upgraded within its supported range
 - Unicode dot normalization (`．。｡` → `.`) to avoid bypasses
 - Step limits and label count caps to avoid pathological inputs
 - Credentials helpers: exact-only and wildcard-enabled variants
