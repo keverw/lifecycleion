@@ -2304,11 +2304,12 @@ export class NodeAdapter implements HTTPAdapter {
               settleResponse({ status, headers, body: null });
 
               // An upload still going out - its last bytes still buffered included - is
-              // left to finish, as one an early `200` answers is, and watched for a stall
-              // as that one is. The bytes the `205` carries are drained unread meanwhile,
-              // up to `maxResponseBytes`, past which the connection is let go at once. It
-              // is let go once the upload has gone out either way; with none going out,
-              // now.
+              // left to finish, as one an early `200` answers is: a writer still running
+              // is watched for a stall as that one is, and a request whose writer has
+              // finished is left to send what it buffered, as there. The bytes the `205`
+              // carries are drained unread meanwhile, up to `maxResponseBytes`, past which
+              // the connection is let go at once. It is let go once the upload has gone
+              // out either way; with none going out, now.
               if (!req.writableFinished) {
                 let drainedBytes = 0;
                 body.on('data', (chunk: Buffer) => {
