@@ -2274,6 +2274,11 @@ export class NodeAdapter implements HTTPAdapter {
             // fails while they drain, as FetchAdapter never reads them. Its download is
             // complete at `0` bytes, as one that ends on its own reports it.
             const answerBodilessEarly = (teardown?: () => void): void => {
+              // Answered once: a caller after the request is answered sends nothing.
+              if (activeBufferedResponse === undefined) {
+                return;
+              }
+
               guardedDownloadProgress?.(completeProgressEvent(0));
 
               // Cancelled from that event: the request is already answered.
@@ -2292,9 +2297,13 @@ export class NodeAdapter implements HTTPAdapter {
             };
 
             // One that says up front it carries more than the limit is answered before a
-            // byte is read, as a body that says so is refused.
+            // byte is read, as a body that says so is refused. A `205` alone, and not to a
+            // `HEAD`: Node's parser reads no bytes for the other bodiless answers, whatever
+            // their `Content-Length` says, so they end on their own and keep their
+            // connection.
             if (
-              !hasBody &&
+              status === 205 &&
+              hasResponseBody(request.method, 200) &&
               declaredLength !== undefined &&
               declaredLength > maxResponseBytes
             ) {

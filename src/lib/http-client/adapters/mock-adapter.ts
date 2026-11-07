@@ -847,8 +847,8 @@ export class MockAdapter implements HTTPAdapter {
         const existing = responseHeaders[key];
         delete responseHeaders[key];
         if (Array.isArray(existing)) {
-          // By index, not spread into `push`: a long list would pass the call's argument
-          // limit.
+          // One at a time, not spread into `push`: a long list would pass the call's
+          // argument limit. The headers are this adapter's own copy, so iterating is safe.
           for (const entry of existing) {
             existingArr.push(entry);
           }
@@ -856,7 +856,10 @@ export class MockAdapter implements HTTPAdapter {
           existingArr.push(existing);
         }
       }
-      responseHeaders['set-cookie'] = [...existingArr, ...setCookieEntries];
+      for (const entry of setCookieEntries) {
+        existingArr.push(entry);
+      }
+      responseHeaders['set-cookie'] = existingArr;
     }
 
     // Auto-set content-type when handler didn't provide one.

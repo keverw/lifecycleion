@@ -10924,6 +10924,47 @@ for (const ending of [
   });
 }
 
+for (const [method, status] of [
+  ['HEAD', 200],
+  ['GET', 204],
+  ['GET', 304],
+] as const) {
+  test(`a ${method} answered ${status} with a Content-Length past the limit keeps its connection`, async () => {
+    // Node's parser reads no bytes for it, so it ends on its own: nothing to cut short.
+    let connections = 0;
+    const server = http.createServer((_req, res) => {
+      res.writeHead(status, { 'content-length': String(100 * 1024 * 1024) });
+      res.end();
+    });
+    server.on('connection', () => {
+      connections++;
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      const { port } = server.address() as AddressInfo;
+      const adapter = new NodeAdapter();
+      for (let index = 0; index < 2; index++) {
+        const response = await adapter.send({
+          requestURL: `http://127.0.0.1:${port}/`,
+          method,
+          headers: {},
+          maxResponseBytes: 1000,
+        });
+
+        expect(response.status).toBe(status);
+        expect(response.isStreamError).not.toBe(true);
+      }
+
+      expect(connections).toBe(1);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+}
+
 test('a factory decline whose teardown throws still answers as the decline', async () => {
   let respond: ((res: http.IncomingMessage) => void) | undefined;
   let isTornDown = false;
