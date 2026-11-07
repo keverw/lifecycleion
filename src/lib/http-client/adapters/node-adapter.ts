@@ -1189,11 +1189,6 @@ export class NodeAdapter implements HTTPAdapter {
          * whichever regular look comes after it.
          */
         const watchForStalledUpload = (): void => {
-          // One watch at a time: an early `205` arms it before its response closes.
-          if (stallWatchdogTimer !== undefined) {
-            return;
-          }
-
           let bytesAtLastTick = uploadedBytesSeen;
 
           /** What is left of the source grace while the writer waits, else `Infinity`. */
@@ -2272,27 +2267,14 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            // A `205` is whole once its headers are in: it has no body (RFC 9110), so
-            // FetchAdapter never reads what one carries anyway, and neither is it waited
-            // on here - not until a stray body ends, nor until one that never arrives
-            // times out. One whose bytes are not known to be none - a `Content-Length`
-            // above `0`, or none at all - is answered now, with no body, and its
-            // connection let go, as FetchAdapter lets one go (see below). Not one to a
-            // `HEAD`, nor the
-            // other bodiless answers: Node's parser reads no bytes for them, whatever
-            // their `Content-Length` says, so they end on their own and keep their
-            // connection. Its download is complete at `0` bytes, as one that ends on its
-            // own reports it.
             activeBufferedResponse = {
               status,
               headers,
             };
 
-            if (
-              status === 205 &&
-              asciiUppercase(request.method) !== 'HEAD' &&
-              declaredLength !== 0
-            ) {
+            // A bodiless answer, with no body handed over: complete at `0` bytes, as one
+            // that ends on its own reports it, and its connection let go.
+            const answerBodiless = (): void => {
               guardedDownloadProgress?.(completeProgressEvent(0));
 
               // Cancelled from that event: the request is already answered.
@@ -2301,37 +2283,34 @@ export class NodeAdapter implements HTTPAdapter {
               }
 
               activeBufferedResponse = undefined;
+              tearDownAfterResponse();
               settleResponse({ status, headers, body: null });
+            };
 
-              // An upload still going out - its last bytes still buffered included - is
-              // left to finish, as one an early `200` answers is: a writer still running
-              // is watched for a stall as that one is, and a request whose writer has
-              // finished is left to send what it buffered, as there. The bytes the `205`
-              // carries are drained unread meanwhile, up to `maxResponseBytes`, past which
-              // the connection is let go at once. It is let go once the upload has gone
-              // out either way; with none going out, now.
-              if (!req.writableFinished) {
-                let drainedBytes = 0;
-                body.on('data', (chunk: Buffer) => {
-                  drainedBytes += chunk.length;
-                  if (drainedBytes > maxResponseBytes) {
-                    tearDownAfterResponse();
-                  }
-                });
-                // The request is answered: a failure of what is drained is no one's.
-                body.on('error', () => {});
-                if (isWritingBody) {
-                  watchForStalledUpload();
-                }
-                req.once('finish', tearDownAfterResponse);
-              } else {
-                tearDownAfterResponse();
-              }
+            // A `205` has no body (RFC 9110), so FetchAdapter never reads what one carries
+            // anyway. Node's parser reads it as a body - it reads none for a `HEAD`, a
+            // `204` or a `304`, whatever their `Content-Length` says, so those end on
+            // their own and keep their connection. One whose bytes are not known to be
+            // none - a `Content-Length` above `0`, or none at all - is answered as its
+            // headers arrive, as FetchAdapter answers it, when nothing is still being
+            // uploaded. An upload still going out is left to finish as an early `200`
+            // leaves one: the answer read to its end, its bytes drained unread up to
+            // `maxResponseBytes`, bounded by the attempt's timeout and, once it closes,
+            // the stall watchdog.
+            if (
+              status === 205 &&
+              asciiUppercase(request.method) !== 'HEAD' &&
+              declaredLength !== 0 &&
+              req.writableFinished
+            ) {
+              answerBodiless();
               return;
             }
 
             const chunks: Buffer[] = [];
             let loadedBytes = 0;
+            // A bodiless answer's bytes, drained unread (see `answerBodiless`).
+            let drainedBytes = 0;
 
             // Deduplication guard — when Content-Length is known and the last
             // `data` chunk fills the body exactly, progress: 1 fires there.
@@ -2347,8 +2326,13 @@ export class NodeAdapter implements HTTPAdapter {
                 return;
               }
 
-              // A bodiless answer has none to keep or report (see above).
+              // A bodiless answer has none to keep or report (see above): its bytes are
+              // counted against the limit alone, past which it is answered at once.
               if (!hasBody) {
+                drainedBytes += chunk.length;
+                if (drainedBytes > maxResponseBytes) {
+                  answerBodiless();
+                }
                 return;
               }
 

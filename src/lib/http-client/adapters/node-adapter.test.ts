@@ -11793,61 +11793,71 @@ test('an upload a 205 answers early goes out in full while the server reads on',
   }
 });
 
-for (const ending of ['stalls', 'outlasts its bytes past the limit'] as const) {
-  test(`an upload a 205 answers early that ${ending} is cut, not held`, async () => {
-    // Accepted and never acknowledged: the upload is parked for good.
-    const req = new MockClientRequest(() => true);
-    // No `Content-Length`, and no end: the 205 never closes on its own.
-    const res = new MockIncomingMessage(205, {});
-    const requestSpy = spyOn(http, 'request').mockImplementation(
-      (_options, callback) => {
-        const cb = callback as
-          ((res: http.IncomingMessage) => void) | undefined;
-        queueMicrotask(() => {
-          cb?.(res as unknown as http.IncomingMessage);
-          if (ending === 'outlasts its bytes past the limit') {
-            queueMicrotask(() => {
-              res.emit('data', Buffer.alloc(100));
-            });
-          }
-        });
-        return req as unknown as http.ClientRequest;
-      },
-    );
-    const onError = (event: Event): void => {
-      event.preventDefault();
-    };
-    globalThis.addEventListener('error', onError);
-
-    try {
-      const response = await new NodeAdapter().send({
-        requestURL: 'http://example.test/upload',
-        method: 'POST',
+test('a 205 that answers an upload still going out is read as an early 200 is, bounded by the signal', async () => {
+  // Answered at once, never ended, and the upload never read: as an early `200` with an
+  // endless body, the attempt's signal ends it, and its upload with it.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(205);
+    res.flushHeaders();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const outcome = await new NodeAdapter()
+      .send({
+        requestURL: `http://127.0.0.1:${port}/upload`,
+        method: 'PUT',
         headers: {},
-        body: 'x'.repeat(256 * 1024),
-        maxResponseBytes: 10,
+        body: new Uint8Array(32 * 1024 * 1024),
+        signal: AbortSignal.timeout(300),
+      })
+      .then(
+        (response) => response.status,
+        (error: unknown) => (error as Error).name,
+      );
+
+    expect(outcome).not.toBe(205);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('a 205 whose bytes pass the limit during an upload is answered at once', async () => {
+  // Accepted and never acknowledged: the upload is parked for good.
+  const req = new MockClientRequest(() => true);
+  // No `Content-Length`, and no end: the 205 never closes on its own.
+  const res = new MockIncomingMessage(205, {});
+  const requestSpy = spyOn(http, 'request').mockImplementation(
+    (_options, callback) => {
+      const cb = callback as ((res: http.IncomingMessage) => void) | undefined;
+      queueMicrotask(() => {
+        cb?.(res as unknown as http.IncomingMessage);
+        queueMicrotask(() => {
+          res.emit('data', Buffer.alloc(100));
+        });
       });
+      return req as unknown as http.ClientRequest;
+    },
+  );
 
-      expect(response.status).toBe(205);
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: 'http://example.test/upload',
+      method: 'POST',
+      headers: {},
+      body: 'x'.repeat(256 * 1024),
+      maxResponseBytes: 10,
+    });
 
-      if (ending === 'stalls') {
-        const outcome = await Promise.race([
-          response.requestBodySettled,
-          // Two watchdog windows and change; see `UPLOAD_STALL_GRACE_MS`.
-          new Promise((resolve) => setTimeout(() => resolve('hung'), 12_000)),
-        ]);
-
-        expect(outcome).toBeInstanceOf(Error);
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      expect(req.destroyed).toBe(true);
-    } finally {
-      globalThis.removeEventListener('error', onError);
-      requestSpy.mockRestore();
-    }
-  }, 30000);
-}
+    expect(response.status).toBe(205);
+    expect(response.body).toBeNull();
+    expect(response.isStreamError).not.toBe(true);
+    expect(req.destroyed).toBe(true);
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
 
 test('the stall watchdog timer is cleared once an early-ack upload finishes', async () => {
   // Left pending once the writer finishes, the watchdog armed as the early response
