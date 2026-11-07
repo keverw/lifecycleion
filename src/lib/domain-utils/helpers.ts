@@ -899,9 +899,22 @@ export function matchesCompiledWildcard(
     return false;
   }
 
-  return matchesSplitPattern(
-    domainLabels,
-    compiled.leftLabels,
-    compiled.fixedTail,
+  if (
+    !matchesSplitPattern(domainLabels, compiled.leftLabels, compiled.fixedTail)
+  ) {
+    return false;
+  }
+
+  // Nor a host whose public suffix lies beneath the tail: a suffix the list names under a
+  // tail that is not one (`os.hedmark.no` under `hedmark.no`) makes the host - and what
+  // sits under it, `evil.os.hedmark.no` - another registrant's, as a tail over a suffix
+  // would (see `isUnmatchableWildcardTail`). Asked of a match alone, as a host the
+  // pattern does not cover needs no lookup.
+  const tail = compiled.fixedTail.join('.');
+  const suffix = getPublicSuffix(normalizedDomain);
+  return !(
+    suffix !== null &&
+    suffix.length > tail.length &&
+    suffix.endsWith(`.${tail}`)
   );
 }

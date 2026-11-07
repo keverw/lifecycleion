@@ -4092,6 +4092,32 @@ describe('matcher options and the validateConfigEntry context', () => {
   });
 });
 
+describe('a wildcard over a tail with a public suffix beneath it', () => {
+  test('matches no host under that suffix, nor the suffix itself', () => {
+    // `os.hedmark.no` is a public suffix the list names under `hedmark.no`, which is not.
+    expect(matchesWildcardDomain('os.hedmark.no', '*.hedmark.no')).toBe(false);
+    expect(matchesWildcardDomain('evil.os.hedmark.no', '**.hedmark.no')).toBe(
+      false,
+    );
+    expect(
+      matchesCORSCredentialsList(
+        'https://evil.os.hedmark.no',
+        ['https://**.hedmark.no'],
+        { allowWildcardSubdomains: true },
+      ),
+    ).toBe(false);
+    expect(
+      matchesOriginList('https://evil.os.hedmark.no', [
+        'https://**.hedmark.no',
+      ]),
+    ).toBe(false);
+
+    // A host the tail's own registrant holds still matches.
+    expect(matchesWildcardDomain('api.hedmark.no', '*.hedmark.no')).toBe(true);
+    expect(matchesWildcardDomain('a.b.hedmark.no', '**.hedmark.no')).toBe(true);
+  });
+});
+
 describe('allowlist entries the validator refuses', () => {
   test('an exact-origin entry with a tab, CR or LF inside it matches nothing', () => {
     for (const [entry, origin] of [

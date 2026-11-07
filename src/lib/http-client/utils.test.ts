@@ -1410,6 +1410,25 @@ describe('matchesFilter', () => {
     );
   });
 
+  test('hosts — a wildcard does not reach a host under a public suffix beneath its tail', () => {
+    // `os.hedmark.no` is a public suffix; `hedmark.no` is not.
+    for (const hosts of [['*.hedmark.no'], ['**.hedmark.no']]) {
+      for (const requestURL of [
+        'https://os.hedmark.no/x',
+        'https://evil.os.hedmark.no/x',
+      ]) {
+        expect(matchesFilter({ hosts }, { requestURL }, 'request')).toBe(false);
+      }
+      expect(
+        matchesFilter(
+          { hosts },
+          { requestURL: 'https://api.hedmark.no/x' },
+          'request',
+        ),
+      ).toBe(true);
+    }
+  });
+
   test('statusCodes — matches included status', () => {
     expect(
       matchesFilter({ statusCodes: [401, 403] }, { status: 401 }, 'request'),
