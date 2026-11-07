@@ -9,6 +9,7 @@ import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
+import * as net from 'node:net';
 import type { AddressInfo, Socket } from 'node:net';
 import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -11808,14 +11809,15 @@ test('an upload a 205 answers early goes out in full while the server reads on',
   }
 });
 
-test('a 205 that answers an upload still going out is read as an early 200 is, bounded by the signal', async () => {
-  // Answered at once, never ended, and the upload never read: as an early `200` with an
-  // endless body, the attempt's signal ends it, and its upload with it.
+test('a 205 with no length that answers an upload still going out is answered at once', async () => {
+  // Answered at once and never ended, the upload never read: answered as its headers
+  // arrive, as `fetch` answers it, rather than read until the connection closes.
   const server = http.createServer((_req, res) => {
     res.writeHead(205);
     res.flushHeaders();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const controller = new AbortController();
   try {
     const { port } = server.address() as AddressInfo;
     const outcome = await new NodeAdapter()
@@ -11824,19 +11826,273 @@ test('a 205 that answers an upload still going out is read as an early 200 is, b
         method: 'PUT',
         headers: {},
         body: new Uint8Array(32 * 1024 * 1024),
-        signal: AbortSignal.timeout(300),
+        signal: controller.signal,
       })
       .then(
-        (response) => response.status,
+        (response) => [response.status, response.body] as const,
         (error: unknown) => (error as Error).name,
       );
 
-    expect(outcome).toBe('AbortError');
+    expect(outcome).toEqual([205, null]);
   } finally {
+    controller.abort();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+/**
+ * A raw HTTP/1.1 server answering each request with `response` as its head arrives, and
+ * reading its body at `delayMS` a chunk. Raw, so a `205` carries the bytes it is given.
+ */
+async function listenRaw205(
+  response: string,
+  delayMS = 0,
+): Promise<{
+  port: number;
+  connections: () => number;
+  receivedBytes: () => number;
+  closedSockets: () => number;
+  /** Write to every connection whose response head has been written. */
+  writeToAll: (data: string) => void;
+  close: () => Promise<void>;
+}> {
+  let connections = 0;
+  let receivedBytes = 0;
+  let closedSockets = 0;
+  const sockets = new Set<net.Socket>();
+  // Those whose response head has been written, which `writeToAll` alone writes to.
+  const answered = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    connections++;
+    sockets.add(socket);
+    // The head being read, or `undefined` while a body's bytes are.
+    let head: string | undefined = '';
+    let bodyLeft = 0;
+    socket.on('error', () => {});
+    socket.on('close', () => {
+      closedSockets++;
+      sockets.delete(socket);
+      answered.delete(socket);
+    });
+    socket.on('data', (chunk: Buffer) => {
+      let rest = chunk;
+      if (head !== undefined) {
+        head += chunk.toString('latin1');
+        const end = head.indexOf('\r\n\r\n');
+        if (end === -1) {
+          return;
+        }
+        const length = /content-length: *(\d+)/i.exec(head.slice(0, end));
+        bodyLeft = length === null ? 0 : Number(length[1]);
+        rest = Buffer.from(head.slice(end + 4), 'latin1');
+        head = undefined;
+        socket.write(response);
+        answered.add(socket);
+      }
+      receivedBytes += rest.length;
+      bodyLeft -= rest.length;
+      if (bodyLeft <= 0) {
+        head = '';
+      }
+      if (delayMS > 0) {
+        socket.pause();
+        setTimeout(() => socket.resume(), delayMS);
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  return {
+    port: (server.address() as AddressInfo).port,
+    connections: () => connections,
+    receivedBytes: () => receivedBytes,
+    closedSockets: () => closedSockets,
+    writeToAll: (data: string) => {
+      for (const socket of answered) {
+        socket.write(data);
+      }
+    },
+    close: async () => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+test('a 205 carrying bytes after an upload has gone out keeps its connection, as fetch keeps it', async () => {
+  const raw = await listenRaw205(
+    'HTTP/1.1 205 Reset Content\r\nContent-Length: 13\r\n\r\nReset Content',
+  );
+  try {
+    const adapter = new NodeAdapter();
+    for (let index = 0; index < 2; index++) {
+      const response = await adapter.send({
+        requestURL: `http://127.0.0.1:${raw.port}/`,
+        method: 'POST',
+        headers: {},
+        body: 'x',
+      });
+
+      expect(response.status).toBe(205);
+      expect(response.body).toBeNull();
+
+      // Answered before its bytes are read: the connection goes back to the pool once
+      // they end.
+      while (
+        !Object.entries(http.globalAgent.freeSockets).some(
+          ([name, sockets]) =>
+            name.startsWith(`127.0.0.1:${raw.port}:`) &&
+            (sockets?.length ?? 0) > 0,
+        )
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+
+    expect(raw.connections()).toBe(1);
+  } finally {
+    await raw.close();
+  }
+});
+
+test('an upload a 205 answers goes out in full, however much of it the socket had taken', async () => {
+  // Read slowly, so whether the upload is still going out when the answer lands depends
+  // on the socket's buffers: neither way is it cut off under the server.
+  const uploadSize = 4 * 1024 * 1024;
+  const raw = await listenRaw205(
+    'HTTP/1.1 205 Reset Content\r\nContent-Length: 13\r\n\r\nReset Content',
+    2,
+  );
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${raw.port}/upload`,
+      method: 'PUT',
+      headers: {},
+      body: new Uint8Array(uploadSize).fill(0x61),
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.body).toBeNull();
+    expect(await response.requestBodySettled).toBeUndefined();
+
+    while (raw.receivedBytes() < uploadSize && raw.closedSockets() === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(raw.receivedBytes()).toBe(uploadSize);
+  } finally {
+    await raw.close();
+  }
+});
+
+test('a 205 with no length held open after its upload lets its connection go after a quiet window', async () => {
+  // Nothing says where its bytes end, and none come: answered at once, and the connection
+  // let go rather than held for as long as the server keeps it open.
+  const raw = await listenRaw205('HTTP/1.1 205 Reset Content\r\n\r\n');
+  try {
+    const startedAt = performance.now();
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${raw.port}/`,
+      method: 'POST',
+      headers: {},
+      body: 'x',
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.body).toBeNull();
+    expect(performance.now() - startedAt).toBeLessThan(1000);
+
+    while (raw.closedSockets() === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(4900);
+  } finally {
+    await raw.close();
+  }
+}, 20_000);
+
+test("the caller's signal ends the read behind an answered 205", async () => {
+  // Bytes that keep coming, under the limit: only the signal can end the read, as it ends
+  // the same read behind a `fetch` answer.
+  const raw = await listenRaw205(
+    'HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n',
+  );
+  const trickle = setInterval(() => {
+    raw.writeToAll('1\r\nx\r\n');
+  }, 50);
+  try {
+    const controller = new AbortController();
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${raw.port}/`,
+      method: 'POST',
+      headers: {},
+      body: 'x',
+      signal: controller.signal,
+    });
+
+    expect(response.status).toBe(205);
+
+    controller.abort();
+
+    while (raw.closedSockets() === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(raw.closedSockets()).toBe(1);
+  } finally {
+    clearInterval(trickle);
+    await raw.close();
+  }
+});
+
+test('an answered 205 keeps its connection for a whole quiet window after its upload ends', async () => {
+  // The upload ends just before the first window does, and the 205's bytes come after:
+  // that window was not quiet, so they are read rather than the connection let go.
+  const parked: Array<() => void> = [];
+  const req = new MockClientRequest((_data, callback) => {
+    parked.push(() => callback?.(null));
+    return true;
+  });
+  const res = new MockIncomingMessage(205, { 'content-length': '13' });
+  const requestSpy = spyOn(http, 'request').mockImplementation(
+    (_options, callback) => {
+      const cb = callback as ((res: http.IncomingMessage) => void) | undefined;
+      queueMicrotask(() => {
+        cb?.(res as unknown as http.IncomingMessage);
+      });
+      return req as unknown as http.ClientRequest;
+    },
+  );
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: 'http://example.test/upload',
+      method: 'PUT',
+      headers: {},
+      body: 'x'.repeat(256 * 1024),
+    });
+
+    expect(response.status).toBe(205);
+
+    await new Promise((resolve) => setTimeout(resolve, 4500));
+    while (!req.ended) {
+      parked.shift()?.();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    expect(req.destroyed).toBe(false);
+
+    res.emit('data', Buffer.from('Reset Content'));
+    res.emit('end');
+  } finally {
+    requestSpy.mockRestore();
+  }
+}, 20_000);
 
 test('a 205 that answers an upload and declares more than the limit is answered from its header', async () => {
   // Parked for good, so the answer cannot wait on the upload.
@@ -11871,10 +12127,12 @@ test('a 205 that answers an upload and declares more than the limit is answered 
   }
 });
 
-test('a 205 whose bytes pass the limit during an upload is answered at once', async () => {
+test('a 205 whose bytes pass the limit during an upload lets its connection go', async () => {
   // Accepted and never acknowledged: the upload is parked for good.
   const req = new MockClientRequest(() => true);
-  // No `Content-Length`, and no end: the 205 never closes on its own.
+  // No `Content-Length`, and no end: the 205 never closes on its own. Answered as its
+  // headers arrive, and its connection let go once the bytes read behind it pass the
+  // limit.
   const res = new MockIncomingMessage(205, {});
   const requestSpy = spyOn(http, 'request').mockImplementation(
     (_options, callback) => {
