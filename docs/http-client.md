@@ -531,7 +531,7 @@ skip a later one in the current snapshot. A sub-client's chain run snapshots its
 parent's registrations and its own together, so a parent callback that registers one
 on the sub-client does not run it in that same chain run.
 
-Interceptors run **before** an adapter attempt and can mutate the outgoing request (headers, URL, body) or cancel it entirely. They are the right place for auth token injection, URL rewriting, or pre-flight validation.
+Interceptors run **before** an adapter attempt and can mutate the outgoing request (headers, URL, body) or cancel it entirely. They are the right place for auth token injection, URL rewriting, or pre-flight validation. They run before each attempt's `timeout` is armed, so a token refresh does not spend it, and the request waits for them with no timeout of its own: one that never settles holds the request until it is cancelled.
 
 ```typescript
 // Remove a previously added interceptor by calling the returned function
