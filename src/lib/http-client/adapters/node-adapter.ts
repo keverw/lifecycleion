@@ -2272,7 +2272,8 @@ export class NodeAdapter implements HTTPAdapter {
             // on here - not until a stray body ends, nor until one that never arrives
             // times out. One whose bytes are not known to be none - a `Content-Length`
             // above `0`, or none at all - is answered now, with no body, and its
-            // connection torn down so they are not drained. Not one to a `HEAD`, nor the
+            // connection let go, as FetchAdapter lets one go (see below). Not one to a
+            // `HEAD`, nor the
             // other bodiless answers: Node's parser reads no bytes for them, whatever
             // their `Content-Length` says, so they end on their own and keep their
             // connection. Its download is complete at `0` bytes, as one that ends on its
@@ -2295,8 +2296,21 @@ export class NodeAdapter implements HTTPAdapter {
               }
 
               activeBufferedResponse = undefined;
-              tearDownAfterResponse();
               settleResponse({ status, headers, body: null });
+
+              // An upload still running is left to finish, as one an early `200` answers
+              // is: the bytes are drained unread meanwhile, and what is left of them cut
+              // once it has gone out. With none running, the connection is let go now.
+              if (isWritingBody && !req.writableEnded) {
+                body.resume();
+                req.once('finish', () => {
+                  if (!res.complete) {
+                    tearDownAfterResponse();
+                  }
+                });
+              } else {
+                tearDownAfterResponse();
+              }
               return;
             }
 

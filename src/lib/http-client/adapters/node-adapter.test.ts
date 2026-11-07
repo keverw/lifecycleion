@@ -11752,6 +11752,47 @@ test('an abort after the body arrived takes the pipe off a sink whose end never 
   }
 });
 
+test('an upload a 205 answers early goes out in full while the server reads on', async () => {
+  const uploadSize = 4 * 1024 * 1024;
+  let receivedBytes: Promise<number> | undefined;
+  const server = http.createServer((req, res) => {
+    // Answered at once, with a stray body, then read on slowly.
+    res.writeHead(205, { 'content-length': '13' });
+    res.write('Reset Content');
+    receivedBytes = new Promise((resolve, reject) => {
+      let bytes = 0;
+      req.on('data', (chunk: Buffer) => {
+        bytes += chunk.length;
+        req.pause();
+        setTimeout(() => req.resume(), 2);
+      });
+      req.on('end', () => {
+        res.end();
+        resolve(bytes);
+      });
+      req.on('error', reject);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/upload`,
+      method: 'PUT',
+      headers: {},
+      body: new Uint8Array(uploadSize).fill(0x61),
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.body).toBeNull();
+    expect(await response.requestBodySettled).toBeUndefined();
+    expect(await receivedBytes).toBe(uploadSize);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test('the stall watchdog timer is cleared once an early-ack upload finishes', async () => {
   // Left pending once the writer finishes, the watchdog armed as the early response
   // closed would only return on its tick, but until then it would hold the request's
