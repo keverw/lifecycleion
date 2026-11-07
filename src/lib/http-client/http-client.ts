@@ -1914,31 +1914,37 @@ export class BaseHTTPClient {
               // A cancel made before the failure ends the hop as the cancel below does,
               // as the initial phase's does; see there.
               if (!cancelSignal.aborted) {
-                observerRequest = this._bestEffortAttemptRequestFromPending(
-                  failedRedirectRequest,
-                  attemptLimits,
-                  requestID,
-                  { fallbackURL: redirectURL },
-                  // See the initial phase's.
-                  redirectBodyCopy.didFail ? 'unbuildable' : undefined,
-                );
-                // The interceptor's request may be what failed; see the initial phase.
-                response = buildUnsentHopResponse(
-                  readStringMember(
+                const failedObserverRequest =
+                  this._bestEffortAttemptRequestFromPending(
                     failedRedirectRequest,
-                    'requestURL',
-                    redirectURL,
-                  ),
+                    attemptLimits,
+                    requestID,
+                    { fallbackURL: redirectURL },
+                    // See the initial phase's.
+                    redirectBodyCopy.didFail ? 'unbuildable' : undefined,
+                  );
+                // The interceptor's request may be what failed; see the initial phase.
+                const failedRequestURL = readStringMember(
+                  failedRedirectRequest,
+                  'requestURL',
+                  redirectURL,
                 );
 
-                // A body that could not be copied is the body's failure; see
-                // `isBodyCopyFailure`.
-                errorCode = isBodyCopyFailure(redirectBodyCopy, error)
-                  ? 'request_setup_error'
-                  : 'interceptor_error';
-                adapterCause = normalizeError(error);
+                // The reads above run the interceptors' getters; a cancel made in one
+                // ends the hop cancelled, below, as one made before the failure does.
+                if (!cancelSignal.aborted) {
+                  observerRequest = failedObserverRequest;
+                  response = buildUnsentHopResponse(failedRequestURL);
 
-                break;
+                  // A body that could not be copied is the body's failure; see
+                  // `isBodyCopyFailure`.
+                  errorCode = isBodyCopyFailure(redirectBodyCopy, error)
+                    ? 'request_setup_error'
+                    : 'interceptor_error';
+                  adapterCause = normalizeError(error);
+
+                  break;
+                }
               }
             }
 
@@ -2836,16 +2842,30 @@ export class BaseHTTPClient {
       // End an attempt that never reached the adapter - a retry interceptor that
       // cancelled or threw, or request setup that failed. Its start event (and, once
       // armed, its timer) already belong to it, and the prior upload outcome carries over.
-      const endBeforeDispatch = (
+      // The request such an attempt reports. Built apart from ending it, so a failure
+      // whose report runs the interceptors' getters can see a cancel made in one.
+      const reportBeforeDispatch = (
         pendingRequest: InterceptedRequest,
+        knownBodies?: AttemptBodies | 'unbuildable',
+        reportedURL?: string,
+      ) =>
+        this._bestEffortAttemptRequestFromPending(
+          pendingRequest,
+          { timeout, maxResponseBytes },
+          requestID,
+          // The hop's own URL when the pending request's cannot be read, so the
+          // response, the error and host-filtered observers name a real one.
+          { fallbackURL: baseRequest.requestURL, reportedURL },
+          knownBodies,
+        );
+      const endBeforeDispatch = (
+        sentRequest: ReturnType<typeof reportBeforeDispatch>,
         outcome: {
           wasCancelled?: boolean;
           errorCode?: HTTPClientError['code'];
           adapterCause?: Error;
           cancelReason?: string;
         },
-        knownBodies?: AttemptBodies | 'unbuildable',
-        reportedURL?: string,
       ) => {
         clearTimeout(timeoutID);
         if (outcome.wasCancelled) {
@@ -2855,15 +2875,7 @@ export class BaseHTTPClient {
 
         return {
           adapterResponse: null,
-          sentRequest: this._bestEffortAttemptRequestFromPending(
-            pendingRequest,
-            { timeout, maxResponseBytes },
-            requestID,
-            // The hop's own URL when the pending request's cannot be read, so the
-            // response, the error and host-filtered observers name a real one.
-            { fallbackURL: baseRequest.requestURL, reportedURL },
-            knownBodies,
-          ),
+          sentRequest,
           attemptCount: attemptNumber,
           wasCancelled: false,
           wasTimeout: false,
@@ -3021,15 +3033,8 @@ export class BaseHTTPClient {
               'requestURL',
             );
             const isHeld = isHeldToHop(failedRetryURL);
-
-            return endBeforeDispatch(
+            const failedRetryReport = reportBeforeDispatch(
               isHeld ? baseRequest : failedRetryRequest,
-              {
-                errorCode: isBodyCopyFailure(retryBodyCopy, error)
-                  ? 'request_setup_error'
-                  : 'interceptor_error',
-                adapterCause: normalizeError(error),
-              },
               // A body that failed to copy is reported as it came, not read again; the
               // hop's own is reported built.
               retryBodyCopy.didFail && !isHeld ? 'unbuildable' : undefined,
@@ -3037,6 +3042,17 @@ export class BaseHTTPClient {
                 ? failedRetryURL
                 : undefined,
             );
+
+            // The reads above run the interceptors' getters; a cancel made in one ends
+            // the attempt cancelled, below, as one made before the failure does.
+            if (!cancelSignal.aborted) {
+              return endBeforeDispatch(failedRetryReport, {
+                errorCode: isBodyCopyFailure(retryBodyCopy, error)
+                  ? 'request_setup_error'
+                  : 'interceptor_error',
+                adapterCause: normalizeError(error),
+              });
+            }
           }
         }
 
@@ -3045,7 +3061,7 @@ export class BaseHTTPClient {
         const retryEnd = endInterceptorPhase(retryIntercept, cancelSignal);
         if (retryEnd.isCancelled) {
           const retryCancelReason = retryEnd.cancelReason;
-          return endBeforeDispatch(baseRequest, {
+          return endBeforeDispatch(reportBeforeDispatch(baseRequest), {
             wasCancelled: true,
             ...(retryCancelReason !== undefined
               ? { cancelReason: retryCancelReason }
@@ -3086,7 +3102,7 @@ export class BaseHTTPClient {
             // interceptors' carries what they added - a token in the URL or a header - and
             // the response, the error and host-filtered observers would name a
             // credentialed request to the host the server chose.
-            return endBeforeDispatch(baseRequest, {
+            return endBeforeDispatch(reportBeforeDispatch(baseRequest), {
               errorCode: 'request_setup_error',
               adapterCause: normalizeError(error),
             });
@@ -3099,7 +3115,7 @@ export class BaseHTTPClient {
           try {
             this._assertRequestIsSupported(attemptRequest);
           } catch (error) {
-            return endBeforeDispatch(baseRequest, {
+            return endBeforeDispatch(reportBeforeDispatch(baseRequest), {
               errorCode: 'interceptor_error',
               adapterCause: normalizeError(error),
             });
@@ -3115,7 +3131,7 @@ export class BaseHTTPClient {
       // not check before it answers.
       if (cancelSignal.aborted) {
         const signalReason = getSignalCancelReason(cancelSignal);
-        return endBeforeDispatch(attemptRequest, {
+        return endBeforeDispatch(reportBeforeDispatch(attemptRequest), {
           wasCancelled: true,
           ...(signalReason !== undefined ? { cancelReason: signalReason } : {}),
         });
@@ -3187,12 +3203,11 @@ export class BaseHTTPClient {
         // Serialization and cookie/header preparation precede adapter dispatch. The
         // snapshot reuses the bodies built here, or skips a build that already failed.
         return endBeforeDispatch(
-          attemptRequest,
+          reportBeforeDispatch(attemptRequest, knownBodies),
           {
             errorCode: 'request_setup_error',
             adapterCause: normalizeError(error),
           },
-          knownBodies,
         );
       }
 

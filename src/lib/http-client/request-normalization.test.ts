@@ -3950,6 +3950,72 @@ test("a cancel made while an interceptor's failed result is read for the report 
   expect(builder.error?.cancelReason).toBe('in-report');
 });
 
+for (const phase of ['redirect', 'retry'] as const) {
+  test(`a cancel made while a ${phase} interceptor's failed result is read for the report ends it as a cancel there does`, async () => {
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock' as const,
+      send: (): Promise<AdapterResponse> => {
+        sends++;
+        if (sends === 1) {
+          const first: AdapterResponse =
+            phase === 'redirect'
+              ? {
+                  status: 302,
+                  headers: { location: 'https://a.test/next' },
+                  body: null,
+                }
+              : { status: 503, headers: {}, body: null };
+          return Promise.resolve(first);
+        }
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://a.test',
+      followRedirects: true,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    const observed: string[] = [];
+    client.addErrorObserver((error, request) => {
+      observed.push(`${error.code} ${request.requestURL}`);
+    });
+    let cancelResult: CancelResult | undefined;
+    // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
+    let builder: ReturnType<HTTPClient['get']>;
+    let reads = 0;
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        // Refused on the client's first read; the failure's report reads it again.
+        get requestURL() {
+          reads++;
+          if (reads === 1) {
+            throw new Error('first read');
+          }
+          cancelResult ??= builder.cancel('in-report');
+          return 'https://a.test/x?token=1';
+        },
+      }),
+      { phases: [phase] },
+    );
+    builder = client.get('/start');
+    const response = await builder.send();
+    // Reported as the hop's own request, as a cancel made before the failure is: not
+    // the interceptor's, with what it added.
+    const hopURL =
+      phase === 'redirect' ? 'https://a.test/next' : 'https://a.test/start';
+
+    expect(cancelResult).toBe('cancelled');
+    expect(builder.state).toBe('cancelled');
+    expect(builder.error?.cancelReason).toBe('in-report');
+    expect(response.isCancelled).toBe(true);
+    expect(response.requestURL).toBe(hopURL);
+    expect(observed).toEqual([`cancelled ${hopURL}`]);
+  });
+}
+
 test('a cancel made before an early failure ends the request cancelled, as its true says', async () => {
   // An initial interceptor that cancels, then throws.
   const client = new HTTPClient({

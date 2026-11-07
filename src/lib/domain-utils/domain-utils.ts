@@ -15,7 +15,7 @@ import {
   normalizeWildcardPattern,
   compileWildcardPattern,
   matchesCompiledWildcard,
-  wildcardHostSuffix,
+  lazyWildcardHostSuffix,
   isUnmatchableWildcardTail,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
@@ -413,8 +413,24 @@ function matchesWildcardDomainIn(
   pattern: string,
   isCached: PatternCache,
 ): boolean {
-  const normalizedDomain = normalizeDomain(domain);
+  return matchesNormalizedWildcardIn(
+    normalizeDomain(domain),
+    pattern,
+    isCached,
+  );
+}
 
+/**
+ * {@link matchesWildcardDomainIn} for a host already normalized by `normalizeDomain`,
+ * with what the caller already knows of it (see `matchesCompiledWildcard`).
+ */
+function matchesNormalizedWildcardIn(
+  normalizedDomain: string,
+  pattern: string,
+  isCached: PatternCache,
+  isIP?: boolean,
+  readSuffix?: () => string | null,
+): boolean {
   if (normalizedDomain === '') {
     return false; // invalid domain cannot match
   }
@@ -425,7 +441,7 @@ function matchesWildcardDomainIn(
 
   return (
     compiled !== undefined &&
-    matchesCompiledWildcard(normalizedDomain, compiled)
+    matchesCompiledWildcard(normalizedDomain, compiled, isIP, readSuffix)
   );
 }
 
@@ -487,8 +503,15 @@ function wildcardOriginMatcher(
 /** An origin as a wildcard pattern reads it (see `readWildcardOrigin`). */
 interface WildcardOrigin {
   url: URL;
-  /** Its hostname normalized, when a pattern has first needed it. */
-  normalizedHostname?: string;
+  /**
+   * Its hostname normalized, when a pattern has first needed it, with whether it is an
+   * IP address and its public suffix's reader.
+   */
+  host?: {
+    normalized: string;
+    isIP: boolean;
+    readSuffix: () => string | null;
+  };
 }
 
 /**
@@ -570,8 +593,16 @@ function matchesWildcardPatternIn(
     );
   }
 
-  origin.normalizedHostname ??= normalizeDomain(originURL.hostname);
-  const normalizedHostname = origin.normalizedHostname;
+  if (origin.host === undefined) {
+    const normalized = normalizeDomain(originURL.hostname);
+    origin.host = {
+      normalized,
+      isIP: normalized !== '' && isIPAddress(normalized),
+      readSuffix: lazyWildcardHostSuffix(normalized),
+    };
+  }
+  const host = origin.host;
+  const normalizedHostname = host.normalized;
 
   if (normalizedHostname === '') {
     return false;
@@ -607,7 +638,13 @@ function matchesWildcardPatternIn(
     }
 
     // Check domain pattern using direct domain matching
-    return matchesWildcardDomainIn(normalizedHostname, domainPattern, isCached);
+    return matchesNormalizedWildcardIn(
+      normalizedHostname,
+      domainPattern,
+      isCached,
+      host.isIP,
+      host.readSuffix,
+    );
   }
 
   // Handle domain wildcard patterns (including multi-label patterns)
@@ -618,10 +655,12 @@ function matchesWildcardPatternIn(
       return false;
     }
 
-    return matchesWildcardDomainIn(
+    return matchesNormalizedWildcardIn(
       normalizedHostname,
       normalizedPattern,
       isCached,
+      host.isIP,
+      host.readSuffix,
     );
   }
 
@@ -896,11 +935,7 @@ export function matchesDomainList(
   // Asked once, for every wildcard entry, and only if one is reached - its public suffix
   // only once one matches.
   let isIP: boolean | undefined;
-  let suffix: string | null | undefined;
-  const readSuffix = (): string | null =>
-    suffix === undefined
-      ? (suffix = wildcardHostSuffix(normalizedDomain))
-      : suffix;
+  const readSuffix = lazyWildcardHostSuffix(normalizedDomain);
 
   for (let index = 0; index < list.cleaned.length; index++) {
     const entry = compiledDomainEntry(list, index);

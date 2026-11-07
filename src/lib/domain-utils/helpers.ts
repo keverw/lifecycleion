@@ -847,15 +847,30 @@ export function wildcardHostSuffix(normalizedDomain: string): string | null {
 }
 
 /**
+ * A host's {@link wildcardHostSuffix}, read on the first call and kept for the rest: one
+ * host checked against several patterns looks it up once, and only if one matches.
+ */
+export function lazyWildcardHostSuffix(
+  normalizedDomain: string,
+): () => string | null {
+  let suffix: string | null | undefined;
+  return () =>
+    suffix === undefined
+      ? (suffix = wildcardHostSuffix(normalizedDomain))
+      : suffix;
+}
+
+/**
  * Whether a host, already normalized by `normalizeDomain`, matches a compiled pattern.
  * `isIP` is whether that host is an IP address, when the caller already knows it - one
- * host checked against several patterns is asked once.
+ * host checked against several patterns is asked once - and `readSuffix` reads its public
+ * suffix, for such a caller to read once (see `lazyWildcardHostSuffix`).
  */
 export function matchesCompiledWildcard(
   normalizedDomain: string,
   compiled: CompiledWildcardPattern,
   isIP?: boolean,
-  readSuffix: () => string | null = () => wildcardHostSuffix(normalizedDomain),
+  readSuffix?: () => string | null,
 ): boolean {
   if (normalizedDomain === '') {
     return false; // invalid domain cannot match
@@ -892,7 +907,9 @@ export function matchesCompiledWildcard(
   // would (see `isUnmatchableWildcardTail`). Asked of a match alone, as a host the
   // pattern does not cover needs no lookup.
   const tail = compiled.tail;
-  const suffix = readSuffix();
+  const suffix = readSuffix
+    ? readSuffix()
+    : wildcardHostSuffix(normalizedDomain);
   return !(
     suffix !== null &&
     suffix.length > tail.length &&
