@@ -686,7 +686,7 @@ export class XHRAdapter implements HTTPAdapter {
       /**
        * Whether an answer's status says it carries no body (see `hasResponseBody`). Not a
        * `0`, the status an XHR reads before it has an answer - a followed redirect's, say -
-       * which is left to the size limit and `load`, as it was.
+       * which is left to the size limit and `load`.
        */
       const isBodilessAnswer = (status: number): boolean =>
         status !== 0 && !hasResponseBody(method, status);

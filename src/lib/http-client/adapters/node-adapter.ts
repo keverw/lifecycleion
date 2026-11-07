@@ -2287,6 +2287,10 @@ export class NodeAdapter implements HTTPAdapter {
               settleResponse({ status, headers, body: null });
             };
 
+            // A `205` to anything but a `HEAD`: bodiless, yet read by Node's parser as a
+            // body (see below).
+            const isStray205 = !hasBody && status === 205;
+
             // A `205` has no body (RFC 9110), so FetchAdapter never reads what one carries
             // anyway. Node's parser reads it as a body - it reads none for a `HEAD`, a
             // `204` or a `304`, whatever their `Content-Length` says, so those end on
@@ -2297,12 +2301,7 @@ export class NodeAdapter implements HTTPAdapter {
             // leaves one: the answer read to its end, its bytes drained unread up to
             // `maxResponseBytes`, bounded by the attempt's timeout and, once it closes,
             // the stall watchdog.
-            if (
-              status === 205 &&
-              asciiUppercase(request.method) !== 'HEAD' &&
-              declaredLength !== 0 &&
-              req.writableFinished
-            ) {
+            if (isStray205 && declaredLength !== 0 && req.writableFinished) {
               answerBodiless();
               return;
             }
@@ -2310,8 +2309,7 @@ export class NodeAdapter implements HTTPAdapter {
             // One that says up front its bytes pass the limit is answered from that, as a
             // body that says so is refused, rather than drained up to the limit first.
             if (
-              status === 205 &&
-              asciiUppercase(request.method) !== 'HEAD' &&
+              isStray205 &&
               declaredLength !== undefined &&
               declaredLength > maxResponseBytes
             ) {
@@ -2321,7 +2319,7 @@ export class NodeAdapter implements HTTPAdapter {
 
             const chunks: Buffer[] = [];
             let loadedBytes = 0;
-            // A bodiless answer's bytes, drained unread (see `answerBodiless`).
+            // A bodiless answer's bytes, drained unread (see `isStray205`).
             let drainedBytes = 0;
 
             // Deduplication guard — when Content-Length is known and the last
