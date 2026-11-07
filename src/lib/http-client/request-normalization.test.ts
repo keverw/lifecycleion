@@ -4016,6 +4016,71 @@ for (const phase of ['redirect', 'retry'] as const) {
   });
 }
 
+for (const phase of ['initial', 'redirect', 'retry'] as const) {
+  test(`a cancel made while ${phase === 'initial' ? 'an' : 'a'} ${phase} interceptor's failed result is reported to the error observers ends it cancelled, in every phase alike`, async () => {
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock' as const,
+      send: (): Promise<AdapterResponse> => {
+        sends++;
+        if (sends === 1 && phase !== 'initial') {
+          const first: AdapterResponse =
+            phase === 'redirect'
+              ? {
+                  status: 302,
+                  headers: { location: 'https://a.test/next' },
+                  body: null,
+                }
+              : { status: 503, headers: {}, body: null };
+          return Promise.resolve(first);
+        }
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://a.test',
+      followRedirects: true,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    let cancelResult: CancelResult | undefined;
+    // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
+    let builder: ReturnType<HTTPClient['get']>;
+    let didThrow = false;
+    client.addRequestInterceptor(
+      (request) => {
+        const headers = request.headers;
+        return {
+          ...request,
+          // Refused on the client's first read.
+          get requestURL() {
+            if (!didThrow) {
+              didThrow = true;
+              throw new Error('first read');
+            }
+            return 'https://a.test/x';
+          },
+          // Read again for the request the error observers are given.
+          get headers() {
+            if (didThrow) {
+              cancelResult ??= builder.cancel('in-report');
+            }
+            return headers;
+          },
+        };
+      },
+      { phases: [phase] },
+    );
+    builder = client.get('/start');
+    const response = await builder.send();
+
+    expect(cancelResult).toBe('cancelled');
+    expect(builder.state).toBe('cancelled');
+    expect(builder.error?.cancelReason).toBe('in-report');
+    expect(response.isCancelled).toBe(true);
+  });
+}
+
 test('a cancel made before an early failure ends the request cancelled, as its true says', async () => {
   // An initial interceptor that cancels, then throws.
   const client = new HTTPClient({

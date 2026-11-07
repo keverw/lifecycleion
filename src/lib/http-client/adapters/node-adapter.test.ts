@@ -10853,6 +10853,37 @@ test('a 205 that carries bytes is answered bodiless, its bytes neither measured 
   }
 });
 
+test('a 205 whose bytes pass the limit is answered at once, not drained for as long as they come', async () => {
+  // Its headers and more bytes than the limit, then held open: drained to its end, the
+  // answer would wait as long as the server sends.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(205, { 'transfer-encoding': 'chunked' });
+    res.write('x'.repeat(2000));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const loaded: number[] = [];
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/`,
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1000,
+      onDownloadProgress: (event) => {
+        loaded.push(event.loaded);
+      },
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.isStreamError).not.toBe(true);
+    expect(response.body).toBeNull();
+    expect(loaded.every((bytes) => bytes === 0)).toBe(true);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test('a factory decline whose teardown throws still answers as the decline', async () => {
   let respond: ((res: http.IncomingMessage) => void) | undefined;
   let isTornDown = false;

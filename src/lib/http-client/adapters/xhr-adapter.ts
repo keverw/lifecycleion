@@ -649,6 +649,32 @@ export class XHRAdapter implements HTTPAdapter {
       };
 
       /**
+       * End the send at a bodiless answer - a `205` - whose bytes pass `maxResponseBytes`:
+       * answered as `load` answers it, with no body, and the download stopped, so an XHR
+       * that keeps a bodiless answer's bytes does not hold them all first.
+       */
+      const answerBodilessEarly = (answer: AnsweredHeaders): void => {
+        // A cancel from that upload callback ends the send as the cancel.
+        if (!emitFinalUpload()) {
+          return;
+        }
+
+        reportDownloadComplete(0);
+        resolve({
+          status: answer.status,
+          ...derivedRedirectFields(answeredURL, answer.status, answer.headers),
+          headers: answer.headers,
+          body: null,
+        });
+
+        try {
+          xhr.abort();
+        } catch {
+          // Whatever the answer goes on to deliver is reported to no one.
+        }
+      };
+
+      /**
        * Whether an answer's status says it carries no body (see `hasResponseBody`). Not a
        * `0`, the status an XHR reads before it has an answer - a followed redirect's, say -
        * which is left to the size limit and `load`, as it was.
@@ -750,11 +776,15 @@ export class XHRAdapter implements HTTPAdapter {
           }
 
           // A bodiless answer's bytes - a `205` that carries some - are neither measured
-          // nor reported: no body is handed over, as `load` hands over none.
+          // nor reported: no body is handed over, as `load` hands over none. Past the
+          // limit, the answer is given without waiting for the rest.
           if (
             answeredSoFar !== undefined &&
             isBodilessAnswer(answeredSoFar.status)
           ) {
+            if (event.loaded > maxResponseBytes) {
+              answerBodilessEarly(answeredSoFar);
+            }
             return;
           }
 
@@ -767,7 +797,12 @@ export class XHRAdapter implements HTTPAdapter {
             const answer = readAndActOnAnswer() ?? readAnswer();
 
             // Ended by the answer, read for the first time here.
-            if (didSettle || isBodilessAnswer(answer.status)) {
+            if (didSettle) {
+              return;
+            }
+
+            if (isBodilessAnswer(answer.status)) {
+              answerBodilessEarly(answer);
               return;
             }
 

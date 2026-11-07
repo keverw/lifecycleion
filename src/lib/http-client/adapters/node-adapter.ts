@@ -2267,12 +2267,32 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
+            // A bodiless answer - a `205` that carries bytes - whose bytes pass the limit
+            // is answered at once, with no body, and the connection torn down, so they are
+            // not drained for as long as the server sends them. Its download is complete
+            // at `0` bytes, as one that ends on its own reports it.
+            const answerBodilessEarly = (): void => {
+              guardedDownloadProgress?.(completeProgressEvent(0));
+
+              // Cancelled from that event: the request is already answered.
+              if (activeBufferedResponse === undefined) {
+                return;
+              }
+
+              activeBufferedResponse = undefined;
+              tearDownAfterResponse();
+              settleResponse({ status, headers, body: null });
+            };
+
             activeBufferedResponse = {
               status,
               headers,
             };
             const chunks: Buffer[] = [];
             let loadedBytes = 0;
+            // A bodiless answer's bytes, counted only against the limit (see
+            // `answerBodilessEarly`).
+            let drainedBytes = 0;
 
             // Deduplication guard — when Content-Length is known and the last
             // `data` chunk fills the body exactly, progress: 1 fires there.
@@ -2290,8 +2310,13 @@ export class NodeAdapter implements HTTPAdapter {
 
               // A bodiless answer's bytes - a `205` that carries some, which Node's parser
               // reads as a body as it reads none for a `204` or `304` - are drained, not
-              // counted, kept or reported: no body is handed over, so none is measured.
+              // kept or reported: no body is handed over, so none is measured. They are
+              // counted against the limit alone, past which the answer is given at once.
               if (!hasBody) {
+                drainedBytes += chunk.length;
+                if (drainedBytes > maxResponseBytes) {
+                  answerBodilessEarly();
+                }
                 return;
               }
 

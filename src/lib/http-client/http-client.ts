@@ -1286,6 +1286,18 @@ export class BaseHTTPClient {
               normalizeError(error),
             );
 
+            const failedObserverRequest =
+              this._bestEffortAttemptRequestFromPending(
+                initialRequestCandidate,
+                attemptLimits,
+                requestID,
+                // The URL the response and error name, so a host filter agrees with them.
+                { fallbackURL: url },
+                // A body that failed to copy is not read a second time; it is reported as it
+                // came.
+                initialBodyCopy.didFail ? 'unbuildable' : undefined,
+              );
+
             // The reads above run the interceptor's own getters, and a cancel made in one
             // was told it cancelled the request: it ends cancelled, below, as one made
             // before the failure does.
@@ -1302,17 +1314,7 @@ export class BaseHTTPClient {
 
               await this._runErrorObservers(
                 normalizedError,
-                this._bestEffortAttemptRequestFromPending(
-                  initialRequestCandidate,
-                  attemptLimits,
-                  requestID,
-                  // The URL the response and error name, so a host filter agrees with
-                  // them.
-                  { fallbackURL: url },
-                  // A body that failed to copy is not read a second time; it is reported
-                  // as it came.
-                  initialBodyCopy.didFail ? 'unbuildable' : undefined,
-                ),
+                failedObserverRequest,
                 {
                   type: 'final',
                 },
@@ -2839,11 +2841,9 @@ export class BaseHTTPClient {
       // fresh signal (see `_composeSignals`), so nothing has listened on it yet.
       guardAbortListeners(attemptSignal, 'HTTPClient attempt abort listener');
 
-      // End an attempt that never reached the adapter - a retry interceptor that
-      // cancelled or threw, or request setup that failed. Its start event (and, once
-      // armed, its timer) already belong to it, and the prior upload outcome carries over.
-      // The request such an attempt reports. Built apart from ending it, so a failure
-      // whose report runs the interceptors' getters can see a cancel made in one.
+      // The request an attempt that never reached the adapter reports (see
+      // `endBeforeDispatch`). Built apart from ending it, so a failure whose report runs
+      // the interceptors' getters can see a cancel made in one.
       const reportBeforeDispatch = (
         pendingRequest: InterceptedRequest,
         knownBodies?: AttemptBodies | 'unbuildable',
@@ -2858,6 +2858,9 @@ export class BaseHTTPClient {
           { fallbackURL: baseRequest.requestURL, reportedURL },
           knownBodies,
         );
+      // End an attempt that never reached the adapter - a retry interceptor that
+      // cancelled or threw, or request setup that failed. Its start event (and, once
+      // armed, its timer) already belong to it, and the prior upload outcome carries over.
       const endBeforeDispatch = (
         sentRequest: ReturnType<typeof reportBeforeDispatch>,
         outcome: {

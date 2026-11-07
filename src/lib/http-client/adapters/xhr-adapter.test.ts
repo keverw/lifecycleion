@@ -814,6 +814,37 @@ describe('XHRAdapter', () => {
     expect(downloads.every((loaded) => loaded === 0)).toBe(true);
   });
 
+  for (const isAnsweredAtHeaders of [true, false]) {
+    test(`a 205 whose bytes pass the limit is answered at once, not held whole (${isAnsweredAtHeaders ? 'read at its headers' : 'first read past the limit'})`, async () => {
+      const downloads: number[] = [];
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/reset',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 10,
+        onDownloadProgress: (event) => {
+          downloads.push(event.loaded);
+        },
+      });
+
+      if (isAnsweredAtHeaders) {
+        lastXHR.simulateHeadersReceived(205, 'content-encoding: identity\r\n');
+      } else {
+        lastXHR.status = 205;
+        lastXHR.getAllResponseHeadersResult = 'content-encoding: identity\r\n';
+      }
+      // No `load`: an XHR that keeps the bytes would hold them all before it fires.
+      lastXHR.simulateDownloadProgress(100, 1000);
+      const response = await promise;
+
+      expect(response.status).toBe(205);
+      expect(response.streamErrorCode).toBeUndefined();
+      expect(response.body).toBeNull();
+      expect(downloads).toEqual([0]);
+      expect(lastXHR.abortCalled).toBe(true);
+    });
+  }
+
   test('a body refused mid-download still ends with the final upload event', async () => {
     const uploads: number[] = [];
     const promise = new XHRAdapter().send({
