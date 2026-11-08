@@ -1133,6 +1133,21 @@ export class NodeAdapter implements HTTPAdapter {
          */
         let stallWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
 
+        /**
+         * Stops the deadline `reportWriteErrorAfterResponse` arms, once the response has
+         * closed and it has nothing left to look at.
+         */
+        let stopFailedUploadDeadline: (() => void) | undefined;
+
+        /**
+         * Run once the body writer has failed after the response arrived, after
+         * `reportWriteErrorAfterResponse` has handled it, so a stray `205`'s read can let its
+         * connection go then (see `answerAndDrainStray205`): a failed upload emits no
+         * `'finish'`. A failure the request's `'error'` handler reports kills the
+         * connection, whose close ends that read.
+         */
+        let afterBodyWriteFailure: (() => void) | undefined;
+
         /** Whether a post-response write failure has already been reported and scheduled. */
         let didReportWriteErrorAfterResponse = false;
         /**
@@ -1734,8 +1749,10 @@ export class NodeAdapter implements HTTPAdapter {
           // Given the same grace the stall watchdog gives an upload, and for the same reason:
           // a response still streaming in on that socket is worth waiting for, so a window in
           // which its connection read anything starts another, and one that reads nothing for
-          // a whole window is waiting on a body that is never coming. Tearing it down settles
-          // the promise through the response path's own error handling.
+          // a whole window is waiting on a body that is never coming. Started again for
+          // {@link FAILED_UPLOAD_RESPONSE_WINDOWS} windows at most, since a server can keep a
+          // response alive a byte at a time while it waits on the rest of the body. Tearing
+          // it down settles the promise through the response path's own error handling.
           //
           // Not while the response is behind its own consumer, though - fully arrived, paused
           // under a slow sink's backpressure, or buffered for a stream factory still opening
@@ -1753,32 +1770,32 @@ export class NodeAdapter implements HTTPAdapter {
           // the response flows.
           const responseBytesRead = (): number =>
             receivedResponse?.socket?.bytesRead ?? 0;
-          const armDeadline = (): void => {
-            const bytesAtArm = responseBytesRead();
-            const deadline = setTimeout(() => {
-              if (didResponseClose) {
-                return;
-              }
-
-              if (
-                isResponseBehindItsConsumer() ||
-                responseBytesRead() !== bytesAtArm
-              ) {
-                armDeadline();
-
-                return;
-              }
-
-              destroyUnfinishedRequestQuietly(req);
-            }, UPLOAD_STALL_GRACE_MS);
-
-            // Never a reason for the process to stay up, exactly as the stall watchdog's
-            // timer is not.
-            deadline.unref?.();
-          };
+          let arrivingWindows = 0;
 
           try {
-            armDeadline();
+            stopFailedUploadDeadline = watchGraceWindows(
+              responseBytesRead,
+              (didProgress) => {
+                if (didResponseClose) {
+                  return false;
+                }
+
+                if (isResponseBehindItsConsumer()) {
+                  return true;
+                }
+
+                if (
+                  didProgress &&
+                  ++arrivingWindows < FAILED_UPLOAD_RESPONSE_WINDOWS
+                ) {
+                  return true;
+                }
+
+                destroyUnfinishedRequestQuietly(req);
+
+                return false;
+              },
+            );
           } catch {
             // No way to schedule it, so the request is torn down now rather than left to
             // hang. A response mid-flight is the lesser loss of the two.
@@ -1834,6 +1851,7 @@ export class NodeAdapter implements HTTPAdapter {
           // unfinished one is destroyed here, where it can no longer cut a response short.
           res.on('close', () => {
             didResponseClose = true;
+            stopFailedUploadDeadline?.();
 
             if (req.writableEnded) {
               return;
@@ -2315,18 +2333,29 @@ export class NodeAdapter implements HTTPAdapter {
               settleResponse({ status, headers, body: null });
             };
 
+            // Whether a body is still going out: being written, or written and ended with
+            // its last bytes not yet flushed to the socket. Not one whose writer has failed
+            // and returned.
+            const isUploading = (): boolean =>
+              (isWritingBody || req.writableEnded) && !req.writableFinished;
+
             // A stray `205`'s answer (see below): settled now, its bytes read and dropped
-            // until they end. An upload still going out goes on, watched by the stall
-            // watchdog, armed now rather than once the answer closes. The read is bounded
-            // by the caller's signal, which ends it as it ends the same read behind a
-            // `fetch` answer, and, once nothing is being uploaded, by `maxResponseBytes`
-            // and the same five-second windows: past the limit, after a whole window with
-            // no bytes, or at the end of the {@link STRAY_205_DRAIN_WINDOWS}th window
-            // however the bytes trickle, the connection is let go. The request's timeout
-            // stopped with the answer, so nothing else would end a read that a server
-            // keeps alive a byte at a time. Bytes past the limit during an upload are
-            // dropped as they come, so they cost no memory.
-            const answerAndDrainStray205 = (): void => {
+            // until they end. An upload still going out goes on, its writer watched by the
+            // stall watchdog, armed now rather than once the answer closes. The read is
+            // bounded by the caller's signal, which ends it as it ends the same read behind
+            // a `fetch` answer, and, once nothing is being uploaded, by `maxResponseBytes`
+            // and the same five-second windows: past the limit - as the upload's last bytes
+            // go out, as its writer fails, or as a byte arrives after either - after a whole
+            // window with no bytes, or at the end
+            // of the {@link STRAY_205_DRAIN_WINDOWS}th window however the bytes trickle,
+            // the connection is let go. The request's timeout stopped with the answer, so
+            // nothing else would end a read that a server keeps alive a byte at a time.
+            // Bytes past the limit during an upload are dropped as they come, so they cost
+            // no memory; `isDeclaredPastLimit` counts a `Content-Length` saying they will
+            // pass it as passing it.
+            const answerAndDrainStray205 = (
+              isDeclaredPastLimit: boolean,
+            ): void => {
               guardedDownloadProgress?.(completeProgressEvent(0));
 
               // Cancelled from that event: the request is already answered.
@@ -2337,17 +2366,17 @@ export class NodeAdapter implements HTTPAdapter {
               activeBufferedResponse = undefined;
 
               let drainedBytes = 0;
-              let isDraining = true;
               isDrainingAnsweredResponse = true;
-              let drainWatchTimer: ReturnType<typeof setTimeout> | undefined;
+
+              const isPastLimit = (): boolean =>
+                isDeclaredPastLimit || drainedBytes > maxResponseBytes;
 
               const stopDraining = (): void => {
-                isDraining = false;
-
-                if (drainWatchTimer !== undefined) {
-                  clearTimeout(drainWatchTimer);
-                  drainWatchTimer = undefined;
-                }
+                // Not yet assigned only before this function returns, when nothing has
+                // called this yet: every caller is an event or a timer.
+                stopDrainWatch();
+                req.off('finish', letGoIfPastLimit);
+                afterBodyWriteFailure = undefined;
 
                 if (isDrainingAnsweredResponse) {
                   isDrainingAnsweredResponse = false;
@@ -2360,31 +2389,52 @@ export class NodeAdapter implements HTTPAdapter {
                 runTeardownGuarded(tearDownAfterResponse);
               };
 
-              const isUploading = (): boolean =>
-                isWritingBody && !req.writableEnded;
+              // Past the limit once nothing is being uploaded: as a byte arrives, as the
+              // upload's last bytes go out, or as its writer fails.
+              function letGoIfPastLimit(): void {
+                if (
+                  isDrainingAnsweredResponse &&
+                  isPastLimit() &&
+                  !isUploading()
+                ) {
+                  letGoOfConnection();
+                }
+              }
 
-              const isPastLimit = (): boolean =>
-                drainedBytes > maxResponseBytes;
-
-              let bytesAtLastTick = 0;
-              // Read at each tick, so a window counts as quiet only when the upload was
-              // already done as it began - not one it ran through until just before its end.
+              // Read at each window's end, so a window counts as quiet only when the upload
+              // was already done as it began - not one it ran through until just before its
+              // end.
               let wasUploadingAtLastTick = isUploading();
               // Whole windows run with nothing being uploaded, quiet or not.
               let windowsAfterUpload = 0;
-              const armDrainWatch = (): void => {
-                const timer = setTimeout(() => {
-                  drainWatchTimer = undefined;
 
-                  if (!isDraining) {
-                    return;
+              body.on('data', (chunk: Buffer) => {
+                if (!isDrainingAnsweredResponse) {
+                  return;
+                }
+
+                drainedBytes += chunk.length;
+                letGoIfPastLimit();
+              });
+              body.on('end', stopDraining);
+              body.on('error', stopDraining);
+              body.on('aborted', stopDraining);
+              body.on('close', stopDraining);
+              req.on('finish', letGoIfPastLimit);
+              afterBodyWriteFailure = letGoIfPastLimit;
+
+              const stopDrainWatch = watchGraceWindows(
+                () => drainedBytes,
+                (didProgress) => {
+                  if (!isDrainingAnsweredResponse) {
+                    return false;
                   }
 
                   // Torn down already, by a teardown or the peer: nothing left to read.
                   if (req.destroyed) {
                     stopDraining();
 
-                    return;
+                    return false;
                   }
 
                   const isStillUploading = isUploading();
@@ -2392,49 +2442,27 @@ export class NodeAdapter implements HTTPAdapter {
                   if (!isStillUploading && isPastLimit()) {
                     letGoOfConnection();
 
-                    return;
+                    return false;
                   }
 
                   if (!isStillUploading && !wasUploadingAtLastTick) {
                     windowsAfterUpload++;
 
                     if (
-                      drainedBytes === bytesAtLastTick ||
+                      !didProgress ||
                       windowsAfterUpload >= STRAY_205_DRAIN_WINDOWS
                     ) {
                       letGoOfConnection();
 
-                      return;
+                      return false;
                     }
                   }
 
-                  bytesAtLastTick = drainedBytes;
                   wasUploadingAtLastTick = isStillUploading;
-                  armDrainWatch();
-                }, UPLOAD_STALL_GRACE_MS);
 
-                // The connection's own reads keep the process up while it is open.
-                timer.unref?.();
-                drainWatchTimer = timer;
-              };
-
-              body.on('data', (chunk: Buffer) => {
-                if (!isDraining) {
-                  return;
-                }
-
-                drainedBytes += chunk.length;
-
-                if (isPastLimit() && !isUploading()) {
-                  letGoOfConnection();
-                }
-              });
-              body.on('end', stopDraining);
-              body.on('error', stopDraining);
-              body.on('aborted', stopDraining);
-              body.on('close', stopDraining);
-
-              armDrainWatch();
+                  return true;
+                },
+              );
 
               if (isUploading() && stallWatchdogTimer === undefined) {
                 watchForStalledUpload();
@@ -2451,15 +2479,17 @@ export class NodeAdapter implements HTTPAdapter {
             // so the connection is let go as they end - kept for the next request where it
             // can be - and an upload still going out goes on, as it does after an early
             // `200`. One that says up front its bytes pass `maxResponseBytes` has its
-            // connection let go at once, as a body that says so is refused.
+            // connection let go at once, as a body that says so is refused, once nothing
+            // is being uploaded on it.
             if (status === 205 && asciiUppercase(request.method) !== 'HEAD') {
-              if (
+              const isDeclaredPastLimit =
                 declaredLength !== undefined &&
-                declaredLength > maxResponseBytes
-              ) {
+                declaredLength > maxResponseBytes;
+
+              if (isDeclaredPastLimit && !isUploading()) {
                 answerBodiless();
               } else {
-                answerAndDrainStray205();
+                answerAndDrainStray205(isDeclaredPastLimit);
               }
 
               return;
@@ -2945,6 +2975,7 @@ export class NodeAdapter implements HTTPAdapter {
           // `reportWriteErrorAfterResponse`.
           if (didReceiveResponse) {
             reportWriteErrorAfterResponse(error);
+            afterBodyWriteFailure?.();
 
             return;
           }
@@ -3093,6 +3124,56 @@ export class NodeAdapter implements HTTPAdapter {
  * does, for a large body) - instead of one held to that server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
+
+/**
+ * How many {@link UPLOAD_STALL_GRACE_MS} windows NodeAdapter's deadline after an upload
+ * fails once the server has answered starts again for a response still arriving - a
+ * minute - before it tears the request down. A response behind its own consumer is
+ * waited for without this limit; see `reportWriteErrorAfterResponse`.
+ */
+const FAILED_UPLOAD_RESPONSE_WINDOWS = 12;
+
+/**
+ * Calls `onWindow` at the end of every {@link UPLOAD_STALL_GRACE_MS} window for as long
+ * as it answers `true`, telling it whether `readProgress` moved during that window. The
+ * timer never keeps the process up. Returns a function that stops it, safe to call from
+ * `onWindow` and more than once.
+ */
+function watchGraceWindows(
+  readProgress: () => number,
+  onWindow: (didProgress: boolean) => boolean,
+): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let isStopped = false;
+
+  const arm = (): void => {
+    const progressAtStart = readProgress();
+
+    timer = setTimeout(() => {
+      timer = undefined;
+
+      if (
+        !isStopped &&
+        onWindow(readProgress() !== progressAtStart) &&
+        !isStopped
+      ) {
+        arm();
+      }
+    }, UPLOAD_STALL_GRACE_MS);
+    timer.unref?.();
+  };
+
+  arm();
+
+  return (): void => {
+    isStopped = true;
+
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+}
 
 /**
  * How many whole {@link UPLOAD_STALL_GRACE_MS} windows with nothing being uploaded

@@ -219,31 +219,36 @@ test('the post-upload-failure deadline keeps a response that is still arriving',
   }
 }, 30_000);
 
-test('bytes past the limit behind an answered 205 let its connection go at once after its upload fails', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'node-adapter-205-failed-'));
-  try {
-    const build = await Bun.build({
-      entrypoints: [
-        fileURLToPath(new URL('./node-adapter.ts', import.meta.url)),
-      ],
-      target: 'node',
-      format: 'esm',
-    });
-    expect(build.success).toBe(true);
-    await writeFile(
-      join(directory, 'adapter.mjs'),
-      await build.outputs[0].text(),
-    );
-    const fixture = join(directory, 'fixture.mjs');
-    await writeFile(
-      fixture,
-      `
+test.each([
+  ['after it fails', 1000],
+  ['before it fails', 0],
+])(
+  'bytes past the limit behind an answered 205 let its connection go as soon as its upload has failed, sent %s',
+  async (_when, strayDelayMS) => {
+    const directory = await mkdtemp(join(tmpdir(), 'node-adapter-205-failed-'));
+    try {
+      const build = await Bun.build({
+        entrypoints: [
+          fileURLToPath(new URL('./node-adapter.ts', import.meta.url)),
+        ],
+        target: 'node',
+        format: 'esm',
+      });
+      expect(build.success).toBe(true);
+      await writeFile(
+        join(directory, 'adapter.mjs'),
+        await build.outputs[0].text(),
+      );
+      const fixture = join(directory, 'fixture.mjs');
+      await writeFile(
+        fixture,
+        `
         import assert from 'node:assert/strict';
         import net from 'node:net';
         import { NodeAdapter } from './adapter.mjs';
 
-        // Answers 205 at once, then, a second later - after the upload has failed at its
-        // source - sends 100 KiB of stray bytes against a 64 KiB limit.
+        // Answers 205 at once, and sends 100 KiB of stray bytes against a 64 KiB limit
+        // with it, or a second later, after the upload has failed at its source (300 ms).
         const STRAY = 100 * 1024;
         let strayAt;
         let closedAt;
@@ -257,7 +262,7 @@ test('bytes past the limit behind an answered 205 let its connection go at once 
             setTimeout(() => {
               strayAt = performance.now();
               socket.write(STRAY.toString(16) + '\\r\\n' + 'x'.repeat(STRAY) + '\\r\\n');
-            }, 1000);
+            }, ${strayDelayMS});
             socket.resume();
           });
         });
@@ -292,22 +297,25 @@ test('bytes past the limit behind an answered 205 let its connection go at once 
         }
         clearTimeout(hang);
 
-        // Let go as the bytes pass the limit, not when a watchdog looks again.
+        // Let go as the bytes pass the limit or as the upload fails, whichever is later,
+        // not when a window ends five seconds on.
         assert.ok(closedAt - strayAt < 2000, 'closed ' + Math.round(closedAt - strayAt) + ' ms after the stray bytes');
         for (const socket of sockets) socket.destroy();
         server.close();
       `,
-    );
-    const child = spawnSync('node', [fixture], {
-      encoding: 'utf8',
-      timeout: 20_000,
-    });
-    expect(child.error).toBeUndefined();
-    expect(child.status, child.stderr).toBe(0);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-}, 30_000);
+      );
+      const child = spawnSync('node', [fixture], {
+        encoding: 'utf8',
+        timeout: 20_000,
+      });
+      expect(child.error).toBeUndefined();
+      expect(child.status, child.stderr).toBe(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
 
 test('a multipart body source that does not match its size fails once, not retried as a network error', async () => {
   const directory = await mkdtemp(

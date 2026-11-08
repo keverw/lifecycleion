@@ -3533,6 +3533,109 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('the deadline after an upload fails behind an answer gives a response still arriving twelve windows at most', async () => {
+    // Parked, so the upload is still going out when it fails.
+    const req = new MockClientRequest(() => true);
+    // Only timers armed by the failure and by the windows run here are captured, not a
+    // leftover one of another test's.
+    let isCapturing = false;
+    const runCapturing = (run: () => void): void => {
+      isCapturing = true;
+      try {
+        run();
+      } finally {
+        isCapturing = false;
+      }
+    };
+    const socket = { bytesRead: 0 };
+    const res = Object.assign(
+      new MockIncomingMessage(200, { 'content-type': 'text/plain' }),
+      {
+        socket,
+        complete: false,
+        readableLength: 0,
+        isPaused: () => false,
+      },
+    );
+
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            // The upload fails without the connection, and the response goes on.
+            runCapturing(() => {
+              req.emit('error', new Error('upload source failed'));
+            });
+          });
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    // The deadline's windows, run by hand.
+    const windows: Array<() => void> = [];
+    const placeholders: Array<ReturnType<typeof setTimeout>> = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const setTimeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(((
+      handler: (...args: unknown[]) => void,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      if (delay === 5_000 && isCapturing) {
+        windows.push(() => handler(...args));
+        const placeholder = realSetTimeout(() => {}, 2_147_483_647);
+        placeholders.push(placeholder);
+        return placeholder;
+      }
+
+      return realSetTimeout(handler, delay, ...args);
+    }) as typeof setTimeout);
+
+    const onError = (event: Event): void => {
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      const sent = new NodeAdapter().send({
+        requestURL: 'http://example.test/upload',
+        method: 'POST',
+        headers: {},
+        body: 'x'.repeat(64 * 1024),
+      });
+
+      await waitUntil(() => windows.length === 1);
+
+      // A byte every window, never ending.
+      for (let window = 1; window < 12; window++) {
+        socket.bytesRead++;
+        runCapturing(windows[windows.length - 1]);
+        expect(req.destroyed).toBe(false);
+      }
+
+      socket.bytesRead++;
+      runCapturing(windows[windows.length - 1]);
+      expect(req.destroyed).toBe(true);
+
+      res.emit('aborted');
+      res.emit('close');
+      await sent;
+    } finally {
+      for (const placeholder of placeholders) {
+        clearTimeout(placeholder);
+      }
+      globalThis.removeEventListener('error', onError);
+      setTimeoutSpy.mockRestore();
+      requestSpy.mockRestore();
+    }
+  });
+
   test('the stall watchdog leaves a writer waiting on a slow source alone', async () => {
     // Progress is bytes the socket accepted, and a writer parked in `Blob.stream()`'s
     // `read()` makes none - so a multipart `File` on a slow disk, with the server already
@@ -12170,9 +12273,40 @@ test('an answered 205 keeps its connection for a whole quiet window after its up
   }
 }, 20_000);
 
-test('a 205 that answers an upload and declares more than the limit is answered from its header', async () => {
-  // Parked for good, so the answer cannot wait on the upload.
-  const req = new MockClientRequest(() => true);
+/**
+ * A request whose writes are accepted a tick later and whose `end()` leaves its last bytes
+ * unflushed until `flush()`, as a socket's send buffer does.
+ */
+class BufferingClientRequest extends MockClientRequest {
+  public writableEnded = false;
+  public writableFinished = false;
+
+  constructor() {
+    super((_data, callback) => {
+      setImmediate(() => callback?.(null));
+      return true;
+    });
+  }
+
+  public override end(): void {
+    super.end();
+    this.writableEnded = true;
+  }
+
+  public flush(): void {
+    this.writableFinished = true;
+    this.emit('finish');
+  }
+}
+
+async function waitUntil(condition: () => boolean): Promise<void> {
+  while (!condition()) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+test('a 205 that answers an upload and declares more than the limit lets its connection go once the upload has gone out', async () => {
+  const req = new BufferingClientRequest();
   const res = new MockIncomingMessage(205, {
     'content-length': String(10 * 1024 * 1024 * 1024),
   });
@@ -12197,7 +12331,55 @@ test('a 205 that answers an upload and declares more than the limit is answered 
 
     expect(response.status).toBe(205);
     expect(response.body).toBeNull();
+
+    await waitUntil(() => req.writableEnded);
+
+    expect(req.destroyed).toBe(false);
+
+    req.flush();
+
     expect(req.destroyed).toBe(true);
+    expect(await response.requestBodySettled).toBeUndefined();
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
+test('bytes past the limit behind an answered 205 wait for an ended upload to flush, and let its connection go as it does', async () => {
+  const req = new BufferingClientRequest();
+  // No length and no end: the 205 never closes on its own.
+  const res = new MockIncomingMessage(205, {});
+  const requestSpy = spyOn(http, 'request').mockImplementation(
+    (_options, callback) => {
+      const cb = callback as ((res: http.IncomingMessage) => void) | undefined;
+      queueMicrotask(() => {
+        cb?.(res as unknown as http.IncomingMessage);
+      });
+      return req as unknown as http.ClientRequest;
+    },
+  );
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: 'http://example.test/upload',
+      method: 'POST',
+      headers: {},
+      body: 'x'.repeat(256 * 1024),
+      maxResponseBytes: 10,
+    });
+
+    expect(response.status).toBe(205);
+
+    // Ended, its last bytes still buffered, when the limit is passed.
+    await waitUntil(() => req.writableEnded);
+    res.emit('data', Buffer.alloc(100));
+
+    expect(req.destroyed).toBe(false);
+
+    req.flush();
+
+    expect(req.destroyed).toBe(true);
+    expect(await response.requestBodySettled).toBeUndefined();
   } finally {
     requestSpy.mockRestore();
   }
