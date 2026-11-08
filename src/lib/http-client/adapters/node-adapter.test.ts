@@ -12049,6 +12049,41 @@ test("the caller's signal ends the read behind an answered 205", async () => {
   }
 });
 
+test('bytes trickled behind an answered 205 hold its connection for three windows at most', async () => {
+  // A byte a second, under the limit and with no signal: no window is quiet, so only the
+  // drain's own cap lets the connection go, fifteen seconds after the answer.
+  const raw = await listenRaw205(
+    'HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n',
+  );
+  const trickle = setInterval(() => {
+    raw.writeToAll('1\r\nx\r\n');
+  }, 1000);
+  try {
+    const startedAt = performance.now();
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${raw.port}/`,
+      method: 'POST',
+      headers: {},
+      body: 'x',
+    });
+
+    expect(response.status).toBe(205);
+
+    while (
+      raw.closedSockets() === 0 &&
+      performance.now() - startedAt < 25_000
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    expect(raw.closedSockets()).toBe(1);
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(14_900);
+  } finally {
+    clearInterval(trickle);
+    await raw.close();
+  }
+}, 30_000);
+
 test('an answered 205 keeps its connection for a whole quiet window after its upload ends', async () => {
   // The upload ends just before the first window does, and the 205's bytes come after:
   // that window was not quiet, so they are read rather than the connection let go.

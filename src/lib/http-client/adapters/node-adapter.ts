@@ -2304,13 +2304,15 @@ export class NodeAdapter implements HTTPAdapter {
             };
 
             // A stray `205`'s answer (see below): settled now, its bytes read and dropped
-            // until they end. Bounded as a body is, by `maxResponseBytes`, past which the
-            // connection is let go; by the caller's signal, which ends it as it ends the
-            // same read behind a `fetch` answer; an upload still going out by the stall
-            // watchdog, armed now rather than once the answer closes; and the bytes
-            // themselves by the same five-second windows, once nothing is being uploaded:
-            // a whole window with neither lets the connection go, rather than holding it
-            // for as long as the server keeps it open.
+            // until they end. Bounded by `maxResponseBytes`, past which the connection is
+            // let go; by the caller's signal, which ends it as it ends the same read behind
+            // a `fetch` answer; an upload still going out by the stall watchdog, armed now
+            // rather than once the answer closes; and the bytes themselves by the same
+            // five-second windows, once nothing is being uploaded: a whole window with
+            // neither lets the connection go, and so does the end of the
+            // {@link STRAY_205_DRAIN_WINDOWS}th, however the bytes trickle - the request's
+            // timeout has stopped with the answer, so nothing else would end a read a
+            // server keeps alive a byte at a time.
             const answerAndDrainStray205 = (): void => {
               guardedDownloadProgress?.(completeProgressEvent(0));
 
@@ -2352,6 +2354,8 @@ export class NodeAdapter implements HTTPAdapter {
               // Read at each tick, so a window counts as quiet only when the upload was
               // already done as it began - not one it ran through until just before its end.
               let wasUploadingAtLastTick = isUploading();
+              // Whole windows run with nothing being uploaded, quiet or not.
+              let windowsAfterUpload = 0;
               const armDrainWatch = (): void => {
                 const timer = setTimeout(() => {
                   drainWatchTimer = undefined;
@@ -2369,14 +2373,17 @@ export class NodeAdapter implements HTTPAdapter {
 
                   const isStillUploading = isUploading();
 
-                  if (
-                    drainedBytes === bytesAtLastTick &&
-                    !isStillUploading &&
-                    !wasUploadingAtLastTick
-                  ) {
-                    letGoOfConnection();
+                  if (!isStillUploading && !wasUploadingAtLastTick) {
+                    windowsAfterUpload++;
 
-                    return;
+                    if (
+                      drainedBytes === bytesAtLastTick ||
+                      windowsAfterUpload >= STRAY_205_DRAIN_WINDOWS
+                    ) {
+                      letGoOfConnection();
+
+                      return;
+                    }
                   }
 
                   bytesAtLastTick = drainedBytes;
@@ -3064,6 +3071,15 @@ export class NodeAdapter implements HTTPAdapter {
  * does, for a large body) - instead of one held to that server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
+
+/**
+ * How many whole {@link UPLOAD_STALL_GRACE_MS} windows NodeAdapter reads and drops the
+ * bytes behind an answered `205` for once nothing is being uploaded - fifteen seconds -
+ * before it lets the connection go, however steadily they arrive. A quiet window lets it
+ * go sooner. The bytes are ones the status says are not there, so this is room for a
+ * server that sends a short stray body slowly, not for one that streams.
+ */
+const STRAY_205_DRAIN_WINDOWS = 3;
 
 // ---------------------------------------------------------------------------
 // Streaming pipe helper
