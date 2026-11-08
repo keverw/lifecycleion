@@ -903,8 +903,9 @@ export class NodeAdapter implements HTTPAdapter {
      * `upload.settle === null` reads as "no body write is outstanding": it is `null` for
      * a bodiless request, which opens no outcome, and cleared the moment a bodied one
      * settles. A writer that is still running after its outcome settled - a post-response
-     * write failure handed to the grace deadline - is already on a teardown path of its
-     * own, so no abort is needed to finish it.
+     * write failure, its request torn down or left to the consumer of its response (see
+     * `reportWriteErrorAfterResponse`) - is already on a teardown path of its own, so no
+     * abort is needed to finish it.
      */
     const releaseAbortListeners = (): void => {
       if (
@@ -1312,11 +1313,11 @@ export class NodeAdapter implements HTTPAdapter {
               // for the same upload. The one-shot is honoured in the other direction too:
               // a write failure reported from the request's `'error'` handler settles the
               // outcome but leaves `isWritingBody` set on purpose (see
-              // `settleBodyOutcome`), and hands the request to a grace deadline of its
-              // own rather than destroying it, so this tick still runs and would
-              // otherwise say "stalled" over an upload already reported as reset. The
-              // settle and the destroy still happen here: the first is a no-op the second
-              // time, the second is the teardown that deadline was going to do anyway.
+              // `settleBodyOutcome`), and leaves the request up while its response is
+              // behind its consumer, so this tick can still run and would otherwise say
+              // "stalled" over an upload already reported as reset. The settle and the
+              // destroy still happen here: the first is a no-op the second time, the
+              // second a teardown of a request nothing is finishing.
               // Not for an upload this adapter tore down itself, which
               // `reportWriteErrorAfterResponse` does not report either.
               if (
@@ -1402,7 +1403,8 @@ export class NodeAdapter implements HTTPAdapter {
          *
          * Split from {@link endBodyWrite} because one caller must settle the promise
          * *without* declaring the writer finished: a write error that lands after the
-         * response has arrived is reported and left to the grace deadline, and
+         * response has arrived is reported and its request torn down (see
+         * `reportWriteErrorAfterResponse`), and
          * `isWritingBody` still gates the response-close handler's choice between the
          * stall watchdog and an immediate `destroy`. Flipping it there would change that
          * teardown as a side effect of answering the caller.
@@ -1705,10 +1707,11 @@ export class NodeAdapter implements HTTPAdapter {
           }
 
           // This body is over, so answer `requestBodySettled` now rather than leaving it
-          // to the writer. Nothing below settles it: the request is reported and then
-          // handed to the grace deadline, and a writer blocked in `Blob.stream()`'s
-          // `read()` never returns to notice - `await response.requestBodySettled` would
-          // then hang for the whole grace window on an upload that is already dead.
+          // to the writer. Nothing below settles it: the request is reported and then torn
+          // down, or left to its response's consumer, and a writer blocked in
+          // `Blob.stream()`'s `read()` never returns to notice - `await
+          // response.requestBodySettled` would then hang on an upload that is already
+          // dead.
           // Settled before the report, so a failure in reporting cannot leave the caller
           // waiting.
           settleBodyOutcome(failure);
@@ -1860,6 +1863,23 @@ export class NodeAdapter implements HTTPAdapter {
             // A writer still running is left alone while it is getting anywhere; see
             // `watchForStalledUpload`. It ends the request when it finishes, and
             // `reportWriteErrorAfterResponse` destroys it if it fails.
+            //
+            // Except on a connection the answer said it would close: the runtime has
+            // ended its writing side as the answer ended (Node half-closes it, Bun closes
+            // it), so the upload cannot finish whatever the server reads. Torn down now,
+            // as this adapter's own, rather than left for the watchdog to call it stalled
+            // five seconds on against a server that neither reads nor closes.
+            if (
+              isWritingBody &&
+              isAnswerClosingConnection(res) &&
+              (req.socket?.writableEnded === true ||
+                req.socket?.destroyed === true)
+            ) {
+              tearDownAfterResponse();
+
+              return;
+            }
+
             if (isWritingBody) {
               // Once: a stray `205` arms it as it is answered (see
               // `answerAndDrainStray205`).

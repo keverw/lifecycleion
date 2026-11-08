@@ -998,13 +998,6 @@ export class MockAdapter implements HTTPAdapter {
 // --- Helpers ---
 
 /**
- * The URL a redirect's `Location` resolves against: the request URL, or - for a
- * path-only one driven straight at the adapter, which has no origin of its own - that
- * URL read against {@link MOCK_ADAPTER_DEFAULT_BASE_URL}, as the client reads a mock
- * request with no `baseURL`. So `/start` answered with `Location: /next` reports
- * `http://localhost/next`, as it does through the client.
- */
-/**
  * A protocol-relative `requestURL` (`//api.test/users`) given the scheme of the mock's
  * default base, so its host is read as a host - stripped before routing, and reported as
  * `host` - as `redirectBaseURL` reads it. Anything else is returned as it is.
@@ -1015,6 +1008,13 @@ function withMockScheme(requestURL: string): string {
     : requestURL;
 }
 
+/**
+ * The URL a redirect's `Location` resolves against: the request URL, or - for a
+ * path-only one driven straight at the adapter, which has no origin of its own - that
+ * URL read against {@link MOCK_ADAPTER_DEFAULT_BASE_URL}, as the client reads a mock
+ * request with no `baseURL`. So `/start` answered with `Location: /next` reports
+ * `http://localhost/next`, as it does through the client.
+ */
 function redirectBaseURL(requestURL: string): string {
   try {
     new URL(requestURL);

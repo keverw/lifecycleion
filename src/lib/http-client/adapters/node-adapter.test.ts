@@ -3539,7 +3539,6 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     const res = Object.assign(
       new MockIncomingMessage(200, { 'content-type': 'text/plain' }),
       {
-        socket: { bytesRead: 0 },
         complete: false,
         readableLength: 0,
         isPaused: () => false,
@@ -10909,10 +10908,18 @@ test('a 205 that carries bytes is answered bodiless, its bytes neither measured 
   }
 });
 
-test('a 205 whose bytes pass the limit is answered at once, not drained for as long as they come', async () => {
+test('a 205 whose bytes pass the limit is answered at once, and its connection let go as they do', async () => {
   // Its headers and more bytes than the limit, then held open: drained to its end, the
-  // answer would wait as long as the server sends.
-  const server = http.createServer((_req, res) => {
+  // answer would wait as long as the server sends, and read on behind it, the connection
+  // would be held to the next five-second window.
+  let resolveClosed: () => void = () => {};
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  const server = http.createServer((req, res) => {
+    req.socket.on('close', () => {
+      resolveClosed();
+    });
     res.writeHead(205, { 'transfer-encoding': 'chunked' });
     res.write('x'.repeat(2000));
   });
@@ -10934,6 +10941,10 @@ test('a 205 whose bytes pass the limit is answered at once, not drained for as l
     expect(response.isStreamError).not.toBe(true);
     expect(response.body).toBeNull();
     expect(loaded.every((bytes) => bytes === 0)).toBe(true);
+
+    const startedAt = performance.now();
+    await closed;
+    expect(performance.now() - startedAt).toBeLessThan(4000);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -12336,6 +12347,37 @@ test('a 205 that answers an upload and declares more than the limit lets its con
 
     expect(req.destroyed).toBe(true);
     expect(await response.requestBodySettled).toBeUndefined();
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
+test('a 205 that declares more than the limit with nothing being uploaded lets its connection go at once', async () => {
+  const req = new MockClientRequest();
+  const res = new MockIncomingMessage(205, {
+    'content-length': String(10 * 1024 * 1024 * 1024),
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(
+    (_options, callback) => {
+      const cb = callback as ((res: http.IncomingMessage) => void) | undefined;
+      queueMicrotask(() => {
+        cb?.(res as unknown as http.IncomingMessage);
+      });
+      return req as unknown as http.ClientRequest;
+    },
+  );
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: 'http://example.test/',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.body).toBeNull();
+    expect(req.destroyed).toBe(true);
   } finally {
     requestSpy.mockRestore();
   }

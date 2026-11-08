@@ -318,6 +318,75 @@ test.each([
   30_000,
 );
 
+test('an upload a Connection: close answer ends is settled at once and not reported, against a server that neither reads nor closes', async () => {
+  // Node half-closes the connection as such an answer ends and leaves the pending write
+  // parked; Bun closes it. Either way the upload cannot finish.
+  const directory = await mkdtemp(join(tmpdir(), 'node-adapter-close-'));
+  try {
+    const build = await Bun.build({
+      entrypoints: [
+        fileURLToPath(new URL('./node-adapter.ts', import.meta.url)),
+      ],
+      target: 'node',
+      format: 'esm',
+    });
+    expect(build.success).toBe(true);
+    await writeFile(
+      join(directory, 'adapter.mjs'),
+      await build.outputs[0].text(),
+    );
+    const fixture = join(directory, 'fixture.mjs');
+    await writeFile(
+      fixture,
+      `
+        import assert from 'node:assert/strict';
+        import net from 'node:net';
+        import { NodeAdapter } from './adapter.mjs';
+
+        let reports = 0;
+        globalThis.addEventListener('error', (event) => {
+          reports++;
+          event.preventDefault();
+        });
+        const sockets = [];
+        const server = net.createServer((socket) => {
+          sockets.push(socket);
+          socket.on('error', () => {});
+          socket.once('data', () => {
+            socket.write('HTTP/1.1 413 Payload Too Large\\r\\nConnection: close\\r\\nContent-Length: 4\\r\\n\\r\\nnope');
+            // Never reads again, never closes.
+            socket.pause();
+          });
+        });
+        await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+        const startedAt = performance.now();
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://127.0.0.1:' + server.address().port + '/',
+          method: 'PUT', headers: {}, body: new Uint8Array(32 * 1024 * 1024),
+        });
+        assert.equal(response.status, 413);
+        assert.ok(await response.requestBodySettled instanceof Error, 'the upload was cut');
+        const settledMS = Math.round(performance.now() - startedAt);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        assert.equal(reports, 0, 'not reported');
+        assert.ok(settledMS < 3000, 'settled at the answer, not by the watchdog: ' + settledMS + ' ms');
+        for (const socket of sockets) socket.destroy();
+        server.close();
+      `,
+    );
+    const child = spawnSync('node', [fixture], {
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
 test('a multipart body source that does not match its size fails once, not retried as a network error', async () => {
   const directory = await mkdtemp(
     join(tmpdir(), 'node-adapter-source-mismatch-'),
