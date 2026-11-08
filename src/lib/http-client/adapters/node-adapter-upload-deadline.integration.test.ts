@@ -131,7 +131,7 @@ test('the post-upload-failure deadline keeps a response that is behind its consu
   }
 }, 30_000);
 
-test('the post-upload-failure deadline keeps a response that is still arriving', async () => {
+test('an upload that fails behind a response still arriving cuts it at once, as fetch does', async () => {
   const directory = await mkdtemp(
     join(tmpdir(), 'node-adapter-upload-deadline-arriving-'),
   );
@@ -156,8 +156,7 @@ test('the post-upload-failure deadline keeps a response that is still arriving',
         import net from 'node:net';
         import { NodeAdapter } from './adapter.mjs';
 
-        // Answers at once, then sends 100 bytes every 100 ms for 8 s: past the
-        // deadline's first window, and never quiet for one.
+        // Answers at once, then sends 100 bytes every 100 ms for 8 s.
         const CHUNKS = 80;
         const sockets = [];
         const server = net.createServer((socket) => {
@@ -195,15 +194,18 @@ test('the post-upload-failure deadline keeps a response that is still arriving',
         form.append('f', file);
 
         const hang = setTimeout(() => { console.error('HANG'); process.exit(2); }, 15000);
+        const startedAt = performance.now();
         const response = await new NodeAdapter().send({
           requestURL: 'http://127.0.0.1:' + server.address().port + '/',
           method: 'POST', headers: {}, body: form,
         });
         clearTimeout(hang);
+        const elapsed = Math.round(performance.now() - startedAt);
 
         assert.equal(response.status, 200);
-        assert.ok(!response.isStreamError, 'no stream error');
-        assert.equal(response.body.length, CHUNKS * 100);
+        assert.ok(response.isStreamError, 'cut as a stream error');
+        assert.ok(response.body === null || response.body.length < CHUNKS * 100);
+        assert.ok(elapsed < 3000, 'cut at the failure, not later: ' + elapsed + ' ms');
         for (const socket of sockets) socket.destroy();
         server.close();
       `,
@@ -250,7 +252,7 @@ test.each([
         // Answers 205 at once, and sends 100 KiB of stray bytes against a 64 KiB limit
         // with it, or a second later, after the upload has failed at its source (300 ms).
         const STRAY = 100 * 1024;
-        let strayAt;
+        let answeredAt;
         let closedAt;
         const sockets = [];
         const server = net.createServer((socket) => {
@@ -258,9 +260,9 @@ test.each([
           socket.on('error', () => {});
           socket.on('close', () => { closedAt = performance.now(); });
           socket.once('data', () => {
+            answeredAt = performance.now();
             socket.write('HTTP/1.1 205 Reset Content\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n');
             setTimeout(() => {
-              strayAt = performance.now();
               socket.write(STRAY.toString(16) + '\\r\\n' + 'x'.repeat(STRAY) + '\\r\\n');
             }, ${strayDelayMS});
             socket.resume();
@@ -297,9 +299,8 @@ test.each([
         }
         clearTimeout(hang);
 
-        // Let go as the bytes pass the limit or as the upload fails, whichever is later,
-        // not when a window ends five seconds on.
-        assert.ok(closedAt - strayAt < 2000, 'closed ' + Math.round(closedAt - strayAt) + ' ms after the stray bytes');
+        // Let go as the upload fails (300 ms in), not when a window ends five seconds on.
+        assert.ok(closedAt - answeredAt < 2000, 'closed ' + Math.round(closedAt - answeredAt) + ' ms after the answer');
         for (const socket of sockets) socket.destroy();
         server.close();
       `,

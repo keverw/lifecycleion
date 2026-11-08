@@ -3533,25 +3533,13 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
-  test('the deadline after an upload fails behind an answer gives a response still arriving twelve windows at most', async () => {
+  test('an upload that fails behind an answer still arriving tears the request down at once, as fetch does', async () => {
     // Parked, so the upload is still going out when it fails.
     const req = new MockClientRequest(() => true);
-    // Only timers armed by the failure and by the windows run here are captured, not a
-    // leftover one of another test's.
-    let isCapturing = false;
-    const runCapturing = (run: () => void): void => {
-      isCapturing = true;
-      try {
-        run();
-      } finally {
-        isCapturing = false;
-      }
-    };
-    const socket = { bytesRead: 0 };
     const res = Object.assign(
       new MockIncomingMessage(200, { 'content-type': 'text/plain' }),
       {
-        socket,
+        socket: { bytesRead: 0 },
         complete: false,
         readableLength: 0,
         isPaused: () => false,
@@ -3567,34 +3555,13 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           cb?.(res as unknown as http.IncomingMessage);
           queueMicrotask(() => {
             // The upload fails without the connection, and the response goes on.
-            runCapturing(() => {
-              req.emit('error', new Error('upload source failed'));
-            });
+            req.emit('error', new Error('upload source failed'));
           });
         });
 
         return req as unknown as http.ClientRequest;
       },
     );
-
-    // The deadline's windows, run by hand.
-    const windows: Array<() => void> = [];
-    const placeholders: Array<ReturnType<typeof setTimeout>> = [];
-    const realSetTimeout = globalThis.setTimeout;
-    const setTimeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(((
-      handler: (...args: unknown[]) => void,
-      delay?: number,
-      ...args: unknown[]
-    ) => {
-      if (delay === 5_000 && isCapturing) {
-        windows.push(() => handler(...args));
-        const placeholder = realSetTimeout(() => {}, 2_147_483_647);
-        placeholders.push(placeholder);
-        return placeholder;
-      }
-
-      return realSetTimeout(handler, delay, ...args);
-    }) as typeof setTimeout);
 
     const onError = (event: Event): void => {
       event.preventDefault();
@@ -3610,28 +3577,13 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         body: 'x'.repeat(64 * 1024),
       });
 
-      await waitUntil(() => windows.length === 1);
-
-      // A byte every window, never ending.
-      for (let window = 1; window < 12; window++) {
-        socket.bytesRead++;
-        runCapturing(windows[windows.length - 1]);
-        expect(req.destroyed).toBe(false);
-      }
-
-      socket.bytesRead++;
-      runCapturing(windows[windows.length - 1]);
-      expect(req.destroyed).toBe(true);
+      await waitUntil(() => req.destroyed);
 
       res.emit('aborted');
       res.emit('close');
       await sent;
     } finally {
-      for (const placeholder of placeholders) {
-        clearTimeout(placeholder);
-      }
       globalThis.removeEventListener('error', onError);
-      setTimeoutSpy.mockRestore();
       requestSpy.mockRestore();
     }
   });

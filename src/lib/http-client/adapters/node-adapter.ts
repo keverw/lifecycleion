@@ -1144,15 +1144,6 @@ export class NodeAdapter implements HTTPAdapter {
          */
         let stopFailedUploadDeadline: (() => void) | undefined;
 
-        /**
-         * Run once the body writer has failed after the response arrived, after
-         * `reportWriteErrorAfterResponse` has handled it, so a stray `205`'s read can let its
-         * connection go then (see `answerAndDrainStray205`): a failed upload emits no
-         * `'finish'`. A failure the request's `'error'` handler reports kills the
-         * connection, whose close ends that read.
-         */
-        let afterBodyWriteFailure: (() => void) | undefined;
-
         /** Whether a post-response write failure has already been reported and scheduled. */
         let didReportWriteErrorAfterResponse = false;
         /**
@@ -1763,48 +1754,40 @@ export class NodeAdapter implements HTTPAdapter {
           // this promise at all: the caller hangs until its own signal fires, and the adapter
           // imposes no timeout of its own by design.
           //
-          // Given the same grace the stall watchdog gives an upload, and for the same reason:
-          // a response still streaming in on that socket is worth waiting for, so a window in
-          // which its connection read anything starts another, and one that reads nothing for
-          // a whole window is waiting on a body that is never coming. Started again for
-          // {@link FAILED_UPLOAD_RESPONSE_WINDOWS} windows at most, since a server can keep a
-          // response alive a byte at a time while it waits on the rest of the body. Tearing
-          // it down settles the promise through the response path's own error handling.
+          // Torn down now, as `fetch` and Node's own `pipeline` tear a request down when its
+          // body source fails: a request whose body cannot be completed is not one the
+          // server can finish answering, so a response still arriving is cut there, and the
+          // response path reports it as the stream error it is.
           //
           // Not while the response is behind its own consumer, though - fully arrived, paused
           // under a slow sink's backpressure, or buffered for a stream factory still opening
           // its sink. Destroying the request then dumps the bytes that have not been read
           // yet: a download cut short and reported as a success, or a factory left waiting
           // on a response that has already ended. That response is not waiting on the body;
-          // its `'close'` destroys the request once it has been consumed, so the deadline
-          // only looks again later.
+          // its `'close'` destroys the request once it has been consumed, and until then it
+          // is looked at again every {@link UPLOAD_STALL_GRACE_MS}, so one that goes back to
+          // waiting on the network is torn down then.
           const isResponseBehindItsConsumer = (): boolean =>
             receivedResponse !== undefined &&
             (receivedResponse.complete ||
               receivedResponse.isPaused() ||
               receivedResponse.readableLength > 0);
-          // Counted off the connection, not the response, so reading it never changes how
-          // the response flows.
-          const responseBytesRead = (): number =>
-            receivedResponse?.socket?.bytesRead ?? 0;
-          let arrivingWindows = 0;
+
+          if (!isResponseBehindItsConsumer()) {
+            destroyUnfinishedRequestQuietly(req);
+
+            return;
+          }
 
           try {
             stopFailedUploadDeadline = watchGraceWindows(
-              responseBytesRead,
-              (didProgress) => {
+              () => 0,
+              () => {
                 if (didResponseClose) {
                   return false;
                 }
 
                 if (isResponseBehindItsConsumer()) {
-                  return true;
-                }
-
-                if (
-                  didProgress &&
-                  ++arrivingWindows < FAILED_UPLOAD_RESPONSE_WINDOWS
-                ) {
                   return true;
                 }
 
@@ -2358,14 +2341,14 @@ export class NodeAdapter implements HTTPAdapter {
 
             // A stray `205`'s answer (see below): settled now, its bytes read and dropped
             // until they end. An upload still going out goes on, its writer watched by the
-            // stall watchdog, armed now rather than once the answer closes. The read is
-            // bounded by the caller's signal, which ends it as it ends the same read behind
-            // a `fetch` answer, and, once nothing is being uploaded, by `maxResponseBytes`
-            // and the same five-second windows: past the limit - as the upload's last bytes
-            // go out, as its writer fails, or as a byte arrives after either - after a whole
-            // window with no bytes, or at the end
-            // of the {@link STRAY_205_DRAIN_WINDOWS}th window however the bytes trickle,
-            // the connection is let go. The request's timeout stopped with the answer, so
+            // stall watchdog, armed now rather than once the answer closes; one whose writer
+            // fails tears the connection down with it (see `reportWriteErrorAfterResponse`).
+            // The read is bounded by the caller's signal, which ends it as it ends the same
+            // read behind a `fetch` answer, and, once the upload has gone out, by
+            // `maxResponseBytes` and the same five-second windows: past the limit - as the
+            // upload's last bytes go out, or as a byte arrives after them - after a whole
+            // window with no bytes, or at the end of the {@link STRAY_205_DRAIN_WINDOWS}th
+            // window however the bytes trickle, the connection is let go. The request's timeout stopped with the answer, so
             // nothing else would end a read that a server keeps alive a byte at a time.
             // Bytes past the limit during an upload are dropped as they come, so they cost
             // no memory; `isDeclaredPastLimit` counts a `Content-Length` saying they will
@@ -2393,7 +2376,6 @@ export class NodeAdapter implements HTTPAdapter {
                 // called this yet: every caller is an event or a timer.
                 stopDrainWatch();
                 req.off('finish', letGoIfPastLimit);
-                afterBodyWriteFailure = undefined;
 
                 if (isDrainingAnsweredResponse) {
                   isDrainingAnsweredResponse = false;
@@ -2406,8 +2388,8 @@ export class NodeAdapter implements HTTPAdapter {
                 runTeardownGuarded(tearDownAfterResponse);
               };
 
-              // Past the limit once nothing is being uploaded: as a byte arrives, as the
-              // upload's last bytes go out, or as its writer fails.
+              // Past the limit once nothing is being uploaded: as a byte arrives, or as the
+              // upload's last bytes go out.
               function letGoIfPastLimit(): void {
                 if (
                   isDrainingAnsweredResponse &&
@@ -2438,7 +2420,6 @@ export class NodeAdapter implements HTTPAdapter {
               body.on('aborted', stopDraining);
               body.on('close', stopDraining);
               req.on('finish', letGoIfPastLimit);
-              afterBodyWriteFailure = letGoIfPastLimit;
 
               const stopDrainWatch = watchGraceWindows(
                 () => drainedBytes,
@@ -2992,7 +2973,6 @@ export class NodeAdapter implements HTTPAdapter {
           // `reportWriteErrorAfterResponse`.
           if (didReceiveResponse) {
             reportWriteErrorAfterResponse(error);
-            afterBodyWriteFailure?.();
 
             return;
           }
@@ -3170,14 +3150,6 @@ function isAnswerClosingConnection(
 
   return response.httpVersion === '1.0' && !tokens.includes('keep-alive');
 }
-
-/**
- * How many {@link UPLOAD_STALL_GRACE_MS} windows NodeAdapter's deadline after an upload
- * fails once the server has answered starts again for a response still arriving - a
- * minute - before it tears the request down. A response behind its own consumer is
- * waited for without this limit; see `reportWriteErrorAfterResponse`.
- */
-const FAILED_UPLOAD_RESPONSE_WINDOWS = 12;
 
 /**
  * Calls `onWindow` at the end of every {@link UPLOAD_STALL_GRACE_MS} window for as long

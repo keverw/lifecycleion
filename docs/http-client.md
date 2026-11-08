@@ -419,14 +419,12 @@ failed, a response body over `maxResponseBytes` or one that fails to decode - se
 short because the answer said it would close the connection (`Connection: close`, or
 HTTP/1.0 without keep-alive) and the runtime closed it.
 
-Once an upload has failed after an early answer, NodeAdapter keeps reading that answer only
-while it is still coming: a response whose connection reads nothing for five seconds is
-waiting on the rest of a body that will never arrive, and the request is torn down, failing
-as a stream error. One still arriving is read for a minute at most - a server can keep a
-response alive a byte at a time while it waits - after which it is torn down the same way.
-A response its consumer is still working through (complete, paused under a slow
-`streamResponse` sink, or buffered for a factory still opening its sink) is waited for
-however long that takes. A timeout while the
+When an upload fails after an early answer that is still arriving, NodeAdapter tears the
+request down at once, as `fetch` and Node's own `pipeline` do: a request whose body cannot be
+completed is not one the server can finish answering, so the response fails as a stream
+error. A response its consumer is still working through - complete, paused under a slow
+`streamResponse` sink, or buffered for a factory still opening its sink - is waited for
+however long that takes, and torn down if it goes back to waiting on the network. A timeout while the
 client waits to dispatch another hop is a separate request failure.
 
 ### Content-Type Detection and Body Parsing
