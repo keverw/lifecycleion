@@ -667,7 +667,15 @@ test('a response task that fails after an early-ack stream setup was answered re
         }),
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Waited for, not timed: a slow runner can take more than one turn to get there.
+    const waitFor = async (condition: () => boolean): Promise<void> => {
+      const deadline = Date.now() + 2000;
+      while (!condition() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    };
+
+    await waitFor(() => failPendingWrite !== undefined);
     expect(failPendingWrite).toBeDefined();
 
     const res = Object.assign(new EventEmitter(), {
@@ -690,7 +698,7 @@ test('a response task that fails after an early-ack stream setup was answered re
       'Response stream closed during setup',
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitFor(() => reports.length > 0);
 
     expect(reports).toHaveLength(1);
     expect((reports[0] as Error).message).toBe(

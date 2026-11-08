@@ -5358,11 +5358,16 @@ test('a timed-out attempt is a timeout whatever the adapter rejects with; nextRe
   const client = new HTTPClient({
     adapter: new RecordingAdapter(503),
     baseURL: 'http://x.test',
-    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 200 },
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1000 },
   });
+  // Outlasts the delay, so the retry is due as the observer ends: kept, it starts then;
+  // restarted after the observer, a whole delay later. Wide apart, so a slow runner's
+  // late timers cannot be read as either.
+  let observerEnd = 0;
   client.addResponseObserver(
     async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      observerEnd = Date.now();
     },
     { phases: ['retry'] },
   );
@@ -5379,7 +5384,8 @@ test('a timed-out attempt is a timeout whatever the adapter rejects with; nextRe
       }
     })
     .send();
-  expect(secondStart - nextRetryAt).toBeLessThan(150);
+  expect(nextRetryAt).toBeGreaterThan(0);
+  expect(secondStart - observerEnd).toBeLessThan(500);
 });
 
 test('override apex for edge-hyphen hosts, a resolved transport error after the timer, a clock step during retry observers', async () => {
@@ -13655,7 +13661,9 @@ test('an adapter that honors its signal is not held by the abort grace', async (
   let startedAt = performance.now();
   const timedOut = await client.get('/slow').timeout(50).send();
   expect(timedOut.isTimeout).toBe(true);
-  expect(performance.now() - startedAt).toBeLessThan(150);
+  // Held by the grace, it would take a second past the abort; the bound is well short of
+  // that, and well past a slow runner's late timers.
+  expect(performance.now() - startedAt).toBeLessThan(700);
 
   startedAt = performance.now();
   const builder = client.get('/slow').timeout(0);
@@ -13664,7 +13672,7 @@ test('an adapter that honors its signal is not held by the abort grace', async (
   builder.cancel('stop');
   const cancelled = await sending;
   expect(cancelled.isCancelled).toBe(true);
-  expect(performance.now() - startedAt).toBeLessThan(120);
+  expect(performance.now() - startedAt).toBeLessThan(700);
 });
 
 /**

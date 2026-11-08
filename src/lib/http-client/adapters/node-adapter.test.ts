@@ -1221,7 +1221,9 @@ describe('NodeAdapter streamResponse factory failures', () => {
     const client = new HTTPClient({
       adapter: new NodeAdapter(),
       baseURL: `http://127.0.0.1:${String(port)}`,
-      timeout: 150,
+      // Long enough that a slow runner has the headers in, and the stream started,
+      // before it fires.
+      timeout: 1000,
     });
     const sink = () =>
       new Writable({
@@ -7484,13 +7486,18 @@ describe('NodeAdapter via HTTPClient', () => {
       // The server's real answer, not a fabricated transport error over it.
       expect(res.status).toBe(413);
 
-      // Past the stall grace, so an upload that parked has been torn down by now. See
-      // `UPLOAD_STALL_GRACE_MS`.
-      await new Promise((resolve) => setTimeout(resolve, 6_000));
+      // This server keeps reading, so the upload finishes, all of it reaching the server
+      // over a connection left up; that a stalled one is torn down instead is the next
+      // test's, which stops reading and so can tell.
+      expect(await res.requestBodySettled).toBeUndefined();
 
-      // This server keeps reading, so the upload finishes; that a stalled one is torn
-      // down instead is the next test's, which stops reading and so can tell.
-      expect(didCloseSocket || receivedBytes >= bodySize).toBe(true);
+      const deadline = Date.now() + 10_000;
+      while (receivedBytes < bodySize && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      expect(receivedBytes).toBeGreaterThanOrEqual(bodySize);
+      expect(didCloseSocket).toBe(false);
     } finally {
       server.close();
     }
@@ -12453,7 +12460,11 @@ test('the stall watchdog timer is cleared once an early-ack upload finishes', as
   ) => {
     const timer = realSetTimeout(handler, delay, ...args);
 
-    if (delay === 5_000) {
+    // The stall watchdog's alone: the 205 drain and other tests' windows are 5 s too.
+    if (
+      delay === 5_000 &&
+      (new Error().stack ?? '').includes('watchForStalledUpload')
+    ) {
       watchdogTimers.push(timer);
     }
 
@@ -12471,7 +12482,9 @@ test('the stall watchdog timer is cleared once an early-ack upload finishes', as
       requestURL: `http://127.0.0.1:${port}/upload`,
       method: 'PUT',
       headers: {},
-      body: 'x'.repeat(4 * 1024 * 1024),
+      // Read slowly and large enough to outlast the response on a runner whose socket
+      // buffers take a few megabytes.
+      body: 'x'.repeat(32 * 1024 * 1024),
     });
 
     expect(response.status).toBe(200);

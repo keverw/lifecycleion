@@ -124,9 +124,12 @@ test('a CRL with no complete block is refused at construction', () => {
 });
 
 test('an error for a body cut off mid-stream does not carry the request headers when serialized', async () => {
-  // Headers, part of the body, then nothing: the attempt's timer cuts the body off. Long
-  // enough that the headers arrive first on a loaded machine, or it is a plain timeout.
+  // Headers and part of the body, then the connection is cut once the client has them:
+  // the body is cut off however slowly the runner delivers it, with no timer racing the
+  // headers.
+  let serverResponse: http.ServerResponse | undefined;
   const server = http.createServer((_req, res) => {
+    serverResponse = res;
     res.writeHead(200, { 'content-length': '1000' });
     res.write('part');
   });
@@ -134,9 +137,14 @@ test('an error for a body cut off mid-stream does not carry the request headers 
   const { port } = server.address() as { port: number };
 
   try {
-    const builder = new HTTPClient({ adapter: new NodeAdapter(), timeout: 300 })
+    const builder = new HTTPClient({ adapter: new NodeAdapter() })
       .get(`http://127.0.0.1:${port}/`)
-      .headers({ authorization: 'Bearer secret' });
+      .headers({ authorization: 'Bearer secret' })
+      .onDownloadProgress((event) => {
+        if (event.loaded > 0) {
+          serverResponse?.socket?.destroy();
+        }
+      });
 
     await builder.send();
 

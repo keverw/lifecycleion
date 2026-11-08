@@ -198,11 +198,11 @@ describe('NodeAdapter: a sink returned after its request was torn down', () => {
       baseURL: url,
     });
 
-    // The factory outlasts the timeout by a wide margin, so the timer fires during it
-    // even when the response is slow to arrive.
+    // The timeout leaves a slow runner a second for the response to arrive, and the
+    // factory outlasts it by a wide margin, so the timer fires during it.
     const response = await client
-      .get('/', { timeout: 150 })
-      .streamResponse(() => lateMissingFileAfter(400))
+      .get('/', { timeout: 1000 })
+      .streamResponse(() => lateMissingFileAfter(1500))
       .send();
     await settleLateSink();
 

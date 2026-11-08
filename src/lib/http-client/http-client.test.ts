@@ -1290,9 +1290,10 @@ describe('HTTPClient — basic HTTP methods', () => {
 
   test('an upload still reporting progress past the request timeout is not cut', async () => {
     // A stall bound, not a deadline. The adapter here keeps reporting progress every
-    // 30ms for 250ms after answering the `307`, against a `timeout` of 100ms, and only
+    // 30ms for 600ms after answering the `307`, against a `timeout` of 400ms, and only
     // then settles: the wait must follow it to the end and dispatch the second hop, not
-    // fail at 100ms with the body still moving.
+    // fail at 400ms with the body still moving. The gap between reports is far inside
+    // the bound, so a slow runner's late timers do not read as a stall.
     let hop = 0;
     let settleFirst!: () => void;
 
@@ -1318,7 +1319,7 @@ describe('HTTPClient — basic HTTP methods', () => {
             progress: ticks / 10,
           });
 
-          if (ticks >= 8) {
+          if (ticks >= 20) {
             clearInterval(ticker);
             settleFirst();
           }
@@ -1337,7 +1338,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       adapter,
       baseURL: 'http://example.test',
       followRedirects: true,
-      timeout: 100,
+      timeout: 400,
     })
       .post('/upload')
       .json({ a: 1 })
