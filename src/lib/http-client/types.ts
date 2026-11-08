@@ -526,7 +526,7 @@ export interface HTTPClientConfig {
   /**
    * The most bytes of a buffered response body this client will hold. A body past it
    * fails the request as `response_too_large` - unless it is a redirect's the client
-   * follows, whose body is never read. One piped to `streamResponse` is not limited.
+   * follows, whose body past the limit is not read. One piped to `streamResponse` is not limited.
    * Counted as handed over, so a compressed body is counted decoded.
    *
    * A positive integer, or `Infinity` for no limit. Null or undefined selects

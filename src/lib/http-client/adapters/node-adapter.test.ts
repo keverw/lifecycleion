@@ -12025,6 +12025,50 @@ async function listenRaw205(
   };
 }
 
+test.each([
+  [
+    'Connection: close',
+    'HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\nContent-Length: 4\r\n\r\nnope',
+  ],
+  [
+    'HTTP/1.0',
+    'HTTP/1.0 413 Payload Too Large\r\nContent-Length: 4\r\n\r\nnope',
+  ],
+])(
+  'an upload an early answer with %s closes is not reported to the host',
+  async (_kind, answer) => {
+    // The server answers and goes on reading slowly, as nginx's lingering close does; the
+    // runtime closes the connection the answer says it will not keep, and the upload stops
+    // there.
+    const raw = await listenRaw205(answer, 2);
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${raw.port}/upload`,
+        method: 'PUT',
+        headers: {},
+        body: new Uint8Array(32 * 1024 * 1024).fill(0x61),
+      });
+
+      expect(response.status).toBe(413);
+      expect(await response.requestBodySettled).toBeInstanceOf(Error);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(reports).toEqual([]);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      await raw.close();
+    }
+  },
+  30_000,
+);
+
 test('a 205 carrying bytes after an upload has gone out keeps its connection, as fetch keeps it', async () => {
   const raw = await listenRaw205(
     'HTTP/1.1 205 Reset Content\r\nContent-Length: 13\r\n\r\nReset Content',

@@ -2417,6 +2417,32 @@ describe('MockAdapter transportError', () => {
       expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     }
   });
+
+  test('a transportError flag or message of the wrong type is refused as the route mistake', async () => {
+    // The client reads a flag that is not a boolean as unset, so `'false'` would retry
+    // what the route said not to.
+    for (const transportError of [
+      { isRetryable: 'false' },
+      { wasDefinitelyNotSent: 1 },
+      { message: 42 },
+    ]) {
+      const adapter = new MockAdapter();
+      adapter.routes.get('/tls', () => ({
+        status: 200,
+        transportError: transportError as never,
+      }));
+
+      const outcome = await adapter
+        .send({ requestURL: 'http://api.test/tls', method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+  });
 });
 
 describe('retrySuppressedReason', () => {

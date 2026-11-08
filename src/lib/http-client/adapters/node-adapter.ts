@@ -1,4 +1,9 @@
-import { asciiUppercase, isBlankText } from '../../internal/ascii-text';
+import {
+  asciiLowercase,
+  asciiUppercase,
+  isBlankText,
+  trimHTTPWhitespace,
+} from '../../internal/ascii-text';
 import {
   arrayBufferKindOf,
   plainBytesView,
@@ -1717,17 +1722,29 @@ export class NodeAdapter implements HTTPAdapter {
           // waiting.
           settleBodyOutcome(failure);
 
-          try {
-            // Rendered for the console rung, the convention every other `reportToHost`
-            // caller follows. Without it that rung is handed the raw `Error`, and a
-            // process with no `'error'` listener would print `stack`, `cause` and
-            // whatever they carry - a request URL and its query string among them - in
-            // the clear, which is the one thing the rendered line exists to avoid. The
-            // listener still gets the `Error` itself, so a consumer's own redaction
-            // settings are unaffected.
-            reportToHost(failure, () => describeError(failure));
-          } catch {
-            // Nothing left to report with; the response still carries the real status.
+          // Not reported when the answer said it would close the connection - `Connection:
+          // close`, or HTTP/1.0 without keep-alive - and the connection is gone: the
+          // runtime closed it as the answer asked, which ends the upload as surely as this
+          // adapter's own teardown does. An nginx `413` with `Connection: close` would
+          // otherwise report every upload it refused. A failure of its own on a connection
+          // still up - a body source that did not match its size - is still reported.
+          const isClosedAsAnswered =
+            isAnswerClosingConnection(receivedResponse) &&
+            (req.destroyed || req.socket?.destroyed === true);
+
+          if (!isClosedAsAnswered) {
+            try {
+              // Rendered for the console rung, the convention every other `reportToHost`
+              // caller follows. Without it that rung is handed the raw `Error`, and a
+              // process with no `'error'` listener would print `stack`, `cause` and
+              // whatever they carry - a request URL and its query string among them - in
+              // the clear, which is the one thing the rendered line exists to avoid. The
+              // listener still gets the `Error` itself, so a consumer's own redaction
+              // settings are unaffected.
+              reportToHost(failure, () => describeError(failure));
+            } catch {
+              // Nothing left to report with; the response still carries the real status.
+            }
           }
 
           // Only once the response is fully in. See `didResponseClose`.
@@ -3124,6 +3141,35 @@ export class NodeAdapter implements HTTPAdapter {
  * does, for a large body) - instead of one held to that server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
+
+/**
+ * Whether `response` says its connection closes after it: `Connection: close`, or an
+ * HTTP/1.0 answer without `Connection: keep-alive`, as Node's parser reads it.
+ */
+function isAnswerClosingConnection(
+  response: http.IncomingMessage | undefined,
+): boolean {
+  if (response === undefined) {
+    return false;
+  }
+
+  const connection: unknown = response.headers.connection;
+  const tokens = (
+    Array.isArray(connection)
+      ? connection.join(',')
+      : typeof connection === 'string'
+        ? connection
+        : ''
+  )
+    .split(',')
+    .map((token) => asciiLowercase(trimHTTPWhitespace(token)));
+
+  if (tokens.includes('close')) {
+    return true;
+  }
+
+  return response.httpVersion === '1.0' && !tokens.includes('keep-alive');
+}
 
 /**
  * How many {@link UPLOAD_STALL_GRACE_MS} windows NodeAdapter's deadline after an upload

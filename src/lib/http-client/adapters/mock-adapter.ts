@@ -759,11 +759,33 @@ export class MockAdapter implements HTTPAdapter {
               `MockAdapter route returned transportError status ${typeof value === 'number' ? String(value) : typeof value}; it is an integer from 0 to 999`,
             );
           }
+          // The flags too: the client reads anything but a boolean as unset, so a
+          // `'false'` would retry what the route said not to.
+          const isRetryableValue: unknown = options.isRetryable;
+          const wasDefinitelyNotSentValue: unknown =
+            options.wasDefinitelyNotSent;
+          const messageValue: unknown = options.message;
+          for (const [name, flag] of [
+            ['isRetryable', isRetryableValue],
+            ['wasDefinitelyNotSent', wasDefinitelyNotSentValue],
+          ] as const) {
+            if (flag !== undefined && typeof flag !== 'boolean') {
+              throw new TypeError(
+                `MockAdapter route returned transportError ${name} ${describeValue(flag)}; it is a boolean`,
+              );
+            }
+          }
+          if (messageValue !== undefined && typeof messageValue !== 'string') {
+            throw new TypeError(
+              `MockAdapter route returned transportError message ${describeValue(messageValue)}; it is a string`,
+            );
+          }
           return {
             status: value,
-            isRetryable: options.isRetryable,
-            wasDefinitelyNotSent: options.wasDefinitelyNotSent,
-            message: options.message,
+            isRetryable: isRetryableValue as boolean | undefined,
+            wasDefinitelyNotSent: wasDefinitelyNotSentValue as
+              boolean | undefined,
+            message: messageValue,
           };
         });
 

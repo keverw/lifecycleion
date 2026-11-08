@@ -220,7 +220,7 @@ For `MockAdapter`, those resolved URLs are used for features that inspect the re
 
 ### Request Builder API
 
-All builder methods are fluent (chainable) and must be called **before** `.send()`. The builder is single-use: calling `.send()` a second time throws.
+All builder methods are fluent (chainable) and must be called **before** `.send()`. The builder is single-use: calling `.send()` a second time rejects.
 
 ```typescript
 const builder = client
@@ -313,7 +313,7 @@ interface HTTPResponse<T = unknown> {
   redirectHistory: string[]; // Redirect target URLs recorded during redirect handling, in order; entries may appear before the follow-up attempt is dispatched, and a continued redirect rewrite updates later entries to the rewritten target
   requestID: string;
   adapterType: AdapterType;
-  isStreamed: boolean; // Body was piped to a StreamResponseFactory; body is null
+  isStreamed: boolean; // Body was piped to a StreamResponseFactory in full; body is null. False when the stream failed (isStreamError), even part-way through
   isStreamError: boolean; // Body delivery failed after headers arrived; see Stream Errors and Replay
   requestBodySettled?: Promise<Error | undefined>; // Optional adapter-reported upload outcome; see Uploads That Outlive the Response
 }
@@ -415,7 +415,18 @@ method. Failures detected after an early response are also reported on the globa
 opening its sink. An upload cut short because the adapter itself ended the connection - a
 cancel or timeout, a stream factory that declined or failed, a streaming sink that
 failed, a response body over `maxResponseBytes` or one that fails to decode - settles
-`requestBodySettled` with that failure but is not reported there. A timeout while the
+`requestBodySettled` with that failure but is not reported there, and so does one cut
+short because the answer said it would close the connection (`Connection: close`, or
+HTTP/1.0 without keep-alive) and the runtime closed it.
+
+Once an upload has failed after an early answer, NodeAdapter keeps reading that answer only
+while it is still coming: a response whose connection reads nothing for five seconds is
+waiting on the rest of a body that will never arrive, and the request is torn down, failing
+as a stream error. One still arriving is read for a minute at most - a server can keep a
+response alive a byte at a time while it waits - after which it is torn down the same way.
+A response its consumer is still working through (complete, paused under a slow
+`streamResponse` sink, or buffered for a factory still opening its sink) is waited for
+however long that takes. A timeout while the
 client waits to dispatch another hop is a separate request failure.
 
 ### Content-Type Detection and Body Parsing
@@ -1171,7 +1182,7 @@ builder.cancel('timeout_budget_exceeded');
 
 `cancel()` returns a `CancelResult` saying what it did (a `reason` given to it, or to the client's `cancel` methods, must be a string, or the call throws a `TypeError`): `'cancelled'` when this call cancelled the request (before `send()`, or in flight), `'already_cancelled'` when something else had - an earlier `cancel()`, `client.cancel()`, an interceptor, the stream factory or the request's own signal - and `'already_settled'` when it had already completed or failed. A `'cancelled'` holds: the request ends cancelled (`isCancelled: true`, with the reason given) even when the call lands after the last attempt has its answer - from that attempt's `onAttemptEnd`, say - or just before a failure, and that answer or failure is dropped. The signal is aborted at once and the tracked request reads `cancelled` at once; `send()` resolves, and the builder's own state turns `cancelled`, once the request has settled. A `cancel()` made while `send()` is still setting the request up - from a header value's `toString` or a `params` getter - is held and applied before anything is dispatched; it answers `'already_cancelled'` if the request's own signal has already aborted, and `'already_settled'` once setup has failed.
 
-Calling `cancel()` before `send()` marks the builder so that `send()` throws a plain `Error` (not an `HTTPClientError`) immediately rather than dispatching the request. In this case `builder.error` is `null`. No `HTTPClientError` is produced and `cancelReason` is not accessible programmatically (the reason string, if any, appears only in the thrown `Error` message).
+Calling `cancel()` before `send()` marks the builder so that `send()` rejects with a plain `Error` (not an `HTTPClientError`) at once rather than dispatching the request. In this case `builder.error` is `null`. No `HTTPClientError` is produced and `cancelReason` is not accessible programmatically (the reason string, if any, appears only in the thrown `Error` message).
 
 ### ID-Scoped Cancel
 
@@ -1313,7 +1324,7 @@ Sub-clients inherit the parent's interceptors and observers. The parent chain ru
 ## Enable and Disable
 
 ```typescript
-client.disable(); // All subsequent send() calls throw immediately
+client.disable(); // All subsequent send() calls reject at once
 client.enable(); // Re-enables the client
 
 client.isDisabled; // true if the client or any parent client is disabled
@@ -1379,7 +1390,7 @@ Browsers automatically strip forbidden headers (`cookie`, `user-agent`, `host`, 
 
 Uses Node.js native `http` / `https` modules. Supports Unix domain sockets, mTLS, and per-chunk streaming.
 
-Compressed responses are handled as `fetch` handles them: NodeAdapter sends `Accept-Encoding: gzip, deflate, br` (`br` over https only, as browsers offer it; `identity` on a `Range` request, as the Fetch standard has it) unless the request sets its own (`identity` asks for none), and decodes a `gzip`, `deflate` or `br` body - buffered or streamed, stacked codings (`gzip, br`) in reverse order, and `zstd` where the runtime has it (never asked for, only decoded when a server sends it; a body of several zstd frames, skippable metadata frames included, decodes whole however the network splits it) - before handing it over. Decoding is strict: a body that ends before its compressed stream does (a gzip body cut before its trailer), or carries bytes after it, is a stream error. gzip follows gunzip's own rule, as Node and browsers do: bytes after a gzip stream fail unless they start with a zero byte, which reads as padding, and what follows that zero byte is ignored. `fetch` decodes by its own runtime's rules, which are more lenient in places - Bun's ignores bytes after a compressed stream, Node's returns what decoded from a body cut short - so FetchAdapter and NodeAdapter can differ on such a body. A cancel or timeout stops the decoding at once. At most five stacked codings are decoded; more is a stream error, unless one of them is a coding it does not know, in which case the body is handed over as received, as any body with an unknown coding is. Response headers are reported as received, `Content-Encoding` included. `new NodeAdapter({ decompress: false })` turns this off: no `Accept-Encoding` of its own is sent, and every body is handed over exactly as it arrived (to save a server's `.gz` as sent, say), with `maxResponseBytes` and download progress counting the bytes as received, against `Content-Length`. The client still reads a buffered body by its `Content-Type`, so the compressed bytes of a JSON or text response are decoded as UTF-8 text (a JSON one an `isParseError`); stream it with `streamResponse`, or have it served as a binary type, to keep the bytes. Download progress for a decoded body counts decoded bytes, with an unknown total, since `Content-Length` counts the encoded ones. A body that cannot be decoded fails as a stream error with the response's status. Where what failed is the decoding rather than the transfer, the status still counts, as browsers treat it: a redirect is followed when `followRedirects` is on (a browser never decodes a body it is about to leave), and redirect-phase observers see it as a `3xx` with no body; a retryable status (`503`) is retried as the retry policy allows. A transfer that failed - the connection dropped - stops the request as any stream error does; a body past `maxResponseBytes` does not, since a redirect's body is never read.
+Compressed responses are handled as `fetch` handles them: NodeAdapter sends `Accept-Encoding: gzip, deflate, br` (`br` over https only, as browsers offer it; `identity` on a `Range` request, as the Fetch standard has it) unless the request sets its own (`identity` asks for none), and decodes a `gzip`, `deflate` or `br` body - buffered or streamed, stacked codings (`gzip, br`) in reverse order, and `zstd` where the runtime has it (never asked for, only decoded when a server sends it; a body of several zstd frames, skippable metadata frames included, decodes whole however the network splits it) - before handing it over. Decoding is strict: a body that ends before its compressed stream does (a gzip body cut before its trailer), or carries bytes after it, is a stream error. gzip follows gunzip's own rule, as Node and browsers do: bytes after a gzip stream fail unless they start with a zero byte, which reads as padding, and what follows that zero byte is ignored. `fetch` decodes by its own runtime's rules, which are more lenient in places - Bun's ignores bytes after a compressed stream, Node's returns what decoded from a body cut short - so FetchAdapter and NodeAdapter can differ on such a body. A cancel or timeout stops the decoding at once. At most five stacked codings are decoded; more is a stream error, unless one of them is a coding it does not know, in which case the body is handed over as received, as any body with an unknown coding is. Response headers are reported as received, `Content-Encoding` included. `new NodeAdapter({ decompress: false })` turns this off: no `Accept-Encoding` of its own is sent, and every body is handed over exactly as it arrived (to save a server's `.gz` as sent, say), with `maxResponseBytes` and download progress counting the bytes as received, against `Content-Length`. The client still reads a buffered body by its `Content-Type`, so the compressed bytes of a JSON or text response are decoded as UTF-8 text (a JSON one an `isParseError`); stream it with `streamResponse`, or have it served as a binary type, to keep the bytes. Download progress for a decoded body counts decoded bytes, with an unknown total, since `Content-Length` counts the encoded ones. A body that cannot be decoded fails as a stream error with the response's status. Where what failed is the decoding rather than the transfer, the status still counts, as browsers treat it: a redirect is followed when `followRedirects` is on (a browser never decodes a body it is about to leave), and redirect-phase observers see it as a `3xx` with no body; a retryable status (`503`) is retried as the retry policy allows. A transfer that failed - the connection dropped - stops the request as any stream error does; a body past `maxResponseBytes` does not, since a redirect's body past the limit is not read.
 
 ```typescript
 import { NodeAdapter } from 'lifecycleion/http-client-node';
@@ -1557,11 +1568,11 @@ const client = new HTTPClient({
 
 No configuration options. Adapter-level behavior is controlled through `HTTPClientConfig`.
 
-**XHRAdapter constraints** (same as FetchAdapter browser constraints, plus one more):
+**XHRAdapter constraints** (the FetchAdapter browser constraints, plus two that hold everywhere):
 
-- `cookieJar` must not be set
-- `userAgent` must not be set
-- `followRedirects` must not be `true`
+- In a browser, `cookieJar` must not be set
+- In a browser, `userAgent` must not be set (outside one - an `XMLHttpRequest` shim in Node.js or Bun - both are allowed, and the `User-Agent` is sent)
+- `followRedirects` must not be `true`, in any runtime
 - `HTTPClient` throws if `XMLHttpRequest` is not available (e.g. Node.js without a shim)
 
 A synchronous throw from `xhr.send()` fails the request once, as a non-retryable `adapter_error`. An asynchronous `send()` throws only an `InvalidStateError` or for a body it cannot convert, and both fail the same way on every attempt; network failures arrive as `error` events and follow the retry rules. An `XMLHttpRequest` shim that throws a network failure from `send()` instead is not retried. An `XMLHttpRequest` with no `upload` (as some shims have) sends without per-chunk upload progress: `onUploadProgress` fires `0` at dispatch and `1` only once an answer arrives - as its headers do, before any download progress, whatever then becomes of the body - not on a network error, a timeout or an abort before then. One whose `upload` throws when read or listened on fails a request with a body to send and an `onUploadProgress` once, as a non-retryable `adapter_error`.
@@ -1607,7 +1618,7 @@ expect(response.status).toBe(200);
 expect(response.body).toEqual({ id: '1', name: 'Alice' });
 ```
 
-Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `options`, or `routes.on(method, path, handler)` for any other method Node's `http` knows (`TRACE`, `PROPFIND`, `LOCK`, `PURGE`), except `CONNECT`, which is refused. A request's method is matched, and handed to the handler as `req.method`, uppercased, as a server receives it from Node's `http`; header names in `req.headers` are lowercase, and a `HEAD` request needs its own `head` route - it is not answered from a `get` route. A path parameter longer than 100 characters does not match its route, so that request gets a `404`. A handler that returns no response, or a body the mock cannot serialize, fails the request as a non-retryable `adapter_error`. When a request carries two cookies with the same name, `req.cookies` holds the first, as common server parsers do. Driven directly with a path-only request URL, the adapter resolves a redirect's `Location` against `http://localhost`, the base the client gives a mock request with no `baseURL`: `/start` answered with `Location: /next` reports `detectedRedirectURL: 'http://localhost/next'`.
+Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `options`, or `routes.on(method, path, handler)` for any other method Node's `http` knows (`TRACE`, `PROPFIND`, `LOCK`, `PURGE`). A `CONNECT` request is refused when it is sent, whatever is registered for it - and `HTTPClient` refuses one before it reaches the adapter. A request's method is matched, and handed to the handler as `req.method`, uppercased, as a server receives it from Node's `http`; header names in `req.headers` are lowercase, and a `HEAD` request needs its own `head` route - it is not answered from a `get` route. A path parameter longer than 100 characters does not match its route, so that request gets a `404`. A handler that returns no response, or a body the mock cannot serialize, fails the request as a non-retryable `adapter_error`. When a request carries two cookies with the same name, `req.cookies` holds the first, as common server parsers do. Driven directly with a path-only request URL, the adapter resolves a redirect's `Location` against `http://localhost`, the base the client gives a mock request with no `baseURL`: `/start` answered with `Location: /next` reports `detectedRedirectURL: 'http://localhost/next'`.
 
 **MockAdapterConfig:**
 
@@ -1637,9 +1648,10 @@ error as the cause, without retrying the route handler even when retries are ena
 values, regardless of whether the request has an AbortSignal. If a route or error
 handler aborts its own request, the request ends with AbortError while its returned
 promise remains observed so a later rejection cannot become unhandled. The same holds
-for a signal that refuses listeners: one whose `addEventListener` throws fails the wait
-as a handler error would, one whose `removeEventListener` throws does not hold up the
-response, and the handler's promise is observed either way.
+for a signal that refuses listeners: one whose `addEventListener` throws fails the
+request as a non-retryable `adapter_error` - the adapter's refusal, not the handler's, so
+`onHandlerError` is not called - one whose `removeEventListener` throws does not hold up
+the response, and the handler's promise is observed either way.
 
 `mock.routes.clear()` removes all registered mock routes.
 

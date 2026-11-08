@@ -459,7 +459,7 @@ export class HTTPRequestBuilder<T = unknown> {
    * had, and `'already_settled'` when it had already completed or failed.
    *
    * Calling cancel() before send() marks the builder as cancelled so that
-   * send() throws instead of dispatching the request.
+   * send() rejects instead of dispatching the request.
    */
   public cancel(reason?: string): CancelResult {
     assertCancelReason(reason, 'HTTPRequestBuilder.cancel()');
