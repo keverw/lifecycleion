@@ -155,6 +155,13 @@ export interface Cookie {
   sameSite?: 'Strict' | 'Lax' | 'None';
   /** Epoch ms when the cookie was stored. Used with {@link maxAge} to compute expiry. */
   createdAt: number;
+  /**
+   * Epoch ms when the jar last stored, sent or read the cookie; a cookie used in the last 30
+   * days is never evicted by the jar-wide limit (see {@link CookieJar}). Written by `toJSON`
+   * so a restored jar keeps it; `setCookie` takes it as given, a time later than now as now,
+   * and as now when absent. `getAllCookies` and the other reads leave it out.
+   */
+  lastAccessedAt?: number;
 }
 
 /**
@@ -180,6 +187,8 @@ interface StoredCookie {
   creationTime: number;
   /** The jar's access clock when the cookie was last stored or read; orders eviction. */
   lastAccess: number;
+  /** Epoch ms when the cookie was last stored or read; see {@link SAFE_FROM_JAR_LIMIT_MS}. */
+  lastAccessTime: number;
   /** When the cookie expires, from its capped lifetime; `Infinity` for a session cookie. */
   expiresAt: number;
 }
@@ -207,6 +216,9 @@ const MAX_COOKIES_PER_SITE = 180;
 const COOKIES_PER_SITE_AFTER_EVICTION = 150;
 const MAX_COOKIES_IN_JAR = 3300;
 const COOKIES_IN_JAR_AFTER_EVICTION = 3000;
+// Chromium's `kSafeFromGlobalPurgeDays`: a cookie used this recently is never evicted by
+// the jar-wide limit, which then lets the jar grow past it.
+const SAFE_FROM_JAR_LIMIT_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * The RFC 6265bis §4.1.3 name prefix `text` starts with, matched ASCII
@@ -348,13 +360,14 @@ export interface CookieJarOptions {
  *
  * Growth is bounded as Chromium bounds it: past 180 cookies in a site, or 3300 in the jar,
  * expired cookies go first and then the least recently used, non-`Secure` before `Secure`,
- * down to 150 and 3000. Any store can evict a `Secure` cookie once no non-`Secure` one is
- * left to go, as in Chromium, so `Secure` cookies cannot fill the jar and lock others out.
+ * down to 150 and 3000. The jar-wide limit evicts only cookies not used in the last 30 days,
+ * as Chromium's does, so a flood of cookies from other sites cannot push out a session in
+ * use; while more than 3000 have been used that recently, the jar holds them all, bounded
+ * only by each site's 180. Any store can evict a `Secure` cookie once no non-`Secure` one is
+ * left to go, as in Chromium, so `Secure` cookies cannot fill a site and lock others out.
  * Within one limit a flood of non-`Secure` cookies pushes them no lower than its target: 150
- * in a site, 3000 in the jar, whose limit can take one site's below 150. It differs in two
- * ways: cookies used in the last 30 days are not exempt from the jar-wide limit, as a
- * long-running service can reach thousands of sites inside that window, and the limit would
- * not bound it; and `Priority` is not read, every cookie evicting as Chromium's default does.
+ * in a site, 3000 in the jar, whose limit can take one site's below 150. `Priority` is not
+ * read: every cookie evicts as Chromium's default priority does.
  *
  * IPs are never treated as public suffixes. A bare single-label hostname - `localhost`,
  * `myapp` - is, so a cookie may not span one; per RFC 6265bis §5.5 a `Domain=` naming the
@@ -400,7 +413,8 @@ export class CookieJar {
    * included) or is an `Invalid Date`, or a `maxAge` or `createdAt` that is not a
    * finite number. Such a cookie would compare
    * `now` against `NaN` in the expiry check, never be found expired, and be sent for
-   * the life of the jar - see {@link fromJSON}.
+   * the life of the jar - see {@link fromJSON}. A `lastAccessedAt` that is not a finite
+   * number is refused too.
    *
    * Also returns false for a name or value that cannot be written into a `Cookie`
    * header as one cookie-pair: a name that holds `=`, `;` or a control character other
@@ -476,6 +490,20 @@ export class CookieJar {
     // creation: a cookie restored through `fromJSON` with a 10-year lifetime would
     // otherwise keep it. Only an absent `createdAt` is now; a `null` is refused.
     const now = Date.now();
+    const rawLastAccessedAt: unknown = input.lastAccessedAt;
+
+    // A finite time or absent, as `createdAt` is: one that is not would read as never used,
+    // or as used forever. A time later than now is now, so a restored jar cannot keep a
+    // cookie safe from the jar-wide limit for longer than 30 days from its restore.
+    if (
+      rawLastAccessedAt !== undefined &&
+      (typeof rawLastAccessedAt !== 'number' ||
+        !Number.isFinite(rawLastAccessedAt))
+    ) {
+      return false;
+    }
+
+    const lastAccessTime = Math.min(rawLastAccessedAt ?? now, now);
     const lifetime = cookieLifetime(
       input.createdAt === undefined ? now : input.createdAt,
       input.maxAge,
@@ -619,6 +647,7 @@ export class CookieJar {
       preparedDomain: this.prepareHost(domain),
       creationTime,
       lastAccess: ++this.accessClock,
+      lastAccessTime,
       expiresAt: lifetime.expiresAt,
     });
 
@@ -665,6 +694,7 @@ export class CookieJar {
     }
 
     first.lastAccess = ++this.accessClock;
+    first.lastAccessTime = Date.now();
 
     return copyCookie(first.cookie);
   }
@@ -963,7 +993,9 @@ export class CookieJar {
    * saved: after a restore, cookies of equal path length are ordered by `createdAt`, and
    * those that share one by the order listed here.
    * Least recently used first: a restore counts recency by payload order, so a restored
-   * jar evicts as this one would. The times themselves are not saved.
+   * jar evicts as this one would. Each cookie carries the time it was last used as
+   * `lastAccessedAt`, so a restored jar keeps the cookies used in the last 30 days safe
+   * from its jar-wide limit, and only those.
    */
   public toJSON(): CookieJarJSON {
     const stored: StoredCookie[] = [];
@@ -974,7 +1006,12 @@ export class CookieJar {
 
     stored.sort((a, b) => a.lastAccess - b.lastAccess);
 
-    return { cookies: stored.map((entry) => copyCookie(entry.cookie)) };
+    return {
+      cookies: stored.map((entry) => ({
+        ...copyCookie(entry.cookie),
+        lastAccessedAt: entry.lastAccessTime,
+      })),
+    };
   }
 
   /**
@@ -1111,6 +1148,12 @@ export class CookieJar {
         delete cookie.maxAge;
       }
 
+      // Absent, so `setCookie` counts the cookie as used at the restore: a payload saved
+      // before the jar wrote it keeps every cookie safe from the jar-wide limit for 30 days.
+      if ((cookie.lastAccessedAt as unknown) === null) {
+        delete cookie.lastAccessedAt;
+      }
+
       // Above zero only: a `maxAge` of zero or less has expired whenever it started, and
       // deletes its stored twin as `setCookie` has it.
       if (
@@ -1181,9 +1224,11 @@ export class CookieJar {
   private readCookies(url: string): StoredCookie[] {
     const cookies = this.collectCookies(url);
     const access = ++this.accessClock;
+    const accessTime = Date.now();
 
     for (const stored of cookies) {
       stored.lastAccess = access;
+      stored.lastAccessTime = accessTime;
     }
 
     return cookies;
@@ -1547,15 +1592,23 @@ export class CookieJar {
         Array.from(this.buckets.keys()),
         MAX_COOKIES_IN_JAR,
         COOKIES_IN_JAR_AFTER_EVICTION,
+        SAFE_FROM_JAR_LIMIT_MS,
       );
     }
   }
 
   /**
    * Removes the expired cookies of `sites`, then, if more than `limit` remain, the least
-   * recently used down to `target`: non-`Secure` first, then `Secure`.
+   * recently used down to `target`: non-`Secure` first, then `Secure`. With `safeFor`,
+   * only cookies not used in that many milliseconds go, so fewer may, and `target` is
+   * not reached.
    */
-  private evict(sites: string[], limit: number, target: number): void {
+  private evict(
+    sites: string[],
+    limit: number,
+    target: number,
+    safeFor?: number,
+  ): void {
     const now = Date.now();
     const live: Array<{ site: string; key: string; stored: StoredCookie }> = [];
 
@@ -1574,9 +1627,10 @@ export class CookieJar {
     if (live.length > limit) {
       const isSecure = (entry: { stored: StoredCookie }): boolean =>
         entry.stored.cookie.secure === true;
-      const oldestFirst = live.sort(
-        (a, b) => a.stored.lastAccess - b.stored.lastAccess,
-      );
+      const safeSince = safeFor === undefined ? Infinity : now - safeFor;
+      const oldestFirst = live
+        .filter((entry) => entry.stored.lastAccessTime < safeSince)
+        .sort((a, b) => a.stored.lastAccess - b.stored.lastAccess);
       const candidates = [
         ...oldestFirst.filter((entry) => !isSecure(entry)),
         ...oldestFirst.filter(isSecure),

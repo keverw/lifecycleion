@@ -10,6 +10,9 @@ import {
 import { CookieJar } from './cookie-jar';
 import type { Cookie } from './cookie-jar';
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DAYS_31 = 31 * DAY_MS;
+
 afterEach(() => {
   setSystemTime();
 });
@@ -4439,10 +4442,12 @@ describe('jar limits', () => {
     jar.fromJSON(saved);
     expectTrueCount(150);
 
-    // 150 + 3151 crosses 3300 and trims to 3000.
-    for (let index = 0; index < 3151; index++) {
+    // 150 + 3151 crosses 3300 and, the rest unused for 30 days, trims to 3000.
+    for (let index = 0; index < 3150; index++) {
       store('i', `s${index}.test`);
     }
+    setSystemTime(new Date(Date.now() + DAYS_31));
+    store('i', 'last.test');
     expectTrueCount(3000);
   });
 
@@ -4465,6 +4470,9 @@ describe('jar limits', () => {
   };
   const names = (jar: CookieJar): string[] =>
     jar.getAllCookies().map((cookie) => cookie.name);
+  const passDays = (days: number): void => {
+    setSystemTime(new Date(Date.now() + days * DAY_MS));
+  };
 
   test('a site past 180 cookies is evicted to 150, least recently stored first', () => {
     const jar = new CookieJar();
@@ -4582,12 +4590,16 @@ describe('jar limits', () => {
       });
     }
 
+    passDays(31);
+
     const store = (name: string): boolean =>
       jar.setCookie({ name, value: 'v', domain: 'bank.test', path: '/' });
 
-    expect(store('first')).toBe(false);
+    expect(store('first')).toBe(true);
     expect(store('session')).toBe(true);
-    expect(jar.getCookieHeaderString('https://bank.test/')).toBe('session=v');
+    expect(jar.getCookieHeaderString('https://bank.test/')).toBe(
+      'first=v; session=v',
+    );
     expect(names(jar)).toHaveLength(3001);
   });
 
@@ -4617,6 +4629,7 @@ describe('jar limits', () => {
       });
     }
 
+    passDays(31);
     fill(jar, 1, { prefix: 'new', domain: 'last.test', isSecure: true });
 
     expect(names(jar)).toHaveLength(3000);
@@ -4717,12 +4730,136 @@ describe('jar limits', () => {
     }
 
     expect(names(jar)).toHaveLength(3300);
+    passDays(31);
     fill(jar, 1, { prefix: 'new', domain: 'last.test' });
 
     const domains = jar.getStoredDomains();
     expect(domains.reduce((sum, { count }) => sum + count, 0)).toBe(3000);
     expect(domains.map(({ domain }) => domain)).not.toContain('site0.test');
     expect(domains).toContainEqual({ domain: 'last.test', count: 1 });
+  });
+
+  test('the jar-wide limit evicts no cookie used in the last 30 days, as Chromium does', () => {
+    const jar = new CookieJar();
+    fill(jar, 1, { prefix: 'session', domain: 'bank.test' });
+
+    for (let site = 0; site < 33; site++) {
+      fill(jar, 100, { domain: `site${site}.test` });
+    }
+
+    // All used inside 30 days: the jar holds every one.
+    expect(names(jar)).toHaveLength(3301);
+
+    // 29 days on, the session is used; a day later the flood's cookies pass 30 days unused.
+    passDays(29);
+    expect(jar.getCookieHeaderString('https://bank.test/')).toBe('session0=v');
+    passDays(2);
+
+    for (let site = 0; site < 3; site++) {
+      fill(jar, 100, { prefix: 'flood', domain: `flood${site}.test` });
+    }
+
+    // The first flood cookie trims the jar to 3000; the other 299 fit under 3300.
+    const kept = names(jar);
+    expect(kept).toHaveLength(3299);
+    expect(kept).toContain('session0');
+    expect(kept.filter((name) => name.startsWith('flood'))).toHaveLength(300);
+  });
+
+  test('the jar-wide limit evicts only as many unused cookies as it has', () => {
+    const jar = new CookieJar();
+
+    for (let site = 0; site < 10; site++) {
+      fill(jar, 10, { prefix: 'old', domain: `old${site}.test` });
+    }
+
+    passDays(31);
+
+    for (let site = 0; site < 33; site++) {
+      fill(jar, 100, { domain: `site${site}.test` });
+    }
+
+    // 100 unused cookies go as the jar passes 3300, and the 3300 recent ones stay.
+    const kept = names(jar);
+    expect(kept).toHaveLength(3300);
+    expect(kept.some((name) => name.startsWith('old'))).toBe(false);
+  });
+
+  test('toJSON saves when each cookie was last used, and a restore keeps it', () => {
+    const jar = new CookieJar();
+    const start = Date.now();
+    setSystemTime(new Date(start));
+    fill(jar, 1, { prefix: 'old', domain: 'old.test' });
+    passDays(31);
+    fill(jar, 1, { prefix: 'recent', domain: 'recent.test' });
+
+    const saved = jar.toJSON();
+    expect(saved.cookies.map((cookie) => cookie.lastAccessedAt)).toEqual([
+      start,
+      start + 31 * DAY_MS,
+    ]);
+    expect(jar.getAllCookies()[0]).not.toHaveProperty('lastAccessedAt');
+
+    const restored = new CookieJar();
+    restored.fromJSON(saved);
+
+    for (let site = 0; site < 33; site++) {
+      fill(restored, 100, { domain: `site${site}.test` });
+    }
+
+    const kept = names(restored);
+    expect(kept).not.toContain('old0');
+    expect(kept).toContain('recent0');
+  });
+
+  test('a restored cookie with no lastAccessedAt counts as used at the restore', () => {
+    const restored = new CookieJar();
+    restored.fromJSON({
+      cookies: [
+        {
+          name: 'saved',
+          value: 'v',
+          domain: 'saved.test',
+          path: '/',
+          createdAt: Date.now() - 60 * DAY_MS,
+        },
+        {
+          name: 'nulled',
+          value: 'v',
+          domain: 'saved.test',
+          path: '/',
+          createdAt: Date.now(),
+          lastAccessedAt: null as unknown as number,
+        },
+      ],
+    });
+
+    for (let site = 0; site < 33; site++) {
+      fill(restored, 100, { domain: `site${site}.test` });
+    }
+
+    expect(names(restored)).toContain('saved');
+    expect(names(restored)).toContain('nulled');
+  });
+
+  test('setCookie refuses a lastAccessedAt that is not a finite time, and reads a later one as now', () => {
+    const jar = new CookieJar();
+    const cookie = { name: 'a', value: 'v', domain: 'a.test', path: '/' };
+
+    for (const bad of [Number.NaN, Infinity, -Infinity, '1', {}]) {
+      expect(
+        jar.setCookie({ ...cookie, lastAccessedAt: bad as unknown as number }),
+      ).toBe(false);
+    }
+
+    expect(names(jar)).toHaveLength(0);
+
+    const now = Date.now();
+    setSystemTime(new Date(now));
+    expect(
+      jar.setCookie({ ...cookie, lastAccessedAt: now + 365 * DAY_MS }),
+    ).toBe(true);
+    expect(jar.toJSON().cookies[0]?.lastAccessedAt).toBe(now);
   });
 
   test('fromJSON holds a payload to the limits and reports the short count', () => {
