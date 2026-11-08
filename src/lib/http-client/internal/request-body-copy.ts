@@ -184,11 +184,15 @@ function copyFormData(form: FormData): FormData {
 
     const name: unknown = (value as File).name;
     const nameToSend = filePartNameToSend(name);
+    // A part Bun reports with no name - a `Blob`, or a `File` named `''` - is named `blob`,
+    // as `FormData` names a nameless `Blob` and NodeAdapter sends it; appended as it is,
+    // Bun's `fetch` would send it as `filename=""`.
+    const filename = typeof nameToSend === 'string' ? nameToSend : 'blob';
 
-    if (typeof nameToSend !== 'string' || nameToSend === name) {
+    if (filename === name) {
       cloned.append(key, value);
     } else {
-      cloned.append(key, value as unknown as File, nameToSend);
+      cloned.append(key, value as unknown as File, filename);
     }
   }
 

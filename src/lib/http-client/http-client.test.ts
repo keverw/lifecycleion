@@ -11234,6 +11234,29 @@ describe('a file backed by a path on Bun', () => {
   });
 });
 
+test('the form copy a fetch encodes names a part with no name blob, as NodeAdapter sends it', async () => {
+  let sentBody: unknown;
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: (request: { body: unknown }) => {
+        sentBody = request.body;
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    } as unknown as HTTPAdapter,
+    baseURL: 'http://a.test',
+  });
+  const form = new FormData();
+  form.append('fromBlob', new Blob(['a']));
+  form.append('named', new File(['b'], 'kept.txt'));
+
+  await client.post('/').formData(form).send();
+
+  const encoded = await new Response(sentBody as FormData).text();
+  expect(encoded).toContain('name="fromBlob"; filename="blob"');
+  expect(encoded).toContain('name="named"; filename="kept.txt"');
+});
+
 describe('a caller signal this runtime did not make', () => {
   const polyfillSignal = () => {
     const target = new EventTarget() as EventTarget & {
