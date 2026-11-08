@@ -416,8 +416,9 @@ opening its sink. An upload cut short because the adapter itself ended the conne
 cancel or timeout, a stream factory that declined or failed, a streaming sink that
 failed, a response body over `maxResponseBytes` or one that fails to decode - settles
 `requestBodySettled` with that failure but is not reported there, and so does one cut
-short because the answer said it would close the connection (`Connection: close`, or
-HTTP/1.0 without keep-alive): the runtime stops writing to it as the answer ends, so the
+short because the answer said it would close the connection (`Connection: close`,
+HTTP/1.0 without keep-alive, or a body with neither a `Content-Length` nor a
+`Transfer-Encoding`, which only the close can end): the runtime stops writing to it as the answer ends, so the
 adapter ends the upload there.
 
 When an upload fails after an early answer that is still arriving, NodeAdapter tears the

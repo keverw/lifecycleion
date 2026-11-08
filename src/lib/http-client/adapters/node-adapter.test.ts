@@ -4170,9 +4170,13 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
   test('a peer that closes while the writer waits on its source settles the upload', async () => {
     // The same parked writer, with the request destroyed from the other side: the server
-    // answered in full and then closed the connection, which raises no `'error'` at all.
+    // answered in full, with a length that let it keep the connection, and then closed it,
+    // which raises no `'error'` at all.
     const req = new ClosingMockClientRequest();
-    const res = new MockIncomingMessage(200, { 'content-type': 'text/plain' });
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'text/plain',
+      'content-length': '2',
+    });
 
     const requestSpy = spyOn(http, 'request').mockImplementation(
       (_options, callback) => {
@@ -12038,6 +12042,54 @@ test.each([
   },
   30_000,
 );
+
+test('an upload an early answer with no length of its own ends is not reported to the host', async () => {
+  // No `Content-Length`, no `Transfer-Encoding`, no `Connection` header: the body ends
+  // only as the server closes, and the upload with it.
+  const sockets: Socket[] = [];
+  const server = net.createServer((socket) => {
+    sockets.push(socket);
+    let isAnswered = false;
+    socket.on('error', () => {});
+    socket.on('data', (data) => {
+      if (!isAnswered && data.toString('latin1').includes('\r\n\r\n')) {
+        isAnswered = true;
+        socket.pause();
+        socket.end('HTTP/1.1 413 Payload Too Large\r\n\r\nnope');
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  const reports: unknown[] = [];
+  const onError = (event: Event): void => {
+    reports.push(event);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onError);
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${String(port)}/upload`,
+      method: 'POST',
+      headers: {},
+      body: new Uint8Array(16 * 1024 * 1024),
+    });
+
+    expect(response.status).toBe(413);
+    expect(Buffer.from(response.body ?? []).toString()).toBe('nope');
+    expect(await response.requestBodySettled).toBeInstanceOf(Error);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(reports).toEqual([]);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}, 30_000);
 
 test('a whole compressed answer with Connection: close that arrives mid-upload keeps its body', async () => {
   // The server answers in full and stops reading: the answer's raw stream closes while the

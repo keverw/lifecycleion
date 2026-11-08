@@ -1717,13 +1717,14 @@ export class NodeAdapter implements HTTPAdapter {
           settleBodyOutcome(failure);
 
           // Not reported when the answer said it would close the connection - `Connection:
-          // close`, or HTTP/1.0 without keep-alive - and the connection is gone: the
+          // close`, HTTP/1.0 without keep-alive, or a body with no length of its own - and
+          // the connection is gone: the
           // runtime closed it as the answer asked, which ends the upload as surely as this
           // adapter's own teardown does. An nginx `413` with `Connection: close` would
           // otherwise report every upload it refused. A failure of its own on a connection
           // still up - a body source that did not match its size - is still reported.
           const isClosedAsAnswered =
-            isAnswerClosingConnection(receivedResponse) &&
+            isAnswerClosingConnection(receivedResponse, request.method) &&
             (req.destroyed || req.socket?.destroyed === true);
 
           if (!isClosedAsAnswered) {
@@ -1883,7 +1884,7 @@ export class NodeAdapter implements HTTPAdapter {
             // decoding them.
             if (
               isWritingBody &&
-              isAnswerClosingConnection(res) &&
+              isAnswerClosingConnection(res, request.method) &&
               (req.socket?.writableEnded === true ||
                 req.socket?.destroyed === true)
             ) {
@@ -3151,19 +3152,30 @@ export class NodeAdapter implements HTTPAdapter {
  * proxy that has answered and will never read again - costs one idle socket for five to
  * ten seconds, as the watchdog checks in five-second windows - longer where the runtime
  * reports a late chunk accepted, which counts as progress and starts the window again (Bun
- * does, for a large body) - instead of one held to that server's timeout.
+ * does for a large body, and Node over TLS) - instead of one held to that server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
 
 /**
- * Whether `response` says its connection closes after it: `Connection: close`, or an
- * HTTP/1.0 answer without `Connection: keep-alive`, as Node's parser reads it.
+ * Whether `response` says its connection closes after it: `Connection: close`, an HTTP/1.0
+ * answer without `Connection: keep-alive`, as Node's parser reads it, or a body with
+ * neither a `Content-Length` nor a `Transfer-Encoding`, which only the connection's close
+ * can end (RFC 9112 §6.3).
  */
 function isAnswerClosingConnection(
   response: http.IncomingMessage | undefined,
+  method: string,
 ): boolean {
   if (response === undefined) {
     return false;
+  }
+
+  if (
+    response.headers['content-length'] === undefined &&
+    response.headers['transfer-encoding'] === undefined &&
+    hasResponseBody(method, response.statusCode ?? 0)
+  ) {
+    return true;
   }
 
   const connection: unknown = response.headers.connection;
