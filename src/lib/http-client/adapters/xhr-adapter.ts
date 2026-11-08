@@ -55,10 +55,9 @@ import { markBuiltInNetworkAdapter } from '../internal/built-in-adapter';
 
 /**
  * XHR-based adapter for environments that expose `XMLHttpRequest`. Primary
- * advantage over FetchAdapter is real per-chunk upload and download progress
- * via `xhr.upload.onprogress` / `xhr.onprogress`. FetchAdapter only fires 0%
- * and 100% because the Fetch API has no streaming upload and requires
- * buffering the full response to read body bytes.
+ * advantage over FetchAdapter is real per-chunk upload progress via
+ * `xhr.upload.onprogress`: FetchAdapter fires only 0% and 100% for an upload,
+ * because the Fetch API has no upload progress.
  *
  * XHR constraints compared to FetchAdapter and NodeAdapter:
  * - `followRedirects: false` is required — XHR offers no opt-out from
@@ -608,9 +607,7 @@ export class XHRAdapter implements HTTPAdapter {
 
       // --- Download progress ---
 
-      // Real per-chunk download progress. Same advantage over FetchAdapter:
-      // FetchAdapter buffers the full response body before firing any progress,
-      // so it can only ever report 0% then 100%.
+      // Real per-chunk download progress, as FetchAdapter reports it from the stream.
 
       // Whether the bytes progress counts are the body's own (see `isKnownUncodedBody`):
       // read once, when they first pass the limit.

@@ -140,9 +140,10 @@ export interface Cookie {
    * True when the cookie must not match subdomains: a Set-Cookie with no `Domain=`, a last
    * `Domain=` that is empty or `.` (even after a valid one: the last wins, as Chrome and
    * Firefox read it), or a `Domain=` naming a public suffix that is the request host
-   * itself (`Domain=localhost` from `http://localhost/`). Also true for a cookie given
-   * to `setCookie` or restored by `fromJSON` whose domain is a public suffix under the
-   * jar's list, which is stored as that last `Set-Cookie` stores it.
+   * itself (`Domain=localhost` from `http://localhost/`), and for every cookie of an IP
+   * address. Also true for a cookie given to `setCookie` or restored by `fromJSON` whose
+   * domain is an IP address, or a public suffix under the jar's list, which is stored as
+   * that last `Set-Cookie` stores it.
    */
   hostOnly?: boolean;
   path?: string;
@@ -422,12 +423,14 @@ export class CookieJar {
    *
    * Also returns false for a cookie that is already expired: it is not stored, and the
    * stored cookie of the same name, domain, path and host-only flag is deleted, as an
-   * expired `Set-Cookie` deletes it. A domain cookie whose domain is a public suffix
+   * expired `Set-Cookie` deletes it. A domain cookie for an IP address is stored
+   * host-only, as an address's own cookies are. One whose domain is a public suffix
    * under the jar's list is stored host-only, as a `Set-Cookie` naming the suffix from
    * that host itself is, and replaces the cookie such a `Set-Cookie` stored.
    *
-   * Also returns false for a cookie the limits evict as it is stored: a non-`Secure` one
-   * beside 150 or more `Secure` ones in a site goes before they do. See {@link CookieJar}.
+   * Also returns false for a cookie the limits evict as it is stored: once a site passes
+   * 180 cookies, a non-`Secure` one beside 150 or more `Secure` ones goes before they do.
+   * See {@link CookieJar}.
    *
    * The jar stores its own copy of the cookie. To change a stored cookie - its value,
    * say - call `setCookie` again with the same name, domain, path and `hostOnly`.
@@ -1211,6 +1214,11 @@ export class CookieJar {
       return [];
     }
 
+    // See `parseSetCookieHeader`: a host with a leading dot is no host's.
+    if (hostname.startsWith('.')) {
+      return [];
+    }
+
     const now = Date.now();
     const result: StoredCookie[] = [];
     // The request host read once, not once per cookie: normalizing it runs IDNA and a URL
@@ -1686,8 +1694,12 @@ export class CookieJar {
 
     const requestHostname = address.hostname;
 
-    // A URL with no host (`file:///x`) has no one to set a cookie for.
-    if (requestHostname === '') {
+    // A URL with no host (`file:///x`) has no one to set a cookie for. Nor does one whose
+    // host starts with a dot (`https://.example.com/`, which the URL parser accepts):
+    // the dot a `Domain=` may carry is dropped from a cookie's domain, so that host would
+    // otherwise store and be sent `example.com`'s own host-only cookies, while it names no
+    // host DNS resolves.
+    if (requestHostname === '' || requestHostname.startsWith('.')) {
       return;
     }
 

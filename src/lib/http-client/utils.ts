@@ -363,13 +363,21 @@ export function stripURLCredentials(url: string): string {
  * `https:u:p@host`) up to the last `@` before the authority ends at `/`, `\`, `?` or `#`. The `@` itself is
  * kept, so the host after it is read exactly as before and the string is still refused:
  * cut with it, `https://u:p@/evil.test/x` would become `https:///evil.test/x`, which the
- * parser reads as `https://evil.test/x`. Unchanged when it has no authority or no `@` in
- * it, or, as a last guard, when the cut would parse.
+ * parser reads as `https://evil.test/x`. Read without the tabs, newlines and edge
+ * controls the parser drops, which a cut string is left without too. Unchanged when it has
+ * no authority or no `@` in it, or, as a last guard, when the cut would parse.
  */
 function withoutTextualUserinfo(url: string): string {
+  // Read as the parser reads it: without the tabs and newlines it removes anywhere, nor
+  // the C0 controls and spaces it trims from either end, so `ht\ttps://u:p@...` is cut
+  // as `https://u:p@...` is.
+  const text = url
+    .replace(/[\t\n\r]/g, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '');
   const authority =
     /^(\s*(?:(?:https?|wss?|ftp|file):[/\\]*|(?:[a-z][a-z\d+.-]*:)?[/\\]{2}))([^/\\?#]*)/i.exec(
-      url,
+      text,
     );
   if (authority === null) {
     return url;
@@ -381,7 +389,7 @@ function withoutTextualUserinfo(url: string): string {
     return url;
   }
 
-  const cut = prefix + host.slice(at) + url.slice(whole.length);
+  const cut = prefix + host.slice(at) + text.slice(whole.length);
 
   try {
     new URL(cut);

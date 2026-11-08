@@ -83,8 +83,8 @@ export interface AdapterRequest {
    * it is handed over - decoded, where the adapter decodes. Past it the adapter stops
    * reading, releases the response, and resolves a stream error with
    * `streamErrorCode: 'response_too_large'`, keeping the real status and headers.
-   * `NodeAdapter` and `FetchAdapter` also refuse a `Content-Length` already over it
-   * before the body is read, where that length counts the bytes handed over.
+   * `NodeAdapter`, `FetchAdapter` and `XHRAdapter` also refuse a `Content-Length` already
+   * over it before the body is read, where that length counts the bytes handed over.
    *
    * A positive integer, or `Infinity` (or absent) for no limit. Any other value - `0`,
    * `NaN`, a string - and a getter that throws are refused: the adapter rejects with a

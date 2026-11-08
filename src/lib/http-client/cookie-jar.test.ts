@@ -3826,6 +3826,30 @@ test('an edge-hyphen host whose stand-in would read as a public suffix still get
 // RFC 6265bis §5.1.2 canonicalizes a request host without removing a trailing dot (the
 // URL parser keeps it), and §5.1.3 domain-matches strings as they are: `example.com.` is
 // a different host from `example.com`, as browsers treat it.
+describe('a request host with a leading dot', () => {
+  test('is sent no cookie of the host without it, and stores none', () => {
+    // The URL parser accepts `https://.example.com/`; the dot a `Domain=` may carry is
+    // dropped, so read through the same normalization it would be `example.com`.
+    const jar = new CookieJar();
+
+    jar.parseSetCookieHeader(
+      'sid=secret; Secure; Path=/',
+      'https://example.com/',
+    );
+    jar.parseSetCookieHeader('planted=1; Path=/', 'https://.example.com/');
+    jar.parseSetCookieHeader(
+      'wide=1; Domain=example.com; Path=/',
+      'https://.example.com/',
+    );
+
+    expect(jar.getCookieHeaderString('https://.example.com/')).toBe('');
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe(
+      'sid=secret',
+    );
+    expect(jar.getAllCookies().map((cookie) => cookie.name)).toEqual(['sid']);
+  });
+});
+
 describe('a trailing dot is part of the host', () => {
   test('a host-only cookie is not sent to the other form of its host', () => {
     const jar = new CookieJar();

@@ -364,6 +364,19 @@ describe('stripCrossOriginURLCredentials', () => {
 });
 
 describe('URL userinfo removal', () => {
+  test('a URL the parser refuses is cut as the parser reads it, without tabs, newlines or edge controls', () => {
+    for (const location of [
+      'ht\ttps://u:p@h.test:99999/x',
+      'h\nttps://u:p@h.test:99999/x',
+      '\u0001https://u:p@h.test:99999/x',
+      'https://u:\rp@h.test:99999/x',
+    ]) {
+      const stripped = stripURLCredentials(location);
+      expect(stripped).toBe('https://@h.test:99999/x');
+      expect(() => new URL(stripped)).toThrow();
+    }
+  });
+
   test('a URL the parser refuses has the userinfo of its authority cut as written', () => {
     // A `Location` with a port out of range or a broken IPv6 literal is still recorded
     // in the redirect history and reported, so its credentials must not be.
