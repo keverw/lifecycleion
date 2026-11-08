@@ -1,4 +1,5 @@
-import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
+import { asciiLowercase } from '../../internal/ascii-text';
+import { headerListTokens } from './header-utils';
 
 /**
  * The codings a `Content-Encoding` value applies, in the order it lists them: each of its
@@ -6,10 +7,7 @@ import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
  * HTTP whitespace and ASCII-lowercased, an empty one or `identity` left out.
  */
 export function contentCodings(contentEncoding: string | string[]): string[] {
-  return (
-    Array.isArray(contentEncoding) ? contentEncoding.join(',') : contentEncoding
-  )
-    .split(',')
-    .map((token) => asciiLowercase(trimHTTPWhitespace(token)))
+  return headerListTokens(contentEncoding)
+    .map(asciiLowercase)
     .filter((token) => token !== '' && token !== 'identity');
 }

@@ -2,7 +2,6 @@ import {
   asciiLowercase,
   asciiUppercase,
   isBlankText,
-  trimHTTPWhitespace,
 } from '../../internal/ascii-text';
 import {
   arrayBufferKindOf,
@@ -100,6 +99,7 @@ import {
   copyHeaderRecord,
   deleteHeader,
   describeRefusedHeader,
+  headerListTokens,
   lowerCaseHeaderName,
   materializeRequestHeaders,
 } from '../internal/header-utils';
@@ -1783,22 +1783,19 @@ export class NodeAdapter implements HTTPAdapter {
           }
 
           try {
-            stopFailedUploadDeadline = watchGraceWindows(
-              () => 0,
-              () => {
-                if (didResponseClose) {
-                  return false;
-                }
-
-                if (isResponseBehindItsConsumer()) {
-                  return true;
-                }
-
-                destroyUnfinishedRequestQuietly(req);
-
+            stopFailedUploadDeadline = watchGraceWindows(() => {
+              if (didResponseClose) {
                 return false;
-              },
-            );
+              }
+
+              if (isResponseBehindItsConsumer()) {
+                return true;
+              }
+
+              destroyUnfinishedRequestQuietly(req);
+
+              return false;
+            });
           } catch {
             // No way to schedule it, so the request is torn down now rather than left to
             // hang. A response mid-flight is the lesser loss of the two.
@@ -2442,7 +2439,6 @@ export class NodeAdapter implements HTTPAdapter {
               req.on('finish', letGoIfPastLimit);
 
               const stopDrainWatch = watchGraceWindows(
-                () => drainedBytes,
                 (didProgress) => {
                   if (!isDrainingAnsweredResponse) {
                     return false;
@@ -2480,6 +2476,7 @@ export class NodeAdapter implements HTTPAdapter {
 
                   return true;
                 },
+                () => drainedBytes,
               );
 
               if (isUploading() && stallWatchdogTimer === undefined) {
@@ -3154,15 +3151,10 @@ function isAnswerClosingConnection(
   }
 
   const connection: unknown = response.headers.connection;
-  const tokens = (
-    Array.isArray(connection)
-      ? connection.join(',')
-      : typeof connection === 'string'
-        ? connection
-        : ''
-  )
-    .split(',')
-    .map((token) => asciiLowercase(trimHTTPWhitespace(token)));
+  const tokens =
+    Array.isArray(connection) || typeof connection === 'string'
+      ? headerListTokens(connection as string | string[]).map(asciiLowercase)
+      : [];
 
   if (tokens.includes('close')) {
     return true;
@@ -3173,13 +3165,13 @@ function isAnswerClosingConnection(
 
 /**
  * Calls `onWindow` at the end of every {@link UPLOAD_STALL_GRACE_MS} window for as long
- * as it answers `true`, telling it whether `readProgress` moved during that window. The
- * timer never keeps the process up. Returns a function that stops it, safe to call from
- * `onWindow` and more than once.
+ * as it answers `true`, telling it whether `readProgress`, when given, moved during that
+ * window. The timer never keeps the process up. Returns a function that stops it, safe to
+ * call from `onWindow` and more than once.
  */
 function watchGraceWindows(
-  readProgress: () => number,
   onWindow: (didProgress: boolean) => boolean,
+  readProgress: () => number = () => 0,
 ): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let isStopped = false;

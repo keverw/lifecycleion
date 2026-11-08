@@ -28,6 +28,16 @@ export const lowerCaseHeaderName: (name: string) => string = asciiLowercase;
 export const HEADER_VALUE_LABEL = 'HTTPClient header value';
 
 /**
+ * The comma-separated members of a list-valued header, each trimmed of HTTP whitespace,
+ * an array's values joined first, as one header seen twice. Empty members are kept.
+ */
+export function headerListTokens(value: string | string[]): string[] {
+  return (Array.isArray(value) ? value.join(',') : value)
+    .split(',')
+    .map((token) => trimHTTPWhitespace(token));
+}
+
+/**
  * A header value as every header normalizer reads it - the one rule they share, so a
  * header is present or absent alike on the wire and to observers. HTTPClient applies it
  * before any adapter sees a request, and every adapter driven directly applies it too,

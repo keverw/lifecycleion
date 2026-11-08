@@ -395,6 +395,12 @@ export class CookieJar {
 
   /** Counts stores and reads, so recency has a strict order within one millisecond. */
   private accessClock = 0;
+  /**
+   * No stored cookie was last used before this, as Chromium's `earliest_access_time_`: a
+   * lower bound, so the jar-wide limit skips its pass - a scan of the whole jar - on every
+   * store while no cookie can have gone 30 days unused.
+   */
+  private earliestAccessTime = Infinity;
 
   constructor(options?: CookieJarOptions) {
     assertOptionsObject(options, 'CookieJar options', true);
@@ -650,6 +656,7 @@ export class CookieJar {
       lastAccessTime,
       expiresAt: lifetime.expiresAt,
     });
+    this.earliestAccessTime = Math.min(this.earliestAccessTime, lastAccessTime);
 
     this.enforceLimits(site);
 
@@ -892,6 +899,7 @@ export class CookieJar {
       const count = this.cookieCount;
       this.buckets.clear();
       this.cookieCount = 0;
+      this.earliestAccessTime = Infinity;
       return count;
     }
 
@@ -1207,6 +1215,7 @@ export class CookieJar {
 
     this.buckets.clear();
     this.cookieCount = 0;
+    this.earliestAccessTime = Infinity;
 
     for (const cookie of prepared) {
       this.setCookie(cookie);
@@ -1587,13 +1596,27 @@ export class CookieJar {
       this.evict([site], MAX_COOKIES_PER_SITE, COOKIES_PER_SITE_AFTER_EVICTION);
     }
 
-    if (this.cookieCount > MAX_COOKIES_IN_JAR) {
+    if (
+      this.cookieCount > MAX_COOKIES_IN_JAR &&
+      this.earliestAccessTime < Date.now() - SAFE_FROM_JAR_LIMIT_MS
+    ) {
       this.evict(
         Array.from(this.buckets.keys()),
         MAX_COOKIES_IN_JAR,
         COOKIES_IN_JAR_AFTER_EVICTION,
         SAFE_FROM_JAR_LIMIT_MS,
       );
+
+      this.earliestAccessTime = Infinity;
+
+      for (const bucket of this.buckets.values()) {
+        for (const { lastAccessTime } of bucket.values()) {
+          this.earliestAccessTime = Math.min(
+            this.earliestAccessTime,
+            lastAccessTime,
+          );
+        }
+      }
     }
   }
 

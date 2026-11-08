@@ -4766,6 +4766,34 @@ describe('jar limits', () => {
     expect(kept.filter((name) => name.startsWith('flood'))).toHaveLength(300);
   });
 
+  test('past 3300 cookies all used inside 30 days, a store does not scan the jar', () => {
+    const jar = new CookieJar();
+    const internals = jar as unknown as {
+      evict: (sites: string[], ...rest: unknown[]) => void;
+    };
+    const evict = internals.evict.bind(jar);
+    let jarWidePasses = 0;
+    internals.evict = (sites, ...rest) => {
+      if (sites.length > 1) {
+        jarWidePasses++;
+      }
+      evict(sites, ...rest);
+    };
+
+    for (let site = 0; site < 34; site++) {
+      fill(jar, 100, { domain: `site${site}.test` });
+    }
+
+    expect(names(jar)).toHaveLength(3400);
+    expect(jarWidePasses).toBe(0);
+
+    passDays(31);
+    fill(jar, 1, { prefix: 'new', domain: 'last.test' });
+
+    expect(jarWidePasses).toBe(1);
+    expect(names(jar)).toHaveLength(3000);
+  });
+
   test('the jar-wide limit evicts only as many unused cookies as it has', () => {
     const jar = new CookieJar();
 

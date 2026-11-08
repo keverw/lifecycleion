@@ -3,7 +3,7 @@
  * {@link AdapterRequest.maxResponseBytes}.
  */
 
-import { asciiUppercase, trimHTTPWhitespace } from '../../internal/ascii-text';
+import { asciiUppercase } from '../../internal/ascii-text';
 import {
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
@@ -16,6 +16,7 @@ import {
   readBinaryByteLength,
 } from '../../internal/binary-view';
 import { utf8ByteLength } from './utf8-length';
+import { headerListTokens } from './header-utils';
 import { contentCodings } from './content-codings';
 
 /**
@@ -154,9 +155,7 @@ export function parseContentLength(
 
   // Trimmed of HTTP whitespace only, as Fetch and Node read it: `trim()` would also take
   // a no-break space, reading `10\u00A0` as the length 10 where they read no length.
-  const tokens = (Array.isArray(value) ? value.join(',') : value)
-    .split(',')
-    .map((token) => trimHTTPWhitespace(token));
+  const tokens = headerListTokens(value);
 
   if (!tokens.every((token) => /^\d+$/.test(token))) {
     return undefined;
