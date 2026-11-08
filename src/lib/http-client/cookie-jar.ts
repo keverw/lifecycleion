@@ -193,6 +193,14 @@ interface StoredCookie {
   expiresAt: number;
 }
 
+/**
+ * Orders stored cookies least recently used first, as Chromium orders them: by the time each
+ * was last used, then, for cookies used at the same time, by the jar's access clock.
+ */
+function byLeastRecentlyUsed(a: StoredCookie, b: StoredCookie): number {
+  return a.lastAccessTime - b.lastAccessTime || a.lastAccess - b.lastAccess;
+}
+
 /** A copy of a stored cookie, its `expires` a `Date` of its own. */
 function copyCookie(cookie: Cookie): Cookie {
   const copy = { ...cookie };
@@ -365,9 +373,10 @@ export interface CookieJarOptions {
  * use; while more than 3000 have been used that recently, the jar holds them all, bounded
  * only by each site's 180. Any store can evict a `Secure` cookie once no non-`Secure` one is
  * left to go, as in Chromium, so `Secure` cookies cannot fill a site and lock others out.
- * Within one limit a flood of non-`Secure` cookies pushes them no lower than its target: 150
- * in a site, 3000 in the jar, whose limit can take one site's below 150. `Priority` is not
- * read: every cookie evicts as Chromium's default priority does.
+ * Within a site a flood of non-`Secure` cookies pushes them no lower than 150. The jar-wide
+ * limit passes over a flood's cookies, just stored, so it can take `Secure` ones unused for
+ * 30 days down to none. `Priority` is not read: every cookie evicts as Chromium's default
+ * priority does.
  *
  * IPs are never treated as public suffixes. A bare single-label hostname - `localhost`,
  * `myapp` - is, so a cookie may not span one; per RFC 6265bis §5.5 a `Domain=` naming the
@@ -1000,10 +1009,10 @@ export class CookieJar {
    * A replaced cookie's place in the `Cookie` header - its first creation time - is not
    * saved: after a restore, cookies of equal path length are ordered by `createdAt`, and
    * those that share one by the order listed here.
-   * Least recently used first: a restore counts recency by payload order, so a restored
-   * jar evicts as this one would. Each cookie carries the time it was last used as
-   * `lastAccessedAt`, so a restored jar keeps the cookies used in the last 30 days safe
-   * from its jar-wide limit, and only those.
+   * Least recently used first, each cookie with the time it was last used as
+   * `lastAccessedAt`: a restore orders recency by that time, and cookies that share one by
+   * payload order, so a restored jar evicts as this one would and keeps the cookies used
+   * in the last 30 days safe from its jar-wide limit, and only those.
    */
   public toJSON(): CookieJarJSON {
     const stored: StoredCookie[] = [];
@@ -1012,7 +1021,7 @@ export class CookieJar {
       stored.push(...bucket.values());
     }
 
-    stored.sort((a, b) => a.lastAccess - b.lastAccess);
+    stored.sort(byLeastRecentlyUsed);
 
     return {
       cookies: stored.map((entry) => ({
@@ -1623,8 +1632,8 @@ export class CookieJar {
   /**
    * Removes the expired cookies of `sites`, then, if more than `limit` remain, the least
    * recently used down to `target`: non-`Secure` first, then `Secure`. With `safeFor`,
-   * only cookies not used in that many milliseconds go, so fewer may, and `target` is
-   * not reached.
+   * only cookies not used in that many milliseconds go, so `target` may not be
+   * reached.
    */
   private evict(
     sites: string[],
@@ -1653,7 +1662,7 @@ export class CookieJar {
       const safeSince = safeFor === undefined ? Infinity : now - safeFor;
       const oldestFirst = live
         .filter((entry) => entry.stored.lastAccessTime < safeSince)
-        .sort((a, b) => a.stored.lastAccess - b.stored.lastAccess);
+        .sort((a, b) => byLeastRecentlyUsed(a.stored, b.stored));
       const candidates = [
         ...oldestFirst.filter((entry) => !isSecure(entry)),
         ...oldestFirst.filter(isSecure),

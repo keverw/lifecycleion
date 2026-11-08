@@ -4840,6 +4840,45 @@ describe('jar limits', () => {
     expect(kept).toContain('recent0');
   });
 
+  test('eviction and toJSON order cookies by lastAccessedAt, then by when they were stored', () => {
+    const now = Date.now();
+    setSystemTime(new Date(now));
+    const cookie = (name: string, lastAccessedAt?: number) => ({
+      name,
+      value: 'v',
+      domain: 'example.com',
+      path: '/',
+      createdAt: now,
+      ...(lastAccessedAt === undefined ? {} : { lastAccessedAt }),
+    });
+
+    const jar = new CookieJar();
+    jar.fromJSON({
+      cookies: [
+        cookie('usedNow', now),
+        cookie('stale', now - 89 * DAY_MS),
+        ...Array.from({ length: 178 }, (_, index) =>
+          cookie(`filler${index}`, now - 1000),
+        ),
+      ],
+    });
+
+    expect(
+      jar
+        .toJSON()
+        .cookies.map(({ name }) => name)
+        .slice(0, 2),
+    ).toEqual(['stale', 'filler0']);
+
+    fill(jar, 1, { prefix: 'new' });
+
+    const kept = names(jar);
+    expect(kept).toContain('usedNow');
+    expect(kept).not.toContain('stale');
+    expect(kept).not.toContain('filler29');
+    expect(kept).toContain('filler30');
+  });
+
   test('a restored cookie with no lastAccessedAt counts as used at the restore', () => {
     const restored = new CookieJar();
     restored.fromJSON({
