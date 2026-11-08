@@ -371,7 +371,8 @@ export interface CookieJarOptions {
  * down to 150 and 3000. The jar-wide limit evicts only cookies not used in the last 30 days,
  * as Chromium's does, so a flood of cookies from other sites cannot push out a session in
  * use; while more than 3000 have been used that recently, the jar holds them all, bounded
- * only by each site's 180. Any store can evict a `Secure` cookie once no non-`Secure` one is
+ * only by each site's 180, and its pass - the jar-wide removal of expired cookies with it -
+ * does not run until some cookie may have gone 30 days unused. Any store can evict a `Secure` cookie once no non-`Secure` one is
  * left to go, as in Chromium, so `Secure` cookies cannot fill a site and lock others out.
  * Within a site a flood of non-`Secure` cookies pushes them no lower than 150. The jar-wide
  * limit passes over a flood's cookies, just stored, so it can take `Secure` ones unused for
@@ -850,8 +851,10 @@ export class CookieJar {
 
   /**
    * Removes expired cookies. Returns the number of cookies removed. Reading a URL's
-   * cookies removes the expired ones in the sites it scans, and the jar's limits remove
-   * them when reached, so this is only needed to purge the sites no longer requested.
+   * cookies removes the expired ones in the sites it scans, and the site limit removes a
+   * site's when it is reached, so this is only needed to purge the sites no longer
+   * requested. The jar-wide limit removes them only once it has cookies 30 days unused to
+   * evict.
    */
   public clearExpiredCookies(): number {
     const now = Date.now();

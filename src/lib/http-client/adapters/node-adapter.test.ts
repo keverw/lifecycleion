@@ -12039,6 +12039,127 @@ test.each([
   30_000,
 );
 
+test('a whole compressed answer with Connection: close that arrives mid-upload keeps its body', async () => {
+  // The server answers in full and stops reading: the answer's raw stream closes while the
+  // upload is still in flight and the decoder is still at work on its bytes.
+  const plain = Buffer.alloc(8 * 1024 * 1024, 'abcdefgh');
+  const compressed = zlib.gzipSync(plain);
+  const sockets: Socket[] = [];
+  const server = net.createServer((socket) => {
+    sockets.push(socket);
+    let isAnswered = false;
+    socket.on('error', () => {});
+    socket.on('data', (data) => {
+      if (!isAnswered && data.toString('latin1').includes('\r\n\r\n')) {
+        isAnswered = true;
+        socket.write(
+          `HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: ${String(compressed.length)}\r\nConnection: close\r\n\r\n`,
+        );
+        socket.write(compressed);
+        socket.pause();
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${String(port)}/upload`,
+      method: 'POST',
+      headers: {},
+      body: new Uint8Array(32 * 1024 * 1024),
+    });
+
+    expect(response.isStreamError).toBeUndefined();
+    expect(response.status).toBe(200);
+    expect(response.body?.length).toBe(plain.length);
+    expect(await response.requestBodySettled).toBeInstanceOf(Error);
+  } finally {
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}, 30_000);
+
+test.each([
+  ['Connection: close', 'HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n'],
+  ['HTTP/1.0', 'HTTP/1.0 200 OK\r\n\r\n'],
+])(
+  'an answer with no length of its own, cut by an upload that fails behind it, is a stream error (%s)',
+  async (_kind, head) => {
+    // The server answers at once and trickles a body it ends by closing the connection;
+    // the upload's source yields half its size, so its writer fails mid-answer.
+    const sockets: Socket[] = [];
+    const server = net.createServer((socket) => {
+      sockets.push(socket);
+      let isAnswered = false;
+      socket.on('error', () => {});
+      socket.on('data', (data) => {
+        if (isAnswered || !data.toString('latin1').includes('\r\n\r\n')) {
+          return;
+        }
+
+        isAnswered = true;
+        socket.write(head);
+        const timer = setInterval(() => {
+          if (socket.destroyed) {
+            clearInterval(timer);
+          } else {
+            socket.write('a');
+          }
+        }, 50);
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    const streamSpy = spyOn(Blob.prototype, 'stream').mockImplementation(
+      function (this: Blob) {
+        const half = Math.floor(this.size / 2);
+
+        return new ReadableStream<Uint8Array<ArrayBuffer>>({
+          async pull(controller) {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            controller.enqueue(new Uint8Array(half));
+            controller.close();
+          },
+        });
+      },
+    );
+    const onError = (event: Event): void => {
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+    try {
+      const form = new FormData();
+      form.append('file', new Blob([new Uint8Array(1024)]), 'short.bin');
+
+      const response = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${String(port)}/upload`,
+        method: 'POST',
+        headers: {},
+        body: form,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_response_error');
+      expect(response.body).toBeNull();
+      expect(await response.requestBodySettled).toBeInstanceOf(Error);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      streamSpy.mockRestore();
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  },
+  30_000,
+);
+
 test('a 205 carrying bytes after an upload has gone out keeps its connection, as fetch keeps it', async () => {
   const raw = await listenRaw205(
     'HTTP/1.1 205 Reset Content\r\nContent-Length: 13\r\n\r\nReset Content',

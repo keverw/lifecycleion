@@ -1776,8 +1776,21 @@ export class NodeAdapter implements HTTPAdapter {
               receivedResponse.isPaused() ||
               receivedResponse.readableLength > 0);
 
-          if (!isResponseBehindItsConsumer()) {
+          // The response is destroyed first, so it is cut as a stream error on every
+          // runtime: Bun, destroying the request alone, ends a response with no length of
+          // its own (`Connection: close`, HTTP/1.0) as if it had arrived in full.
+          const cutResponseAndRequest = (): void => {
+            try {
+              receivedResponse?.destroy();
+            } catch {
+              // Already torn down, which is the state this was trying to reach.
+            }
+
             destroyUnfinishedRequestQuietly(req);
+          };
+
+          if (!isResponseBehindItsConsumer()) {
+            cutResponseAndRequest();
 
             return;
           }
@@ -1792,7 +1805,7 @@ export class NodeAdapter implements HTTPAdapter {
                 return true;
               }
 
-              destroyUnfinishedRequestQuietly(req);
+              cutResponseAndRequest();
 
               return false;
             });
@@ -1863,16 +1876,19 @@ export class NodeAdapter implements HTTPAdapter {
             //
             // Except on a connection the answer said it would close: the runtime has
             // ended its writing side as the answer ended (Node half-closes it, Bun closes
-            // it), so the upload cannot finish whatever the server reads. Torn down now,
-            // as this adapter's own, rather than left for the watchdog to call it stalled
-            // five seconds on against a server that neither reads nor closes.
+            // it), so the upload cannot finish whatever the server reads. Ended now, as
+            // this adapter's own, rather than left for the watchdog to call it stalled
+            // five seconds on against a server that neither reads nor closes. The upload
+            // only: the response has all its bytes, and a decoded body may still be
+            // decoding them.
             if (
               isWritingBody &&
               isAnswerClosingConnection(res) &&
               (req.socket?.writableEnded === true ||
                 req.socket?.destroyed === true)
             ) {
-              tearDownAfterResponse();
+              didTearDownAfterResponse = true;
+              destroyRequestQuietly(req);
 
               return;
             }
