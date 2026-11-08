@@ -2418,6 +2418,47 @@ describe('MockAdapter transportError', () => {
     }
   });
 
+  test('transportError options are read as the route answers, not after its delay', async () => {
+    const adapter = new MockAdapter();
+    const options = { wasDefinitelyNotSent: true };
+    adapter.routes.get('/tls', () => ({
+      status: 200,
+      transportError: options,
+      delay: 30,
+    }));
+
+    const sent = adapter.send({
+      requestURL: 'http://api.test/tls',
+      method: 'GET',
+      headers: {},
+    });
+    // Changed once the route has answered, while the response is delayed.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    options.wasDefinitelyNotSent = false;
+    const response = await sent;
+
+    expect(response.isTransportError).toBe(true);
+    expect(response.wasDefinitelyNotSent).toBe(true);
+  });
+
+  test('a protocol-relative URL driven directly is routed by its path, its host reported', async () => {
+    const adapter = new MockAdapter();
+    let seenHost: unknown;
+    adapter.routes.get('/x', (req) => {
+      seenHost = req.headers.host;
+      return { status: 200, body: 'ok' };
+    });
+
+    const response = await adapter.send({
+      requestURL: '//h.test/x',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.status).toBe(200);
+    expect(seenHost).toBe('h.test');
+  });
+
   test('a transportError flag or message of the wrong type is refused as the route mistake', async () => {
     // The client reads a flag that is not a boolean as unset, so `'false'` would retry
     // what the route said not to.

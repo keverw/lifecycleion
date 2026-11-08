@@ -607,7 +607,8 @@ export class XHRAdapter implements HTTPAdapter {
 
       // --- Download progress ---
 
-      // Real per-chunk download progress, as FetchAdapter reports it from the stream.
+      // Real per-chunk download progress, where FetchAdapter reports only the terminal
+      // event.
 
       // Whether the bytes progress counts are the body's own (see `isKnownUncodedBody`):
       // read once, when they first pass the limit.

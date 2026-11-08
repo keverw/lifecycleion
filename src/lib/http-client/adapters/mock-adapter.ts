@@ -138,9 +138,9 @@ export interface MockResponse {
    * - `undefined` or omitted — no body
    * - `null` — no body
    * - `string` — UTF-8 bytes
-   * - `Uint8Array` — raw bytes unchanged (one from another realm, such as jsdom or a
-   *   `vm` context, copied to this realm's)
-   * - `ArrayBuffer` — viewed as a `Uint8Array`, from any realm
+   * - `Uint8Array` — its bytes, copied as the route answers, from any realm (such as
+   *   jsdom or a `vm` context)
+   * - `ArrayBuffer` — its bytes, copied as a `Uint8Array`, from any realm
    * - plain object (`Object.prototype` or `null` prototype) — JSON
    * - array — JSON
    */
@@ -355,7 +355,11 @@ export class MockAdapter implements HTTPAdapter {
     // and a FormData body's multipart `content-type` (the boundary is the mock's own).
     if (!Object.hasOwn(materializedHeaders, 'host')) {
       try {
-        defineEntry(materializedHeaders, 'host', new URL(requestURL).host);
+        defineEntry(
+          materializedHeaders,
+          'host',
+          new URL(withMockScheme(requestURL)).host,
+        );
       } catch {
         // A path-only URL driven straight at the adapter has no host to report.
       }
@@ -399,7 +403,7 @@ export class MockAdapter implements HTTPAdapter {
     let queryString: string;
 
     try {
-      const url = new URL(requestURL);
+      const url = new URL(withMockScheme(requestURL));
       path = url.pathname;
       queryString = url.search.slice(1);
     } catch {
@@ -650,6 +654,97 @@ export class MockAdapter implements HTTPAdapter {
       );
     });
 
+    // A simulated transport failure's options, read as the route answered, as the body
+    // and headers are: a fixture the test changes during the delay does not change the
+    // flags that go out. A mistake in them is refused after the delay, where the body's
+    // is.
+    const routeTransportError = mockResponse.transportError;
+    const transportFailure =
+      routeTransportError !== undefined &&
+      routeTransportError !== null &&
+      routeTransportError !== false
+        ? captureRead(() => {
+            // A boolean or its options: `'yes'` would be read as `true`, and `0` as none.
+            asRouteMistake(() => {
+              const candidate: unknown = routeTransportError;
+              if (
+                candidate !== true &&
+                (typeof candidate !== 'object' || Array.isArray(candidate))
+              ) {
+                throw new TypeError(
+                  `MockAdapter route returned an unknown transportError (got ${describeValue(candidate)}); it is a boolean or its options`,
+                );
+              }
+            });
+            const options: MockTransportErrorOptions =
+              routeTransportError === true ? {} : routeTransportError;
+            // Held to the rule the client holds an adapter's status to - an integer from 0 to
+            // 999 - here, as the route's mistake: unchecked, it would be refused later as the
+            // adapter's.
+            //
+            // Each field read once, as the answer's own are (see `snapshotMockResponse`):
+            // otherwise a `status` getter that answers `495` to the check and `1000` to the
+            // response would pass one and send another. All read as the route's mistake: a
+            // getter that throws on any of them is refused once, not retried as the adapter's
+            // own failure.
+            return asRouteMistake(() => {
+              assertKnownFields(
+                options,
+                fieldNames<MockTransportErrorOptions>({
+                  status: true,
+                  wasDefinitelyNotSent: true,
+                  isRetryable: true,
+                  message: true,
+                }),
+                'MockAdapter route transportError',
+              );
+              const value: unknown = options.status;
+              if (
+                value !== undefined &&
+                (typeof value !== 'number' ||
+                  !Number.isInteger(value) ||
+                  value < 0 ||
+                  value > 999)
+              ) {
+                throw new TypeError(
+                  `MockAdapter route returned transportError status ${typeof value === 'number' ? String(value) : typeof value}; it is an integer from 0 to 999`,
+                );
+              }
+              // The flags too: the client reads anything but a boolean as unset, so a
+              // `'false'` would retry what the route said not to.
+              const isRetryableValue: unknown = options.isRetryable;
+              const wasDefinitelyNotSentValue: unknown =
+                options.wasDefinitelyNotSent;
+              const messageValue: unknown = options.message;
+              for (const [name, flag] of [
+                ['isRetryable', isRetryableValue],
+                ['wasDefinitelyNotSent', wasDefinitelyNotSentValue],
+              ] as const) {
+                if (flag !== undefined && typeof flag !== 'boolean') {
+                  throw new TypeError(
+                    `MockAdapter route returned transportError ${name} ${describeValue(flag)}; it is a boolean`,
+                  );
+                }
+              }
+              if (
+                messageValue !== undefined &&
+                typeof messageValue !== 'string'
+              ) {
+                throw new TypeError(
+                  `MockAdapter route returned transportError message ${describeValue(messageValue)}; it is a string`,
+                );
+              }
+              return {
+                status: value,
+                isRetryable: isRetryableValue as boolean | undefined,
+                wasDefinitelyNotSent: wasDefinitelyNotSentValue as
+                  boolean | undefined,
+                message: messageValue,
+              };
+            });
+          })
+        : undefined;
+
     // --- 5. Delay ---
     // Simulates network latency. Per-response delay takes priority over the
     // adapter default. When a signal is present, the sleep is abort-aware and
@@ -707,87 +802,9 @@ export class MockAdapter implements HTTPAdapter {
     // A simulated transport failure never produced a response, so it returns
     // before any of the response-shaped work below — no body, no headers, no
     // cookies, and no terminal progress, exactly as a real one delivers none.
-    if (
-      mockResponse.transportError !== undefined &&
-      mockResponse.transportError !== null &&
-      mockResponse.transportError !== false
-    ) {
-      // A boolean or its options: `'yes'` would be read as `true`, and `0` as none.
-      asRouteMistake(() => {
-        const candidate: unknown = mockResponse.transportError;
-        if (
-          candidate !== true &&
-          (typeof candidate !== 'object' || Array.isArray(candidate))
-        ) {
-          throw new TypeError(
-            `MockAdapter route returned an unknown transportError (got ${describeValue(candidate)}); it is a boolean or its options`,
-          );
-        }
-      });
-      const options: MockTransportErrorOptions =
-        mockResponse.transportError === true ? {} : mockResponse.transportError;
-      // Held to the rule the client holds an adapter's status to - an integer from 0 to
-      // 999 - here, as the route's mistake: unchecked, it would be refused later as the
-      // adapter's.
-      //
-      // Each field read once, as the answer's own are (see `snapshotMockResponse`):
-      // otherwise a `status` getter that answers `495` to the check and `1000` to the
-      // response would pass one and send another. All read as the route's mistake: a
-      // getter that throws on any of them is refused once, not retried as the adapter's
-      // own failure.
+    if (transportFailure !== undefined) {
       const { status, isRetryable, wasDefinitelyNotSent, message } =
-        asRouteMistake(() => {
-          assertKnownFields(
-            options,
-            fieldNames<MockTransportErrorOptions>({
-              status: true,
-              wasDefinitelyNotSent: true,
-              isRetryable: true,
-              message: true,
-            }),
-            'MockAdapter route transportError',
-          );
-          const value: unknown = options.status;
-          if (
-            value !== undefined &&
-            (typeof value !== 'number' ||
-              !Number.isInteger(value) ||
-              value < 0 ||
-              value > 999)
-          ) {
-            throw new TypeError(
-              `MockAdapter route returned transportError status ${typeof value === 'number' ? String(value) : typeof value}; it is an integer from 0 to 999`,
-            );
-          }
-          // The flags too: the client reads anything but a boolean as unset, so a
-          // `'false'` would retry what the route said not to.
-          const isRetryableValue: unknown = options.isRetryable;
-          const wasDefinitelyNotSentValue: unknown =
-            options.wasDefinitelyNotSent;
-          const messageValue: unknown = options.message;
-          for (const [name, flag] of [
-            ['isRetryable', isRetryableValue],
-            ['wasDefinitelyNotSent', wasDefinitelyNotSentValue],
-          ] as const) {
-            if (flag !== undefined && typeof flag !== 'boolean') {
-              throw new TypeError(
-                `MockAdapter route returned transportError ${name} ${describeValue(flag)}; it is a boolean`,
-              );
-            }
-          }
-          if (messageValue !== undefined && typeof messageValue !== 'string') {
-            throw new TypeError(
-              `MockAdapter route returned transportError message ${describeValue(messageValue)}; it is a string`,
-            );
-          }
-          return {
-            status: value,
-            isRetryable: isRetryableValue as boolean | undefined,
-            wasDefinitelyNotSent: wasDefinitelyNotSentValue as
-              boolean | undefined,
-            message: messageValue,
-          };
-        });
+        unwrapCaptured(transportFailure);
 
       return {
         status: status ?? 0,
@@ -987,6 +1004,17 @@ export class MockAdapter implements HTTPAdapter {
  * request with no `baseURL`. So `/start` answered with `Location: /next` reports
  * `http://localhost/next`, as it does through the client.
  */
+/**
+ * A protocol-relative `requestURL` (`//api.test/users`) given the scheme of the mock's
+ * default base, so its host is read as a host - stripped before routing, and reported as
+ * `host` - as `redirectBaseURL` reads it. Anything else is returned as it is.
+ */
+function withMockScheme(requestURL: string): string {
+  return requestURL.startsWith('//')
+    ? new URL(MOCK_ADAPTER_DEFAULT_BASE_URL).protocol + requestURL
+    : requestURL;
+}
+
 function redirectBaseURL(requestURL: string): string {
   try {
     new URL(requestURL);

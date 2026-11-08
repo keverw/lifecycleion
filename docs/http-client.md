@@ -784,7 +784,7 @@ type ErrorObserver = (
 
 The `request` argument is the same `AttemptRequest` snapshot described above, including the configured `timeout` for that attempt.
 
-When a request fails before any adapter attempt is dispatched (for example request setup errors, pre-dispatch interceptor failures, or pre-send cancellation), the snapshot is best-effort: it carries the headers set before interceptors run - the request ID header (with `includeRequestID`) and the `user-agent`, if there is one - but not the per-attempt attempt header or cookie-jar cookies, which are applied at dispatch, because no real outbound attempt occurred.
+When a request fails before any adapter attempt is dispatched (for example request setup errors, pre-dispatch interceptor failures, or pre-send cancellation), the snapshot is best-effort: it carries the headers set before interceptors run - the request ID header (with `includeRequestID`) and the `user-agent`, if there is one - but not the per-attempt attempt header or cookie-jar cookies, which are applied at dispatch, because no real outbound attempt occurred. A redirect hop's request is the exception for cookies: it carries the `Cookie` the jar gave its target as the hop was set up, so a snapshot of one that failed or was cancelled before dispatch - and the request its retry-phase interceptors are handed - shows that header, though a `Set-Cookie` from the hop's own earlier attempt is not in it. What is sent is rebuilt from the jar at dispatch either way.
 
 ### Filter Options
 
@@ -1151,7 +1151,7 @@ redirect interceptors, and generated body headers are recalculated after their e
 
 Note: `MockAdapter` strips the domain before route matching, so "cross-origin" redirects in tests are effectively same-origin to its router. Header stripping still applies, but test routes don't need to be registered per-domain.
 
-Redirect metadata is recorded when a redirect target is detected and enters redirect handling. That means `redirectHistory` can include the current redirect target before the follow-up adapter attempt is dispatched. During redirect-phase interception, the metadata reflects the target detected from the redirect response. If a redirect interceptor rewrites `requestURL` and redirect handling continues, later `requestURL` / `redirectHistory` values reflect the rewritten target. If redirect handling is cancelled or errors before dispatch, the response/error metadata may still reflect the originally detected target rather than a completed adapter attempt. That target is the redirect detected and not followed: it is `detectedRedirectURL`, and it does not count toward `wasRedirectFollowed`, which says whether a hop was actually dispatched. A `Location` that does not resolve to a URL is still recorded in `redirectHistory` as the raw string the server sent, any `user:pass@` in its authority cut down to the `@`, so the string is still refused (redirect-phase interceptors are handed it, and may rewrite it), but reports no `detectedRedirectURL`.
+Redirect metadata is recorded when a redirect target is detected and enters redirect handling. That means `redirectHistory` can include the current redirect target before the follow-up adapter attempt is dispatched. During redirect-phase interception, the metadata reflects the target detected from the redirect response. If a redirect interceptor rewrites `requestURL` and redirect handling continues, later `requestURL` / `redirectHistory` values reflect the rewritten target. If redirect handling is cancelled or errors before dispatch, the response/error metadata may still reflect the originally detected target rather than a completed adapter attempt. Where it was stopped decides which: a cancel from a redirect-phase response observer, or from the `3xx`'s `onAttemptEnd`, reports the URL that answered as `requestURL` and a `redirectHistory` without the target; one from a redirect-phase interceptor on reports the target in both. Each reports the target as `detectedRedirectURL`. That target is the redirect detected and not followed: it is `detectedRedirectURL`, and it does not count toward `wasRedirectFollowed`, which says whether a hop was actually dispatched. A `Location` that does not resolve to a URL is still recorded in `redirectHistory` as the raw string the server sent, any `user:pass@` in its authority cut down to the `@`, so the string is still refused (redirect-phase interceptors are handed it, and may rewrite it), but reports no `detectedRedirectURL`.
 
 ### Redirect Phase Info
 
@@ -1624,7 +1624,7 @@ Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `
 
 ```typescript
 interface MockAdapterConfig {
-  defaultDelay?: number | null; // Non-negative milliseconds added to all responses; 0 disables
+  defaultDelay?: number | null; // Non-negative milliseconds each response waits before it is delivered, unless it sets its own delay; 0 disables
   onHandlerError?: (
     req: MockRequest,
     error: unknown,
@@ -1941,12 +1941,12 @@ Two things deliberately do **not** set the flag. A caller's own `AbortSignal` fi
 
 #### Adapter Support
 
-| Adapter        | `isStreamError` | Notes                                                                                                                                                     |
-| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                            |
-| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. Always reports `stream_response_error` because `fetch` buffers the body, so there is no per-chunk delivery to inspect |
-| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                 |
-| `XHRAdapter`   | Buffered bodies | Reads the status and headers as they arrive, so a network error or timeout mid-body keeps them, as does a body it cannot read                             |
+| Adapter        | `isStreamError` | Notes                                                                                                                                                                                                            |
+| -------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                                                                                   |
+| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. A body that fails mid-read is a `stream_response_error`, and one past `maxResponseBytes` a `response_too_large`; it has no `streamResponse`, so never a `stream_write_error` |
+| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                                                                        |
+| `XHRAdapter`   | Buffered bodies | Reads the status and headers as they arrive, so a network error or timeout mid-body keeps them, as does a body it cannot read                                                                                    |
 
 Every adapter, `XHRAdapter` included, also reports `response_too_large` as a stream error for a buffered body past `maxResponseBytes` (see [Response Size Limit](#response-size-limit)): there the adapter itself stops the read, while the headers are still in hand.
 

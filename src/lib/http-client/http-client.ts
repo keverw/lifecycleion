@@ -5301,7 +5301,9 @@ export class BaseHTTPClient {
     // Best-effort snapshot for observers when a request fails before any adapter
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
     // Jar cookies and the attempt header (x-local-client-request-attempt) are not added
-    // here - they are applied at dispatch time, and no attempt went out. The request ID
+    // here - they are applied at dispatch time, and no attempt went out. A redirect hop's
+    // request already carries the jar's `Cookie` for its target, set as the hop was
+    // built, and keeps it. The request ID
     // header and the client's user-agent are already on it: they are set before the
     // interceptors run. A request that already carries them (a redirect
     // hop's, built from the previous hop's sent headers, or a retry interceptor's input)
