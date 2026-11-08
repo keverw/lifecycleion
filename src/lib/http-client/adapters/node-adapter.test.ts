@@ -11988,6 +11988,47 @@ test('an upload a 205 answers goes out in full, however much of it the socket ha
   }
 });
 
+test('bytes behind an answered 205 that pass the limit during an upload leave the upload going', async () => {
+  // 100 KiB of stray chunked bytes against a 64 KiB limit, sent with the head while a
+  // 32 MiB upload is read slowly: dropped as they come, the upload goes out in full, and
+  // the connection is let go once it has.
+  const uploadSize = 32 * 1024 * 1024;
+  const stray = 100 * 1024;
+  const raw = await listenRaw205(
+    'HTTP/1.1 205 Reset Content\r\nTransfer-Encoding: chunked\r\n\r\n' +
+      `${stray.toString(16)}\r\n${'x'.repeat(stray)}\r\n`,
+    1,
+  );
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${raw.port}/upload`,
+      method: 'PUT',
+      headers: {},
+      body: new Uint8Array(uploadSize).fill(0x61),
+      maxResponseBytes: 64 * 1024,
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.body).toBeNull();
+    expect(await response.requestBodySettled).toBeUndefined();
+
+    while (raw.receivedBytes() < uploadSize && raw.closedSockets() === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(raw.receivedBytes()).toBe(uploadSize);
+
+    const uploadedAt = performance.now();
+    while (raw.closedSockets() === 0 && performance.now() - uploadedAt < 8000) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    expect(raw.closedSockets()).toBe(1);
+  } finally {
+    await raw.close();
+  }
+}, 30_000);
+
 test('a 205 with no length held open after its upload lets its connection go after a quiet window', async () => {
   // Nothing says where its bytes end, and none come: answered at once, and the connection
   // let go rather than held for as long as the server keeps it open.
@@ -12156,44 +12197,6 @@ test('a 205 that answers an upload and declares more than the limit is answered 
 
     expect(response.status).toBe(205);
     expect(response.body).toBeNull();
-    expect(req.destroyed).toBe(true);
-  } finally {
-    requestSpy.mockRestore();
-  }
-});
-
-test('a 205 whose bytes pass the limit during an upload lets its connection go', async () => {
-  // Accepted and never acknowledged: the upload is parked for good.
-  const req = new MockClientRequest(() => true);
-  // No `Content-Length`, and no end: the 205 never closes on its own. Answered as its
-  // headers arrive, and its connection let go once the bytes read behind it pass the
-  // limit.
-  const res = new MockIncomingMessage(205, {});
-  const requestSpy = spyOn(http, 'request').mockImplementation(
-    (_options, callback) => {
-      const cb = callback as ((res: http.IncomingMessage) => void) | undefined;
-      queueMicrotask(() => {
-        cb?.(res as unknown as http.IncomingMessage);
-        queueMicrotask(() => {
-          res.emit('data', Buffer.alloc(100));
-        });
-      });
-      return req as unknown as http.ClientRequest;
-    },
-  );
-
-  try {
-    const response = await new NodeAdapter().send({
-      requestURL: 'http://example.test/upload',
-      method: 'POST',
-      headers: {},
-      body: 'x'.repeat(256 * 1024),
-      maxResponseBytes: 10,
-    });
-
-    expect(response.status).toBe(205);
-    expect(response.body).toBeNull();
-    expect(response.isStreamError).not.toBe(true);
     expect(req.destroyed).toBe(true);
   } finally {
     requestSpy.mockRestore();

@@ -1127,7 +1127,10 @@ export class NodeAdapter implements HTTPAdapter {
          */
         let sourceWaitEndedAt: number | undefined;
 
-        /** The stall watchdog's pending tick, cleared once the writer is done; see {@link watchForStalledUpload}. */
+        /**
+         * The stall watchdog's pending tick, cleared once the writer is done; see
+         * {@link watchForStalledUpload}.
+         */
         let stallWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
 
         /** Whether a post-response write failure has already been reported and scheduled. */
@@ -2313,15 +2316,16 @@ export class NodeAdapter implements HTTPAdapter {
             };
 
             // A stray `205`'s answer (see below): settled now, its bytes read and dropped
-            // until they end. Bounded by `maxResponseBytes`, past which the connection is
-            // let go; by the caller's signal, which ends it as it ends the same read behind
-            // a `fetch` answer; an upload still going out by the stall watchdog, armed now
-            // rather than once the answer closes; and the bytes themselves by the same
-            // five-second windows, once nothing is being uploaded: a whole window with
-            // neither lets the connection go, and so does the
-            // {@link STRAY_205_DRAIN_WINDOWS}th such window, however the bytes trickle - the request's
-            // timeout has stopped with the answer, so nothing else would end a read a
-            // server keeps alive a byte at a time.
+            // until they end. An upload still going out goes on, watched by the stall
+            // watchdog, armed now rather than once the answer closes. The read is bounded
+            // by the caller's signal, which ends it as it ends the same read behind a
+            // `fetch` answer, and, once nothing is being uploaded, by `maxResponseBytes`
+            // and the same five-second windows: past the limit, after a whole window with
+            // no bytes, or at the end of the {@link STRAY_205_DRAIN_WINDOWS}th window
+            // however the bytes trickle, the connection is let go. The request's timeout
+            // stopped with the answer, so nothing else would end a read that a server
+            // keeps alive a byte at a time. Bytes past the limit during an upload are
+            // dropped as they come, so they cost no memory.
             const answerAndDrainStray205 = (): void => {
               guardedDownloadProgress?.(completeProgressEvent(0));
 
@@ -2359,6 +2363,9 @@ export class NodeAdapter implements HTTPAdapter {
               const isUploading = (): boolean =>
                 isWritingBody && !req.writableEnded;
 
+              const isPastLimit = (): boolean =>
+                drainedBytes > maxResponseBytes;
+
               let bytesAtLastTick = 0;
               // Read at each tick, so a window counts as quiet only when the upload was
               // already done as it began - not one it ran through until just before its end.
@@ -2381,6 +2388,12 @@ export class NodeAdapter implements HTTPAdapter {
                   }
 
                   const isStillUploading = isUploading();
+
+                  if (!isStillUploading && isPastLimit()) {
+                    letGoOfConnection();
+
+                    return;
+                  }
 
                   if (!isStillUploading && !wasUploadingAtLastTick) {
                     windowsAfterUpload++;
@@ -2412,7 +2425,7 @@ export class NodeAdapter implements HTTPAdapter {
 
                 drainedBytes += chunk.length;
 
-                if (drainedBytes > maxResponseBytes) {
+                if (isPastLimit() && !isUploading()) {
                   letGoOfConnection();
                 }
               });
@@ -3086,8 +3099,9 @@ const UPLOAD_STALL_GRACE_MS = 5_000;
  * NodeAdapter reads and drops the bytes behind an answered `205` for before it lets the
  * connection go, however steadily they arrive: fifteen seconds from the answer when there
  * is no upload, and up to twenty from an upload's end, as a window counts only once it
- * began with the upload done. A quiet window lets it go sooner. The bytes are ones the status says are not there, so this is room for a
- * server that sends a short stray body slowly, not for one that streams.
+ * began with the upload done. A quiet window lets it go sooner. The bytes are ones the
+ * status says are not there, so this is room for a server that sends a short stray body
+ * slowly, not for one that streams.
  */
 const STRAY_205_DRAIN_WINDOWS = 3;
 

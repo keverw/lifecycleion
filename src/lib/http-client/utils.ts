@@ -370,7 +370,9 @@ export function stripURLCredentials(url: string): string {
 function withoutTextualUserinfo(url: string): string {
   // Read as the parser reads it: without the tabs and newlines it removes anywhere, nor
   // the C0 controls and spaces it trims from either end, so `ht\ttps://u:p@...` is cut
-  // as `https://u:p@...` is.
+  // as `https://u:p@...` is. The pattern's own leading `\s*` goes further, past
+  // whitespace the parser keeps (a no-break space): such a string is refused anyway, and
+  // reading past it cuts its userinfo too.
   const text = url
     .replace(/[\t\n\r]/g, '')
     // eslint-disable-next-line no-control-regex

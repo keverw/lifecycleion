@@ -219,6 +219,96 @@ test('the post-upload-failure deadline keeps a response that is still arriving',
   }
 }, 30_000);
 
+test('bytes past the limit behind an answered 205 let its connection go at once after its upload fails', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'node-adapter-205-failed-'));
+  try {
+    const build = await Bun.build({
+      entrypoints: [
+        fileURLToPath(new URL('./node-adapter.ts', import.meta.url)),
+      ],
+      target: 'node',
+      format: 'esm',
+    });
+    expect(build.success).toBe(true);
+    await writeFile(
+      join(directory, 'adapter.mjs'),
+      await build.outputs[0].text(),
+    );
+    const fixture = join(directory, 'fixture.mjs');
+    await writeFile(
+      fixture,
+      `
+        import assert from 'node:assert/strict';
+        import net from 'node:net';
+        import { NodeAdapter } from './adapter.mjs';
+
+        // Answers 205 at once, then, a second later - after the upload has failed at its
+        // source - sends 100 KiB of stray bytes against a 64 KiB limit.
+        const STRAY = 100 * 1024;
+        let strayAt;
+        let closedAt;
+        const sockets = [];
+        const server = net.createServer((socket) => {
+          sockets.push(socket);
+          socket.on('error', () => {});
+          socket.on('close', () => { closedAt = performance.now(); });
+          socket.once('data', () => {
+            socket.write('HTTP/1.1 205 Reset Content\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n');
+            setTimeout(() => {
+              strayAt = performance.now();
+              socket.write(STRAY.toString(16) + '\\r\\n' + 'x'.repeat(STRAY) + '\\r\\n');
+            }, 1000);
+            socket.resume();
+          });
+        });
+        await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+        // A multipart File that yields 10 of its 100 bytes: the upload fails at its source.
+        const file = new File([new Uint8Array(100)], 'f.bin');
+        Object.defineProperty(file, 'stream', {
+          value() {
+            return new ReadableStream({
+              async start(controller) {
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                controller.enqueue(new Uint8Array(10));
+                controller.close();
+              },
+            });
+          },
+        });
+        const form = new FormData();
+        form.append('f', file);
+
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://127.0.0.1:' + server.address().port + '/',
+          method: 'POST', headers: {}, body: form, maxResponseBytes: 64 * 1024,
+        });
+        assert.equal(response.status, 205);
+        assert.ok(await response.requestBodySettled instanceof Error, 'the upload failed');
+
+        const hang = setTimeout(() => { console.error('HANG'); process.exit(2); }, 15000);
+        while (closedAt === undefined) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        clearTimeout(hang);
+
+        // Let go as the bytes pass the limit, not when a watchdog looks again.
+        assert.ok(closedAt - strayAt < 2000, 'closed ' + Math.round(closedAt - strayAt) + ' ms after the stray bytes');
+        for (const socket of sockets) socket.destroy();
+        server.close();
+      `,
+    );
+    const child = spawnSync('node', [fixture], {
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
 test('a multipart body source that does not match its size fails once, not retried as a network error', async () => {
   const directory = await mkdtemp(
     join(tmpdir(), 'node-adapter-source-mismatch-'),
