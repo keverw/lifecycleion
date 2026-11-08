@@ -1729,9 +1729,10 @@ export class NodeAdapter implements HTTPAdapter {
           // imposes no timeout of its own by design.
           //
           // Given the same grace the stall watchdog gives an upload, and for the same reason:
-          // a response still streaming in on that socket is worth waiting for, and one that
-          // has not finished by then is waiting on a body that is never coming. Tearing it
-          // down settles the promise through the response path's own error handling.
+          // a response still streaming in on that socket is worth waiting for, so a window in
+          // which its connection read anything starts another, and one that reads nothing for
+          // a whole window is waiting on a body that is never coming. Tearing it down settles
+          // the promise through the response path's own error handling.
           //
           // Not while the response is behind its own consumer, though - fully arrived, paused
           // under a slow sink's backpressure, or buffered for a stream factory still opening
@@ -1745,13 +1746,21 @@ export class NodeAdapter implements HTTPAdapter {
             (receivedResponse.complete ||
               receivedResponse.isPaused() ||
               receivedResponse.readableLength > 0);
+          // Counted off the connection, not the response, so reading it never changes how
+          // the response flows.
+          const responseBytesRead = (): number =>
+            receivedResponse?.socket?.bytesRead ?? 0;
           const armDeadline = (): void => {
+            const bytesAtArm = responseBytesRead();
             const deadline = setTimeout(() => {
               if (didResponseClose) {
                 return;
               }
 
-              if (isResponseBehindItsConsumer()) {
+              if (
+                isResponseBehindItsConsumer() ||
+                responseBytesRead() !== bytesAtArm
+              ) {
                 armDeadline();
 
                 return;
@@ -2309,8 +2318,8 @@ export class NodeAdapter implements HTTPAdapter {
             // a `fetch` answer; an upload still going out by the stall watchdog, armed now
             // rather than once the answer closes; and the bytes themselves by the same
             // five-second windows, once nothing is being uploaded: a whole window with
-            // neither lets the connection go, and so does the end of the
-            // {@link STRAY_205_DRAIN_WINDOWS}th, however the bytes trickle - the request's
+            // neither lets the connection go, and so does the
+            // {@link STRAY_205_DRAIN_WINDOWS}th such window, however the bytes trickle - the request's
             // timeout has stopped with the answer, so nothing else would end a read a
             // server keeps alive a byte at a time.
             const answerAndDrainStray205 = (): void => {
@@ -3073,10 +3082,11 @@ export class NodeAdapter implements HTTPAdapter {
 const UPLOAD_STALL_GRACE_MS = 5_000;
 
 /**
- * How many whole {@link UPLOAD_STALL_GRACE_MS} windows NodeAdapter reads and drops the
- * bytes behind an answered `205` for once nothing is being uploaded - fifteen seconds -
- * before it lets the connection go, however steadily they arrive. A quiet window lets it
- * go sooner. The bytes are ones the status says are not there, so this is room for a
+ * How many whole {@link UPLOAD_STALL_GRACE_MS} windows with nothing being uploaded
+ * NodeAdapter reads and drops the bytes behind an answered `205` for before it lets the
+ * connection go, however steadily they arrive: fifteen seconds from the answer when there
+ * is no upload, and up to twenty from an upload's end, as a window counts only once it
+ * began with the upload done. A quiet window lets it go sooner. The bytes are ones the status says are not there, so this is room for a
  * server that sends a short stray body slowly, not for one that streams.
  */
 const STRAY_205_DRAIN_WINDOWS = 3;

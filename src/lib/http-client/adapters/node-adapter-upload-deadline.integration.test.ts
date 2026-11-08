@@ -131,6 +131,94 @@ test('the post-upload-failure deadline keeps a response that is behind its consu
   }
 }, 30_000);
 
+test('the post-upload-failure deadline keeps a response that is still arriving', async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), 'node-adapter-upload-deadline-arriving-'),
+  );
+  try {
+    const build = await Bun.build({
+      entrypoints: [
+        fileURLToPath(new URL('./node-adapter.ts', import.meta.url)),
+      ],
+      target: 'node',
+      format: 'esm',
+    });
+    expect(build.success).toBe(true);
+    await writeFile(
+      join(directory, 'adapter.mjs'),
+      await build.outputs[0].text(),
+    );
+    const fixture = join(directory, 'fixture.mjs');
+    await writeFile(
+      fixture,
+      `
+        import assert from 'node:assert/strict';
+        import net from 'node:net';
+        import { NodeAdapter } from './adapter.mjs';
+
+        // Answers at once, then sends 100 bytes every 100 ms for 8 s: past the
+        // deadline's first window, and never quiet for one.
+        const CHUNKS = 80;
+        const sockets = [];
+        const server = net.createServer((socket) => {
+          sockets.push(socket);
+          socket.once('data', () => {
+            socket.write('HTTP/1.1 200 OK\\r\\nContent-Length: ' + CHUNKS * 100 + '\\r\\n\\r\\n');
+            let sent = 0;
+            const timer = setInterval(() => {
+              if (socket.destroyed) {
+                clearInterval(timer);
+                return;
+              }
+              socket.write(Buffer.alloc(100, 0x61));
+              if (++sent === CHUNKS) clearInterval(timer);
+            }, 100);
+            socket.resume();
+          });
+        });
+        await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+        // A multipart File that yields 10 of its 100 bytes: the upload fails at its source.
+        const file = new File([new Uint8Array(100)], 'f.bin');
+        Object.defineProperty(file, 'stream', {
+          value() {
+            return new ReadableStream({
+              async start(controller) {
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                controller.enqueue(new Uint8Array(10));
+                controller.close();
+              },
+            });
+          },
+        });
+        const form = new FormData();
+        form.append('f', file);
+
+        const hang = setTimeout(() => { console.error('HANG'); process.exit(2); }, 15000);
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://127.0.0.1:' + server.address().port + '/',
+          method: 'POST', headers: {}, body: form,
+        });
+        clearTimeout(hang);
+
+        assert.equal(response.status, 200);
+        assert.ok(!response.isStreamError, 'no stream error');
+        assert.equal(response.body.length, CHUNKS * 100);
+        for (const socket of sockets) socket.destroy();
+        server.close();
+      `,
+    );
+    const child = spawnSync('node', [fixture], {
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
 test('a multipart body source that does not match its size fails once, not retried as a network error', async () => {
   const directory = await mkdtemp(
     join(tmpdir(), 'node-adapter-source-mismatch-'),
