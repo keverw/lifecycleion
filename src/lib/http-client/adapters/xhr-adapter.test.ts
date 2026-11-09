@@ -2439,6 +2439,69 @@ describe('XHRAdapter', () => {
     },
   );
 
+  test('a sandboxed https: frame, whose origin is null, reads an upgrade by its location', async () => {
+    const response = await withGlobal(
+      'location',
+      { href: 'https://app.test/', origin: 'https://app.test' },
+      async () =>
+        await withGlobal('origin', 'null', async () => {
+          const promise = new XHRAdapter().send({
+            requestURL: 'http://api.test/data',
+            method: 'GET',
+            headers: {},
+          });
+
+          lastXHR.status = 200;
+          lastXHR.response = textBody('ok');
+          lastXHR.responseURL = 'https://api.test/data';
+          lastXHR.simulateLoad();
+
+          return await promise;
+        }),
+    );
+
+    expect(response.wasRedirectDetected).toBe(false);
+    expect(response.status).toBe(200);
+  });
+
+  test('a 3xx handed over unfollowed after an upgrade resolves its Location against the https: URL that answered', async () => {
+    const response = await withPageOrigin('https://app.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'http://api.test/a',
+        method: 'GET',
+        headers: {},
+      });
+
+      // An XHR that does not follow it, as one outside a browser hands a 3xx over.
+      lastXHR.status = 308;
+      lastXHR.getAllResponseHeadersResult = 'location: /b\r\n';
+      lastXHR.response = textBody('');
+      lastXHR.responseURL = 'https://api.test/a';
+      lastXHR.simulateLoad();
+
+      return await promise;
+    });
+
+    expect(response.status).toBe(308);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://api.test/b');
+  });
+
+  test('an upgraded same-host request past maxResponseBytes is refused mid-download, as a same-origin one is', async () => {
+    const result = await withPageOrigin(
+      'https://app.test',
+      async () =>
+        await sendPastLimitWithoutCoding(
+          'http://app.test/big',
+          'https://app.test/big',
+        ),
+    );
+
+    expect(result.abortCalled).toBe(true);
+    expect(result.wasRedirectDetected).toBe(false);
+    expect(result.streamErrorCode).toBe('response_too_large');
+  });
+
   test('does not treat fragment-only URL differences as redirect', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

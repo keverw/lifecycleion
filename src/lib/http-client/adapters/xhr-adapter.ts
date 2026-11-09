@@ -46,6 +46,7 @@ import type {
 import {
   derivedRedirectFields,
   findBrowserPage,
+  type BrowserPage,
   isBrowserEnvironment,
   isCrossOrigin,
   keepFirstJoinedLocation,
@@ -118,7 +119,7 @@ export class XHRAdapter implements HTTPAdapter {
 
     // Resolved once, as the browser resolves it - against the document's base URL, or the
     // worker's `location` - with credentials withheld for another origin than the initial
-    // URL's, and that one absolute URL is what is opened, what `didBrowserFollowRedirect`
+    // URL's, and that one absolute URL is what is opened, what `compareResponseURL`
     // compares `responseURL` with, and what a `Location` resolves against. One that does
     // not resolve, or is not http(s), is the non-retryable error it is refused with below
     // (see `resolveBrowserDispatchURL`).
@@ -311,10 +312,30 @@ export class XHRAdapter implements HTTPAdapter {
         }
       };
 
-      /** Whether `responseURL` is where the browser followed a redirect to. */
-      const isFollowedRedirect = (responseURL: string): boolean =>
-        responseURL !== '' &&
-        didBrowserFollowRedirect(responseURL, answeredURL);
+      /**
+       * The URL that answered, which a `Location` resolves against and the page's origin is
+       * compared with: `answeredURL`, or its `https:` form once the answer shows the
+       * browser upgraded it (see `compareResponseURL`).
+       */
+      let answeringURL = answeredURL;
+
+      /**
+       * Whether `responseURL` is where the browser followed a redirect to. An upgrade the
+       * browser made itself is not one: it moves `answeringURL` to the `https:` form.
+       */
+      const isFollowedRedirect = (responseURL: string): boolean => {
+        if (responseURL === '') {
+          return false;
+        }
+
+        const comparison = compareResponseURL(responseURL, answeredURL);
+
+        if (comparison.kind === 'upgraded') {
+          answeringURL = comparison.upgradedURL;
+        }
+
+        return comparison.kind === 'redirected';
+      };
 
       /**
        * The answer as the XHR has it now. A redirect the browser followed is told by its URL
@@ -652,7 +673,7 @@ export class XHRAdapter implements HTTPAdapter {
         endDownloadAt(answer, () => {
           resolve(
             tooLargeAnswer(
-              answeredURL,
+              answeringURL,
               answer.status,
               answer.headers,
               maxResponseBytes,
@@ -672,7 +693,7 @@ export class XHRAdapter implements HTTPAdapter {
           resolve({
             status: answer.status,
             ...derivedRedirectFields(
-              answeredURL,
+              answeringURL,
               answer.status,
               answer.headers,
             ),
@@ -725,7 +746,7 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         // The same decision the download's bytes would come to (see `isBodyKnownUncoded`).
-        isBodyKnownUncoded = isKnownUncodedBody(answer, answeredURL);
+        isBodyKnownUncoded = isKnownUncodedBody(answer, answeringURL);
 
         if (isBodyKnownUncoded) {
           refuseTooLargeBody(answer);
@@ -814,7 +835,7 @@ export class XHRAdapter implements HTTPAdapter {
               return;
             }
 
-            isBodyKnownUncoded = isKnownUncodedBody(answer, answeredURL);
+            isBodyKnownUncoded = isKnownUncodedBody(answer, answeringURL);
 
             if (isBodyKnownUncoded) {
               refuseTooLargeBody(answer);
@@ -909,7 +930,7 @@ export class XHRAdapter implements HTTPAdapter {
           if (body === RESPONSE_UNREADABLE) {
             resolve(
               streamErrorAnswer(
-                answeredURL,
+                answeringURL,
                 status,
                 responseHeaders,
                 'stream_response_error',
@@ -931,7 +952,7 @@ export class XHRAdapter implements HTTPAdapter {
           ) {
             resolve(
               tooLargeAnswer(
-                answeredURL,
+                answeringURL,
                 status,
                 responseHeaders,
                 maxResponseBytes,
@@ -948,7 +969,7 @@ export class XHRAdapter implements HTTPAdapter {
           // a real 3xx.
           resolve({
             status,
-            ...derivedRedirectFields(answeredURL, status, responseHeaders),
+            ...derivedRedirectFields(answeringURL, status, responseHeaders),
             headers: responseHeaders,
             body,
           });
@@ -1000,7 +1021,7 @@ export class XHRAdapter implements HTTPAdapter {
 
           resolve(
             streamErrorAnswer(
-              answeredURL,
+              answeringURL,
               status,
               answeredHeaders,
               'stream_response_error',
@@ -1225,9 +1246,9 @@ function isKnownUncodedBody(
  * `<base href>` can resolve the URL elsewhere, but the origin is still that page's.
  * `undefined` where there is no page, or it names no origin, as outside a browser.
  */
-function readPageOrigin(): string | undefined {
-  const page = findBrowserPage();
-
+function readPageOrigin(
+  page: BrowserPage | undefined = findBrowserPage(),
+): string | undefined {
   if (page === undefined) {
     return undefined;
   }
@@ -1445,63 +1466,77 @@ function parseXHRResponseHeaders(
 }
 
 /**
- * Compares URLs as browsers evaluate request destinations:
- * - strips userinfo (omitted by responseURL) and hash fragments (not sent over HTTP)
- * - relies on URL normalization for equivalent forms
- *   (default ports, dot segments, encoding normalization, etc.)
- * - on an `https:` page, reads an `http:` URL answered from its `https:` form as the
- *   same URL (see `isUpgradeFromSecurePage`)
+ * How `responseURL` stands to `answeredURL`, the absolute URL `send` opened, compared as
+ * browsers evaluate request destinations:
+ * - userinfo (omitted by `responseURL`) and hash fragments (not sent over HTTP) are
+ *   stripped
+ * - URL normalization makes equivalent forms equal (default ports, dot segments,
+ *   encoding normalization, etc.)
  *
- * `answeredURL` is the absolute URL `send` opened. A `responseURL` that does not parse
- * cannot name it, so it is taken as a redirect.
+ * The same URL is `'same'`. On an `https:` page, an `http:` URL answered from its own
+ * `https:` form - the scheme changed, a default port staying the default and any other
+ * kept - is `'upgraded'`, with that form as `upgradedURL`: a browser blocks a plain
+ * `http:` request from such a page as mixed content, so one that was answered there was
+ * upgraded before it was sent - by the page's `upgrade-insecure-requests` policy, or
+ * HSTS - and no server redirected it, as FetchAdapter's `fetch` reports it. Not for a
+ * host of this machine's (see `isLoopbackHost`), which a browser lets through over
+ * `http:`, so a local proxy's redirect to the same URL over `https:` - a `301` that
+ * turned a `POST` into a `GET` among them - is not mistaken for an upgrade. On an
+ * `http:` page an upgrade looks exactly like a server's redirect to `https:`, and is
+ * reported as one. Anything else is `'redirected'`, a `responseURL` that does not parse
+ * among them, since it cannot name `answeredURL`.
  */
-function didBrowserFollowRedirect(
+function compareResponseURL(
   responseURL: string,
   answeredURL: string,
-): boolean {
+): { kind: 'same' | 'redirected' } | { kind: 'upgraded'; upgradedURL: string } {
   const normalizedResponse = safeParseURL(responseURL);
 
   if (normalizedResponse === null) {
-    return true;
+    return { kind: 'redirected' };
   }
 
   normalizedResponse.hash = '';
-
-  const normalizedRequest = new URL(answeredURL);
-  normalizedRequest.hash = '';
-
   const responseHref = stripURLCredentials(normalizedResponse.href);
 
-  if (responseHref === stripURLCredentials(normalizedRequest.href)) {
-    return false;
+  const request = new URL(answeredURL);
+  const hash = request.hash;
+  request.hash = '';
+
+  if (responseHref === stripURLCredentials(request.href)) {
+    return { kind: 'same' };
   }
 
-  return !isUpgradeFromSecurePage(normalizedRequest, responseHref);
+  if (
+    request.protocol !== 'http:' ||
+    isLoopbackHost(request.hostname) ||
+    !isOnHTTPSPage()
+  ) {
+    return { kind: 'redirected' };
+  }
+
+  request.protocol = 'https:';
+
+  if (responseHref !== stripURLCredentials(request.href)) {
+    return { kind: 'redirected' };
+  }
+
+  request.hash = hash;
+
+  return { kind: 'upgraded', upgradedURL: request.href };
 }
 
 /**
- * Whether `responseHref` is `request` - an `http:` URL - upgraded to `https:` by the
- * browser itself, on an `https:` page. A browser blocks a plain `http:` request from an
- * `https:` page as mixed content, unless its host is this machine's (see
- * `isLoopbackHost`), so one that was answered was upgraded before it was sent - by the
- * page's `upgrade-insecure-requests` policy, or HSTS - and no server redirected it, as
- * FetchAdapter's `fetch` reports it. The upgrade is the URL with its scheme changed - a
- * default port stays the default, any other port is kept. On an `http:` page an upgrade looks exactly
- * like a server's redirect to `https:`, and is reported as one.
+ * Whether the page or worker running the request is an `https:` one, whose `http:`
+ * requests a browser blocks as mixed content: its origin (see `readPageOrigin`), or - for
+ * a page whose origin is `'null'`, as a sandboxed frame's is - its `location`.
  */
-function isUpgradeFromSecurePage(request: URL, responseHref: string): boolean {
-  if (request.protocol !== 'http:' || isLoopbackHost(request.hostname)) {
-    return false;
-  }
+function isOnHTTPSPage(): boolean {
+  const page = findBrowserPage();
 
-  const pageOrigin = readPageOrigin();
-
-  if (pageOrigin === undefined || !pageOrigin.startsWith('https:')) {
-    return false;
-  }
-
-  const upgraded = new URL(request.href);
-  upgraded.protocol = 'https:';
-
-  return stripURLCredentials(upgraded.href) === responseHref;
+  return (
+    page !== undefined &&
+    (readPageOrigin(page)?.startsWith('https:') === true ||
+      page.href.startsWith('https:'))
+  );
 }
