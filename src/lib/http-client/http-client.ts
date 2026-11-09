@@ -129,13 +129,13 @@ import type {
   ResponseObserverPhase,
   ErrorObserverPhase,
   CancelResult,
+  HTTPRetryPolicyOptions,
 } from './types';
 import type {
   BuilderCallbacks,
   ResolvedBuilderOptions,
   BuilderSendContext,
 } from './http-request-builder';
-import type { RetryPolicyOptions } from '../retry-utils';
 import type { CookieJar } from './cookie-jar';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
@@ -149,6 +149,10 @@ import {
 } from './internal/response-limit';
 import { readBinaryByteLength } from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
+import {
+  parseRetryAfterMS,
+  RETRY_AFTER_STATUS_CODES,
+} from './internal/retry-after';
 import {
   cloneBodyValue,
   copiedJSONText,
@@ -1378,13 +1382,15 @@ export class BaseHTTPClient {
 
         // Determine effective retry policy — one shared instance used by both
         // the main dispatch loop AND any redirect hops (shared budget).
-        const retryPolicyOptions: RetryPolicyOptions | undefined | null =
+        const retryPolicyOptions: HTTPRetryPolicyOptions | undefined | null =
           options.retryPolicy !== undefined
             ? options.retryPolicy
             : this._config.retryPolicy;
         const retryPolicy = retryPolicyOptions
           ? new RetryPolicy(retryPolicyOptions)
           : null;
+        // Resolved when the policy was taken (see `snapshotRetryPolicyOptions`).
+        const maxRetryAfterMS = retryPolicyOptions?.maxRetryAfterMS ?? 0;
 
         // --- Main request + redirect loop ---
         //
@@ -1443,6 +1449,7 @@ export class BaseHTTPClient {
             signalReleasers,
             uploadActivity,
             retryPolicy,
+            maxRetryAfterMS,
             requestID,
             options,
             callbacks: trackedCallbacks,
@@ -2556,6 +2563,8 @@ export class BaseHTTPClient {
     /** Where each attempt's signal composition registers its release; see `_composeSignals`. */
     signalReleasers: Array<() => void>;
     retryPolicy: RetryPolicy | null;
+    /** The policy's `maxRetryAfterMS` (see `HTTPRetryPolicyOptions`). */
+    maxRetryAfterMS: number;
     requestID: string;
     options: ResolvedBuilderOptions;
     callbacks: BuilderCallbacks<T>;
@@ -2625,6 +2634,7 @@ export class BaseHTTPClient {
       signalReleasers,
       uploadActivity,
       retryPolicy: policy,
+      maxRetryAfterMS,
       requestID,
       options,
       callbacks,
@@ -3841,9 +3851,29 @@ export class BaseHTTPClient {
           RETRYABLE_STATUS_CODES.has(adapterResponse.status) &&
           !cancelSignal.aborted
         ) {
-          const { shouldRetry, delayMS } = policy.shouldRetry(
+          const decision = policy.shouldRetry(
             new Error(`HTTP ${adapterResponse.status}`),
           );
+          // A `Retry-After` the server sent with a `429` or `503` - read only once the
+          // policy would retry - waits at least as long as it asks, or, asking past
+          // `maxRetryAfterMS`, ends the request with this answer: a retry sooner would be
+          // refused again. One that asks for less than the policy's delay leaves it, so a
+          // server answering `Retry-After: 1` every time is still backed off from.
+          const retryAfterMS =
+            decision.shouldRetry &&
+            RETRY_AFTER_STATUS_CODES.has(adapterResponse.status)
+              ? parseRetryAfterMS(
+                  scalarHeader(adapterResponse.headers, 'retry-after'),
+                  Date.now(),
+                )
+              : undefined;
+          const isRetryAfterTooLong =
+            retryAfterMS !== undefined && retryAfterMS > maxRetryAfterMS;
+          const shouldRetry = decision.shouldRetry && !isRetryAfterTooLong;
+          const delayMS =
+            retryAfterMS === undefined
+              ? decision.delayMS
+              : Math.max(decision.delayMS, retryAfterMS);
           const nextRetryAt = shouldRetry ? Date.now() + delayMS : undefined;
           // The delay's start on the monotonic clock: what is left of it after the
           // retry-phase observers is measured here, so a wall-clock step cannot stretch
@@ -3876,6 +3906,9 @@ export class BaseHTTPClient {
             willRetry: shouldRetry,
             nextRetryDelayMS: shouldRetry ? delayMS : undefined,
             nextRetryAt,
+            ...(isRetryAfterTooLong
+              ? { retrySuppressedReason: 'retry_after_too_long' as const }
+              : {}),
             status: adapterResponse.status,
           });
 
@@ -3936,7 +3969,8 @@ export class BaseHTTPClient {
             continue;
           }
 
-          isRetriesExhausted = true;
+          // Not when the server's `Retry-After` stopped it: retries were left.
+          isRetriesExhausted = !isRetryAfterTooLong;
         } else {
           emitAttemptEnd({
             willRetry: false,

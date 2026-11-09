@@ -36,8 +36,8 @@ import type {
   HTTPClientError,
   StreamResponseFactory,
   RequestHeadersInput,
+  HTTPRetryPolicyOptions,
 } from './types';
-import type { RetryPolicyOptions } from '../retry-utils';
 
 export interface BuilderCallbacks<T> {
   setState: (state: RequestState) => void;
@@ -97,7 +97,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _timeout?: number | null;
   private _maxResponseBytes?: number | null;
   private _signal?: AbortSignal;
-  private _retryPolicy?: RetryPolicyOptions | null;
+  private _retryPolicy?: HTTPRetryPolicyOptions | null;
   private _retryNonIdempotentMethods?: boolean;
   private _label?: string;
   private _onUploadProgress?: (event: HTTPProgressEvent) => void;
@@ -325,7 +325,7 @@ export class HTTPRequestBuilder<T = unknown> {
     return this;
   }
 
-  public retryPolicy(options: RetryPolicyOptions | null | undefined): this {
+  public retryPolicy(options: HTTPRetryPolicyOptions | null | undefined): this {
     this._assertNotSent('retryPolicy');
     this._retryPolicy = isNullish(options)
       ? options

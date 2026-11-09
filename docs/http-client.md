@@ -28,6 +28,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [Filter Options](#filter-options-2)
 - [Phase Model](#phase-model)
 - [Retry Policy](#retry-policy)
+  - [Retry-After](#retry-after)
   - [Retryable Status Codes](#retryable-status-codes)
   - [Method Safety](#method-safety)
   - [Per-Request Override](#per-request-override)
@@ -860,6 +861,7 @@ const client = new HTTPClient({
     maxTimeoutMS: 10_000, // Maximum delay cap (ms). Default: 30_000
     factor: 1.5, // Backoff multiplier. Default: 1.5
     dispersion: 0.2, // 0–1 jitter fraction. Default: 0.1
+    maxRetryAfterMS: 60_000, // Longest Retry-After to wait for (ms). Default: maxTimeoutMS
   },
 });
 
@@ -869,9 +871,14 @@ const client2 = new HTTPClient({
     strategy: 'fixed',
     maxRetryAttempts: 2, // Default: 10; minimum: 1
     delayMS: 1_000, // Delay between each attempt (ms). Default: 1000; minimum: 1
+    maxRetryAfterMS: 60_000, // Longest Retry-After to wait for (ms). Default: 30_000
   },
 });
 ```
+
+### Retry-After
+
+A `429` or `503` the policy would retry is retried no sooner than its `Retry-After` asks: a number of seconds (`120`), or an HTTP-date in any of the three forms RFC 9110 defines (`Sun, 06 Nov 1994 08:49:37 GMT`, read as GMT). The retry waits for the longer of what the server asked and the policy's own delay, so a server that answers `Retry-After: 1` every time is still backed off from. A `Retry-After` asking for longer than `maxRetryAfterMS` ends the request instead: the `429` or `503` is returned as the response, without the retry the server said it would refuse, and `onAttemptEnd` reports `willRetry: false` with `retrySuppressedReason: 'retry_after_too_long'`. That keeps a server's `Retry-After: 86400` from holding a request for a day. `maxRetryAfterMS` defaults to the policy's `maxTimeoutMS` for the exponential strategy and to 30 seconds for the fixed one; `0` waits for none, so any `Retry-After` past `0` ends the request. A header seen twice is read as one value when the two agree (`120, 120`, as `fetch` joins them). A `Retry-After` that is neither form (`1.5`, `5 seconds`, values that disagree), or one on any other status, is ignored, and the policy's delay is used. The server's wait has no jitter added, as ky adds none. A cancel or timeout during the wait ends the request at once, as during any backoff.
 
 ### Retryable Status Codes
 
@@ -2015,6 +2022,7 @@ Since the client treats anything other than `false` as retryable, an unset value
 | `stream_error`          | The body failed after headers arrived, so the server received the request             |
 | `non_idempotent_method` | A non-idempotent method (`POST`, `PATCH`, a custom one) with no proof of non-delivery |
 | `upload_unsettled`      | The adapter ignored a bodied attempt's timeout, and the body may still be going out   |
+| `retry_after_too_long`  | A `429` or `503` asked, by `Retry-After`, for a longer wait than `maxRetryAfterMS`    |
 
 It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place. In those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped. It is also absent when the attempt ends as an `adapter_error`, such as a response whose body could not be decoded, even if a retry had been planned: the request failed, and the error code says why.
 

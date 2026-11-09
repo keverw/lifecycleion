@@ -4,6 +4,8 @@ import type {
   RetryPolicyOptionsStrategyFixed,
   RetryPolicyOptions,
 } from '../../retry-utils';
+import type { HTTPRetryPolicyOptions } from '../types';
+import { resolveTimeoutMS } from '../../internal/timer-limits';
 import {
   assertKnownFields,
   assertOptionsObject,
@@ -12,19 +14,38 @@ import {
 import { isNullish } from '../../internal/is-nullish';
 import { defineEntry } from '../../internal/define-entry';
 
+/** The field the client adds to either strategy's (see `HTTPRetryPolicyOptions`). */
+type RetryAfterField = Pick<HTTPRetryPolicyOptions, 'maxRetryAfterMS'>;
+
+/**
+ * The longest `Retry-After` a fixed policy waits for when it sets no `maxRetryAfterMS`:
+ * the exponential strategy's default `maxTimeoutMS` (30 seconds), read from `RetryPolicy`
+ * so the two cannot drift apart.
+ */
+const DEFAULT_MAX_RETRY_AFTER_MS = (() => {
+  const info = new RetryPolicy({ strategy: 'exponential' }).policyInfo;
+  return info.strategy === 'exponential' ? info.maxTimeoutMS : 30_000;
+})();
+
 /** The fields each strategy takes; any other is refused as misspelled. */
-const FIXED_FIELDS = fieldNames<RetryPolicyOptionsStrategyFixed>({
+const FIXED_FIELDS = fieldNames<
+  RetryPolicyOptionsStrategyFixed & RetryAfterField
+>({
   strategy: true,
   maxRetryAttempts: true,
   delayMS: true,
+  maxRetryAfterMS: true,
 });
-const EXPONENTIAL_FIELDS = fieldNames<RetryPolicyOptionsStrategyExponential>({
+const EXPONENTIAL_FIELDS = fieldNames<
+  RetryPolicyOptionsStrategyExponential & RetryAfterField
+>({
   strategy: true,
   maxRetryAttempts: true,
   factor: true,
   minTimeoutMS: true,
   maxTimeoutMS: true,
   dispersion: true,
+  maxRetryAfterMS: true,
 });
 /** Either strategy's: the fields checked before the strategy is known. */
 const ANY_STRATEGY_FIELDS = [
@@ -33,12 +54,12 @@ const ANY_STRATEGY_FIELDS = [
 
 /** The fields a policy of `strategy` may hold. */
 function retryPolicyFields(
-  strategy: RetryPolicyOptions['strategy'],
+  strategy: HTTPRetryPolicyOptions['strategy'],
 ): readonly string[] {
   return strategy === 'fixed' ? FIXED_FIELDS : EXPONENTIAL_FIELDS;
 }
 
-const validatedSnapshots = new WeakSet<RetryPolicyOptions>();
+const validatedSnapshots = new WeakSet<HTTPRetryPolicyOptions>();
 
 /**
  * `options`' own enumerable keys as they stand now, each holding its own data value where
@@ -67,9 +88,9 @@ function keyShape(options: object): Record<string, true | null | undefined> {
  * refusal names `label`, the API the policy was handed to.
  */
 export function snapshotRetryPolicyOptions(
-  options: RetryPolicyOptions,
+  options: HTTPRetryPolicyOptions,
   label: string,
-): RetryPolicyOptions {
+): HTTPRetryPolicyOptions {
   if (validatedSnapshots.has(options)) {
     return options;
   }
@@ -121,9 +142,18 @@ export function snapshotRetryPolicyOptions(
   // misspelling - is refused rather than left at the default.
   assertKnownFields(options, fields, label);
 
-  const snapshot = Object.freeze(
-    new RetryPolicy(plain as unknown as RetryPolicyOptions).policyInfo,
-  );
+  const policyInfo = new RetryPolicy(plain as unknown as RetryPolicyOptions)
+    .policyInfo;
+  const snapshot: HTTPRetryPolicyOptions = Object.freeze({
+    ...policyInfo,
+    maxRetryAfterMS: resolveTimeoutMS(
+      plain.maxRetryAfterMS as number | null | undefined,
+      policyInfo.strategy === 'exponential'
+        ? policyInfo.maxTimeoutMS
+        : DEFAULT_MAX_RETRY_AFTER_MS,
+      'Retry maxRetryAfterMS',
+    ),
+  });
   // Normalized policies contain only primitive fields. Brand only our frozen
   // copies, so inheritance can reuse them without trusting mutable caller data.
   validatedSnapshots.add(snapshot);

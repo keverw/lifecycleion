@@ -28,7 +28,12 @@ test.each(['own', 'inherited', 'non-enumerable'] as const)(
       followRedirects: true,
       maxRedirects: 3,
       baseURL: 'https://child.example/',
-      retryPolicy: { strategy: 'fixed', delayMS: 5, maxRetryAttempts: 1 },
+      retryPolicy: {
+        strategy: 'fixed',
+        delayMS: 5,
+        maxRetryAttempts: 1,
+        maxRetryAfterMS: 30_000,
+      },
       retryNonIdempotentMethods: true,
       includeRequestID: true,
       includeAttemptHeader: true,

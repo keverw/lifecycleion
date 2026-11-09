@@ -5,6 +5,7 @@ export { CookieJar } from './cookie-jar';
 export { FetchAdapter } from './adapters/fetch-adapter';
 
 export type {
+  HTTPRetryPolicyOptions,
   HTTPAdapter,
   AdapterType,
   AdapterRequest,

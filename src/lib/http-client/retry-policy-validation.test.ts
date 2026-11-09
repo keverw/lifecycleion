@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
 import { snapshotRetryPolicyOptions as snapshotLabelled } from './internal/retry-policy-options';
-import type { RetryPolicyOptions } from '../retry-utils';
+import type { HTTPRetryPolicyOptions as RetryPolicyOptions } from './types';
 
 /** A policy snapshotted as the client's own `retryPolicy` option is. */
 function snapshotRetryPolicyOptions(
@@ -31,6 +31,7 @@ test('sub-clients reuse only immutable validated retry snapshots', () => {
     strategy: 'fixed',
     delayMS: 5,
     maxRetryAttempts: 1,
+    maxRetryAfterMS: 30_000,
   });
   expect(() => Reflect.set(validated, 'delayMS', NaN)).not.toThrow();
   expect(Reflect.set(validated, 'delayMS', NaN)).toBe(false);
@@ -259,7 +260,7 @@ test("a field of the other strategy is named ahead of a bad value, with only the
       delay: 500,
     } as unknown as RetryPolicyOptions),
   ).toThrow(
-    'HTTPClient retryPolicy has no "delay" field (it takes strategy, maxRetryAttempts, delayMS)',
+    'HTTPClient retryPolicy has no "delay" field (it takes strategy, maxRetryAttempts, delayMS, maxRetryAfterMS)',
   );
 });
 
@@ -333,7 +334,7 @@ test('a misspelling a getter removes or adds while the policy is read is still r
     expect(() =>
       snapshotRetryPolicyOptions(policy as unknown as RetryPolicyOptions),
     ).toThrow(
-      'HTTPClient retryPolicy has no "maxRetryAttemps" field (it takes strategy, maxRetryAttempts, delayMS)',
+      'HTTPClient retryPolicy has no "maxRetryAttemps" field (it takes strategy, maxRetryAttempts, delayMS, maxRetryAfterMS)',
     );
   }
 });

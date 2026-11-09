@@ -1,6 +1,22 @@
 import type { CookieJar } from './cookie-jar';
 import type { RetryPolicyOptions } from '../retry-utils';
 
+/**
+ * A retry policy as the client takes it: either strategy's options (see
+ * `RetryPolicyOptions`), and how long a server's `Retry-After` may ask it to wait.
+ */
+export type HTTPRetryPolicyOptions = RetryPolicyOptions & {
+  /**
+   * The longest wait a `Retry-After` on a `429` or `503` may ask for, in milliseconds.
+   * Within it, the retry waits for the longer of what the server asked and the policy's
+   * own delay; past it, the response is not retried and is returned as the answer
+   * (`retrySuppressedReason: 'retry_after_too_long'`). `0` waits for none: any
+   * `Retry-After` past `0` ends the request. Null or undefined selects the policy's
+   * `maxTimeoutMS` for the exponential strategy, and 30 seconds for the fixed one.
+   */
+  maxRetryAfterMS?: number | null;
+};
+
 // --- Adapter Interface ---
 
 export type AdapterType = 'fetch' | 'xhr' | 'node' | 'mock';
@@ -481,6 +497,8 @@ export interface AttemptEndEvent {
    * - `upload_unsettled` — the attempt timed out with a body to send, and its adapter
    *   ignored the abort and had not settled a second later, so the client gave up on
    *   it while the adapter may still be sending that body: a retry would send it twice.
+   * - `retry_after_too_long` — a `429` or `503` whose `Retry-After` asked for a longer
+   *   wait than the policy's `maxRetryAfterMS`: a retry sooner would be refused again.
    *
    * Exists so a suppressed retry is self-explaining: `willRetry: false` alone is
    * indistinguishable from a policy declining.
@@ -489,7 +507,8 @@ export interface AttemptEndEvent {
     | 'adapter_veto'
     | 'stream_error'
     | 'non_idempotent_method'
-    | 'upload_unsettled';
+    | 'upload_unsettled'
+    | 'retry_after_too_long';
   /** Present only when a retry has been scheduled after this attempt. */
   nextRetryDelayMS?: number;
   /** Epoch ms for the scheduled retry, when a retry has been scheduled. */
@@ -535,7 +554,7 @@ export interface HTTPClientConfig {
    */
   maxResponseBytes?: number | null;
   cookieJar?: CookieJar | null;
-  retryPolicy?: RetryPolicyOptions;
+  retryPolicy?: HTTPRetryPolicyOptions;
   /**
    * Whether a retry policy may replay a method RFC 9110 does not define as idempotent:
    * `POST`, `PATCH`, or any custom method. Defaults to `false`.
@@ -564,7 +583,7 @@ export interface SubClientConfig extends Partial<
    * Overrides the parent's retry policy. Omitted or `undefined` inherits it; `null` turns
    * retries off for this sub-client.
    */
-  retryPolicy?: RetryPolicyOptions | null;
+  retryPolicy?: HTTPRetryPolicyOptions | null;
   /**
    * How sub-client `defaultHeaders` should interact with inherited defaults.
    * Default: `'replace'`.
@@ -607,7 +626,7 @@ export interface HTTPRequestOptions {
   maxResponseBytes?: number | null;
   /** Null or undefined sets none, as `.signal(null)` clears one. */
   signal?: AbortSignal | null;
-  retryPolicy?: RetryPolicyOptions | null;
+  retryPolicy?: HTTPRetryPolicyOptions | null;
   /**
    * Per-request override for {@link HTTPClientConfig.retryNonIdempotentMethods}.
    * Falls back to the client config when omitted.
