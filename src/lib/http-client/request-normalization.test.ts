@@ -4671,15 +4671,26 @@ test('numeric IPv4 host entries, label null, and a FormData changed mid-upload',
   );
   expect(unlabelled.state).toBe('pending');
 
-  // A FormData changed mid-upload: an overrun is refused before it reaches the wire, and
-  // a shortfall fails as the same non-retryable source mismatch.
+  // A FormData changed mid-upload: the form was read once, before it was sized, so a field
+  // appended or deleted then changes nothing that is sent.
   const received: number[] = [];
+  const lengths: number[] = [];
+  let onBothClosed = (): void => {};
+  const bothClosed = new Promise<void>((resolve) => {
+    onBothClosed = resolve;
+  });
   const server = http.createServer((req, res) => {
     let bytes = 0;
     req.on('data', (chunk: Buffer) => {
       bytes += chunk.length;
     });
-    req.on('close', () => received.push(bytes));
+    req.on('close', () => {
+      received.push(bytes);
+      lengths.push(Number(req.headers['content-length']));
+      if (received.length === 2) {
+        onBothClosed();
+      }
+    });
     req.on('end', () => res.end('ok'));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -4691,30 +4702,33 @@ test('numeric IPv4 host entries, label null, and a FormData changed mid-upload',
       form.append('b', 'y'.repeat(10));
       form.append('c', 'z'.repeat(10));
       let hasChanged = false;
-      const rejection = await new NodeAdapter()
-        .send({
-          requestURL: `http://127.0.0.1:${port}/`,
-          method: 'POST',
-          headers: {},
-          body: form,
-          onUploadProgress: (event) => {
-            if (!hasChanged && event.loaded > 0) {
-              hasChanged = true;
-              if (change === 'grow') {
-                form.append('d', 'w'.repeat(50));
-              } else {
-                form.delete('c');
-              }
+      const response = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/`,
+        method: 'POST',
+        headers: {},
+        body: form,
+        onUploadProgress: (event) => {
+          if (!hasChanged && event.loaded > 0) {
+            hasChanged = true;
+            if (change === 'grow') {
+              form.append('d', 'w'.repeat(50));
+            } else {
+              form.delete('c');
             }
-          },
-        })
-        .then(
-          (response) => response.errorCause,
-          (error: unknown) => error as Error,
-        );
+          }
+        },
+      });
 
-      expect(rejection?.message).toMatch(/Content-Length/);
+      expect(response.status).toBe(200);
+      expect(response.errorCause).toBeUndefined();
     }
+
+    // The three fields as they were read, whatever was appended or deleted: the whole
+    // body its Content-Length counted, the same both times. Read once the server has seen
+    // both requests close, which may come after their responses.
+    await bothClosed;
+    expect(received).toEqual(lengths);
+    expect(received[0]).toBe(received[1]);
   } finally {
     server.closeAllConnections();
     server.close();

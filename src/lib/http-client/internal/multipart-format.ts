@@ -5,7 +5,7 @@
  * reads a form as a server would receive it on any platform.
  */
 
-import { filePartNameToSend, formEntries } from './form-entries';
+import { filePartNameToSend } from './form-entries';
 import { isByteCount } from './progress';
 import { utf8ByteLength } from './utf8-length';
 
@@ -95,8 +95,8 @@ export function formatFilePartHeaders(
 }
 
 /**
- * Returns the exact byte length of the multipart body for a given FormData
- * and boundary — without writing anything.
+ * Returns the exact byte length of the multipart body for a form's entries, already read,
+ * and a boundary — without writing anything.
  *
  * This mirrors the exact structure `serializeMultipartFormData` (in `multipart.ts`)
  * writes, so the two must stay in sync: both build each part from the helpers above.
@@ -106,17 +106,6 @@ export function formatFilePartHeaders(
  * NodeAdapter sets Content-Length up front and reports real 0–100% progress during
  * serialization instead of guesswork. MockAdapter reports the same Content-Length to a
  * route, under its own boundary.
- */
-export function measureMultipartFormData(
-  formData: FormData,
-  boundary: string,
-): { totalSize: number; partSizes: number[] } {
-  return measureMultipartEntries(formEntries(formData), boundary);
-}
-
-/**
- * {@link measureMultipartFormData} for a form's entries already read: for a caller that
- * reads them once and makes more than one use of them.
  */
 export function measureMultipartEntries(
   entries: Iterable<[string, FormDataEntryValue]>,

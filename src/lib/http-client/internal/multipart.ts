@@ -20,8 +20,8 @@
  * file content. Each part has its own mini-headers (Content-Disposition,
  * optionally Content-Type), followed by a blank line, then the value.
  *
- * This module uses a two-pass approach:
- *   Pass 1 — measureMultipartFormData: walk all fields, count exact byte length.
+ * This module reads a form's entries once, then makes two passes over that read:
+ *   Pass 1 — measureMultipartEntries (multipart-format.ts): count the exact byte length.
  *   Pass 2 — serializeMultipartFormData: write boundary + headers + value for each field.
  *
  * Knowing the total size upfront lets us set an exact Content-Length header,
@@ -47,7 +47,7 @@ import {
   formatFieldName,
   formatFilePartHeaders,
   formatStringPart,
-  measureMultipartFormData,
+  measureMultipartEntries,
 } from './multipart-format';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
@@ -101,10 +101,15 @@ export async function serializeMultipartFormData(
   // wrong type, fails the same way on every attempt. Untagged, it would reach the adapter
   // as a transport error and be retried for an idempotent method, failing identically
   // each time.
+  // The entries read once, and both sized and written from that one read: a field the
+  // form gains or loses between the two passes changes neither. (Each part's headers are
+  // still formatted in both passes.)
+  let parts: Array<[string, FormDataEntryValue]>;
   let measured: { totalSize: number; partSizes: number[] };
 
   try {
-    measured = measureMultipartFormData(formData, boundary);
+    parts = [...formEntries(formData)];
+    measured = measureMultipartEntries(parts, boundary);
   } catch (error) {
     throw sourceReadFailure(error);
   }
@@ -148,8 +153,8 @@ export async function serializeMultipartFormData(
 
   // Every part's write is held to this before it is written, since bytes past the
   // `Content-Length` already on the wire would be read by the server as the start of
-  // another message. Reached when the FormData changed after the sizing pass - a field
-  // appended mid-upload, a later part's headers grown longer - as the per-part check
+  // another message. Reached when a part's headers grew between the sizing pass and the
+  // write - a `name` getter that answers longer the second time - as the per-part check
   // below is for a file that grew. Held to the parts' share of it, not the whole: a new
   // part's `--boundary` line fits in the bytes kept for the closing delimiter, and would
   // otherwise go out before its headers were refused.
@@ -206,9 +211,9 @@ export async function serializeMultipartFormData(
     }
   };
 
-  // Read again, and live: a form changed after the sizing pass is caught against the
-  // measured sizes below.
-  for (const [name, value] of formEntries(formData)) {
+  // The entries the sizing pass read; each part's headers are formatted again, so a
+  // getter that answers differently now is caught against the measured sizes below.
+  for (const [name, value] of parts) {
     if (req.destroyed) {
       break;
     }
@@ -238,11 +243,6 @@ export async function serializeMultipartFormData(
     if (typeof value !== 'string') {
       // Compare against the sizing pass, even if the source's size later changes.
       const partSize = partSizes[partIndex++];
-      if (partSize === undefined) {
-        throw sourceMismatch(
-          'Multipart body changed after Content-Length was calculated',
-        );
-      }
       let partBytes = 0;
 
       // Blob.stream() lets us forward large files piece-by-piece instead of
@@ -411,8 +411,8 @@ export async function serializeMultipartFormData(
   }
 
   // Bytes, not just `req.destroyed`, matching what `writeRequestBodyChunked` checks. Each
-  // part's own shortfall is refused where it is read, so what reaches here is a form that
-  // lost entries after the sizing pass: `Content-Length` promised them, and Node does not
+  // part's own shortfall is refused where it is read, so what reaches here is a part whose
+  // headers shrank after the sizing pass: `Content-Length` promised more, and Node does not
   // check a `ClientRequest` for a shortfall, so the server would wait for bytes that never
   // arrive. Refused before the closing delimiter, which would tell it the form had ended.
   //

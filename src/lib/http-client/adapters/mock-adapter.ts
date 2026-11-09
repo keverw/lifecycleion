@@ -385,9 +385,6 @@ export class MockAdapter implements HTTPAdapter {
     // `localhost` for a path-only URL driven straight at the adapter, read against the
     // mock's default base as the client reads it - a FormData body's multipart
     // `content-type` (the boundary is the mock's own), and the body's `content-length`.
-    // A form's entries, read once: the `content-length` below and what the route is
-    // handed are both made from them, so the two cannot disagree.
-    const formParts = isFormData(body) ? [...formEntries(body)] : undefined;
     // Read once, against the mock's default base as the client reads a path-only URL
     // (and a protocol-relative one, `//api.test/users`, by that base's scheme): `null`
     // for one that does not parse, which has no host and is routed as it is written.
@@ -429,6 +426,9 @@ export class MockAdapter implements HTTPAdapter {
     // replaced - and `0` for a bodiless request whose method Node sends one for (see
     // `requestBodyLength`). Measured once the request is known to go ahead, so a form
     // part's getters are not read for one refused or cancelled.
+    // A form's entries, read once: the `content-length` and what the route is handed are
+    // both made from them, so the two cannot disagree.
+    const formParts = isFormData(body) ? [...formEntries(body)] : undefined;
     delete materializedHeaders['content-length'];
     const bodyLength = requestBodyLength(body, method, formParts);
     if (bodyLength !== undefined) {
@@ -503,9 +503,13 @@ export class MockAdapter implements HTTPAdapter {
       query,
       headers: materializedHeaders,
       cookies,
-      body: isFormData(body)
-        ? extractFormData(formParts ?? [])
-        : parseRequestBody(body, materializedHeaders['content-type']),
+      // `formParts` is read exactly when the body is a form.
+      body: formParts
+        ? extractFormData(formParts)
+        : parseRequestBody(
+            body as Exclude<typeof body, FormData>,
+            materializedHeaders['content-type'],
+          ),
     };
 
     // --- 4. Invoke handler ---

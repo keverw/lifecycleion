@@ -10,12 +10,12 @@ import {
   serializeMultipartFormData,
 } from './multipart';
 import {
-  measureMultipartFormData,
+  measureMultipartEntries,
   sanitizeContentType,
 } from './multipart-format';
 import type { RequestBodyWritable } from './request-body-writable';
 import { REQUEST_BODY_CHUNK_SIZE } from './request-body-writer';
-import { filePartNameToSend } from './form-entries';
+import { filePartNameToSend, formEntries } from './form-entries';
 import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
 import {
   scriptFormEntries,
@@ -115,7 +115,7 @@ describe('generateMultipartBoundary', () => {
   });
 });
 
-describe('measureMultipartFormData', () => {
+describe('measureMultipartEntries', () => {
   test('size matches actual serialized byte length for string fields', async () => {
     const fd = new FormData();
 
@@ -126,7 +126,7 @@ describe('measureMultipartFormData', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+    expect(measureMultipartEntries(formEntries(fd), boundary).totalSize).toBe(
       getBody().length,
     );
   });
@@ -143,7 +143,7 @@ describe('measureMultipartFormData', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+    expect(measureMultipartEntries(formEntries(fd), boundary).totalSize).toBe(
       getBody().length,
     );
   });
@@ -161,7 +161,7 @@ describe('measureMultipartFormData', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+    expect(measureMultipartEntries(formEntries(fd), boundary).totalSize).toBe(
       getBody().length,
     );
   });
@@ -169,7 +169,7 @@ describe('measureMultipartFormData', () => {
   test('returns just the closing boundary line for empty FormData', () => {
     const fd = new FormData();
     const boundary = generateMultipartBoundary();
-    const size = measureMultipartFormData(fd, boundary).totalSize;
+    const size = measureMultipartEntries(formEntries(fd), boundary).totalSize;
     expect(size).toBe(Buffer.byteLength(`--${boundary}--\r\n`));
   });
 });
@@ -284,7 +284,7 @@ describe('serializeMultipartFormData', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+    expect(measureMultipartEntries(formEntries(fd), boundary).totalSize).toBe(
       getBody().length,
     );
   });
@@ -708,7 +708,7 @@ describe('serializeMultipartFormData', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+    expect(measureMultipartEntries(formEntries(fd), boundary).totalSize).toBe(
       getBody().length,
     );
   });
@@ -755,7 +755,7 @@ describe('serializeMultipartFormData', () => {
     const boundary = generateMultipartBoundary();
 
     await serializeMultipartFormData(fd, req, boundary);
-    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+    expect(measureMultipartEntries(formEntries(fd), boundary).totalSize).toBe(
       getBody().length,
     );
   });
@@ -1403,12 +1403,12 @@ test('a File named "" is sent as filename="", one with no name as blob', async (
   const body = getBody().toString();
   expect(body).toContain('name="empty"; filename=""');
   expect(body).toContain('name="unnamed"; filename="blob"');
-  expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+  expect(measureMultipartEntries(formEntries(fd), boundary).totalSize).toBe(
     getBody().length,
   );
 });
 
-test('a field appended mid-upload is refused before any of its bytes go out', async () => {
+test('a field appended mid-upload is not sent: the form is read once, before it is sized', async () => {
   const fd = new FormData();
   fd.append('first', 'one');
   const { req, getBody } = makeCapture();
@@ -1424,17 +1424,12 @@ test('a field appended mid-upload is refused before any of its bytes go out', as
     return write(data, callback);
   };
 
-  let failure: unknown;
-  try {
-    await serializeMultipartFormData(fd, req, boundary);
-  } catch (error) {
-    failure = error;
-  }
+  await serializeMultipartFormData(fd, req, boundary);
 
-  expect(failure).toBeInstanceOf(Error);
-  expect((failure as Error).message).toContain('more than its Content-Length');
-  // Only the first part's own delimiter: none of the appended part reached the wire.
+  // Only the first part, and the whole body its Content-Length counted.
   expect(getBody().toString().split(`--${boundary}\r\n`).length - 1).toBe(1);
+  expect(getBody().toString()).not.toContain('late');
+  expect(getBody().toString()).toEndWith(`--${boundary}--\r\n`);
 });
 
 test('a File that outgrows its measured size is refused naming that part', async () => {
@@ -1497,21 +1492,26 @@ test('a chunk within its part but past the body total is refused before it is wr
         },
       }),
   });
+  // The second part's filename grows by three bytes once the first part's bytes go out:
+  // its name is read when it is sized and again when it is written. Its headers still fit
+  // in the bytes its payload was measured at; its payload, the right size for its part,
+  // does not.
+  let isGrown = false;
+  const grown = blobPart('', [7, 7, 7, 7], true);
+  Object.defineProperty(grown, 'name', {
+    get: () => (isGrown ? 'bbbb' : 'b'),
+  });
   const parts: [string, unknown][] = [
     ['first', blobPart('a', [1, 2])],
-    ['second', blobPart('b', [7, 7, 7, 7])],
+    ['second', grown],
   ];
-  // Read live, as a FormData is: the second part is swapped for one whose filename is
-  // three bytes longer once the first part's bytes go out. Its headers still fit in the
-  // bytes its payload was measured at; its payload, the right size for its part, does not.
-  // An array's iterator reads each index as it reaches it.
   const fd = scriptFormEntries(new FormData(), () => parts[Symbol.iterator]());
   const { req, getBody } = makeCapture();
   const boundary = generateMultipartBoundary();
   const write = req.write.bind(req);
   req.write = (data, callback) => {
     if (Buffer.from(data as Uint8Array).equals(Buffer.from([1, 2]))) {
-      parts[1] = ['second', blobPart('bbbb', [7, 7, 7, 7], true)];
+      isGrown = true;
     }
 
     return write(data, callback);
@@ -2068,7 +2068,7 @@ test('a form is read through the intrinsic entries, not one it declares', async 
     expect(body).toContain('name="held"\r\n\r\nvalue\r\n');
     expect(body).not.toContain('reported');
     expect(headers['content-length']).toBe(String(getBody().length));
-    expect(measureMultipartFormData(fd, boundary).totalSize).toBe(
+    expect(measureMultipartEntries(formEntries(fd), boundary).totalSize).toBe(
       getBody().length,
     );
   }
@@ -2125,7 +2125,7 @@ test('on Bun under Windows, a file part name loses its drive prefix as path.win3
   }
 });
 
-test('a form that loses an entry after sizing is refused before its closing delimiter', async () => {
+test('a form whose entries would change on a second read is sent as its one read found it', async () => {
   let passes = 0;
   const fd = scriptFormEntries(new FormData(), function* () {
     passes++;
@@ -2137,16 +2137,11 @@ test('a form that loses an entry after sizing is refused before its closing deli
   const { req, getBody } = makeCapture();
   const boundary = generateMultipartBoundary();
 
-  const failure = await serializeMultipartFormData(fd, req, boundary).then(
-    () => undefined,
-    (error: unknown) => error as Error,
-  );
+  await serializeMultipartFormData(fd, req, boundary);
 
-  expect(failure?.message).toContain(
-    'Request body source produced fewer bytes than its Content-Length',
-  );
-
-  expect(getBody().toString()).not.toContain(`--${boundary}--`);
+  expect(passes).toBe(1);
+  expect(getBody().toString()).toContain('name="lost"');
+  expect(getBody().toString()).toEndWith(`--${boundary}--\r\n`);
 });
 
 test('a file part name is read once each time it is formatted', async () => {

@@ -81,6 +81,18 @@ describe('parseRetryAfterMS', () => {
     ).toBe(Date.UTC(2105, 0, 1) - newYear2080);
   });
 
+  test("an RFC 850 29 Feb that the next century lacks is read in this one's", () => {
+    // 2100 is no leap year, so 29-Feb-00 is 2000's: already past.
+    expect(parseRetryAfterMS('Tuesday, 29-Feb-00 08:49:37 GMT', NOW)).toBe(0);
+  });
+
+  test('an RFC 850 29 Feb is held to the year RFC 9110 reads it as, not moved to another', () => {
+    // From 2060, 00 is 2100 - within 50 years - which has no 29 February.
+    expect(
+      parseRetryAfterMS('Monday, 29-Feb-00 08:49:37 GMT', Date.UTC(2060, 0, 1)),
+    ).toBeUndefined();
+  });
+
   test('a four-digit year below 100 is that year, not 19xx', () => {
     // Read as 1950 it would be past from a `now` of 1900; as 0050 it is past either way.
     const in1900 = Date.UTC(1900, 0, 1);
@@ -229,6 +241,37 @@ describe('HTTPClient and Retry-After', () => {
     expect(events[0].willRetry).toBe(false);
     expect(events[0].nextRetryDelayMS).toBeUndefined();
     expect(events[0].retrySuppressedReason).toBe('retry_after_too_long');
+  });
+
+  test("a Retry-After past the cap but within the policy's own delay is retried after that delay", async () => {
+    const event = await scheduledDelay(
+      { status: 503, retryAfter: '40' },
+      { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 60_000 },
+    );
+
+    expect(event.willRetry).toBe(true);
+    expect(event.nextRetryDelayMS).toBe(60_000);
+    expect(event.retrySuppressedReason).toBeUndefined();
+  });
+
+  test("the same answer meets the same cap whatever the exponential policy's jitter", async () => {
+    const policy = {
+      strategy: 'exponential',
+      maxRetryAttempts: 2,
+      minTimeoutMS: 800,
+      dispersion: 0.3,
+      maxRetryAfterMS: 500,
+    } as const;
+    const reasons = new Set<string | undefined>();
+
+    for (let run = 0; run < 20; run++) {
+      reasons.add(
+        (await scheduledDelay({ status: 503, retryAfter: '1' }, policy))
+          .retrySuppressedReason,
+      );
+    }
+
+    expect([...reasons]).toEqual(['retry_after_too_long']);
   });
 
   test("the exponential strategy's cap is its maxTimeoutMS", async () => {

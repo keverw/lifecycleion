@@ -128,23 +128,23 @@ function parseHTTPDate(text: string, now: number): number | undefined {
     fiftyYearsOn.setUTCFullYear(currentYear + 50);
     const limit = fiftyYearsOn.getTime();
 
-    for (
-      let fullYear = currentYear - (currentYear % 100) + +year + 100;
-      fullYear >= currentYear - 100;
-      fullYear -= 100
+    // The year is chosen by the moment it would name, then the date held to that year:
+    // `29-Feb-00` read as 2100, which has no 29 February, is no date, not 2000's.
+    let fullYear = currentYear - (currentYear % 100) + +year + 100;
+    while (
+      Date.UTC(
+        fullYear,
+        MONTHS.indexOf(month as (typeof MONTHS)[number]),
+        +day,
+        +hour,
+        +minute,
+        +second,
+      ) > limit
     ) {
-      const at = utcTime(fullYear, month, +day, +hour, +minute, +second);
-
-      if (at === undefined) {
-        return undefined;
-      }
-
-      if (at <= limit) {
-        return at;
-      }
+      fullYear -= 100;
     }
 
-    return undefined;
+    return utcTime(fullYear, month, +day, +hour, +minute, +second);
   }
 
   match = ASCTIME_DATE.exec(text);
