@@ -9,6 +9,9 @@
  * gives the JSON. A malformed one can differ: decoding here is strict, and a runtime's
  * `fetch` is more lenient in places. So can a stacked one (`br, gzip`): undici and
  * browsers decode every coding, as this does, but Bun's `fetch` hands it over undecoded.
+ * So can one that lists `identity` beside a coding (`identity, gzip`): this skips
+ * `identity` and decodes the rest, as Bun's `fetch` does, but undici hands it over
+ * undecoded.
  *
  * The decoded body is offered through the same events the raw `IncomingMessage` emits -
  * `data`, `end`, `error`, `aborted`, `close` - and its `pause` / `resume`, so the buffered
