@@ -72,6 +72,15 @@ describe('parseRetryAfterMS', () => {
     ).toBe(0);
   });
 
+  test('an RFC 850 year is read in the next century when that is within 50 years', () => {
+    const newYear2080 = Date.UTC(2080, 0, 1);
+
+    // 2005 is past, 2105 only 25 years on: RFC 9110 reads it as 2105.
+    expect(
+      parseRetryAfterMS('Monday, 01-Jan-05 00:00:00 GMT', newYear2080),
+    ).toBe(Date.UTC(2105, 0, 1) - newYear2080);
+  });
+
   test('a four-digit year below 100 is that year, not 19xx', () => {
     // Read as 1950 it would be past from a `now` of 1900; as 0050 it is past either way.
     const in1900 = Date.UTC(1900, 0, 1);

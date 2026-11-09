@@ -8,7 +8,7 @@ import {
 import { formEntries, isFormData } from '../internal/form-entries';
 import {
   formatFieldName,
-  measureMultipartFormData,
+  measureMultipartEntries,
   normalizeLinefeeds,
 } from '../internal/multipart-format';
 import { utf8ByteLength } from '../internal/utf8-length';
@@ -385,6 +385,9 @@ export class MockAdapter implements HTTPAdapter {
     // `localhost` for a path-only URL driven straight at the adapter, read against the
     // mock's default base as the client reads it - a FormData body's multipart
     // `content-type` (the boundary is the mock's own), and the body's `content-length`.
+    // A form's entries, read once: the `content-length` below and what the route is
+    // handed are both made from them, so the two cannot disagree.
+    const formParts = isFormData(body) ? [...formEntries(body)] : undefined;
     // Read once, against the mock's default base as the client reads a path-only URL
     // (and a protocol-relative one, `//api.test/users`, by that base's scheme): `null`
     // for one that does not parse, which has no host and is routed as it is written.
@@ -427,7 +430,7 @@ export class MockAdapter implements HTTPAdapter {
     // `requestBodyLength`). Measured once the request is known to go ahead, so a form
     // part's getters are not read for one refused or cancelled.
     delete materializedHeaders['content-length'];
-    const bodyLength = requestBodyLength(body, method);
+    const bodyLength = requestBodyLength(body, method, formParts);
     if (bodyLength !== undefined) {
       defineEntry(materializedHeaders, 'content-length', String(bodyLength));
     }
@@ -445,8 +448,8 @@ export class MockAdapter implements HTTPAdapter {
     // --- 2. Parse URL ---
     // Strip host so routes match on path only — same behavior regardless of
     // whether the client passed an absolute URL (https://api.test/users) or a
-    // path-only URL (/users). Falls back to manual splitting for path-only URLs
-    // that `new URL()` would reject.
+    // path-only URL (/users). A URL that does not parse even against the mock's base
+    // (`http://[`) is split by hand, and matches no route a URL could name.
     let path: string;
     let queryString: string;
 
@@ -501,7 +504,7 @@ export class MockAdapter implements HTTPAdapter {
       headers: materializedHeaders,
       cookies,
       body: isFormData(body)
-        ? extractFormData(body)
+        ? extractFormData(formParts ?? [])
         : parseRequestBody(body, materializedHeaders['content-type']),
     };
 
@@ -1416,13 +1419,15 @@ function inheritsFromFormData(value: unknown): boolean {
  * own, under the name it holds: renaming one means a new `File`, and on Bun a `File` made
  * from a form's renames the form's own too.
  */
-function extractFormData(fd: FormData): MockFormData {
+function extractFormData(
+  parts: ReadonlyArray<[string, FormDataEntryValue]>,
+): MockFormData {
   const fields: Record<string, string> = {};
   const files: Record<string, File> = {};
   const allFields: Record<string, string[]> = {};
   const allFiles: Record<string, File[]> = {};
 
-  for (const [rawKey, rawValue] of formEntries(fd)) {
+  for (const [rawKey, rawValue] of parts) {
     const key = formatFieldName(rawKey);
     // Defined, not assigned: a `__proto__` field would otherwise vanish, and a
     // `__proto__` file would become the record's prototype.
@@ -1447,14 +1452,18 @@ function extractFormData(fd: FormData): MockFormData {
  * and `undefined` for those. A form part the encoding cannot size (a `size` or `name`
  * getter that throws) is refused, as NodeAdapter refuses it.
  */
-function requestBodyLength(body: unknown, method: string): number | undefined {
+function requestBodyLength(
+  body: unknown,
+  method: string,
+  formParts: ReadonlyArray<[string, FormDataEntryValue]> | undefined,
+): number | undefined {
   if (typeof body === 'string') {
     return utf8ByteLength(body);
   }
 
-  if (isFormData(body)) {
+  if (formParts !== undefined) {
     return asRouteMistake(
-      () => measureMultipartFormData(body, MOCK_FORM_BOUNDARY).totalSize,
+      () => measureMultipartEntries(formParts, MOCK_FORM_BOUNDARY).totalSize,
     );
   }
 

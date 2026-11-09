@@ -6,6 +6,10 @@ import {
   RESPONSE_STREAM_ABORT_FLAG,
 } from '../consts';
 import type { MockAdapterConfig, MockFormData } from './mock-adapter';
+import {
+  scriptFormEntries,
+  useScriptedFormEntries,
+} from '../test-helpers/scripted-form-entries';
 import { HTTPClient } from '../http-client';
 import { CookieJar } from '../cookie-jar';
 import type {
@@ -27,6 +31,8 @@ function makeCookie(
     ...overrides,
   };
 }
+
+useScriptedFormEntries();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1217,6 +1223,40 @@ describe('MockAdapter.send() — low-level contract', () => {
     // A file is the form's own, under the name it holds.
     expect(body?.files.doc.name).toBe('x\ny".txt');
     expect(await body?.files.doc.text()).toBe('x');
+  });
+
+  test("a form's content-length and what the route is handed come from one read of its entries", async () => {
+    let body: MockFormData | undefined;
+    let contentLength: string | undefined;
+    adapter.routes.post('/once', (req) => {
+      body = req.body as MockFormData;
+      contentLength = req.headers['content-length'];
+      return { status: 200 };
+    });
+    // A form whose entries differ on each read.
+    let reads = 0;
+    const form = scriptFormEntries(new FormData(), () => {
+      reads++;
+      return (
+        reads === 1
+          ? [['a', '1']]
+          : [
+              ['a', '1'],
+              ['b', '22'],
+            ]
+      )[Symbol.iterator]();
+    });
+
+    await adapter.send(
+      makeAdapterRequest({ requestURL: '/once', method: 'POST', body: form }),
+    );
+
+    const boundary = '----lifecycleion-mock-boundary';
+    const encoded =
+      `--${boundary}\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n` +
+      `--${boundary}--\r\n`;
+    expect(body?.allFields).toEqual({ a: ['1'] });
+    expect(contentLength).toBe(String(encoded.length));
   });
 
   test.each([

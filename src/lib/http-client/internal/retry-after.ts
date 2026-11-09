@@ -120,35 +120,31 @@ function parseHTTPDate(text: string, now: number): number | undefined {
   match = RFC850_DATE.exec(text);
   if (match) {
     const [, day, month, year, hour, minute, second] = match;
-    // In the current century, unless that is more than 50 years from `now`, which
-    // RFC 9110 reads as the most recent past year with those digits.
+    // The latest year with those two digits that is not more than 50 years from `now`,
+    // as RFC 9110 reads one: one that appears more than 50 years ahead is the most recent
+    // past year with those digits.
     const currentYear = new Date(now).getUTCFullYear();
-    const inThisCentury = utcTime(
-      currentYear - (currentYear % 100) + +year,
-      month,
-      +day,
-      +hour,
-      +minute,
-      +second,
-    );
-
-    if (inThisCentury === undefined) {
-      return undefined;
-    }
-
     const fiftyYearsOn = new Date(now);
     fiftyYearsOn.setUTCFullYear(currentYear + 50);
+    const limit = fiftyYearsOn.getTime();
 
-    return inThisCentury > fiftyYearsOn.getTime()
-      ? utcTime(
-          currentYear - (currentYear % 100) + +year - 100,
-          month,
-          +day,
-          +hour,
-          +minute,
-          +second,
-        )
-      : inThisCentury;
+    for (
+      let fullYear = currentYear - (currentYear % 100) + +year + 100;
+      fullYear >= currentYear - 100;
+      fullYear -= 100
+    ) {
+      const at = utcTime(fullYear, month, +day, +hour, +minute, +second);
+
+      if (at === undefined) {
+        return undefined;
+      }
+
+      if (at <= limit) {
+        return at;
+      }
+    }
+
+    return undefined;
   }
 
   match = ASCTIME_DATE.exec(text);

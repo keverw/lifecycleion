@@ -111,10 +111,21 @@ export function measureMultipartFormData(
   formData: FormData,
   boundary: string,
 ): { totalSize: number; partSizes: number[] } {
+  return measureMultipartEntries(formEntries(formData), boundary);
+}
+
+/**
+ * {@link measureMultipartFormData} for a form's entries already read: for a caller that
+ * reads them once and makes more than one use of them.
+ */
+export function measureMultipartEntries(
+  entries: Iterable<[string, FormDataEntryValue]>,
+  boundary: string,
+): { totalSize: number; partSizes: number[] } {
   let size = 0;
   const partSizes: number[] = [];
 
-  for (const [name, value] of formEntries(formData)) {
+  for (const [name, value] of entries) {
     const fieldName = formatFieldName(name);
 
     // Every part starts with its own opening boundary line.
