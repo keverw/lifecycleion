@@ -1670,9 +1670,9 @@ interface MockRequest {
   path: string;
   params: Record<string, string>; // Path params from :paramName segments
   query: QueryObject; // Parsed with qs, as Express's extended query parser reads it (the Express 4 default): nested `a[b]=1` keys, keys like `constructor` kept, qs's limits apply (an array past 20 items is an object). Express 5's and Fastify's default parsers read nested keys flat.
-  headers: Record<string, string>; // Lowercase names, with `host` added and a FormData body's multipart `content-type` set (in place of one the request carries) as a server receives them. Names and values are otherwise as set: not checked or trimmed as the real adapters check and trim them, so a header NodeAdapter or FetchAdapter refuses (a CR or LF in a value, a space in a name) reaches the handler
+  headers: Record<string, string>; // Lowercase names, with `host` added (`localhost` for a path-only URL) and a FormData body's multipart `content-type` and the body's `content-length` set (in place of ones the request carries; without a body, `0` on a `POST`, `PUT` or `PATCH` and none on a `GET`, `HEAD`, `DELETE`, `OPTIONS` or `TRACE`, as Node sends it - a `Transfer-Encoding` header is refused, as NodeAdapter refuses it) as a server receives them. Names and values are otherwise as set: not checked or trimmed as the real adapters check and trim them, so a header NodeAdapter or FetchAdapter refuses (a CR or LF in a value, a space in a name) reaches the handler
   cookies: Record<string, string>; // Pre-parsed from cookie header: trimmed of spaces and tabs only (as the cookie jar trims), unquoted and percent-decoded, the first of a repeated name
-  body?: unknown; // Parsed: JSON object, string, Uint8Array, or MockFormData ({ fields, files } with the last value of a name, { allFields, allFiles } with every value)
+  body?: unknown; // Parsed: JSON object, string, Uint8Array, or MockFormData ({ fields, files } with the last value of a name, { allFields, allFiles } with every value; names and string values as the wire encoding writes them - line breaks as CRLF, `"`, CR and LF in a name percent-encoded - and each file the form's own)
 }
 ```
 

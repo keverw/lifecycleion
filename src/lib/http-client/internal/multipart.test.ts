@@ -6,11 +6,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test, spyOn } from 'bun:test';
 import {
-  measureMultipartFormData,
   generateMultipartBoundary,
-  sanitizeContentType,
   serializeMultipartFormData,
 } from './multipart';
+import {
+  measureMultipartFormData,
+  sanitizeContentType,
+} from './multipart-format';
 import type { RequestBodyWritable } from './request-body-writable';
 import { REQUEST_BODY_CHUNK_SIZE } from './request-body-writer';
 import { filePartNameToSend } from './form-entries';

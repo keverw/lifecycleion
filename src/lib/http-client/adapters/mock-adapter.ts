@@ -7,6 +7,13 @@ import {
 } from '../internal/cookie-text';
 import { formEntries, isFormData } from '../internal/form-entries';
 import {
+  formatFieldName,
+  measureMultipartFormData,
+  normalizeLinefeeds,
+} from '../internal/multipart-format';
+import { utf8ByteLength } from '../internal/utf8-length';
+
+import {
   assertKnownFields,
   assertOptionsObject,
   fieldNames,
@@ -84,6 +91,13 @@ import {
   resolveTimeoutMS,
 } from '../../internal/timer-limits';
 
+/**
+ * A form body as a server reads it off the wire NodeAdapter and `fetch` write: field
+ * names with line breaks as CRLF and `"`, CR and LF percent-encoded (`a%0D%0Ab%22`), and
+ * string values with line breaks as CRLF. Each file is the form's own `File`, under the
+ * name it holds, not the filename it is sent by (escaped the same way, a nameless one as
+ * `blob`).
+ */
 export interface MockFormData {
   /** String fields from the multipart body - the last value of a repeated name */
   fields: Record<string, string>;
@@ -346,23 +360,37 @@ export class MockAdapter implements HTTPAdapter {
       markNonRetryableAdapterError(refusal);
       throw refusal;
     }
+    // Any other body no adapter writes - an `ArrayBuffer`, a `Blob`, a plain object -
+    // refused as NodeAdapter refuses it, rather than reaching the route as it is: a test
+    // driving the adapter directly would otherwise pass here and fail against a server.
+    // `HTTPClient` serializes or refuses such a body before any adapter is handed it.
+    if (
+      !isNullish(body) &&
+      typeof body !== 'string' &&
+      !isRequestBodyBytes(body) &&
+      !isFormData(body)
+    ) {
+      const refusal = new TypeError(
+        'MockAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
     // Names lowercased, as a Node server receives them, so a request driven straight at
     // the adapter with `Content-Type` is read like one the client sent.
     const materializedHeaders = materializeRequestHeaders(headers, {
       isLowercasingNames: true,
     });
-    // Headers every real server receives and the client does not set itself: `host`,
-    // and a FormData body's multipart `content-type` (the boundary is the mock's own).
-    if (!Object.hasOwn(materializedHeaders, 'host')) {
-      try {
-        defineEntry(
-          materializedHeaders,
-          'host',
-          new URL(withMockScheme(requestURL)).host,
-        );
-      } catch {
-        // A path-only URL driven straight at the adapter has no host to report.
-      }
+    // Headers every real server receives and the client does not set itself: `host` -
+    // `localhost` for a path-only URL driven straight at the adapter, read against the
+    // mock's default base as the client reads it - a FormData body's multipart
+    // `content-type` (the boundary is the mock's own), and the body's `content-length`.
+    // Read once, against the mock's default base as the client reads a path-only URL
+    // (and a protocol-relative one, `//api.test/users`, by that base's scheme): `null`
+    // for one that does not parse, which has no host and is routed as it is written.
+    const parsedURL = parseMockURL(requestURL);
+    if (!Object.hasOwn(materializedHeaders, 'host') && parsedURL !== null) {
+      defineEntry(materializedHeaders, 'host', parsedURL.host);
     }
     // A form's own, replacing a caller's, as NodeAdapter writes the boundary it sends: a
     // caller's `multipart/form-data` names none.
@@ -370,8 +398,18 @@ export class MockAdapter implements HTTPAdapter {
       defineEntry(
         materializedHeaders,
         'content-type',
-        'multipart/form-data; boundary=----lifecycleion-mock-boundary',
+        `multipart/form-data; boundary=${MOCK_FORM_BOUNDARY}`,
       );
+    }
+
+    // Refused as NodeAdapter refuses it: the mock frames the body itself, by the
+    // `content-length` below, and a request framed both ways is one RFC 9112 forbids.
+    if (Object.hasOwn(materializedHeaders, 'transfer-encoding')) {
+      const refusal = new TypeError(
+        'MockAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
     }
 
     if (asciiUppercase(method) === 'CONNECT') {
@@ -382,6 +420,16 @@ export class MockAdapter implements HTTPAdapter {
     // Throw immediately if the signal was already cancelled before we even start.
     if (isSignalAborted(signal)) {
       throwAbortError();
+    }
+
+    // The body's own length, as NodeAdapter frames every body with one - a caller's is
+    // replaced - and `0` for a bodiless request whose method Node sends one for (see
+    // `requestBodyLength`). Measured once the request is known to go ahead, so a form
+    // part's getters are not read for one refused or cancelled.
+    delete materializedHeaders['content-length'];
+    const bodyLength = requestBodyLength(body, method);
+    if (bodyLength !== undefined) {
+      defineEntry(materializedHeaders, 'content-length', String(bodyLength));
     }
 
     // Signal 0% upload — upload is instant for mock, but we fire the event so
@@ -402,11 +450,12 @@ export class MockAdapter implements HTTPAdapter {
     let path: string;
     let queryString: string;
 
-    try {
-      const url = new URL(withMockScheme(requestURL));
-      path = url.pathname;
-      queryString = url.search.slice(1);
-    } catch {
+    // Routed as normalized (`/a/../b` is `/b`, `/café` is `/caf%C3%A9`), as the client
+    // normalizes the URL it sends.
+    if (parsedURL !== null) {
+      path = parsedURL.pathname;
+      queryString = parsedURL.search.slice(1);
+    } else {
       // Without its fragment, as `URL` drops it from `pathname` and `search`.
       const hashIdx = requestURL.indexOf('#');
       const withoutHash =
@@ -570,8 +619,9 @@ export class MockAdapter implements HTTPAdapter {
 
     // Every field read once, here, into the answer every check and use below reads:
     // otherwise a getter that answers `200` to the status check and `0` to the response
-    // would pass one and send another. A getter that throws keeps the ordinary
-    // adapter-error behavior of caller code read here, as the CRL's does.
+    // would pass one and send another. A getter that throws is the route's mistake, as
+    // one on its `transportError` or `cookies` is: the route has run, and a retry would
+    // only run it, and its side effects, again.
     // A misspelled field (`header`, `statusCode`) is the route's mistake too: read as
     // absent, the response would go out without what the test meant it to carry. A
     // `then` is let through: an async handler's answer is adopted once, and one carrying
@@ -587,7 +637,8 @@ export class MockAdapter implements HTTPAdapter {
       markNonRetryableAdapterError(error);
       throw error;
     }
-    mockResponse = snapshotMockResponse(mockResponse);
+    const answered = mockResponse;
+    mockResponse = asRouteMistake(() => snapshotMockResponse(answered));
 
     // What the server would have put on the wire, fixed when the route answers: serialized
     // now, before the delay, so a body the test changes while the response is delayed is
@@ -764,13 +815,13 @@ export class MockAdapter implements HTTPAdapter {
           : 'MockAdapter response delay',
       );
     } catch (error) {
-      // The route has already run. Retrying a bad delay would repeat its side effects
-      // without repairing the configuration. Only our validation error is terminal;
-      // the caller-owned delay getter above keeps its usual adapter-error behavior.
+      // The route has already run. Retrying a bad delay - or a delay getter that throws -
+      // would repeat its side effects without repairing the configuration.
       if (isTimeoutValidationError(error)) {
         markNonRetryableAdapterError(error);
+        throw error;
       }
-      throw error;
+      throw nonRetryableAdapterErrorFrom(error);
     }
 
     if (delay > 0) {
@@ -996,16 +1047,21 @@ export class MockAdapter implements HTTPAdapter {
 }
 
 // --- Helpers ---
+/** The boundary a form's multipart `content-type` names in a route's request. */
+const MOCK_FORM_BOUNDARY = '----lifecycleion-mock-boundary';
 
 /**
- * A protocol-relative `requestURL` (`//api.test/users`) given the scheme of the mock's
- * default base, so its host is read as a host - stripped before routing, and reported as
- * `host` - as `redirectBaseURL` reads it. Anything else is returned as it is.
+ * `requestURL` parsed against the mock's default base, as the client reads a mock request
+ * with no `baseURL`: a path-only URL is that base's, and a protocol-relative one
+ * (`//api.test/users`) takes its scheme, so its host is read as a host. `null` for a URL
+ * that does not parse.
  */
-function withMockScheme(requestURL: string): string {
-  return requestURL.startsWith('//')
-    ? new URL(MOCK_ADAPTER_DEFAULT_BASE_URL).protocol + requestURL
-    : requestURL;
+function parseMockURL(requestURL: string): URL | null {
+  try {
+    return new URL(requestURL, MOCK_ADAPTER_DEFAULT_BASE_URL);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1353,26 +1409,71 @@ function inheritsFromFormData(value: unknown): boolean {
   }
 }
 
+/**
+ * A form as a server reads it off the wire NodeAdapter and `fetch` write (see
+ * `multipart-format.ts`): field names with line breaks as CRLF and `"`, CR and LF
+ * percent-encoded, and string values with line breaks as CRLF. Each file is the form's
+ * own, under the name it holds: renaming one means a new `File`, and on Bun a `File` made
+ * from a form's renames the form's own too.
+ */
 function extractFormData(fd: FormData): MockFormData {
   const fields: Record<string, string> = {};
   const files: Record<string, File> = {};
   const allFields: Record<string, string[]> = {};
   const allFiles: Record<string, File[]> = {};
 
-  for (const [key, value] of formEntries(fd)) {
+  for (const [rawKey, rawValue] of formEntries(fd)) {
+    const key = formatFieldName(rawKey);
     // Defined, not assigned: a `__proto__` field would otherwise vanish, and a
     // `__proto__` file would become the record's prototype.
-    if (typeof value === 'string') {
+    if (typeof rawValue === 'string') {
+      const value = normalizeLinefeeds(rawValue);
       defineEntry(fields, key, value);
       appendEntry(allFields, key, value);
     } else {
-      defineEntry(files, key, value);
-      appendEntry(allFiles, key, value);
+      defineEntry(files, key, rawValue);
+      appendEntry(allFiles, key, rawValue);
     }
   }
 
   return { fields, files, allFields, allFiles };
 }
+
+/**
+ * The `content-length` a body is sent with, as NodeAdapter frames it: a string's UTF-8
+ * bytes, bytes' own length, a form's multipart encoding under the mock's boundary. With
+ * no body, `0` for a method Node frames a body for by default - any but `GET`, `HEAD`,
+ * `DELETE`, `OPTIONS`, `TRACE` and `CONNECT` - as Node's `http` sends a bodiless `POST`,
+ * and `undefined` for those. A form part the encoding cannot size (a `size` or `name`
+ * getter that throws) is refused, as NodeAdapter refuses it.
+ */
+function requestBodyLength(body: unknown, method: string): number | undefined {
+  if (typeof body === 'string') {
+    return utf8ByteLength(body);
+  }
+
+  if (isFormData(body)) {
+    return asRouteMistake(
+      () => measureMultipartFormData(body, MOCK_FORM_BOUNDARY).totalSize,
+    );
+  }
+
+  if (isRequestBodyBytes(body)) {
+    return readBinaryByteLength(body) ?? undefined;
+  }
+
+  return NO_DEFAULT_BODY_METHODS.has(asciiUppercase(method)) ? undefined : 0;
+}
+
+/** The methods Node's `http` sends no `content-length` for when they carry no body. */
+const NO_DEFAULT_BODY_METHODS: ReadonlySet<string> = new Set([
+  'GET',
+  'HEAD',
+  'DELETE',
+  'OPTIONS',
+  'TRACE',
+  'CONNECT',
+]);
 
 /** Add `value` to the list under `key`, made once per key and defined as `defineEntry` defines it. */
 function appendEntry<T>(

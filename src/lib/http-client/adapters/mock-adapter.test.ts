@@ -740,7 +740,7 @@ describe('MockAdapter via HTTPClient', () => {
     },
   );
 
-  test('a response delay getter throwing a caller TypeError retains ordinary adapter retry behavior', async () => {
+  test("a response delay getter that throws is the route's mistake, not retried", async () => {
     const error = new TypeError('caller delay getter failed');
     let calls = 0;
     adapter.routes.get('/throwing-delay-getter', () => {
@@ -758,11 +758,60 @@ describe('MockAdapter via HTTPClient', () => {
       delayMS: 1,
     });
     await request.send();
-    expect(calls).toBe(2);
+    expect(calls).toBe(1);
     expect(request.error?.code).toBe('adapter_error');
     expect(request.error?.cause).toBe(error);
-    expect(request.error?.isRetriesExhausted).toBe(true);
+    expect(request.error?.isRetriesExhausted).toBe(false);
   });
+
+  test.each([
+    [
+      'a response status getter',
+      (error: Error) => ({
+        get status(): never {
+          throw error;
+        },
+      }),
+      {},
+    ],
+    [
+      'a defaultDelay getter',
+      () => ({ status: 200 }),
+      { isThrowingOnDelay: true },
+    ],
+  ])(
+    '%s that throws after the route ran is not retried',
+    async (
+      _label,
+      answer,
+      { isThrowingOnDelay }: { isThrowingOnDelay?: boolean },
+    ) => {
+      const error = new TypeError('getter failed');
+      let reads = 0;
+      const throwingAdapter = new MockAdapter({
+        get defaultDelay(): number {
+          reads++;
+          if (isThrowingOnDelay === true && reads > 1) {
+            throw error;
+          }
+          return 0;
+        },
+      });
+      let calls = 0;
+      throwingAdapter.routes.get('/x', () => {
+        calls++;
+        return answer(error);
+      });
+      const request = makeClient(throwingAdapter)
+        .get('/x')
+        .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 });
+      await request.send();
+
+      expect(calls).toBe(1);
+      expect(request.error?.code).toBe('adapter_error');
+      expect(request.error?.cause).toBe(error);
+    },
+  );
 
   test('inherited error handlers retain the original config receiver', async () => {
     class Config {
@@ -1149,6 +1198,188 @@ describe('MockAdapter.send() — low-level contract', () => {
   test('getType returns mock', () => {
     expect(adapter.getType()).toBe('mock');
   });
+
+  test('a form reaches the route as a server reads it off the wire', async () => {
+    let body: MockFormData | undefined;
+    adapter.routes.post('/upload', (req) => {
+      body = req.body as MockFormData;
+      return { status: 200 };
+    });
+    const form = new FormData();
+    form.append('a\nb"', 'line1\nline2\rline3');
+    form.append('doc', new File(['x'], 'x\ny".txt', { type: 'text/plain' }));
+
+    await adapter.send(
+      makeAdapterRequest({ requestURL: '/upload', method: 'POST', body: form }),
+    );
+
+    expect(body?.fields).toEqual({ 'a%0D%0Ab%22': 'line1\r\nline2\r\nline3' });
+    // A file is the form's own, under the name it holds.
+    expect(body?.files.doc.name).toBe('x\ny".txt');
+    expect(await body?.files.doc.text()).toBe('x');
+  });
+
+  test.each([
+    ['a string', 'h\u00e9llo', '6'],
+    ['bytes', new Uint8Array(5), '5'],
+    ['an empty string', '', '0'],
+  ])(
+    "%s body reaches the route with its content-length, a caller's replaced",
+    async (_label, body, expected) => {
+      let contentLength: string | undefined;
+      adapter.routes.post('/len', (req) => {
+        contentLength = req.headers['content-length'];
+        return { status: 200 };
+      });
+
+      await adapter.send(
+        makeAdapterRequest({
+          requestURL: '/len',
+          method: 'POST',
+          headers: { 'content-length': '999' },
+          body,
+        }),
+      );
+
+      expect(contentLength).toBe(expected);
+    },
+  );
+
+  test("a form body's content-length is its multipart encoding's, and a bodiless POST's is 0", async () => {
+    const lengths: Array<string | undefined> = [];
+    adapter.routes.post('/len', (req) => {
+      lengths.push(req.headers['content-length']);
+      return { status: 200 };
+    });
+    const form = new FormData();
+    form.append('a', '1');
+
+    await adapter.send(
+      makeAdapterRequest({ requestURL: '/len', method: 'POST', body: form }),
+    );
+    await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/len',
+        method: 'POST',
+        headers: { 'content-length': '10' },
+      }),
+    );
+
+    const boundary = '----lifecycleion-mock-boundary';
+    const encoded =
+      `--${boundary}\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n` +
+      `--${boundary}--\r\n`;
+    expect(lengths).toEqual([String(encoded.length), '0']);
+  });
+
+  test.each(['GET', 'DELETE'])(
+    "a bodiless %s has no content-length, a caller's dropped, as Node sends none",
+    async (method) => {
+      let contentLength: string | undefined = 'unset';
+      const handler = (req: { headers: Record<string, string> }) => {
+        contentLength = req.headers['content-length'];
+        return { status: 200 };
+      };
+      adapter.routes.get('/len', handler);
+      adapter.routes.delete('/len', handler);
+
+      await adapter.send(
+        makeAdapterRequest({
+          requestURL: '/len',
+          method,
+          headers: { 'content-length': '10' },
+        }),
+      );
+
+      expect(contentLength).toBeUndefined();
+    },
+  );
+
+  test('a Transfer-Encoding request header is refused before the route runs, as NodeAdapter refuses it', async () => {
+    let calls = 0;
+    adapter.routes.post('/te', () => {
+      calls++;
+      return { status: 200 };
+    });
+
+    const failure = await adapter
+      .send(
+        makeAdapterRequest({
+          requestURL: '/te',
+          method: 'POST',
+          headers: { 'Transfer-Encoding': 'chunked' },
+          body: 'x',
+        }),
+      )
+      .catch((error: unknown) => error);
+
+    expect(calls).toBe(0);
+    expect(failure).toBeInstanceOf(TypeError);
+    expect(
+      (failure as Record<string, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
+  });
+
+  test.each([
+    ['/a/../b', '/b', '/b'],
+    ['/caf\u00e9', '/caf\u00e9', '/caf%C3%A9'],
+  ])(
+    'a path-only URL %p is routed as the client normalizes it, to %p as %p',
+    async (requestURL, routePattern, expectedPath) => {
+      let path: string | undefined;
+      let host: string | undefined;
+      adapter.routes.get(routePattern, (req) => {
+        path = req.path;
+        host = req.headers.host;
+        return { status: 200 };
+      });
+
+      const response = await adapter.send(makeAdapterRequest({ requestURL }));
+
+      expect(response.status).toBe(200);
+      expect(path).toBe(expectedPath);
+      expect(host).toBe('localhost');
+    },
+  );
+
+  test.each([
+    ['an ArrayBuffer', new ArrayBuffer(2)],
+    ['a Blob', new Blob(['x'])],
+    ['a plain object', { a: 1 }],
+    ['a number', 1],
+  ])(
+    '%s body is refused before the route runs, as NodeAdapter refuses it',
+    async (_label, body) => {
+      let calls = 0;
+      adapter.routes.post('/raw', () => {
+        calls++;
+        return { status: 200 };
+      });
+
+      const failure = await adapter
+        .send(
+          makeAdapterRequest({
+            requestURL: '/raw',
+            method: 'POST',
+            body: body as unknown as AdapterRequest['body'],
+          }),
+        )
+        .catch((error: unknown) => error);
+
+      expect(calls).toBe(0);
+      expect(failure).toBeInstanceOf(TypeError);
+      expect((failure as Error).message).toBe(
+        'MockAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+      );
+      expect(
+        (failure as Record<string, unknown>)[
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+        ],
+      ).toBe(true);
+    },
+  );
 
   test("a form body reaches the route with the mock's multipart Content-Type, not a caller's", async () => {
     let contentType: string | undefined;

@@ -42,8 +42,13 @@
 import { types } from 'node:util';
 import { plainBytesView } from '../../internal/binary-view';
 import { markNonRetryableAdapterError } from './adapter-error';
-import { filePartNameToSend, formEntries } from './form-entries';
-import { isByteCount } from './progress';
+import { formEntries } from './form-entries';
+import {
+  formatFieldName,
+  formatFilePartHeaders,
+  formatStringPart,
+  measureMultipartFormData,
+} from './multipart-format';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 import {
@@ -51,77 +56,6 @@ import {
   REQUEST_BODY_CHUNK_SIZE,
   writeChunkWithBackpressure,
 } from './request-body-writer';
-
-/**
- * Escape a field name or filename for its quoted Content-Disposition parameter, as the
- * WHATWG multipart/form-data encoding does and as `fetch` sends a `FormData` (undici,
- * Bun, browsers): `"`, CR and LF are percent-encoded, nothing is backslash-escaped, and
- * the name is otherwise sent as UTF-8.
- *
- * Matched exactly rather than improved on, because the servers on the other end parse
- * what browsers send. RFC 7578 4.2 forbids `filename*=` in multipart/form-data and the
- * WHATWG parsers (Bun, undici/Node, Deno, Workers) ignore it, so with the RFC 5987 form
- * and a lossy ASCII fallback they would read `résumé.pdf` as `resume.pdf` and `日本語.pdf`
- * as `.pdf`; and a backslash-escaped `a\"b` would reach them as `a\\"b`.
- * With CR and LF encoded a name still cannot start a header of its own.
- */
-function escapeDispositionValue(value: string): string {
-  return value.replace(/\n/g, '%0A').replace(/\r/g, '%0D').replace(/"/g, '%22');
-}
-
-/** Line breaks as CRLF, as the WHATWG encoding writes field names and string values. */
-function normalizeLinefeeds(value: string): string {
-  return value.replace(/\r?\n|\r/g, '\r\n');
-}
-
-/** A field name as the WHATWG encoding writes it: line breaks normalized, then escaped. */
-function formatFieldName(name: string): string {
-  return escapeDispositionValue(normalizeLinefeeds(name));
-}
-
-/** A filename as the WHATWG encoding writes it: escaped, never renamed. */
-function formatFilename(filename: string): string {
-  return `filename="${escapeDispositionValue(filename)}"`;
-}
-
-/**
- * Sanitizes a MIME type string for safe use in a multipart Content-Type header.
- *
- * Browser and Node.js `File.type` values are normally clean, but a
- * programmatically constructed File could carry CR/LF sequences that would
- * inject extra headers into the multipart part. Stripping line breaks
- * eliminates that risk while still forwarding the intended media type.
- */
-export function sanitizeContentType(raw: string): string {
-  return raw.replace(/\r\n|\r|\n/g, '');
-}
-
-/** A string part, whole - its Content-Disposition, value and trailing CRLF - as both passes write it. */
-function formatStringPart(fieldName: string, value: string): string {
-  return `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`;
-}
-
-/**
- * A file part's headers - its Content-Disposition with the filename, and its Content-Type -
- * as both passes write them. Reads the caller's `name` and `type`, so it can throw: a
- * getter that throws, or a `type` that is not a string, is refused with a `TypeError` the
- * callers turn into {@link sourceReadFailure}.
- */
-function formatFilePartHeaders(fieldName: string, value: unknown): string {
-  // A `File` named `''` is sent as `filename=""`, as browsers send it (a server reads it as
-  // no file chosen); only a part with no name at all is `blob`.
-  const partName = filePartNameToSend((value as File).name);
-  const filename = typeof partName === 'string' ? partName : 'blob';
-  const type: unknown = (value as Blob).type;
-
-  if (typeof type !== 'string') {
-    throw new TypeError('Request body part has a type that is not a string');
-  }
-
-  const contentType = sanitizeContentType(type) || 'application/octet-stream';
-
-  return `Content-Disposition: form-data; name="${fieldName}"; ${formatFilename(filename)}\r\nContent-Type: ${contentType}\r\n\r\n`;
-}
 
 /**
  * Generates a random boundary string for use as the multipart delimiter.
@@ -137,68 +71,6 @@ export function generateMultipartBoundary(): string {
   ).join('');
 
   return `----NodeAdapterFormBoundary${suffix}`;
-}
-
-/**
- * Returns the exact byte length of the multipart body for a given FormData
- * and boundary — without writing anything.
- *
- * This mirrors the exact structure that serializeMultipartFormData will
- * produce, so the two functions must stay in sync.
- *
- * Why this exists: Node can stream the body without precomputing it, but then
- * upload progress would be indeterminate. By counting the exact bytes first,
- * we can set Content-Length up front and report real 0–100% progress during
- * serialization instead of guesswork.
- */
-export function measureMultipartFormData(
-  formData: FormData,
-  boundary: string,
-): { totalSize: number; partSizes: number[] } {
-  let size = 0;
-  const partSizes: number[] = [];
-
-  for (const [name, value] of formEntries(formData)) {
-    const fieldName = formatFieldName(name);
-
-    // Every part starts with its own opening boundary line.
-    size += Buffer.byteLength(`--${boundary}\r\n`);
-
-    if (typeof value === 'string') {
-      // String part wire format:
-      //   Content-Disposition header
-      //   blank line
-      //   raw string value
-      //   trailing CRLF before the next boundary
-      size += Buffer.byteLength(formatStringPart(fieldName, value));
-    } else {
-      // File/blob part wire format:
-      //   Content-Disposition header (with filename)
-      //   Content-Type header
-      //   blank line
-      //   raw file bytes
-      //   trailing CRLF before the next boundary
-      size += Buffer.byteLength(formatFilePartHeaders(fieldName, value));
-      // Blob.size is already the exact byte length of the binary payload - for a real
-      // `Blob`. A subclass's getter can answer anything, and a non-integer here would go
-      // out as the `Content-Length`.
-      const partSize: unknown = (value as Blob).size;
-
-      if (!isByteCount(partSize)) {
-        throw new TypeError(
-          'Request body part has a size that is not a byte count',
-        );
-      }
-
-      partSizes.push(partSize);
-      size += partSize;
-      size += Buffer.byteLength('\r\n');
-    }
-  }
-
-  // Final terminating boundary line — note the extra trailing `--`.
-  size += Buffer.byteLength(`--${boundary}--\r\n`);
-  return { totalSize: size, partSizes };
 }
 
 /**
