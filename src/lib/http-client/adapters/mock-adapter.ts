@@ -381,13 +381,10 @@ export class MockAdapter implements HTTPAdapter {
     const materializedHeaders = materializeRequestHeaders(headers, {
       isLowercasingNames: true,
     });
-    // Headers every real server receives and the client does not set itself: `host` -
-    // `localhost` for a path-only URL driven straight at the adapter, read against the
-    // mock's default base as the client reads it - a FormData body's multipart
-    // `content-type` (the boundary is the mock's own), and the body's `content-length`.
-    // Read once, against the mock's default base as the client reads a path-only URL
-    // (and a protocol-relative one, `//api.test/users`, by that base's scheme): `null`
-    // for one that does not parse, which has no host and is routed as it is written.
+    // Headers every real server receives and the client does not set itself: `host`, a
+    // FormData body's multipart `content-type` (the boundary is the mock's own), and the
+    // body's `content-length`. The URL is read once, by `parseMockURL`: a path-only one is
+    // `localhost`'s, and one that does not parse has no host and is routed as written.
     const parsedURL = parseMockURL(requestURL);
     if (!Object.hasOwn(materializedHeaders, 'host') && parsedURL !== null) {
       defineEntry(materializedHeaders, 'host', parsedURL.host);
@@ -424,10 +421,9 @@ export class MockAdapter implements HTTPAdapter {
 
     // The body's own length, as NodeAdapter frames every body with one - a caller's is
     // replaced - and `0` for a bodiless request whose method Node sends one for (see
-    // `requestBodyLength`). Measured once the request is known to go ahead, so a form
-    // part's getters are not read for one refused or cancelled.
-    // A form's entries, read once: the `content-length` and what the route is handed are
-    // both made from them, so the two cannot disagree.
+    // `requestBodyLength`). A form's entries are read once, here, once the request is known
+    // to go ahead - so a part's getters are not read for one refused or cancelled - and
+    // both the `content-length` and what the route is handed are made from that read.
     const formParts = isFormData(body) ? [...formEntries(body)] : undefined;
     delete materializedHeaders['content-length'];
     const bodyLength = requestBodyLength(body, method, formParts);
@@ -1466,9 +1462,13 @@ function requestBodyLength(
   }
 
   if (formParts !== undefined) {
-    return asRouteMistake(
-      () => measureMultipartEntries(formParts, MOCK_FORM_BOUNDARY).totalSize,
-    );
+    // The caller's form, not the route's mistake - the route has not run - but refused
+    // the same way, as NodeAdapter refuses a part it cannot size: a retry reads it again.
+    try {
+      return measureMultipartEntries(formParts, MOCK_FORM_BOUNDARY).totalSize;
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
   }
 
   if (isRequestBodyBytes(body)) {

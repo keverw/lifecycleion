@@ -12,10 +12,11 @@ export type HTTPRetryPolicyOptions = RetryPolicyOptions & {
    * own delay; past it, the response is not retried and is returned as the answer
    * (`retrySuppressedReason: 'retry_after_too_long'`). A fixed policy's cap is never
    * below its `delayMS`, which waits that long anyway. `0` waits for none: any
-   * `Retry-After` past `0` (or, on a fixed policy, past its `delayMS`) ends the request. Null or undefined selects the policy's
-   * `maxTimeoutMS` for the exponential strategy, and 30 seconds for the fixed one. Like
-   * every duration the client waits on a timer, it is capped at 2^31 - 1 ms (about 24.8
-   * days), `Infinity` included: a `Retry-After` past that ends the request too.
+   * `Retry-After` past `0` (or, on a fixed policy, past its `delayMS`) ends the request.
+   * Null or undefined selects the policy's `maxTimeoutMS` for the exponential strategy,
+   * and 30 seconds for the fixed one. Like every duration the client waits on a timer,
+   * it is capped at 2^31 - 1 ms (about 24.8 days), `Infinity` included: a `Retry-After`
+   * past that ends the request too.
    */
   maxRetryAfterMS?: number | null;
 };
