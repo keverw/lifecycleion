@@ -10,13 +10,13 @@ export type HTTPRetryPolicyOptions = RetryPolicyOptions & {
    * The longest wait a `Retry-After` on a `429` or `503` may ask for, in milliseconds.
    * Within it, the retry waits for the longer of what the server asked and the policy's
    * own delay; past it, the response is not retried and is returned as the answer
-   * (`retrySuppressedReason: 'retry_after_too_long'`). A fixed policy's cap is never
-   * below its `delayMS`, which waits that long anyway. `0` waits for none: any
-   * `Retry-After` past `0` (or, on a fixed policy, past its `delayMS`) ends the request.
-   * Null or undefined selects the policy's `maxTimeoutMS` for the exponential strategy,
-   * and 30 seconds for the fixed one. Like every duration the client waits on a timer,
-   * it is capped at 2^31 - 1 ms (about 24.8 days), `Infinity` included: a `Retry-After`
-   * past that ends the request too.
+   * (`retrySuppressedReason: 'retry_after_too_long'`). The cap is never below the
+   * shortest delay the policy waits anyway - a fixed policy's `delayMS`, an exponential
+   * one's `minTimeoutMS` - so `0` waits for no more than that: a `Retry-After` past it
+   * ends the request. Null or undefined selects the policy's `maxTimeoutMS` for the
+   * exponential strategy, and 30 seconds for the fixed one. Like every duration the
+   * client waits on a timer, it is capped at 2^31 - 1 ms (about 24.8 days), `Infinity`
+   * included: a `Retry-After` past that ends the request too.
    */
   maxRetryAfterMS?: number | null;
 };
@@ -504,8 +504,8 @@ export interface AttemptEndEvent {
    *   ignored the abort and had not settled a second later, so the client gave up on
    *   it while the adapter may still be sending that body: a retry would send it twice.
    * - `retry_after_too_long` — a `429` or `503` whose `Retry-After` asked for a longer
-   *   wait than the policy's `maxRetryAfterMS` (on a fixed policy, at least its
-   *   `delayMS`): a retry sooner would be refused again.
+   *   wait than the policy's `maxRetryAfterMS` (at least its `delayMS` or
+   *   `minTimeoutMS`): a retry sooner would be refused again.
    *
    * Exists so a suppressed retry is self-explaining: `willRetry: false` alone is
    * indistinguishable from a policy declining.

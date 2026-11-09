@@ -72,8 +72,10 @@ function refusal(error: TypeError): TypeError {
  *
  * By index, each item read once, so nothing of the caller's array is consulted: not its
  * own `constructor`, which `slice` builds the copy through, nor a `Symbol.iterator`, which
- * a spread runs. A hole stays a hole - one its prototype fills included, as only its own
- * entries are read - so a check that reads every index reads it as the `undefined` it is.
+ * a spread runs. A hole stays a hole - one an Array subclass's or other prototype fills
+ * included, as only its own entries are read; this realm's `Array.prototype` and
+ * `Object.prototype` are taken as filling none (see {@link forEachOwnIndex}) - so a check
+ * that reads every index reads it as the `undefined` it is.
  * Past enough holes the rest are read by its own keys (see {@link forEachOwnIndex}).
  * A length an array cannot have, or one over {@link MAX_COPIED_ARRAY_LENGTH}, is refused
  * (see {@link readArrayLength}).

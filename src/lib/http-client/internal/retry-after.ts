@@ -50,10 +50,17 @@ const ASCTIME_DATE = new RegExp(
  * epoch time), or `undefined` for a value that is neither form RFC 9110 defines: a whole
  * number of seconds (`120`), or an HTTP-date in any of its three forms, which a recipient
  * must accept - read as GMT, case-sensitively, as written. A date already past asks for
- * no wait (`0`). Trimmed of HTTP whitespace only. Repeated values that agree, joined
- * (`120, 120`), are one value (see `singleValue`). Anything else - a
- * fraction, a sign, a date in another format, values that disagree - is unreadable, and
- * the retry policy's own delay is used.
+ * no wait (`0`). Trimmed of HTTP whitespace only. Anything else - a fraction, a sign, a
+ * date in another format or spaced otherwise - is unreadable, and the retry policy's own
+ * delay is used.
+ *
+ * Only the first value is read. A header seen twice reaches the client joined
+ * (`120, 60`) from `fetch` and XHR, and as its first value from Node, which drops a
+ * repeated `Retry-After` - as the client keeps the first of one an adapter hands over as
+ * an array (see `normalizeAdapterResponseHeaders`) - so each runtime waits the same: the
+ * first value, whether or not the others agree with it. Told apart by the commas between
+ * them: an IMF-fixdate or RFC 850 date holds one, after its day name, so it spans the
+ * first two comma-separated pieces; a number of seconds or an asctime date the first.
  */
 export function parseRetryAfterMS(
   value: string | undefined,
@@ -63,50 +70,21 @@ export function parseRetryAfterMS(
     return undefined;
   }
 
-  const text = singleValue(value);
+  const pieces = value.split(',');
+  const first = trimHTTPWhitespace(pieces[0]);
 
-  if (text === undefined) {
-    return undefined;
+  if (/^\d+$/.test(first)) {
+    return Number(first) * 1000;
   }
 
-  if (/^\d+$/.test(text)) {
-    return Number(text) * 1000;
-  }
-
-  const at = parseHTTPDate(text, now);
+  // Rejoined as it was written, so a date spaced otherwise than `Sun, 06 Nov ...` is not
+  // made into one that is.
+  const at =
+    (pieces.length > 1
+      ? parseHTTPDate(trimHTTPWhitespace(`${pieces[0]},${pieces[1]}`), now)
+      : undefined) ?? parseHTTPDate(first, now);
 
   return at === undefined ? undefined : Math.max(0, at - now);
-}
-
-/**
- * The one value a `Retry-After` holds, trimmed of HTTP whitespace, or `undefined` for
- * repeated values that disagree. A header seen twice reaches the client joined
- * (`120, 120`) from `fetch` and XHR, and as its first value from Node, which drops a
- * repeated `Retry-After` - as the client reads one an adapter hands over as an array
- * (see `normalizeAdapterResponseHeaders`): values that agree are read as one, so each
- * runtime waits the same. Told apart by the commas
- * between them - one value of the forms with a comma (an IMF-fixdate or RFC 850 date)
- * spans two comma-separated pieces, any other form one.
- */
-function singleValue(text: string): string | undefined {
-  const pieces = text.split(',').map((piece) => trimHTTPWhitespace(piece));
-
-  for (const size of [1, 2]) {
-    if (pieces.length % size !== 0) {
-      continue;
-    }
-
-    const values: string[] = [];
-    for (let index = 0; index < pieces.length; index += size) {
-      values.push(pieces.slice(index, index + size).join(', '));
-    }
-
-    if (values.every((candidate) => candidate === values[0])) {
-      return values[0];
-    }
-  }
-
-  return undefined;
 }
 
 /** The epoch time an HTTP-date names, or `undefined` when `text` is not one. */

@@ -1390,15 +1390,17 @@ export class BaseHTTPClient {
           ? new RetryPolicy(retryPolicyOptions)
           : null;
         // Resolved when the policy was taken (see `snapshotRetryPolicyOptions`). Never
-        // below a fixed policy's own delay, which waits that long anyway: a `Retry-After`
-        // within it is no reason to give up. Read off the policy, not a jittered delay,
-        // so the same answer is always retried or always not.
+        // below the shortest delay the policy waits - a fixed policy's `delayMS`, an
+        // exponential one's `minTimeoutMS`, below which no jitter takes it - since it
+        // waits that long anyway: a `Retry-After` within it is no reason to give up. Read
+        // off the policy, not a jittered delay, so the same answer is always retried or
+        // always not.
         const maxRetryAfterMS = retryPolicyOptions
           ? Math.max(
               retryPolicyOptions.maxRetryAfterMS ?? 0,
-              retryPolicyOptions.strategy === 'fixed'
-                ? (retryPolicyOptions.delayMS ?? 0)
-                : 0,
+              (retryPolicyOptions.strategy === 'fixed'
+                ? retryPolicyOptions.delayMS
+                : retryPolicyOptions.minTimeoutMS) ?? 0,
             )
           : 0;
 

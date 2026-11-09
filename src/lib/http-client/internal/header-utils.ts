@@ -63,8 +63,8 @@ export function presentHeaderValue(
   }
   // By index, each item read once, as every caller array is (see `copyArrayValue`): not
   // through the array's own iterator, which could yield items it does not hold. A hole -
-  // one its prototype fills included - is skipped, and past enough of them the rest
-  // are read by its own keys (see `forEachOwnIndex`).
+  // one an Array subclass's or other prototype fills included - is skipped, and past
+  // enough of them the rest are read by its own keys (see `forEachOwnIndex`).
   const list = value as unknown[];
   const length = readArrayLength(list, label, MAX_COPIED_ARRAY_LENGTH);
   const items: string[] = [];

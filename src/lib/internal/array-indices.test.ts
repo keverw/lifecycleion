@@ -93,6 +93,50 @@ describe('indicesFrom', () => {
 });
 
 describe('forEachOwnIndex', () => {
+  test("tells a dense array's entries by `in`, not one `Object.hasOwn` per index", () => {
+    let ownChecks = 0;
+    const source = new Proxy(
+      Array.from({ length: 1000 }, (_, index) => index),
+      {
+        getOwnPropertyDescriptor: (target, key) => {
+          ownChecks++;
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      },
+    );
+    const visited: number[] = [];
+
+    forEachOwnIndex(source, 1000, (index) => visited.push(index));
+
+    expect(visited).toHaveLength(1000);
+    expect(ownChecks).toBe(0);
+  });
+
+  test("visits a hole a Proxy's has trap answers for", () => {
+    const list: unknown[] = ['a'];
+    list.length = 3;
+    const visited: number[] = [];
+
+    forEachOwnIndex(new Proxy(list, { has: () => true }), 3, (index) =>
+      visited.push(index),
+    );
+
+    expect(visited).toEqual([0, 1, 2]);
+  });
+
+  test("visits an own entry a Proxy's has trap hides, and not a hole beside it", () => {
+    const list: unknown[] = ['a'];
+    list.length = 3;
+    list[2] = 'c';
+    const visited: number[] = [];
+
+    forEachOwnIndex(new Proxy(list, { has: () => false }), 3, (index) =>
+      visited.push(index),
+    );
+
+    expect(visited).toEqual([0, 2]);
+  });
+
   test('visits own indices in order, past enough holes too, and not a hole a prototype fills', () => {
     const source: unknown[] = ['a', 'b'];
     source.length = SPARSE_RUN * 4;

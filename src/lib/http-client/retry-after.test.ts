@@ -23,10 +23,17 @@ describe('parseRetryAfterMS', () => {
     ['Sun, 06 Nov 1994 08:49:37 GMT', 0],
     // A two-digit year more than 50 years ahead is the last century's.
     ['Sunday, 06-Nov-94 08:49:37 GMT', 0],
-    // Repeated values that agree, as `fetch` joins a header seen twice.
+    // Repeated values, as `fetch` joins a header seen twice: the first, as Node keeps it.
     ['120, 120', 120_000],
     ['5,5 ,\t5', 5000],
+    ['120, 60', 120_000],
+    ['120,', 120_000],
     ['Sun, 08 Nov 2026 12:00:30 GMT, Sun, 08 Nov 2026 12:00:30 GMT', 30_000],
+    ['Sun, 08 Nov 2026 12:00:30 GMT, Sun, 08 Nov 2026 12:00:31 GMT', 30_000],
+    ['Sun, 08 Nov 2026 12:00:30 GMT, 5', 30_000],
+    ['Sunday, 08-Nov-26 12:00:30 GMT, 5', 30_000],
+    ['Sun Nov  8 12:00:30 2026, Sun, 08 Nov 2026 12:00:30 GMT', 30_000],
+    ['5, Sun, 08 Nov 2026 12:00:30 GMT', 5000],
     // A leap second is the second after it.
     ['Sun, 08 Nov 2026 23:59:60 GMT', Date.UTC(2026, 10, 9) - NOW],
   ])('%p asks for %p ms', (value, expected) => {
@@ -39,9 +46,11 @@ describe('parseRetryAfterMS', () => {
     '1.5',
     '-1',
     '+5',
-    '120, 60',
-    'Sun, 08 Nov 2026 12:00:30 GMT, Sun, 08 Nov 2026 12:00:31 GMT',
-    '120,',
+    // Spaced otherwise than an IMF-fixdate is, after its comma.
+    'Sun,08 Nov 2026 12:00:30 GMT',
+    'Sun,   08 Nov 2026 12:00:30 GMT',
+    // A first value that is unreadable is not passed over for a later one.
+    'soon, 120',
     // A second past :59 is only a leap second at 23:59.
     'Sun, 08 Nov 2026 12:00:60 GMT',
     '1e3',
@@ -252,6 +261,40 @@ describe('HTTPClient and Retry-After', () => {
     expect(event.willRetry).toBe(true);
     expect(event.nextRetryDelayMS).toBe(60_000);
     expect(event.retrySuppressedReason).toBeUndefined();
+  });
+
+  test("a Retry-After past the cap but within an exponential policy's minTimeoutMS is retried after the policy's delay", async () => {
+    const event = await scheduledDelay(
+      { status: 503, retryAfter: '1' },
+      {
+        strategy: 'exponential',
+        maxRetryAttempts: 2,
+        minTimeoutMS: 1500,
+        maxTimeoutMS: 3000,
+        dispersion: 0.3,
+        maxRetryAfterMS: 500,
+      },
+    );
+
+    expect(event.willRetry).toBe(true);
+    expect(event.nextRetryDelayMS).toBeGreaterThanOrEqual(1500);
+    expect(event.retrySuppressedReason).toBeUndefined();
+  });
+
+  test("a Retry-After of exactly an exponential policy's minTimeoutMS is retried", async () => {
+    const event = await scheduledDelay(
+      { status: 503, retryAfter: '1' },
+      {
+        strategy: 'exponential',
+        maxRetryAttempts: 2,
+        minTimeoutMS: 1000,
+        maxTimeoutMS: 3000,
+        maxRetryAfterMS: 0,
+      },
+    );
+
+    expect(event.willRetry).toBe(true);
+    expect(event.nextRetryDelayMS).toBe(1000);
   });
 
   test("the same answer meets the same cap whatever the exponential policy's jitter", async () => {

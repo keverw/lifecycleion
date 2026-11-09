@@ -90,11 +90,18 @@ export function indexFreePrototype(array: object): object | null | undefined {
 }
 
 /**
- * Runs `visit` for each index below `length` that `source` holds as its own, in order,
- * each told by `Object.hasOwn`. Past enough holes (see {@link isMostlyHoles}) the rest
- * are found from its own keys, listed once, and each checked again as it is reached - an
- * entry visited before can have removed it, and one it adds is not visited - so a sparse
- * array's length is not walked.
+ * Runs `visit` for each index below `length` that `source` holds as its own, in order.
+ * Each is told by `in` while `source`'s prototype is this realm's `Array.prototype` -
+ * `Object.hasOwn` costs hundreds of times as much per index on JavaScriptCore, seconds
+ * over a list at the copy cap (`MAX_COPIED_ARRAY_LENGTH`) - and by `Object.hasOwn` where
+ * `in` says no, or the prototype is any other. So a hole an Array subclass's or other
+ * prototype fills is not read as an entry, and nor is an own entry a `Proxy`'s `has`
+ * hides lost; this realm's `Array.prototype` and `Object.prototype` are taken as filling
+ * none, as `indexFreePrototype` takes them. A `Proxy` whose `has` answers for
+ * a hole is read as holding it, as `holdsOwnIndex` reads one. Past enough holes (see
+ * {@link isMostlyHoles}) the rest are found from its own keys, listed once, and each
+ * checked again by `Object.hasOwn` as it is reached - an entry visited before can have
+ * removed it, and one it adds is not visited - so a sparse array's length is not walked.
  */
 export function forEachOwnIndex(
   source: unknown[],
@@ -105,7 +112,10 @@ export function forEachOwnIndex(
   let entries = 0;
 
   for (let index = 0; index < length; index++) {
-    if (Object.hasOwn(source, index)) {
+    if (
+      (Reflect.getPrototypeOf(source) === Array.prototype && index in source) ||
+      Object.hasOwn(source, index)
+    ) {
       entries++;
       visit(index);
       continue;
