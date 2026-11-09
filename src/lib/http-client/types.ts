@@ -482,9 +482,11 @@ export interface AttemptEndEvent {
   /**
    * Why no retry happened, when a retry was genuinely available to suppress — a
    * policy is configured, it has attempts left, and the status alone would have
-   * allowed one. Absent otherwise, since nothing was suppressed - and absent when the
-   * attempt ends as an `adapter_error` (an answer whose body or `Set-Cookie` could not
-   * be processed), whose error code says why.
+   * allowed one. Absent otherwise, since nothing was suppressed - and absent when an
+   * `adapter_error` (an answer whose body or `Set-Cookie` could not be processed) stopped
+   * a planned retry, whose error code says why. A retry already suppressed keeps its
+   * reason when the body then cannot be decoded, and the request still ends as that
+   * `adapter_error`.
    *
    * - `adapter_veto` — the adapter reported `isRetryable: false`. Not produced by
    *   a real transport, which pairs that flag with the non-retryable `495`;

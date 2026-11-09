@@ -26,6 +26,7 @@ describe('parseRetryAfterMS', () => {
     // Repeated values that agree, as `fetch` joins a header seen twice.
     ['120, 120', 120_000],
     ['5,5 ,\t5', 5000],
+    ['Sun, 08 Nov 2026 12:00:30 GMT, Sun, 08 Nov 2026 12:00:30 GMT', 30_000],
     // A leap second is the second after it.
     ['Sun, 08 Nov 2026 23:59:60 GMT', Date.UTC(2026, 10, 9) - NOW],
   ])('%p asks for %p ms', (value, expected) => {
@@ -39,6 +40,7 @@ describe('parseRetryAfterMS', () => {
     '-1',
     '+5',
     '120, 60',
+    'Sun, 08 Nov 2026 12:00:30 GMT, Sun, 08 Nov 2026 12:00:31 GMT',
     '120,',
     // A second past :59 is only a leap second at 23:59.
     'Sun, 08 Nov 2026 12:00:60 GMT',
@@ -58,6 +60,18 @@ describe('parseRetryAfterMS', () => {
     expect(parseRetryAfterMS(value, NOW)).toBeUndefined();
   });
 
+  test('an RFC 850 year is read back a century only when more than 50 years ahead, to the moment', () => {
+    const newYear2026 = Date.UTC(2026, 0, 1);
+
+    // 2076-01-01 is exactly 50 years on, so it stays; 2076-12-31 is past it, so 1976.
+    expect(
+      parseRetryAfterMS('Wednesday, 01-Jan-76 00:00:00 GMT', newYear2026),
+    ).toBe(Date.UTC(2076, 0, 1) - newYear2026);
+    expect(
+      parseRetryAfterMS('Thursday, 31-Dec-76 00:00:00 GMT', newYear2026),
+    ).toBe(0);
+  });
+
   test('a four-digit year below 100 is that year, not 19xx', () => {
     // Read as 1950 it would be past from a `now` of 1900; as 0050 it is past either way.
     const in1900 = Date.UTC(1900, 0, 1);
@@ -73,7 +87,7 @@ describe('parseRetryAfterMS', () => {
  * A client whose adapter answers `first` and then `200`, and how many requests it made.
  */
 function clientAnswering(
-  first: { status: number; retryAfter?: string },
+  first: { status: number; retryAfter?: string | string[] },
   retryPolicy: HTTPRetryPolicyOptions,
 ): {
   client: HTTPClient;
@@ -86,7 +100,7 @@ function clientAnswering(
       callCount++;
 
       if (callCount === 1) {
-        const headers: Record<string, string> = {};
+        const headers: Record<string, string | string[]> = {};
         if (first.retryAfter !== undefined) {
           headers['retry-after'] = first.retryAfter;
         }
@@ -117,7 +131,7 @@ function clientAnswering(
  * right after, so no test waits it out.
  */
 async function scheduledDelay(
-  first: { status: number; retryAfter?: string },
+  first: { status: number; retryAfter?: string | string[] },
   retryPolicy: HTTPRetryPolicyOptions,
 ): Promise<AttemptEndEvent> {
   const { client } = clientAnswering(first, retryPolicy);
@@ -175,6 +189,19 @@ describe('HTTPClient and Retry-After', () => {
     expect(event.willRetry).toBe(true);
     expect(event.nextRetryDelayMS).toBe(10);
   });
+
+  test.each([
+    [['5', '5'], 5000],
+    [['5', '86400'], 5000],
+  ])(
+    'a Retry-After an adapter hands over as %p is read by its first value, as Node reads a repeated one: %p ms',
+    async (retryAfter, expected) => {
+      const event = await scheduledDelay({ status: 503, retryAfter }, fixed);
+
+      expect(event.willRetry).toBe(true);
+      expect(event.nextRetryDelayMS).toBe(expected);
+    },
+  );
 
   test('a Retry-After past the cap is not retried, and the answer is returned', async () => {
     const { client, calls } = clientAnswering(

@@ -50,9 +50,10 @@ const ASCTIME_DATE = new RegExp(
  * epoch time), or `undefined` for a value that is neither form RFC 9110 defines: a whole
  * number of seconds (`120`), or an HTTP-date in any of its three forms, which a recipient
  * must accept - read as GMT, case-sensitively, as written. A date already past asks for
- * no wait (`0`). Trimmed of HTTP whitespace only. Repeated seconds that agree
- * (`120, 120`) are one value. Anything else - a fraction, a sign, a date in another
- * format, values that disagree - is unreadable, and the retry policy's own delay is used.
+ * no wait (`0`). Trimmed of HTTP whitespace only. Repeated values that agree, joined
+ * (`120, 120`), are one value (see `singleValue`). Anything else - a
+ * fraction, a sign, a date in another format, values that disagree - is unreadable, and
+ * the retry policy's own delay is used.
  */
 export function parseRetryAfterMS(
   value: string | undefined,
@@ -62,19 +63,50 @@ export function parseRetryAfterMS(
     return undefined;
   }
 
-  const text = trimHTTPWhitespace(value);
+  const text = singleValue(value);
 
-  // A header seen twice reaches the client joined (`120, 120`) from `fetch` and XHR, and
-  // as its first value from Node, which drops a repeated `Retry-After`: values that agree
-  // are read as one, as each runtime would then wait the same.
-  const seconds = /^(\d+)(?:[ \t]*,[ \t]*\1)*$/.exec(text);
-  if (seconds) {
-    return Number(seconds[1]) * 1000;
+  if (text === undefined) {
+    return undefined;
+  }
+
+  if (/^\d+$/.test(text)) {
+    return Number(text) * 1000;
   }
 
   const at = parseHTTPDate(text, now);
 
   return at === undefined ? undefined : Math.max(0, at - now);
+}
+
+/**
+ * The one value a `Retry-After` holds, trimmed of HTTP whitespace, or `undefined` for
+ * repeated values that disagree. A header seen twice reaches the client joined
+ * (`120, 120`) from `fetch` and XHR, and as its first value from Node, which drops a
+ * repeated `Retry-After` - as the client reads one an adapter hands over as an array
+ * (see `normalizeAdapterResponseHeaders`): values that agree are read as one, so each
+ * runtime waits the same. Told apart by the commas
+ * between them - one value of the forms with a comma (an IMF-fixdate or RFC 850 date)
+ * spans two comma-separated pieces, any other form one.
+ */
+function singleValue(text: string): string | undefined {
+  const pieces = text.split(',').map((piece) => trimHTTPWhitespace(piece));
+
+  for (const size of [1, 2]) {
+    if (pieces.length % size !== 0) {
+      continue;
+    }
+
+    const values: string[] = [];
+    for (let index = 0; index < pieces.length; index += size) {
+      values.push(pieces.slice(index, index + size).join(', '));
+    }
+
+    if (values.every((candidate) => candidate === values[0])) {
+      return values[0];
+    }
+  }
+
+  return undefined;
 }
 
 /** The epoch time an HTTP-date names, or `undefined` when `text` is not one. */
@@ -88,14 +120,35 @@ function parseHTTPDate(text: string, now: number): number | undefined {
   match = RFC850_DATE.exec(text);
   if (match) {
     const [, day, month, year, hour, minute, second] = match;
-    return utcTime(
-      fullYearOf(+year, now),
+    // In the current century, unless that is more than 50 years from `now`, which
+    // RFC 9110 reads as the most recent past year with those digits.
+    const currentYear = new Date(now).getUTCFullYear();
+    const inThisCentury = utcTime(
+      currentYear - (currentYear % 100) + +year,
       month,
       +day,
       +hour,
       +minute,
       +second,
     );
+
+    if (inThisCentury === undefined) {
+      return undefined;
+    }
+
+    const fiftyYearsOn = new Date(now);
+    fiftyYearsOn.setUTCFullYear(currentYear + 50);
+
+    return inThisCentury > fiftyYearsOn.getTime()
+      ? utcTime(
+          currentYear - (currentYear % 100) + +year - 100,
+          month,
+          +day,
+          +hour,
+          +minute,
+          +second,
+        )
+      : inThisCentury;
   }
 
   match = ASCTIME_DATE.exec(text);
@@ -105,18 +158,6 @@ function parseHTTPDate(text: string, now: number): number | undefined {
   }
 
   return undefined;
-}
-
-/**
- * The full year an RFC 850 two-digit year names: in the current century, unless that is
- * more than 50 years from `now`, which RFC 9110 reads as the most recent past year with
- * those digits.
- */
-function fullYearOf(twoDigitYear: number, now: number): number {
-  const currentYear = new Date(now).getUTCFullYear();
-  const year = currentYear - (currentYear % 100) + twoDigitYear;
-
-  return year > currentYear + 50 ? year - 100 : year;
 }
 
 /**
