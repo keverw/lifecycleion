@@ -36,6 +36,7 @@ import {
 import { isArrayBufferLike } from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 import { readUnknownMember } from '../../internal/read-member';
+import { isLoopbackHost } from '../internal/loopback-host';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -1448,6 +1449,8 @@ function parseXHRResponseHeaders(
  * - strips userinfo (omitted by responseURL) and hash fragments (not sent over HTTP)
  * - relies on URL normalization for equivalent forms
  *   (default ports, dot segments, encoding normalization, etc.)
+ * - on an `https:` page, reads an `http:` URL answered from its `https:` form as the
+ *   same URL (see `isUpgradeFromSecurePage`)
  *
  * `answeredURL` is the absolute URL `send` opened. A `responseURL` that does not parse
  * cannot name it, so it is taken as a redirect.
@@ -1467,8 +1470,38 @@ function didBrowserFollowRedirect(
   const normalizedRequest = new URL(answeredURL);
   normalizedRequest.hash = '';
 
-  return (
-    stripURLCredentials(normalizedResponse.href) !==
-    stripURLCredentials(normalizedRequest.href)
-  );
+  const responseHref = stripURLCredentials(normalizedResponse.href);
+
+  if (responseHref === stripURLCredentials(normalizedRequest.href)) {
+    return false;
+  }
+
+  return !isUpgradeFromSecurePage(normalizedRequest, responseHref);
+}
+
+/**
+ * Whether `responseHref` is `request` - an `http:` URL - upgraded to `https:` by the
+ * browser itself, on an `https:` page. A browser blocks a plain `http:` request from an
+ * `https:` page as mixed content, unless its host is this machine's (see
+ * `isLoopbackHost`), so one that was answered was upgraded before it was sent - by the
+ * page's `upgrade-insecure-requests` policy, or HSTS - and no server redirected it, as
+ * FetchAdapter's `fetch` reports it. The upgrade is the URL with its scheme changed - a
+ * default port stays the default, any other port is kept. On an `http:` page an upgrade looks exactly
+ * like a server's redirect to `https:`, and is reported as one.
+ */
+function isUpgradeFromSecurePage(request: URL, responseHref: string): boolean {
+  if (request.protocol !== 'http:' || isLoopbackHost(request.hostname)) {
+    return false;
+  }
+
+  const pageOrigin = readPageOrigin();
+
+  if (pageOrigin === undefined || !pageOrigin.startsWith('https:')) {
+    return false;
+  }
+
+  const upgraded = new URL(request.href);
+  upgraded.protocol = 'https:';
+
+  return stripURLCredentials(upgraded.href) === responseHref;
 }

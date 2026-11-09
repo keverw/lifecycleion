@@ -2384,6 +2384,61 @@ describe('XHRAdapter', () => {
     expect(response.status).toBe(200);
   });
 
+  test.each([
+    [
+      'https://app.test',
+      'http://api.test/data',
+      'https://api.test/data',
+      false,
+    ],
+    [
+      'https://app.test',
+      'http://api.test:8080/data',
+      'https://api.test:8080/data',
+      false,
+    ],
+    ['http://app.test', 'http://api.test/data', 'https://api.test/data', true],
+    [
+      'https://app.test',
+      'http://localhost/data',
+      'https://localhost/data',
+      true,
+    ],
+    [
+      'https://app.test',
+      'http://api.test/data',
+      'https://api.test/other',
+      true,
+    ],
+    [
+      'https://app.test',
+      'http://api.test/data',
+      'https://api.test:8443/data',
+      true,
+    ],
+  ])(
+    'on a page at %s, %s answered from %s is a redirect: %p',
+    async (pageOrigin, requestURL, responseURL, isRedirect) => {
+      const response = await withPageOrigin(pageOrigin, async () => {
+        const promise = new XHRAdapter().send({
+          requestURL,
+          method: 'GET',
+          headers: {},
+        });
+
+        lastXHR.status = 200;
+        lastXHR.response = textBody('ok');
+        lastXHR.responseURL = responseURL;
+        lastXHR.simulateLoad();
+
+        return await promise;
+      });
+
+      expect(response.wasRedirectDetected).toBe(isRedirect);
+      expect(response.status).toBe(isRedirect ? 0 : 200);
+    },
+  );
+
   test('does not treat fragment-only URL differences as redirect', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

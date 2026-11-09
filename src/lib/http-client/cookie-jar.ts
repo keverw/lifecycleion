@@ -17,6 +17,7 @@ import {
   trimSpacesAndTabs,
 } from '../internal/ascii-text';
 import { isNullish } from '../internal/is-nullish';
+import { isLoopbackHost } from './internal/loopback-host';
 import {
   assertArrayLength,
   copyArrayValue,
@@ -2325,16 +2326,4 @@ export class CookieJar {
       );
     }
   }
-}
-
-/** Whether a parsed URL's `hostname` names this machine: see `CookieJar.isSecureRequest`. */
-function isLoopbackHost(hostname: string): boolean {
-  const name = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
-
-  return (
-    name === 'localhost' ||
-    name.endsWith('.localhost') ||
-    hostname === '[::1]' ||
-    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
-  );
 }
