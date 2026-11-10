@@ -15,7 +15,8 @@ export type HTTPRetryPolicyOptions = RetryPolicyOptions & {
    * `delayMS`, an exponential one's backoff for that retry, `minTimeoutMS` on the
    * first), so `0` waits for no more than that: a `Retry-After` past it ends the
    * request. Null or undefined selects the policy's `maxTimeoutMS` for the
-   * exponential strategy, and 30 seconds for the fixed one. Like every duration the
+   * exponential strategy - at least one second, the shortest wait a `Retry-After` can ask
+   * for - and 30 seconds for the fixed one. Like every duration the
    * client waits on a timer, it is capped at 2^31 - 1 ms (about 24.8 days), `Infinity`
    * included: a `Retry-After` past that ends the request too.
    */

@@ -27,6 +27,13 @@ const DEFAULT_MAX_RETRY_AFTER_MS = (() => {
   return info.strategy === 'exponential' ? info.maxTimeoutMS : 30_000;
 })();
 
+/**
+ * The least an unset `maxRetryAfterMS` defaults to: `Retry-After` is a whole number of
+ * seconds, so a default below one second - an exponential policy's sub-second
+ * `maxTimeoutMS` - would refuse every wait a server can ask for.
+ */
+const MIN_DEFAULT_MAX_RETRY_AFTER_MS = 1000;
+
 /** The fields each strategy takes; any other is refused as misspelled. */
 const FIXED_FIELDS = fieldNames<
   RetryPolicyOptionsStrategyFixed & RetryAfterField
@@ -149,7 +156,7 @@ export function snapshotRetryPolicyOptions(
     maxRetryAfterMS: resolveTimeoutMS(
       plain.maxRetryAfterMS as number | null | undefined,
       policyInfo.strategy === 'exponential'
-        ? policyInfo.maxTimeoutMS
+        ? Math.max(policyInfo.maxTimeoutMS, MIN_DEFAULT_MAX_RETRY_AFTER_MS)
         : DEFAULT_MAX_RETRY_AFTER_MS,
       'Retry maxRetryAfterMS',
     ),

@@ -377,6 +377,29 @@ describe('HTTPClient and Retry-After', () => {
     expect([...reasons]).toEqual(['retry_after_too_long']);
   });
 
+  test('an unset cap is at least one second, under a sub-second maxTimeoutMS', async () => {
+    const policy = {
+      strategy: 'exponential',
+      maxRetryAttempts: 2,
+      minTimeoutMS: 50,
+      maxTimeoutMS: 100,
+    } as const;
+
+    const unset = await scheduledDelay(
+      { status: 503, retryAfter: '1' },
+      policy,
+    );
+    expect(unset.willRetry).toBe(true);
+    expect(unset.nextRetryDelayMS).toBe(1000);
+
+    const set = await scheduledDelay(
+      { status: 503, retryAfter: '1' },
+      { ...policy, maxRetryAfterMS: 100 },
+    );
+    expect(set.willRetry).toBe(false);
+    expect(set.retrySuppressedReason).toBe('retry_after_too_long');
+  });
+
   test("the exponential strategy's cap is its maxTimeoutMS", async () => {
     const policy = {
       strategy: 'exponential',
