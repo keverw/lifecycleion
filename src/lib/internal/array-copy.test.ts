@@ -31,6 +31,32 @@ describe('readArrayLength', () => {
 });
 
 describe('copyArrayValue', () => {
+  test('a long sparse list is copied without its holes allocated', () => {
+    const list: unknown[] = [];
+    list.length = 2 ** 24;
+    list[5] = 'x';
+    const before = process.memoryUsage().rss;
+    const copies = Array.from({ length: 4 }, () => copyArrayValue(list));
+    const grown = process.memoryUsage().rss - before;
+
+    for (const copy of copies) {
+      expect(copy).toHaveLength(2 ** 24);
+      expect(Object.keys(copy)).toEqual(['5']);
+      expect(copy[5]).toBe('x');
+      expect(Object.hasOwn(copy, 2 ** 24)).toBe(false);
+    }
+    // Each would be 128 MiB allocated whole.
+    expect(grown).toBeLessThan(64 * 1024 * 1024);
+  });
+
+  test('a long dense list is copied whole, in order', () => {
+    const list = Array.from({ length: SPARSE_RUN * 2 }, (_, index) => index);
+    const copy = copyArrayValue(list);
+
+    expect(copy).toEqual(list);
+    expect(Object.hasOwn(copy, SPARSE_RUN * 2)).toBe(false);
+  });
+
   test('refuses a length an array cannot have', () => {
     expect(() => copyArrayValue(withLength(Infinity))).toThrow(
       new TypeError('A list has no array length'),

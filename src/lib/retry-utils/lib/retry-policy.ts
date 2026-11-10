@@ -11,7 +11,7 @@ import {
   assertNumberOption,
   resolveTimeoutMS,
 } from '../../internal/timer-limits';
-import { calculateExponentialDelay, getMostCommonError } from './utils';
+import { calculateExponentialDelays, getMostCommonError } from './utils';
 
 interface CurrentState {
   wasInitialAttemptTaken: boolean; // Represents if the initial attempt was taken or not since if errors is empty, it should return 1
@@ -378,11 +378,7 @@ export class RetryPolicy {
       return { shouldRetry: false, delayMS: 0, baseDelayMS: 0 };
     } else {
       // Calculate the delay for the next retry attempt
-      return {
-        shouldRetry: true,
-        delayMS: this.calculateNextDelay(true),
-        baseDelayMS: this.calculateNextDelay(false),
-      };
+      return { shouldRetry: true, ...this.calculateNextDelays() };
     }
   }
 
@@ -410,24 +406,24 @@ export class RetryPolicy {
    * based on the exponential backoff formula, considering the number of retry attempts, the base delay,
    * the exponential factor, and any specified dispersion to introduce randomness.
    *
-   * @param {boolean} isJittered Whether the policy's `dispersion` is applied.
-   * @returns {number} The calculated delay in milliseconds before the next retry attempt.
+   * @returns The delay in milliseconds before the next retry attempt, with its jitter
+   * (`delayMS`) and without it (`baseDelayMS`).
    */
 
-  private calculateNextDelay(isJittered: boolean): number {
+  private calculateNextDelays(): { delayMS: number; baseDelayMS: number } {
     if (this.policy.strategy === 'fixed') {
-      return this.policy.delayMS;
+      return { delayMS: this.policy.delayMS, baseDelayMS: this.policy.delayMS };
     } else if (this.policy.strategy === 'exponential') {
-      return calculateExponentialDelay({
+      return calculateExponentialDelays({
         retryCount: this.retryCount,
         minTimeoutMS: this.policy.minTimeoutMS,
         maxTimeoutMS: this.policy.maxTimeoutMS,
         factor: this.policy.factor,
-        dispersion: isJittered ? this.policy.dispersion : 0,
+        dispersion: this.policy.dispersion,
         randomFn: Math.random,
       });
     }
 
-    return 1; // Should never reach here
+    return { delayMS: 1, baseDelayMS: 1 }; // Should never reach here
   }
 }

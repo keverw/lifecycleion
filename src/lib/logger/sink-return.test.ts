@@ -461,7 +461,7 @@ for (const key of ['sinks', 'diagnosticSinks'] as const) {
     await logger.close();
   });
 
-  test(`${key} keeps only its own entries: a hole its prototype fills is no sink`, async () => {
+  test(`${key} reads only its own entries: a hole its prototype fills is refused as no sink`, () => {
     const list: unknown[] = [];
     list.length = 1;
     Object.setPrototypeOf(
@@ -470,37 +470,119 @@ for (const key of ['sinks', 'diagnosticSinks'] as const) {
         0: { write: (): void => {} },
       }),
     );
-    const logger = new Logger({
-      callProcessExit: false,
-      [key]: list as never,
-    });
 
-    const kept =
-      key === 'sinks' ? logger.getSinks() : logger.getDiagnosticSinks();
-    expect(kept).toHaveLength(1);
-    expect(kept[0]).toBeUndefined();
-    await logger.close();
+    expect(
+      () => new Logger({ callProcessExit: false, [key]: list as never }),
+    ).toThrow(
+      new TypeError(
+        `Logger ${key}[0] must be a sink with ${key === 'sinks' ? 'a write() method' : 'a write() or writeDiagnostic() method'} (got undefined)`,
+      ),
+    );
+  });
+
+  test(`${key} refuses a hole, and an entry with no write() method, naming its index`, () => {
+    const sink = { write: (): void => {} };
+    const holey: unknown[] = [];
+    holey[1] = sink;
+
+    expect(
+      () => new Logger({ callProcessExit: false, [key]: holey as never }),
+    ).toThrow(
+      new TypeError(
+        `Logger ${key}[0] must be a sink with ${key === 'sinks' ? 'a write() method' : 'a write() or writeDiagnostic() method'} (got undefined)`,
+      ),
+    );
+    expect(
+      () =>
+        new Logger({
+          callProcessExit: false,
+          [key]: [sink, { write: 'no' }] as never,
+        }),
+    ).toThrow(
+      new TypeError(
+        `Logger ${key}[1] must be a sink with ${key === 'sinks' ? 'a write() method' : 'a write() or writeDiagnostic() method'} (got write: string)`,
+      ),
+    );
+  });
+
+  test(`a sparse ${key} list is refused at its first hole, not walked`, () => {
+    const list: unknown[] = [];
+    list.length = 2 ** 24;
+    const startedAt = performance.now();
+
+    expect(
+      () => new Logger({ callProcessExit: false, [key]: list as never }),
+    ).toThrow(`Logger ${key}[0] must be a sink`);
+    expect(performance.now() - startedAt).toBeLessThan(1000);
   });
 }
 
-for (const [key, removeMethod] of [
-  ['sinks', 'removeSink'],
-  ['diagnosticSinks', 'removeDiagnosticSink'],
-] as const) {
-  test(`${key}: a hole is kept through ${removeMethod}, still no sink`, async () => {
-    const sink = { write: (): void => {} };
-    const list: unknown[] = [];
-    list[1] = sink;
-    const logger = new Logger({
-      callProcessExit: false,
-      [key]: list as never,
-    });
+test('a function with a write method is a sink, and a diagnostic sink may have only writeDiagnostic', async () => {
+  const written: unknown[] = [];
+  const functionSink = Object.assign(() => {}, {
+    write: (entry: unknown) => {
+      written.push(entry);
+    },
+  });
+  const diagnosticOnly = { writeDiagnostic: (): void => {} };
+  const logger = new Logger({
+    callProcessExit: false,
+    sinks: [functionSink],
+    diagnosticSinks: [diagnosticOnly as never],
+  });
+  logger.addSink(functionSink);
+  logger.addDiagnosticSink(diagnosticOnly as never);
+  logger.info('hello');
 
-    expect(logger[removeMethod](sink)).toBe(true);
-    const kept =
-      key === 'sinks' ? logger.getSinks() : logger.getDiagnosticSinks();
-    expect(kept).toHaveLength(1);
-    expect(kept[0]).toBeUndefined();
+  expect(written).toHaveLength(2);
+  expect(() => logger.addSink(diagnosticOnly as never)).toThrow(
+    new TypeError(
+      'Logger.addSink() sink must be a sink with a write() method (got write: undefined)',
+    ),
+  );
+  expect(
+    () =>
+      new Logger({
+        callProcessExit: false,
+        diagnosticSinks: [{ writeDiagnostic: 'no' } as never],
+      }),
+  ).toThrow(
+    new TypeError(
+      'Logger diagnosticSinks[0] must be a sink with a write() or writeDiagnostic() method (got writeDiagnostic: string)',
+    ),
+  );
+  await logger.close();
+});
+
+for (const addMethod of ['addSink', 'addDiagnosticSink'] as const) {
+  test(`${addMethod} refuses a value that is not a sink`, async () => {
+    const logger = new Logger({ callProcessExit: false });
+
+    expect(() => logger[addMethod](undefined as never)).toThrow(
+      new TypeError(
+        `Logger.${addMethod}() sink must be a sink with ${addMethod === 'addSink' ? 'a write() method' : 'a write() or writeDiagnostic() method'} (got undefined)`,
+      ),
+    );
+    expect(() => logger[addMethod]({} as never)).toThrow(
+      new TypeError(
+        `Logger.${addMethod}() sink must be a sink with ${addMethod === 'addSink' ? 'a write() method' : 'a write() or writeDiagnostic() method'} (got write: undefined)`,
+      ),
+    );
+    const failure = new Error('getter failed');
+    const throwing = {
+      get write(): never {
+        throw failure;
+      },
+    };
+    expect(() => logger[addMethod](throwing as never)).toThrow(
+      expect.objectContaining({
+        name: 'TypeError',
+        message: `Logger.${addMethod}() sink has a method that could not be read`,
+        cause: failure,
+      }),
+    );
+    expect(logger.getSinks()).toEqual([]);
+    expect(logger.getDiagnosticSinks()).toEqual([]);
     await logger.close();
   });
 }
@@ -834,36 +916,18 @@ test('close publishes its completion before listener-unregistration callbacks', 
 });
 
 for (const value of [false, 0, '']) {
-  test(`non-callable diagnostic method ${JSON.stringify(value)} remains a reported failure`, async () => {
-    let writes = 0;
-    const output = spyOn(console, 'error').mockImplementation(() => {});
-    const logger = new Logger({
-      callProcessExit: false,
-      sinks: [
-        {
-          write() {
-            throw new Error('original');
-          },
-        },
-      ],
-      diagnosticSinks: [
-        {
-          write: () => {
-            writes++;
-          },
-          writeDiagnostic: value,
-        } as unknown as LogSink,
-      ],
-    });
-    try {
-      logger.info('trigger');
-      await sleep(0);
-      expect(writes).toBe(0);
-      expect(output).toHaveBeenCalledTimes(1);
-    } finally {
-      output.mockRestore();
-      await logger.close();
-    }
+  test(`non-callable diagnostic method ${JSON.stringify(value)} is refused as no sink`, () => {
+    expect(
+      () =>
+        new Logger({
+          callProcessExit: false,
+          diagnosticSinks: [
+            { write: () => {}, writeDiagnostic: value } as unknown as LogSink,
+          ],
+        }),
+    ).toThrow(
+      'Logger diagnosticSinks[0] must be a sink with a write() or writeDiagnostic() method (got writeDiagnostic:',
+    );
   });
 }
 

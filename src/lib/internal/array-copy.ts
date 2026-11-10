@@ -1,4 +1,4 @@
-import { forEachOwnIndex } from './array-indices';
+import { forEachOwnIndex, SPARSE_RUN } from './array-indices';
 
 /**
  * The most entries an array handed over to be copied may say it holds - a header value, a
@@ -76,7 +76,10 @@ function refusal(error: TypeError): TypeError {
  * included, as only its own entries are read; this realm's `Array.prototype` and
  * `Object.prototype` are taken as filling none (see {@link forEachOwnIndex}) - so a check
  * that reads every index reads it as the `undefined` it is.
- * Past enough holes the rest are read by its own keys (see {@link forEachOwnIndex}).
+ * Past enough holes the rest are read by its own keys (see {@link forEachOwnIndex}), and a
+ * copy longer than {@link SPARSE_RUN} holds only the entries it was given: V8 allocates
+ * `new Array(length)` whole, as JavaScriptCore does, so one entry in a list at the copy cap
+ * would cost 128 MiB.
  * A length an array cannot have, or one over {@link MAX_COPIED_ARRAY_LENGTH}, is refused
  * (see {@link readArrayLength}).
  */
@@ -87,10 +90,18 @@ export function copyArrayValue<V>(value: V, label = 'A list'): V {
 
   const source: unknown[] = value;
   const length = readArrayLength(source, label, MAX_COPIED_ARRAY_LENGTH);
-  const copy: unknown[] = new Array(length);
+  const copy: unknown[] = length <= SPARSE_RUN ? new Array(length) : [];
   forEachOwnIndex(source, length, (index) => {
     copy[index] = source[index];
   });
+
+  // Lengthened past its last entry by writing one index beyond, then cut back: a length
+  // set on its own makes V8 allocate the holes up to it, where an index written far past
+  // the last makes the array a sparse one first.
+  if (copy.length < length) {
+    copy[length] = undefined;
+    copy.length = length;
+  }
 
   return copy as V;
 }

@@ -20,14 +20,25 @@ interface ExponentialDelayParams {
   randomFn: () => number;
 }
 
-export function calculateExponentialDelay({
+export function calculateExponentialDelay(
+  params: ExponentialDelayParams,
+): number {
+  return calculateExponentialDelays(params).delayMS;
+}
+
+/**
+ * The exponential backoff for `retryCount`, with its jitter (`delayMS`) and without it
+ * (`baseDelayMS`), from one computation of the backoff: the jitter is applied to the base,
+ * and both are held to the bounds.
+ */
+export function calculateExponentialDelays({
   retryCount,
   minTimeoutMS,
   maxTimeoutMS,
   factor,
   dispersion,
   randomFn,
-}: ExponentialDelayParams): number {
+}: ExponentialDelayParams): { delayMS: number; baseDelayMS: number } {
   let delay = minTimeoutMS * Math.pow(factor, retryCount);
 
   // Capped *before* jitter, not only after.
@@ -44,14 +55,28 @@ export function calculateExponentialDelay({
     delay = maxTimeoutMS;
   }
 
+  let jittered = delay;
+
   if (dispersion > 0) {
     const dispersionAmount = delay * dispersion;
     // Apply dispersion jitter using the documented formula:
     // randomOffset = (Math.random() * 2 - 1) * (delay * dispersion)
     // Algebraically equivalent to: Math.random() * (dispersionAmount * 2) - dispersionAmount
-    delay += randomFn() * (dispersionAmount * 2) - dispersionAmount;
+    jittered += randomFn() * (dispersionAmount * 2) - dispersionAmount;
   }
 
+  return {
+    delayMS: boundedDelay(jittered, minTimeoutMS, maxTimeoutMS),
+    baseDelayMS: boundedDelay(delay, minTimeoutMS, maxTimeoutMS),
+  };
+}
+
+/** `delay` clamped to `[minTimeoutMS, maxTimeoutMS]`, and always a finite number. */
+function boundedDelay(
+  delay: number,
+  minTimeoutMS: number,
+  maxTimeoutMS: number,
+): number {
   // Use a clamp function to simplify bounds checking
   const clamped = clamp(delay, minTimeoutMS, maxTimeoutMS);
 

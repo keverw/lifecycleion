@@ -4,7 +4,7 @@ import {
   fieldNames,
 } from '../internal/known-fields';
 import { MAX_COOKIE_LIFETIME_SECONDS } from './consts';
-import { readCopiedIndex } from '../internal/array-indices';
+import { forEachOwnIndex, readCopiedIndex } from '../internal/array-indices';
 import { toASCII } from 'tr46';
 import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
 import { describeValue } from '../internal/describe-value';
@@ -791,18 +791,19 @@ export class CookieJar {
       }
 
       // Copied by index (see `copyArrayValue`), not through the array's own iterator,
-      // which could yield lines it does not hold. A hole reads as `undefined`, skipped.
+      // which could yield lines it does not hold.
       const given = Array.isArray(raw)
         ? copyArrayValue(
             raw as unknown[],
             'CookieJar processResponseHeaders set-cookie',
           )
         : [raw];
-      // eslint-disable-next-line unicorn/no-for-loop -- every index, holes included
-      for (let index = 0; index < given.length; index++) {
+      // Its own entries, not every index: a hole is skipped as an `undefined` line is,
+      // and a sparse list's length is not walked.
+      forEachOwnIndex(given, given.length, (index) => {
         const line = given[index];
         if (isNullish(line) || line === '') {
-          continue;
+          return;
         }
 
         if (typeof line !== 'string') {
@@ -812,7 +813,7 @@ export class CookieJar {
         }
 
         lines.push(line);
-      }
+      });
     }
 
     for (const line of lines) {

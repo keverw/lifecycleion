@@ -1,5 +1,42 @@
 import { describe, expect, test } from 'bun:test';
-import { calculateExponentialDelay, getMostCommonError } from './utils';
+import {
+  calculateExponentialDelay,
+  calculateExponentialDelays,
+  getMostCommonError,
+} from './utils';
+
+describe('calculateExponentialDelays', () => {
+  test('jitters the base it returns, drawing one random number', () => {
+    let draws = 0;
+    const delays = calculateExponentialDelays({
+      retryCount: 2,
+      minTimeoutMS: 100,
+      maxTimeoutMS: 10_000,
+      factor: 2,
+      dispersion: 0.5,
+      randomFn: () => {
+        draws++;
+        return 1;
+      },
+    });
+
+    expect(delays).toEqual({ delayMS: 600, baseDelayMS: 400 });
+    expect(draws).toBe(1);
+  });
+
+  test('holds both to the bounds', () => {
+    expect(
+      calculateExponentialDelays({
+        retryCount: 10,
+        minTimeoutMS: 100,
+        maxTimeoutMS: 1000,
+        factor: 2,
+        dispersion: 0.5,
+        randomFn: () => 0,
+      }),
+    ).toEqual({ delayMS: 500, baseDelayMS: 1000 });
+  });
+});
 
 describe('calculateExponentialDelay', () => {
   // Test without dispersion
