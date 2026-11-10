@@ -1001,8 +1001,12 @@ export class MockAdapter implements HTTPAdapter {
 
     // After the headers are built and checked, as a real adapter has the headers before
     // any body progress: a route mistake found there does not follow a completed download.
-    // Signal upload complete, then report download size based on serialised body.
-    guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+    // Signal upload complete - by the `content-length` sent, a form's included, as
+    // NodeAdapter reports the bytes it wrote - then report download size based on
+    // serialised body.
+    guardedUploadProgress?.(
+      completeProgressEvent(bodyLength ?? knownBodyByteLength(body)),
+    );
 
     // A cancel from that callback ends the request as a cancel over the answer, its status
     // and headers carried out, as the network adapters end one, rather than resolving it

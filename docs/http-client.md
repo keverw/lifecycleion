@@ -1305,7 +1305,7 @@ const { count, requests } = client.listRequests({
 // { requestID: string; clientID: string; label?: string; state: RequestState }
 ```
 
-`scope: 'all'` covers every request on the shared tracker - the whole client tree, so on a sub-client it lists the parent's and siblings' requests too. Any other `scope`, or a `label` that is not a non-empty string, throws.
+`scope: 'all'` covers every request on the shared tracker - the whole client tree, so on a sub-client it lists the parent's and siblings' requests too. Any other `scope`, or a `label` that is not a non-empty string, throws; a `null` `label` is no filter, as a `null` filter field is read as absent.
 
 ## Sub-Client Creation
 
@@ -1360,7 +1360,7 @@ Progress granularity depends on the adapter:
 | XHRAdapter   | Real per-chunk           | Real per-chunk                   |
 | MockAdapter  | 0% at start, 100% at end | Terminal 100% only (no 0% event) |
 
-The final event's `loaded` and `total` are the body's size in bytes. An upload whose size cannot be known without reading it - a `FormData` through FetchAdapter or MockAdapter, or through XHRAdapter on a runtime with no upload events - ends with `{ loaded: 0, total: 0, progress: 1 }`: `total: 0` there means the size is unknown, not that nothing was sent, so read it before showing bytes or throughput.
+The final event's `loaded` and `total` are the body's size in bytes. An upload whose size cannot be known without reading it - a `FormData` through FetchAdapter, or through XHRAdapter on a runtime with no upload events - ends with `{ loaded: 0, total: 0, progress: 1 }`: `total: 0` there means the size is unknown, not that nothing was sent, so read it before showing bytes or throughput. MockAdapter ends a form's upload with the `content-length` it sends.
 
 XHRAdapter reports the total the runtime gives. A count that passes it - a compressed response counted in decoded bytes against its encoded `Content-Length`, as Chrome counts - reports an unknown length (`progress: -1`, the bytes so far as `total`), as NodeAdapter reports a decoded body, and the final `1` still fires when the body has loaded. That final event is XHRAdapter's only `progress: 1`, the runtime's own 100% event not reported: a runtime that counts a compressed body encoded (Firefox, React Native) reaches 100% of the encoded length, and the body's size, which the final event reports, can be less than the last count. A download that fails or is cancelled reports no `progress: 1`, as FetchAdapter reports none. With NodeAdapter, a buffered body's `progress: 1` is sent while its response is still the active one, so a cancel from that event cancels the request (and its `Set-Cookie` is still stored); a streamed body's is sent once the body is delivered to the sink, so a cancel from it finds the download finished and does not fire the factory's signal - the request still ends cancelled, as any cancel made before `send()` settles does, with the body left whole in the sink.
 

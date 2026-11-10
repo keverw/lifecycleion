@@ -1112,6 +1112,21 @@ test('a filter list is read no further than the entry it is refused at', () => {
   expect(read).toEqual([0, 1]);
 });
 
+test('a filter list is read by `in`, not one `Object.hasOwn` per entry', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  let ownChecks = 0;
+  const hosts = new Proxy(['a.com', 'b.com'], {
+    getOwnPropertyDescriptor: (target, key) => {
+      ownChecks++;
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+  });
+
+  client.addRequestInterceptor((request) => request, { hosts });
+
+  expect(ownChecks).toBe(0);
+});
+
 test('a filter list whose length is no array length is refused without being read', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
   for (const length of [Number.POSITIVE_INFINITY, 1.5, -1, 'x']) {
@@ -5858,7 +5873,10 @@ test('label and scope arguments are checked', async () => {
     TypeError,
   );
   expect(() => client.listRequests({ label: 5 as never })).toThrow(TypeError);
+  expect(() => client.listRequests({ label: '' })).toThrow(/non-empty/);
   expect(client.listRequests().count).toBe(1);
+  // `null` is no label filter, as a filter field set to `null` is read as absent.
+  expect(client.listRequests({ label: null as never }).count).toBe(1);
 
   const response = await pending;
   expect(response.isCancelled).toBe(false);

@@ -5,6 +5,7 @@ import {
   readArrayLength,
 } from '../../internal/array-copy';
 import { MAX_PROTOTYPE_DEPTH } from '../../internal/prototype-depth';
+import { holdsCopiedIndex } from '../../internal/array-indices';
 import { isRealmRootPrototype } from './plain-record';
 import {
   hasNonHTTPWhitespaceEdge,
@@ -369,7 +370,7 @@ function copyFilterLists(
     );
     const list: unknown[] = [];
     for (let index = 0; index < length; index++) {
-      const entry = Object.hasOwn(source, index) ? source[index] : undefined;
+      const entry = holdsCopiedIndex(source, index) ? source[index] : undefined;
       // Named by its place in the list, never its text.
       const entryName = `${label} filter ${field}[${String(index)}]`;
       if (typeof entry !== rule.entryType) {

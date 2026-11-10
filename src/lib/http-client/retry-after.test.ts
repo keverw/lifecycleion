@@ -289,6 +289,8 @@ describe('HTTPClient and Retry-After', () => {
         maxRetryAttempts: 2,
         minTimeoutMS: 1000,
         maxTimeoutMS: 3000,
+        // No jitter, so the policy's own first delay is exactly minTimeoutMS.
+        dispersion: 0,
         maxRetryAfterMS: 0,
       },
     );

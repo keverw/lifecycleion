@@ -708,9 +708,10 @@ export class BaseHTTPClient {
 
     // Read once, as `scope` is: a getter answering differently on each read could
     // otherwise be checked as one label and listed by another.
+    // `null` is no filter, as for the filter's other fields.
     const label = filter?.label;
 
-    if (label !== undefined) {
+    if (!isNullish(label)) {
       assertLabelArgument(label, 'listRequests');
     }
 

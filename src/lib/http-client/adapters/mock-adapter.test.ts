@@ -1225,6 +1225,31 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(await body?.files.doc.text()).toBe('x');
   });
 
+  test("a form's terminal upload event reports the content-length the route is sent", async () => {
+    let contentLength: string | undefined;
+    adapter.routes.post('/form-progress', (req) => {
+      contentLength = req.headers['content-length'];
+      return { status: 200 };
+    });
+    const form = new FormData();
+    form.append('a', 'b');
+    form.append('doc', new File(['hello'], 'x.txt', { type: 'text/plain' }));
+    const events: { loaded: number; total: number; progress: number }[] = [];
+
+    await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/form-progress',
+        method: 'POST',
+        body: form,
+        onUploadProgress: (event) => events.push(event),
+      }),
+    );
+
+    const size = Number(contentLength);
+    expect(size).toBeGreaterThan(0);
+    expect(events.at(-1)).toEqual({ loaded: size, total: size, progress: 1 });
+  });
+
   test("a form's content-length and what the route is handed come from one read of its entries", async () => {
     let body: MockFormData | undefined;
     let contentLength: string | undefined;

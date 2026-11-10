@@ -112,6 +112,29 @@ describe('forEachOwnIndex', () => {
     expect(ownChecks).toBe(0);
   });
 
+  test('lists the rest by its own keys once holes outnumber entries, not one `Object.hasOwn` per hole', () => {
+    const length = SPARSE_RUN * 4;
+    const list: unknown[] = [];
+    list.length = length;
+    for (let index = 0; index < length; index += 60) {
+      list[index] = index;
+    }
+    let ownChecks = 0;
+    const source = new Proxy(list, {
+      getOwnPropertyDescriptor: (target, key) => {
+        ownChecks++;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const visited: number[] = [];
+
+    forEachOwnIndex(source, length, (index) => visited.push(index));
+
+    expect(visited).toEqual(Object.keys(list).map(Number));
+    // A hole each up to SPARSE_RUN, then one per listed entry.
+    expect(ownChecks).toBeLessThan(SPARSE_RUN * 1.1);
+  });
+
   test("visits a hole a Proxy's has trap answers for", () => {
     const list: unknown[] = ['a'];
     list.length = 3;

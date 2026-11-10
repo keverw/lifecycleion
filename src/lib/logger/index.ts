@@ -59,6 +59,7 @@ import { LoggerService } from './logger-service';
 import { diagnosticEntry } from './internal/diagnostic-entry';
 import { registerSinkFailureReporter } from './internal/sink-failure-routing';
 import { resolveTimeoutMS } from '../internal/timer-limits';
+import { holdsCopiedIndex } from '../internal/array-indices';
 import { raceDeadline } from '../internal/race-deadline';
 
 const DEFAULT_LOGGER_CLOSE_TIMEOUT_MS = 60_000;
@@ -2496,7 +2497,7 @@ function copySinkList(
   const sinks: LogSink[] = [];
   for (let index = 0; index < length; index++) {
     sinks.push(
-      Object.hasOwn(entries, index) ? entries[index] : (undefined as never),
+      holdsCopiedIndex(entries, index) ? entries[index] : (undefined as never),
     );
   }
   return sinks;
