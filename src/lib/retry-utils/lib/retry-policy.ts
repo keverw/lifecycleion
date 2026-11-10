@@ -351,7 +351,7 @@ export class RetryPolicy {
    *
    * @param {unknown} error The error that resulted from the last operation attempt. Can be omitted when `isQueryOnly` is `true`.
    * @param {boolean} isQueryOnly If true, the method only queries if a retry should be made without storing the error.
-   * @returns {RetryQueryResult} An object indicating whether a retry should be attempted and the delay before the next attempt.
+   * @returns {RetryQueryResult} An object indicating whether a retry should be attempted, and the delay before the next attempt with and without its jitter.
    */
 
   public shouldRetry(
@@ -365,7 +365,7 @@ export class RetryPolicy {
       }
 
       // Once successful, retries are never allowed.
-      return { shouldRetry: false, delayMS: 0 };
+      return { shouldRetry: false, delayMS: 0, baseDelayMS: 0 };
     }
 
     if (!isQueryOnly) {
@@ -375,12 +375,14 @@ export class RetryPolicy {
 
     // Decide if we should retry - check if we've exhausted our retry attempts
     if (this.areAttemptsExhausted) {
-      return { shouldRetry: false, delayMS: 0 };
+      return { shouldRetry: false, delayMS: 0, baseDelayMS: 0 };
     } else {
       // Calculate the delay for the next retry attempt
-      const delayMS = this.calculateNextDelay();
-
-      return { shouldRetry: true, delayMS };
+      return {
+        shouldRetry: true,
+        delayMS: this.calculateNextDelay(true),
+        baseDelayMS: this.calculateNextDelay(false),
+      };
     }
   }
 
@@ -408,10 +410,11 @@ export class RetryPolicy {
    * based on the exponential backoff formula, considering the number of retry attempts, the base delay,
    * the exponential factor, and any specified dispersion to introduce randomness.
    *
+   * @param {boolean} isJittered Whether the policy's `dispersion` is applied.
    * @returns {number} The calculated delay in milliseconds before the next retry attempt.
    */
 
-  private calculateNextDelay(): number {
+  private calculateNextDelay(isJittered: boolean): number {
     if (this.policy.strategy === 'fixed') {
       return this.policy.delayMS;
     } else if (this.policy.strategy === 'exponential') {
@@ -420,7 +423,7 @@ export class RetryPolicy {
         minTimeoutMS: this.policy.minTimeoutMS,
         maxTimeoutMS: this.policy.maxTimeoutMS,
         factor: this.policy.factor,
-        dispersion: this.policy.dispersion,
+        dispersion: isJittered ? this.policy.dispersion : 0,
         randomFn: Math.random,
       });
     }

@@ -25,7 +25,14 @@ export interface RetryPolicyOptionsStrategyExponential {
 
 export interface RetryQueryResult {
   shouldRetry: boolean;
+  /** The delay before the next retry, jitter included; `0` when there is none. */
   delayMS: number;
+  /**
+   * The same delay without its jitter: a fixed policy's `delayMS`, an exponential one's
+   * backoff for this retry (`minTimeoutMS * factor ** retryCount`, within its bounds).
+   * Equal to `delayMS` when the policy has no `dispersion`; `0` when there is no retry.
+   */
+  baseDelayMS: number;
 }
 
 export type RunAttemptStatusCodes =

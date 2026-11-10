@@ -20,7 +20,6 @@ import { safeHandleCallback } from '../safe-handle-callback';
 import { reportToHost } from '../internal/report-to-host';
 import { guardAbortListeners } from '../internal/guarded-abort-signal';
 import { RetryPolicy } from '../retry-utils';
-import { calculateExponentialDelay } from '../retry-utils/lib/utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
 import {
   HEADER_VALUE_LABEL,
@@ -1392,8 +1391,10 @@ export class BaseHTTPClient {
           ? new RetryPolicy(retryPolicyOptions)
           : null;
         // Resolved when the policy was taken (see `snapshotRetryPolicyOptions`); each
-        // retry raises it to the delay the policy waits then anyway (see
-        // `unjitteredRetryDelayMS`).
+        // retry raises it to the delay the policy waits then anyway, without its jitter
+        // (`baseDelayMS`): a `Retry-After` within it is no reason to give up, and read
+        // without the jitter the same answer on the same retry is always retried or
+        // always not.
         const maxRetryAfterMS = retryPolicyOptions?.maxRetryAfterMS ?? 0;
 
         // --- Main request + redirect loop ---
@@ -3873,8 +3874,7 @@ export class BaseHTTPClient {
               : undefined;
           const isRetryAfterTooLong =
             retryAfterMS !== undefined &&
-            retryAfterMS >
-              Math.max(maxRetryAfterMS, unjitteredRetryDelayMS(policy));
+            retryAfterMS > Math.max(maxRetryAfterMS, decision.baseDelayMS);
           const shouldRetry = decision.shouldRetry && !isRetryAfterTooLong;
           const delayMS =
             retryAfterMS === undefined
@@ -5870,30 +5870,6 @@ function adapterRequestBody(
   }
 
   return (cloneBodyValue(body) as AttemptRequest['body']) ?? null;
-}
-
-/**
- * The delay `policy` waits before the retry it has just decided on, without its jitter: a
- * fixed policy's `delayMS`, an exponential one's backoff for that retry - `minTimeoutMS`
- * on the first, below which no jitter takes it. A `Retry-After` within it is no reason
- * to give up, since the client waits about that long anyway, and read without the
- * jitter the same answer on the same retry is always retried or always not.
- */
-function unjitteredRetryDelayMS(policy: RetryPolicy): number {
-  const info = policy.policyInfo;
-
-  if (info.strategy === 'fixed') {
-    return info.delayMS;
-  }
-
-  return calculateExponentialDelay({
-    retryCount: policy.retryCount,
-    minTimeoutMS: info.minTimeoutMS,
-    maxTimeoutMS: info.maxTimeoutMS,
-    factor: info.factor,
-    dispersion: 0,
-    randomFn: () => 0,
-  });
 }
 
 /**

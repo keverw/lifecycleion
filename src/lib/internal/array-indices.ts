@@ -52,14 +52,24 @@ export function holdsOwnIndex(array: unknown[], index: number): boolean {
  * answers for a hole is read as holding it, as `holdsOwnIndex` reads one. Unlike
  * `holdsOwnIndex`, a hole costs an `Object.hasOwn`.
  */
-export function holdsCopiedIndex(
-  source: readonly unknown[],
-  index: number,
-): boolean {
+function holdsCopiedIndex(source: readonly unknown[], index: number): boolean {
   return (
     (Reflect.getPrototypeOf(source) === Array.prototype && index in source) ||
     Object.hasOwn(source, index)
   );
+}
+
+/**
+ * `source`'s entry at `index` when it holds one as its own, told as
+ * {@link holdsCopiedIndex} tells it, and `undefined` for a hole: the read a copy of a
+ * caller's list makes of each index it walks one by one. Each is read once; a getter
+ * that throws throws here.
+ */
+export function readCopiedIndex<T>(
+  source: readonly T[],
+  index: number,
+): T | undefined {
+  return holdsCopiedIndex(source, index) ? source[index] : undefined;
 }
 
 /** Whether `key` is an array index: a canonical integer string below `2 ** 32 - 1`. */

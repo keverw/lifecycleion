@@ -156,7 +156,7 @@ When `isQueryOnly` is `true`, the `error` parameter can be omitted - no error is
 >
 > **Important:** Because `attempts` and `retryCount` are derived from the error list, calling `shouldRetry()` after `markAsSuccessful()` will increase those counts even though no retry will occur.
 
-Returns `{ shouldRetry: boolean, delayMS: number }`.
+Returns `{ shouldRetry: boolean, delayMS: number, baseDelayMS: number }`: `delayMS` is the wait before the next retry, jitter included, and `baseDelayMS` the same wait without its jitter (a fixed policy's `delayMS`, an exponential one's `minTimeoutMS * factor ** retryCount` within its bounds). Both are `0` when no retry will happen.
 
 ```typescript
 const { shouldRetry, delayMS } = policy.shouldRetry(error);
@@ -724,7 +724,7 @@ The following types are exported for use in consuming code:
 | `RetryPolicyOptionsStrategyFixed`       | Options interface for the `'fixed'` strategy                                                                                                         |
 | `RetryPolicyOptionsStrategyExponential` | Options interface for the `'exponential'` strategy                                                                                                   |
 | `RetryPolicyValidated`                  | `RetryPolicyOptions` with every option resolved: required and non-null (narrow on `strategy` to access strategy-specific properties)                 |
-| `RetryQueryResult`                      | Return type of `RetryPolicy.shouldRetry()`: `{ shouldRetry: boolean, delayMS: number }`                                                              |
+| `RetryQueryResult`                      | Return type of `RetryPolicy.shouldRetry()`: `{ shouldRetry: boolean, delayMS: number, baseDelayMS: number }`                                         |
 | `RunAttemptStatusCodes`                 | Union of all possible `status` values in `RunResult`                                                                                                 |
 | `RunnerErrorCode`                       | Union of all possible `code` values in pre-operation errors                                                                                          |
 | `RunResult<T>`                          | Return type of `run()`, `resume()`, `forceTry()`, `waitForCompletion()`. Discriminated union - narrow on `status`                                    |

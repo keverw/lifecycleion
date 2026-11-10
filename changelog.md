@@ -211,6 +211,7 @@
 
 ## Unreleased
 
+- `RetryPolicy.shouldRetry()` also returns `baseDelayMS`, the delay before the next retry without its jitter (`0` when there is no retry), beside `delayMS`, which includes it. It is a required field of the exported `RetryQueryResult` type, so code that builds one itself (a mock or wrapper policy) must set it.
 - Retry runners validate force options and result statuses, account for replaced attempts, and record terminal errors without calculating unused jitter. HTTP observer filters are contained like observer callbacks, preserving response and retry outcomes.
 
 - Attached FileSink, NamedPipeSink, and ArraySink failures now use the owning Logger's diagnostic channel when no explicit sink error handler is configured. The failed sink is excluded from diagnostic delivery, and failures of diagnostic writes terminate at console even when they arrive asynchronously. Standalone sink fallbacks and explicit error handlers remain supported. The routed diagnostic message carries the sink's target, the line's disposition and attempt, and the sink error's message, which carries the system error text for open/setup failures (errno and path) and for NamedPipeSink write failures (errno only; the report names the pipe path) (FileSink write, stream and rotation failures keep a fixed message, with the system error as `cause`), so other sinks and ConsoleSink show why it failed; a `'format'` failure's message still omits error text.
