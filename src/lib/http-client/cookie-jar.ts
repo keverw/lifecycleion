@@ -2062,12 +2062,20 @@ export class CookieJar {
     // A bucket's key is a suffix of every domain stored in it, so a stored domain on
     // either side of `domain` sits in a bucket whose key is on one side of it too, and
     // the other buckets hold nothing to check.
+    // Built once, not per bucket: the domain's own name and each parent name it ends
+    // in, and the suffix a name under it ends in.
+    const selfAndParents = new Set<string>([normalizedDomain]);
+    for (
+      let dot = normalizedDomain.indexOf('.');
+      dot !== -1;
+      dot = normalizedDomain.indexOf('.', dot + 1)
+    ) {
+      selfAndParents.add(normalizedDomain.slice(dot + 1));
+    }
+    const childSuffix = `.${normalizedDomain}`;
+
     for (const [site, bucket] of this.buckets) {
-      if (
-        site !== normalizedDomain &&
-        !site.endsWith(`.${normalizedDomain}`) &&
-        !normalizedDomain.endsWith(`.${site}`)
-      ) {
+      if (!selfAndParents.has(site) && !site.endsWith(childSuffix)) {
         continue;
       }
 
