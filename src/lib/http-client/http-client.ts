@@ -20,6 +20,7 @@ import { safeHandleCallback } from '../safe-handle-callback';
 import { reportToHost } from '../internal/report-to-host';
 import { guardAbortListeners } from '../internal/guarded-abort-signal';
 import { RetryPolicy } from '../retry-utils';
+import { calculateExponentialDelay } from '../retry-utils/lib/utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
 import {
   HEADER_VALUE_LABEL,
@@ -1390,20 +1391,10 @@ export class BaseHTTPClient {
         const retryPolicy = retryPolicyOptions
           ? new RetryPolicy(retryPolicyOptions)
           : null;
-        // Resolved when the policy was taken (see `snapshotRetryPolicyOptions`). Never
-        // below the shortest delay the policy waits - a fixed policy's `delayMS`, an
-        // exponential one's `minTimeoutMS`, below which no jitter takes it - since it
-        // waits that long anyway: a `Retry-After` within it is no reason to give up. Read
-        // off the policy, not a jittered delay, so the same answer is always retried or
-        // always not.
-        const maxRetryAfterMS = retryPolicyOptions
-          ? Math.max(
-              retryPolicyOptions.maxRetryAfterMS ?? 0,
-              (retryPolicyOptions.strategy === 'fixed'
-                ? retryPolicyOptions.delayMS
-                : retryPolicyOptions.minTimeoutMS) ?? 0,
-            )
-          : 0;
+        // Resolved when the policy was taken (see `snapshotRetryPolicyOptions`); each
+        // retry raises it to the delay the policy waits then anyway (see
+        // `unjitteredRetryDelayMS`).
+        const maxRetryAfterMS = retryPolicyOptions?.maxRetryAfterMS ?? 0;
 
         // --- Main request + redirect loop ---
         //
@@ -3881,7 +3872,9 @@ export class BaseHTTPClient {
                 )
               : undefined;
           const isRetryAfterTooLong =
-            retryAfterMS !== undefined && retryAfterMS > maxRetryAfterMS;
+            retryAfterMS !== undefined &&
+            retryAfterMS >
+              Math.max(maxRetryAfterMS, unjitteredRetryDelayMS(policy));
           const shouldRetry = decision.shouldRetry && !isRetryAfterTooLong;
           const delayMS =
             retryAfterMS === undefined
@@ -5877,6 +5870,30 @@ function adapterRequestBody(
   }
 
   return (cloneBodyValue(body) as AttemptRequest['body']) ?? null;
+}
+
+/**
+ * The delay `policy` waits before the retry it has just decided on, without its jitter: a
+ * fixed policy's `delayMS`, an exponential one's backoff for that retry - `minTimeoutMS`
+ * on the first, below which no jitter takes it. A `Retry-After` within it is no reason
+ * to give up, since the client waits about that long anyway, and read without the
+ * jitter the same answer on the same retry is always retried or always not.
+ */
+function unjitteredRetryDelayMS(policy: RetryPolicy): number {
+  const info = policy.policyInfo;
+
+  if (info.strategy === 'fixed') {
+    return info.delayMS;
+  }
+
+  return calculateExponentialDelay({
+    retryCount: policy.retryCount,
+    minTimeoutMS: info.minTimeoutMS,
+    maxTimeoutMS: info.maxTimeoutMS,
+    factor: info.factor,
+    dispersion: 0,
+    randomFn: () => 0,
+  });
 }
 
 /**

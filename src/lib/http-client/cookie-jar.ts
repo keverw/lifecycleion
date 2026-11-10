@@ -4,6 +4,7 @@ import {
   fieldNames,
 } from '../internal/known-fields';
 import { MAX_COOKIE_LIFETIME_SECONDS } from './consts';
+import { holdsCopiedIndex } from '../internal/array-indices';
 import { toASCII } from 'tr46';
 import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
 import { describeValue } from '../internal/describe-value';
@@ -1137,7 +1138,7 @@ export class CookieJar {
       let entry: unknown;
 
       try {
-        entry = Object.hasOwn(cookies, index) ? cookies[index] : undefined;
+        entry = holdsCopiedIndex(cookies, index) ? cookies[index] : undefined;
       } catch {
         entry = undefined;
       }

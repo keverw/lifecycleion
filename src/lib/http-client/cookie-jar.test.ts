@@ -148,6 +148,30 @@ describe('CookieJar', () => {
   );
 
   describe('fromJSON cookie list', () => {
+    test('reads its cookies by `in`, not one `Object.hasOwn` per cookie', () => {
+      const source = new CookieJar();
+      source.setCookie({ name: 'a', value: '1', domain: 'example.com' });
+      source.setCookie({ name: 'b', value: '2', domain: 'example.com' });
+      const data = source.toJSON();
+      let ownChecks = 0;
+
+      jar.fromJSON({
+        ...data,
+        cookies: new Proxy(data.cookies, {
+          getOwnPropertyDescriptor: (target, key) => {
+            ownChecks++;
+            return Reflect.getOwnPropertyDescriptor(target, key);
+          },
+        }),
+      });
+
+      expect(ownChecks).toBe(0);
+      expect(jar.getAllCookies().map((cookie) => cookie.name)).toEqual([
+        'a',
+        'b',
+      ]);
+    });
+
     test("reads its own cookies whatever a Proxy's has trap answers", () => {
       const source = new CookieJar();
       source.setCookie({ name: 'id', value: '1', domain: 'example.com' });

@@ -21,8 +21,10 @@
  * optionally Content-Type), followed by a blank line, then the value.
  *
  * This module reads a form's entries once, then makes two passes over that read:
- *   Pass 1 — measureMultipartEntries (multipart-format.ts): count the exact byte length.
- *   Pass 2 — serializeMultipartFormData: write boundary + headers + value for each field.
+ *   Pass 1 — measureMultipartEntries (multipart-format.ts): format each part's headers
+ *            and count the exact byte length.
+ *   Pass 2 — serializeMultipartFormData: write boundary + those headers + value for each
+ *            field.
  *
  * Knowing the total size upfront lets us set an exact Content-Length header,
  * which makes upload progress length-computable (a real 0–100%) rather than
@@ -43,12 +45,8 @@ import { types } from 'node:util';
 import { plainBytesView } from '../../internal/binary-view';
 import { markNonRetryableAdapterError } from './adapter-error';
 import { formEntries } from './form-entries';
-import {
-  formatFieldName,
-  formatFilePartHeaders,
-  formatStringPart,
-  measureMultipartEntries,
-} from './multipart-format';
+import { measureMultipartEntries } from './multipart-format';
+import type { MeasuredMultipart } from './multipart-format';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 import {
@@ -102,10 +100,10 @@ export async function serializeMultipartFormData(
   // as a transport error and be retried for an idempotent method, failing identically
   // each time.
   // The entries read once, and both sized and written from that one read: a field the
-  // form gains or loses between the two passes changes neither. (Each part's headers are
-  // still formatted in both passes.)
+  // form gains or loses between the two passes changes neither. Each part's headers are
+  // formatted once too, in the sizing pass, and written as counted.
   let parts: Array<[string, FormDataEntryValue]>;
-  let measured: { totalSize: number; partSizes: number[] };
+  let measured: MeasuredMultipart;
 
   try {
     parts = [...formEntries(formData)];
@@ -114,7 +112,7 @@ export async function serializeMultipartFormData(
     throw sourceReadFailure(error);
   }
 
-  const { totalSize, partSizes } = measured;
+  const { totalSize, partSizes, partHeads } = measured;
   let partIndex = 0;
 
   // Servers need the boundary to parse the multipart body. We set an exact
@@ -125,20 +123,11 @@ export async function serializeMultipartFormData(
 
   let uploadedBytes = 0;
   const closingDelimiter = `--${boundary}--\r\n`;
-  // What the parts may take: the closing delimiter is always written last, so a part
-  // that reaches into its bytes is already more than was counted.
-  const closingBytes = Buffer.byteLength(closingDelimiter);
-  const partsBudget = totalSize - closingBytes;
-  // Refused writes name the bytes held for the closing delimiter too: a part refused for
-  // reaching into them names a total that is still within `Content-Length`.
-  const overrunMessage = (written: number, refused: number): string =>
-    `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(written)} bytes written and a further ${String(refused)} refused, with ${String(closingBytes)} kept for the closing delimiter`;
 
-  // The write itself, unchecked: through `write` below for a file part's bytes, through
-  // `writePartHead` for each part's head once it is held to `partsBudget` as a whole, and
-  // directly for the closing delimiter, which always fits - every part's write was held to
-  // `partsBudget`, so at least `closingBytes` remain.
-  const writeToRequest = (data: string | Buffer | Uint8Array): Promise<void> =>
+  // Every write: the boundary lines and part heads are those counted, and a file part's
+  // bytes are held to its measured size before they are written (see below), so the
+  // body comes to `totalSize` exactly.
+  const write = (data: string | Buffer | Uint8Array): Promise<void> =>
     // Bytes counted, and progress reported, only once the writable has accepted them: a
     // write the stream closed or errored under is rejected uncounted.
     writeChunkWithBackpressure(req, data, () => {
@@ -151,27 +140,7 @@ export async function serializeMultipartFormData(
       });
     });
 
-  // Every part's write is held to this before it is written, since bytes past the
-  // `Content-Length` already on the wire would be read by the server as the start of
-  // another message. Reached when a part's headers grew between the sizing pass and the
-  // write - a `name` getter that answers longer the second time - as the per-part check
-  // below is for a file that grew. Held to the parts' share of it, not the whole: a new
-  // part's `--boundary` line fits in the bytes kept for the closing delimiter, and would
-  // otherwise go out before its headers were refused.
-  const budgetRefusal = (byteLength: number): Error | undefined =>
-    uploadedBytes + byteLength > partsBudget
-      ? sourceMismatch(overrunMessage(uploadedBytes, byteLength))
-      : undefined;
-
-  const write = (data: string | Buffer | Uint8Array): Promise<void> => {
-    const refusal = budgetRefusal(Buffer.byteLength(data));
-    return refusal === undefined
-      ? writeToRequest(data)
-      : Promise.reject(refusal);
-  };
-
-  // A part's head - a string field's whole part, or a file part's headers - held to
-  // `partsBudget` as a whole, so none of it goes out when it does not fit, then written in
+  // A part's head - a string field's whole part, or a file part's headers - written in
   // the slices a file's bytes are (see below): a large text field written at once would
   // report no progress until all of it was accepted, and the stall watchdog, which reads
   // that progress, would destroy an upload the server had acked early and was still
@@ -179,14 +148,10 @@ export async function serializeMultipartFormData(
   // write, as any other part's write is.
   const writePartHead = (partHead: string): Promise<void> => {
     const bytes = Buffer.from(partHead);
-    const refusal = budgetRefusal(bytes.byteLength);
-    if (refusal !== undefined) {
-      return Promise.reject(refusal);
-    }
 
     return bytes.byteLength <= REQUEST_BODY_CHUNK_SIZE
-      ? writeToRequest(bytes)
-      : writeInSlices(bytes, writeToRequest);
+      ? write(bytes)
+      : writeInSlices(bytes, write);
   };
 
   // Bytes written slice by slice, each awaited; the slices are views, not copies. A stream
@@ -211,26 +176,10 @@ export async function serializeMultipartFormData(
     }
   };
 
-  // The entries the sizing pass read; each part's headers are formatted again, so a
-  // getter that answers differently now is caught against the measured sizes below.
-  for (const [name, value] of parts) {
+  // The entries the sizing pass read, each written under the head it formatted.
+  for (const [index, [, value]] of parts.entries()) {
     if (req.destroyed) {
       break;
-    }
-
-    // A string field's whole part, or a file part's headers. Read again here, so guarded
-    // again: a getter that answered the sizing pass can still throw on this one.
-    let partHead: string;
-
-    try {
-      const fieldName = formatFieldName(name);
-
-      partHead =
-        typeof value === 'string'
-          ? formatStringPart(fieldName, value)
-          : formatFilePartHeaders(fieldName, value);
-    } catch (error) {
-      throw sourceReadFailure(error);
     }
 
     // Start this part with its boundary delimiter.
@@ -238,7 +187,7 @@ export async function serializeMultipartFormData(
 
     // Simple field: one header, blank line, then the field value. File/blob field:
     // multipart headers first, then the binary payload below.
-    await writePartHead(partHead);
+    await writePartHead(partHeads[index]);
 
     if (typeof value !== 'string') {
       // Compare against the sizing pass, even if the source's size later changes.
@@ -349,9 +298,9 @@ export async function serializeMultipartFormData(
           // the sizing pass would otherwise have its surplus on the wire past a
           // `Content-Length` the server reads as the start of the next request, and no
           // later check could take those bytes back. Held to this part's own measured
-          // size, so the message names the part that outgrew it; `write` holds the
-          // chunk to `partsBudget` as well. The shortfall check below the loop has no
-          // equivalent problem - bytes that were never written need no undoing.
+          // size, so the message names the part that outgrew it. The part's shortfall
+          // check, after the loop, has no equivalent problem - bytes that were never
+          // written need no undoing.
           if (partBytes + bytes.byteLength > partSize) {
             void cancelReaderQuietly(reader);
 
@@ -410,22 +359,8 @@ export async function serializeMultipartFormData(
     throw closedBeforeWritten();
   }
 
-  // Bytes, not just `req.destroyed`, matching what `writeRequestBodyChunked` checks. Each
-  // part's own shortfall is refused where it is read, so what reaches here is a part whose
-  // headers shrank after the sizing pass: `Content-Length` promised more, and Node does not
-  // check a `ClientRequest` for a shortfall, so the server would wait for bytes that never
-  // arrive. Refused before the closing delimiter, which would tell it the form had ended.
-  //
-  // Only a shortfall reaches here. An overrun cannot: every part's write is refused before
-  // it would pass `partsBudget`, so the closing delimiter lands at most at `totalSize`.
-  if (uploadedBytes + closingBytes < totalSize) {
-    throw sourceMismatch(
-      `Request body source produced fewer bytes than its Content-Length: ${String(uploadedBytes + closingBytes)} of ${String(totalSize)}`,
-    );
-  }
-
   // Closing delimiter that tells the server there are no more parts.
-  await writeToRequest(closingDelimiter);
+  await write(closingDelimiter);
 }
 
 async function cancelReaderQuietly(

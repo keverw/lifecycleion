@@ -64,14 +64,14 @@ export function sanitizeContentType(raw: string): string {
   return raw.replace(/\r\n|\r|\n/g, '');
 }
 
-/** A string part, whole - its Content-Disposition, value and trailing CRLF - as both passes write it. */
+/** A string part, whole - its Content-Disposition, value and trailing CRLF - as it is sent. */
 export function formatStringPart(fieldName: string, value: string): string {
   return `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`;
 }
 
 /**
  * A file part's headers - its Content-Disposition with the filename, and its Content-Type -
- * as both passes write them. Reads the caller's `name` and `type`, so it can throw: a
+ * as they are sent. Reads the caller's `name` and `type`, so it can throw: a
  * getter that throws, or a `type` that is not a string, is refused with a `TypeError` the
  * callers turn into {@link sourceReadFailure}.
  */
@@ -94,12 +94,24 @@ export function formatFilePartHeaders(
   return `Content-Disposition: form-data; name="${fieldName}"; ${formatFilename(filename)}\r\nContent-Type: ${contentType}\r\n\r\n`;
 }
 
+/** A form's multipart body as `measureMultipartEntries` sizes it. */
+export interface MeasuredMultipart {
+  /** The whole body's bytes, closing delimiter included. */
+  totalSize: number;
+  /** Each file part's payload bytes, in order. */
+  partSizes: number[];
+  /** Each part's head, in order: a string field's whole part, or a file part's headers. */
+  partHeads: string[];
+}
+
 /**
  * Returns the exact byte length of the multipart body for a form's entries, already read,
- * and a boundary — without writing anything.
+ * and a boundary — without writing anything — with each file part's size and each part's
+ * head as formatted: a string field's whole part, or a file part's headers.
  *
- * This mirrors the exact structure `serializeMultipartFormData` (in `multipart.ts`)
- * writes, so the two must stay in sync: both build each part from the helpers above.
+ * `serializeMultipartFormData` (in `multipart.ts`) writes the heads and sizes returned
+ * here, so a caller's `name` or `type` getter is read once, and the headers sent are the
+ * ones counted.
  *
  * Why this exists: Node can stream the body without precomputing it, but then
  * upload progress would be indeterminate. By counting the exact bytes first,
@@ -110,9 +122,10 @@ export function formatFilePartHeaders(
 export function measureMultipartEntries(
   entries: Iterable<[string, FormDataEntryValue]>,
   boundary: string,
-): { totalSize: number; partSizes: number[] } {
+): MeasuredMultipart {
   let size = 0;
   const partSizes: number[] = [];
+  const partHeads: string[] = [];
 
   for (const [name, value] of entries) {
     const fieldName = formatFieldName(name);
@@ -126,7 +139,9 @@ export function measureMultipartEntries(
       //   blank line
       //   raw string value
       //   trailing CRLF before the next boundary
-      size += byteLength(formatStringPart(fieldName, value));
+      const partHead = formatStringPart(fieldName, value);
+      partHeads.push(partHead);
+      size += byteLength(partHead);
     } else {
       // File/blob part wire format:
       //   Content-Disposition header (with filename)
@@ -134,7 +149,9 @@ export function measureMultipartEntries(
       //   blank line
       //   raw file bytes
       //   trailing CRLF before the next boundary
-      size += byteLength(formatFilePartHeaders(fieldName, value));
+      const partHead = formatFilePartHeaders(fieldName, value);
+      partHeads.push(partHead);
+      size += byteLength(partHead);
       // Blob.size is already the exact byte length of the binary payload - for a real
       // `Blob`. A subclass's getter can answer anything, and a non-integer here would go
       // out as the `Content-Length`.
@@ -154,5 +171,5 @@ export function measureMultipartEntries(
 
   // Final terminating boundary line — note the extra trailing `--`.
   size += byteLength(`--${boundary}--\r\n`);
-  return { totalSize: size, partSizes };
+  return { totalSize: size, partSizes, partHeads };
 }

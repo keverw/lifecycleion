@@ -49,8 +49,9 @@ const ASCTIME_DATE = new RegExp(
  * How long a `Retry-After` value asks the client to wait, in milliseconds from `now` (an
  * epoch time), or `undefined` for a value that is neither form RFC 9110 defines: a whole
  * number of seconds (`120`), or an HTTP-date in any of its three forms, which a recipient
- * must accept - read as GMT, case-sensitively, as written. A date already past asks for
- * no wait (`0`). Trimmed of HTTP whitespace only. Anything else - a fraction, a sign, a
+ * must accept - read as GMT, case-sensitively, as written, its day name not checked
+ * against the date, as browsers' and most HTTP libraries' parsers do not check it. A
+ * date already past asks for no wait (`0`). Trimmed of HTTP whitespace only. Anything else - a fraction, a sign, a
  * date in another format or spaced otherwise - is unreadable, and the retry policy's own
  * delay is used.
  *

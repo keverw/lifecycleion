@@ -147,8 +147,8 @@ test('on Node, a file part keeps its name, and a form copy keeps a File subclass
         assert.equal(answer.status, 200);
         assert.ok(answer.body.includes('filename="a/b.txt"'), answer.body);
         assert.ok(answer.body.includes('OVERRIDE'), answer.body);
-        // The sizing pass and the write, and none for the copies.
-        assert.equal(nameReads, 2);
+        // The sizing pass alone, and none for the copies.
+        assert.equal(nameReads, 1);
         process.exit(0);
       `,
     );

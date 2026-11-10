@@ -1433,8 +1433,7 @@ test('a field appended mid-upload is not sent: the form is read once, before it 
 });
 
 test('a File that outgrows its measured size is refused naming that part', async () => {
-  // Claims two bytes; its stream yields six. Nothing else outgrew the body, so the message
-  // names the part's size, not the body's `Content-Length`.
+  // Claims two bytes; its stream yields six.
   const longFile = {
     name: 'long.bin',
     type: 'application/octet-stream',
@@ -1464,50 +1463,27 @@ test('a File that outgrows its measured size is refused naming that part', async
   expect((failure as Error).message).toContain(
     'part expected 2 bytes, produced more - 0 written and a further 6 refused',
   );
-  expect((failure as Error).message).not.toContain(
-    'more than its Content-Length',
-  );
   expect(getBody().includes(Buffer.from([1, 2, 3]))).toBe(false);
 });
 
-test('a chunk within its part but past the body total is refused before it is written', async () => {
-  let wasGrownPartCancelled = false;
-  // The grown part's stream stays open after its chunk, so only a cancel ends it.
-  const blobPart = (name: string, bytes: number[], isLeftOpen = false) => ({
-    name,
-    type: 'application/octet-stream',
-    size: bytes.length,
-    stream: () =>
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(new Uint8Array(bytes));
-          if (!isLeftOpen) {
-            controller.close();
-          }
-        },
-        cancel() {
-          if (isLeftOpen) {
-            wasGrownPartCancelled = true;
-          }
-        },
-      }),
-  });
-  // The second part's filename grows by three bytes once the first part's bytes go out:
-  // its name is read when it is sized and again when it is written. Its headers still fit
-  // in the bytes its payload was measured at; its payload, the right size for its part,
-  // does not.
+test('a part name that answers differently once written is sent as it was counted', async () => {
+  // The second part's filename would read three bytes longer once the first part's bytes
+  // go out: its headers are formatted when it is sized, and written as they were.
   let isGrown = false;
-  const grown = blobPart('', [7, 7, 7, 7], true);
-  Object.defineProperty(grown, 'name', {
-    get: () => (isGrown ? 'bbbb' : 'b'),
-  });
+  const grown = {
+    get name() {
+      return isGrown ? 'bbbb' : 'b';
+    },
+    type: 'application/octet-stream',
+    size: 4,
+    stream: () => new Blob([new Uint8Array([7, 7, 7, 7])]).stream(),
+  };
   const parts: [string, unknown][] = [
-    ['first', blobPart('a', [1, 2])],
+    ['first', new File([new Uint8Array([1, 2])], 'a')],
     ['second', grown],
   ];
   const fd = scriptFormEntries(new FormData(), () => parts[Symbol.iterator]());
-  const { req, getBody } = makeCapture();
-  const boundary = generateMultipartBoundary();
+  const { req, headers, getBody } = makeCapture();
   const write = req.write.bind(req);
   req.write = (data, callback) => {
     if (Buffer.from(data as Uint8Array).equals(Buffer.from([1, 2]))) {
@@ -1517,18 +1493,12 @@ test('a chunk within its part but past the body total is refused before it is wr
     return write(data, callback);
   };
 
-  let failure: unknown;
-  try {
-    await serializeMultipartFormData(fd, req, boundary);
-  } catch (error) {
-    failure = error;
-  }
+  await serializeMultipartFormData(fd, req, generateMultipartBoundary());
 
-  expect(failure).toBeInstanceOf(Error);
-  expect((failure as Error).message).toContain('more than its Content-Length');
-  expect(getBody().toString()).toContain('filename="bbbb"');
-  expect(getBody().includes(Buffer.from([7]))).toBe(false);
-  expect(wasGrownPartCancelled).toBe(true);
+  expect(isGrown).toBe(true);
+  expect(getBody().toString()).toContain('filename="b"');
+  expect(getBody().toString()).not.toContain('filename="bbbb"');
+  expect(getBody().byteLength).toBe(Number(headers['content-length']));
 });
 
 describe('caller values the writer cannot use are refused as non-retryable', () => {
@@ -2144,7 +2114,7 @@ test('a form whose entries would change on a second read is sent as its one read
   expect(getBody().toString()).toEndWith(`--${boundary}--\r\n`);
 });
 
-test('a file part name is read once each time it is formatted', async () => {
+test('a file part name is read once, by the sizing pass', async () => {
   let reads = 0;
   const fd = scriptFormEntries(new FormData(), function* () {
     yield [
@@ -2166,6 +2136,6 @@ test('a file part name is read once each time it is formatted', async () => {
 
   await serializeMultipartFormData(fd, req, generateMultipartBoundary());
 
-  // The sizing pass, and the write.
-  expect(reads).toBe(2);
+  // The sizing pass alone: the write sends the headers it formatted.
+  expect(reads).toBe(1);
 });

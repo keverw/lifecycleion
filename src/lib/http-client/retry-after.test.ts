@@ -102,6 +102,17 @@ describe('parseRetryAfterMS', () => {
     ).toBeUndefined();
   });
 
+  test('a day name that does not match the date is not checked', () => {
+    // 8 Nov 2026 is a Sunday.
+    expect(parseRetryAfterMS('Wed, 08 Nov 2026 12:00:30 GMT', NOW)).toBe(
+      30_000,
+    );
+    expect(parseRetryAfterMS('Wednesday, 08-Nov-26 12:00:30 GMT', NOW)).toBe(
+      30_000,
+    );
+    expect(parseRetryAfterMS('Wed Nov  8 12:00:30 2026', NOW)).toBe(30_000);
+  });
+
   test('a four-digit year below 100 is that year, not 19xx', () => {
     // Read as 1950 it would be past from a `now` of 1900; as 0050 it is past either way.
     const in1900 = Date.UTC(1900, 0, 1);
@@ -297,6 +308,53 @@ describe('HTTPClient and Retry-After', () => {
 
     expect(event.willRetry).toBe(true);
     expect(event.nextRetryDelayMS).toBe(1000);
+  });
+
+  test("a Retry-After past the cap but within a later retry's backoff is retried", async () => {
+    let callCount = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> => {
+        callCount++;
+        // A 503 with no Retry-After, then one asking for 1 s: by the second retry the
+        // policy's own backoff is 2 s, over the 1 s asked for.
+        const headers: Record<string, string> = {};
+        if (callCount > 1) {
+          headers['retry-after'] = '1';
+        }
+
+        return Promise.resolve({ status: 503, headers, body: null });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://a.test',
+      retryPolicy: {
+        strategy: 'exponential',
+        maxRetryAttempts: 3,
+        minTimeoutMS: 10,
+        maxTimeoutMS: 5000,
+        factor: 200,
+        dispersion: 0,
+        maxRetryAfterMS: 0,
+      },
+    });
+    const builder = client.get('/x');
+    const events: AttemptEndEvent[] = [];
+
+    await builder
+      .onAttemptEnd((event) => {
+        events.push(event);
+        if (events.length === 2) {
+          builder.cancel();
+        }
+      })
+      .send();
+
+    expect(events[0].nextRetryDelayMS).toBe(10);
+    expect(events[1].willRetry).toBe(true);
+    expect(events[1].retrySuppressedReason).toBeUndefined();
+    expect(events[1].nextRetryDelayMS).toBe(2000);
   });
 
   test("the same answer meets the same cap whatever the exponential policy's jitter", async () => {
