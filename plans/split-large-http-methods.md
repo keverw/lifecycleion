@@ -6,11 +6,11 @@ Status: not started. Do it after PR #34 and PR #35 have merged, on a new branch 
 
 Three methods hold most of the HTTP client's control flow. Sizes are as of PR #34's head, with main's for comparison:
 
-| Method | File | Main | PR #34 |
-| --- | --- | --- | --- |
-| `NodeAdapter.send` | `src/lib/http-client/adapters/node-adapter.ts` (from line 516) | ~1,450 lines | ~2,640 lines |
-| `HTTPClient._dispatchRequestAttempts` | `src/lib/http-client/http-client.ts` (from line 2529) | ~1,170 lines | ~2,150 lines |
-| `HTTPClient._execute` | `src/lib/http-client/http-client.ts` (from line 823) | ~980 lines | ~1,560 lines |
+| Method                                | File                                                           | Main         | PR #34       |
+| ------------------------------------- | -------------------------------------------------------------- | ------------ | ------------ |
+| `NodeAdapter.send`                    | `src/lib/http-client/adapters/node-adapter.ts` (from line 516) | ~1,450 lines | ~2,640 lines |
+| `HTTPClient._dispatchRequestAttempts` | `src/lib/http-client/http-client.ts` (from line 2529)          | ~1,170 lines | ~2,150 lines |
+| `HTTPClient._execute`                 | `src/lib/http-client/http-client.ts` (from line 823)           | ~980 lines   | ~1,560 lines |
 
 Each coordinates dozens of mutable flags captured by closures (`didReceiveResponse`, `isWritingBody`, `isAbandoned`, `didAdapterResolve`, `isStreamEndedFirst`, and more). Which combinations of them are valid is written down only in comments. The `catch` block of `_dispatchRequestAttempts` alone is about 600 lines of special cases whose order matters.
 
@@ -36,8 +36,8 @@ Review rounds on PR #34 flagged the size twice. Both times it was left alone as 
    - body writing and upload settling (the stall watchdog, `requestBodySettled`);
    - response reading and decoding (buffered and `streamResponse`);
    - teardown (abort, timeout, early answer).
-3. **`_dispatchRequestAttempts`.** Turn the ordered special cases of its `catch` block into named handlers, tried in the same order, and move the retry decision (`Retry-After` included) into its own function.
-4. **`_execute`.** Pull out the redirect hop handling and the interceptor and observer phases.
+3. **`_dispatchRequestAttempts`.** Turn the ordered special cases of its `catch` block into named handlers, tried in the same order, and move the retry decision (`Retry-After` included) into its own function. Retry scheduling is written twice, once for an answered attempt and once for a thrown one: each computes `nextRetryAt`, sets the tracker's three callbacks, emits `onAttemptEnd`, runs the retry-phase observers, waits out the rest of the delay and calls `settleUploadBeforeNextDispatch`. Make it one function both paths call, for example `scheduleRetry(delayMS, runObservers, uploadOutcome)`.
+4. **`_execute`.** Pull out the redirect hop handling and the interceptor and observer phases. The redirect loop ends an unsent hop in about six places (`cancelledBeforeFollowing`, the sanitize failures before and after the interceptors, the interceptor failure, the unusable `Location`, the upload wait). Each builds its observer request, response, `undispatchedRedirect` and error code by hand, and all must agree that `requestURL` is the last `redirectHistory` entry and that a cross-origin URL loses its userinfo. Review fixes have had to patch these one at a time. One helper, for example `endUnsentHop({ request, requestURL, errorCode, cause })`, should own that rule.
 5. **One step per commit**, smallest risk first. Each step keeps the full suite green on Node and Bun and changes no test, except where a test reached into a closure that no longer exists.
 
 ## Tests
