@@ -11,7 +11,11 @@ import {
   assertNumberOption,
   resolveTimeoutMS,
 } from '../../internal/timer-limits';
-import { calculateExponentialDelays, getMostCommonError } from './utils';
+import {
+  calculateExponentialDelays,
+  DEFAULT_EXPONENTIAL_MAX_TIMEOUT_MS,
+  getMostCommonError,
+} from './utils';
 
 interface CurrentState {
   wasInitialAttemptTaken: boolean; // Represents if the initial attempt was taken or not since if errors is empty, it should return 1
@@ -164,7 +168,6 @@ export class RetryPolicy {
     const DEFAULT_MAX_RETRY_ATTEMPTS = 10;
     const DEFAULT_FACTOR = 1.5;
     const DEFAULT_MIN_TIMEOUT_MS = 1000;
-    const DEFAULT_MAX_TIMEOUT_MS = 30000;
     const DEFAULT_DISPERSION = 0.1;
 
     // Duration inputs are validated before clamping. Zero becomes the 1ms minimum, and
@@ -244,7 +247,7 @@ export class RetryPolicy {
       );
       const maxTimeoutMS = duration(
         requestedMaxTimeoutMS,
-        DEFAULT_MAX_TIMEOUT_MS,
+        DEFAULT_EXPONENTIAL_MAX_TIMEOUT_MS,
         'Retry maxTimeoutMS',
       );
 

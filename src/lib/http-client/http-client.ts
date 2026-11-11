@@ -1821,6 +1821,12 @@ export class BaseHTTPClient {
               // GET's body as it replays any other method's.
               body: isBodyDropped ? undefined : sentBody.value,
             };
+            // The headers describing a body go with the method rewritten to GET, as fetch
+            // drops them, or with a body a 303 left behind; a bodiless GET or HEAD sent
+            // to a 303's target keeps them, its method unchanged.
+            const isHopBodyDropped =
+              redirectMethod !== attemptResult.sentRequest.method ||
+              (isBodyDropped && hasRequestBody(sentBody.value));
             let redirectRequest: ResolvedRequest;
             try {
               redirectRequest = this._sanitizeRedirectRequest(
@@ -1828,13 +1834,18 @@ export class BaseHTTPClient {
                 {
                   fromURL: hopFromURL,
                   cookieJar: jar ?? undefined,
+                  isBodyDropped: isHopBodyDropped,
                 },
               );
             } catch (error) {
               // The target, as the other failures before the hop went out report it - to
               // the error observers too, so a host filter agrees with the response.
               observerRequest = this._bestEffortAttemptRequestFromPending(
-                this._unsentRedirectRequest(pendingRedirectRequest, hopFromURL),
+                this._unsentRedirectRequest(
+                  pendingRedirectRequest,
+                  hopFromURL,
+                  isHopBodyDropped,
+                ),
                 attemptLimits,
                 requestID,
               );
@@ -1845,6 +1856,16 @@ export class BaseHTTPClient {
               break;
             }
             const redirectTargetURL = redirectRequest.requestURL;
+            // The URL a request the interceptors returned is compared with to tell whether
+            // they moved the hop to another origin: the target as it was before they ran,
+            // or `url` itself where they moved an `http:` target to `https:` on the same
+            // host and port, as the retry phase reads one (see `isExactHTTPSUpgrade`) - the
+            // safer choice is no third host, and must not cost the credential added for it.
+            // Read the same way wherever such a request is sent or reported.
+            const interceptedFromURL = (url: string): string =>
+              isExactHTTPSUpgrade(redirectTargetURL, url)
+                ? url
+                : redirectTargetURL;
 
             // Run redirect-phase request interceptors so they can update headers
             // for the new target (e.g. refresh auth tokens). Retry-phase
@@ -1940,7 +1961,7 @@ export class BaseHTTPClient {
                   redirectURL,
                 );
                 const failedRequestURL = isCrossOrigin(
-                  redirectTargetURL,
+                  interceptedFromURL(readFailedURL),
                   readFailedURL,
                 )
                   ? stripURLCredentials(readFailedURL)
@@ -2046,34 +2067,37 @@ export class BaseHTTPClient {
               break;
             }
 
-            // As for the target before the interceptors ran, above.
+            // As for the target before the interceptors ran, above. A body the hop carried
+            // and the interceptors' request sends nothing of - none, or one they emptied, by
+            // the rule a retry on a cross-origin hop reads one by (see `sendsRequestBody`) -
+            // was dropped by them, and goes with the headers that describe it, as a hop
+            // rewritten to `GET` drops them. Read inside the `try`, as a body the reads
+            // refuse fails the hop as the sanitizing does.
+            let isBodyDroppedByInterceptors = false;
             let sanitizedRedirectRequest: ResolvedRequest;
             try {
+              isBodyDroppedByInterceptors =
+                sendsRequestBody(redirectRequest.body) &&
+                !sendsRequestBody(redirectEnd.request.body);
               sanitizedRedirectRequest = this._sanitizeRedirectRequest(
                 redirectEnd.request,
                 {
                   // fromURL is the redirect target URL (what the interceptor received).
-                  // This sanitize only strips headers if the interceptor rewrote the
-                  // URL to a third host — in that case from=redirectTarget, to=thirdHost
-                  // is cross-origin and the strip fires correctly.
+                  // This sanitize strips the cross-origin headers only if the interceptor
+                  // rewrote the URL to a third host — in that case from=redirectTarget,
+                  // to=thirdHost is cross-origin and the strip fires correctly - and the
+                  // headers describing a body only if the interceptors dropped it.
 
                   // If the interceptor kept the URL (normal case), from and to are the
-                  // same origin and nothing is stripped, preserving any headers the
+                  // same origin and nothing else is stripped, preserving any headers the
                   // interceptor added (e.g. Authorization for the redirect target).
                   //
                   // The target as it was before the interceptors ran, from the hop's own
                   // request, of which they were handed a copy: compared with what they
-                  // returned, never with itself. Read as upgraded where the interceptor
-                  // moved an `http:` target to `https:` on the same host and port, as
-                  // the retry phase reads one (see `isExactHTTPSUpgrade`): the safer choice is
-                  // no third host, and must not cost the credential it added for it.
-                  fromURL: isExactHTTPSUpgrade(
-                    redirectTargetURL,
-                    redirectEnd.request.requestURL,
-                  )
-                    ? redirectEnd.request.requestURL
-                    : redirectTargetURL,
+                  // returned, never with itself (see `interceptedFromURL`).
+                  fromURL: interceptedFromURL(redirectEnd.request.requestURL),
                   cookieJar: jar ?? undefined,
+                  isBodyDropped: isBodyDroppedByInterceptors,
                 },
               );
             } catch (error) {
@@ -2082,7 +2106,8 @@ export class BaseHTTPClient {
               // without, as a hop that went out is recorded.
               const unsentRequest = this._unsentRedirectRequest(
                 redirectEnd.request,
-                redirectTargetURL,
+                interceptedFromURL(redirectEnd.request.requestURL),
+                isBodyDroppedByInterceptors,
               );
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 unsentRequest,
@@ -2409,11 +2434,13 @@ export class BaseHTTPClient {
   private _unsentRedirectRequest(
     request: ResolvedRequest,
     fromURL: string,
+    isBodyDropped: boolean,
   ): ResolvedRequest {
     try {
       const unsent = this._sanitizeRedirectRequest(request, {
         fromURL,
         cookieJar: null,
+        isBodyDropped,
       });
       delete unsent.headers.cookie;
       return unsent;
@@ -2433,9 +2460,14 @@ export class BaseHTTPClient {
     params: {
       fromURL: string;
       cookieJar?: CookieJar | null;
+      /**
+       * Whether the hop no longer carries the body the request before it did: its
+       * headers describing a body (`BODY_DESCRIBING_HEADERS`) are dropped with it.
+       */
+      isBodyDropped: boolean;
     },
   ): ResolvedRequest {
-    const { fromURL, cookieJar } = params;
+    const { fromURL, cookieJar, isBodyDropped } = params;
     const isCrossOriginHop = isCrossOrigin(fromURL, request.requestURL);
 
     // Credentials in the target URL itself, stripped on the same rule `Authorization` is.
@@ -2468,7 +2500,7 @@ export class BaseHTTPClient {
       //
       // `content-encoding` is kept with them: it describes the body a 307/308 replays,
       // not the caller, and that body arrives unreadable without it. It is dropped
-      // below with the body when the hop does not carry one.
+      // below with the body when the hop drops one.
       //
       // `range` and the conditional headers are kept as well: they say which part or
       // version of the resource is wanted, not who is asking, and a resumed download sent
@@ -2493,13 +2525,10 @@ export class BaseHTTPClient {
       headers = copyHeaderRecord(request.headers);
     }
 
-    if (
-      (request.method === 'GET' || request.method === 'HEAD') &&
-      !hasRequestBody(request.body)
-    ) {
-      // Drop body-related headers when the hop dropped the body: a method rewritten to
-      // GET, or a 303, which leaves a HEAD a HEAD. A 307/308 GET that replays its body
-      // keeps them.
+    if (isBodyDropped) {
+      // Dropped with the body, as fetch drops them when a redirect rewrites the method to
+      // GET. A hop that carries the body it had - a 307/308 replay, or a GET or HEAD that
+      // had none - keeps them, as fetch keeps a bodiless GET's `Content-Type`.
       for (const key of Object.keys(headers)) {
         if (BODY_DESCRIBING_HEADERS.has(lowerCaseHeaderName(key))) {
           delete headers[key];
@@ -3881,6 +3910,7 @@ export class BaseHTTPClient {
               ? parseRetryAfterMS(
                   scalarHeader(adapterResponse.headers, 'retry-after'),
                   Date.now(),
+                  scalarHeader(adapterResponse.headers, 'date'),
                 )
               : undefined;
           const isRetryAfterTooLong =

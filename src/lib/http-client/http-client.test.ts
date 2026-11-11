@@ -7934,6 +7934,127 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(observerRequestURLs).toEqual([reported]);
   });
 
+  test("a bodiless GET's redirect keeps the headers describing a body, which a POST rewritten to GET drops", async () => {
+    const sent: Array<{ method: string; headers: Record<string, unknown> }> =
+      [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sent.push({ method: request.method, headers: request.headers });
+        return Promise.resolve<AdapterResponse>(
+          request.requestURL.endsWith('/x')
+            ? { status: 302, headers: { location: '/moved' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+      defaultHeaders: {
+        'content-type': 'application/vnd.api+json',
+        'content-language': 'en',
+      },
+    });
+    const describing = (headers: Record<string, unknown>) => ({
+      type: headers['content-type'],
+      language: headers['content-language'],
+    });
+
+    await client.get('/x').send();
+    await client.post('/x').text('hello').send();
+
+    expect(sent.map(({ method }) => method)).toEqual([
+      'GET',
+      'GET',
+      'POST',
+      'GET',
+    ]);
+    expect(describing(sent[1].headers)).toEqual({
+      type: 'application/vnd.api+json',
+      language: 'en',
+    });
+    expect(describing(sent[3].headers)).toEqual({
+      type: undefined,
+      language: undefined,
+    });
+  });
+
+  test('a body a redirect-phase interceptor empties goes without the headers that describe it', async () => {
+    const sent: Array<{ body: unknown; headers: Record<string, unknown> }> = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sent.push({ body: request.body, headers: request.headers });
+        return Promise.resolve<AdapterResponse>(
+          request.requestURL.endsWith('/x')
+            ? { status: 307, headers: { location: '/moved' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+    });
+    client.addRequestInterceptor((request) => ({ ...request, body: '' }), {
+      phases: ['redirect'],
+    });
+
+    await client
+      .post('/x')
+      .headers({
+        'content-type': 'application/octet-stream',
+        'content-encoding': 'gzip',
+        'content-language': 'en',
+      })
+      .body(new TextEncoder().encode('hello'))
+      .send();
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0].headers['content-encoding']).toBe('gzip');
+    expect({
+      encoding: sent[1].headers['content-encoding'],
+      language: sent[1].headers['content-language'],
+    }).toEqual({ encoding: undefined, language: undefined });
+  });
+
+  test("a redirect-phase interceptor's https upgrade of a hop that then fails keeps the URL's userinfo, as a followed upgrade does", async () => {
+    const start = 'http://u:p@example.com/start';
+    const upgraded = 'https://u:p@example.com/target';
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve<AdapterResponse>(
+          request.requestURL === start
+            ? { status: 302, headers: { location: '/target' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        ),
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        requestURL: upgraded,
+        get headers(): Record<string, string> {
+          throw new Error('headers could not be read');
+        },
+      }),
+      { phases: ['redirect'] },
+    );
+
+    const builder = client.get(start);
+    const res = await builder.send();
+
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(res.redirectHistory).toEqual([upgraded]);
+    expect(res.requestURL).toBe(upgraded);
+  });
+
   test('redirect-phase interceptor cancel sets requestURL and redirectHistory to redirect target', async () => {
     const start = 'https://example.com/a';
     const target = 'https://example.com/b';

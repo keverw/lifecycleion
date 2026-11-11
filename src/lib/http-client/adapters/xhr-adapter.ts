@@ -320,24 +320,6 @@ export class XHRAdapter implements HTTPAdapter {
       let answeringURL = answeredURL;
 
       /**
-       * Whether `responseURL` is where the browser followed a redirect to. An upgrade the
-       * browser made itself is not one: it moves `answeringURL` to the `https:` form.
-       */
-      const isFollowedRedirect = (responseURL: string): boolean => {
-        if (responseURL === '') {
-          return false;
-        }
-
-        const comparison = compareResponseURL(responseURL, answeredURL);
-
-        if (comparison.kind === 'upgraded') {
-          answeringURL = comparison.upgradedURL;
-        }
-
-        return comparison.kind === 'redirected';
-      };
-
-      /**
        * The answer as the XHR has it now. A redirect the browser followed is told by its URL
        * alone, which is all it is reported by: its headers are the final page's, so they are
        * not read, and one that cannot be read does not lose the redirect.
@@ -348,9 +330,17 @@ export class XHRAdapter implements HTTPAdapter {
         const reportedURL: unknown = xhr.responseURL;
         const responseURL = typeof reportedURL === 'string' ? reportedURL : '';
 
-        const redirectURL = isFollowedRedirect(responseURL)
-          ? responseURL
-          : undefined;
+        // Where the browser followed a redirect to, if it did. An upgrade the browser
+        // made itself is not one: the `https:` form is what answered.
+        const comparison =
+          responseURL === ''
+            ? undefined
+            : compareResponseURL(responseURL, answeredURL);
+        if (comparison?.kind === 'upgraded') {
+          answeringURL = comparison.upgradedURL;
+        }
+        const redirectURL =
+          comparison?.kind === 'redirected' ? responseURL : undefined;
 
         return {
           status,

@@ -113,6 +113,58 @@ describe('parseRetryAfterMS', () => {
     expect(parseRetryAfterMS('Wed Nov  8 12:00:30 2026', NOW)).toBe(30_000);
   });
 
+  describe("an HTTP-date beside the response's Date", () => {
+    const retryAt = 'Sun, 08 Nov 2026 12:00:30 GMT';
+
+    test("is measured from the server's Date when the client's clock is behind", () => {
+      // The server's clock reads two minutes later than the client's.
+      expect(
+        parseRetryAfterMS(
+          'Sun, 08 Nov 2026 12:02:30 GMT',
+          NOW,
+          'Sun, 08 Nov 2026 12:02:00 GMT',
+        ),
+      ).toBe(30_000);
+    });
+
+    test("is measured from the client's clock for a cached answer's old Date", () => {
+      // Made an hour ago, when the server asked for 30 seconds more than it was then.
+      expect(
+        parseRetryAfterMS(retryAt, NOW, 'Sun, 08 Nov 2026 11:00:00 GMT'),
+      ).toBe(30_000);
+    });
+
+    test.each([
+      ['no Date', undefined],
+      ['an unreadable Date', 'yesterday'],
+      ['an empty Date', ''],
+    ])("is measured from the client's clock with %s", (_label, date) => {
+      expect(parseRetryAfterMS(retryAt, NOW, date)).toBe(30_000);
+    });
+
+    test('reads a repeated Date by its first value', () => {
+      expect(
+        parseRetryAfterMS(
+          'Sun, 08 Nov 2026 12:02:30 GMT',
+          NOW,
+          'Sun, 08 Nov 2026 12:02:00 GMT, Sun, 08 Nov 2026 11:00:00 GMT',
+        ),
+      ).toBe(30_000);
+    });
+
+    test('leaves a number of seconds as it is', () => {
+      expect(
+        parseRetryAfterMS('120', NOW, 'Sun, 08 Nov 2026 13:00:00 GMT'),
+      ).toBe(120_000);
+    });
+
+    test('asks for no wait when either clock has passed the date', () => {
+      expect(
+        parseRetryAfterMS(retryAt, NOW, 'Sun, 08 Nov 2026 12:01:00 GMT'),
+      ).toBe(0);
+    });
+  });
+
   test('a four-digit year below 100 is that year, not 19xx', () => {
     // Read as 1950 it would be past from a `now` of 1900; as 0050 it is past either way.
     const in1900 = Date.UTC(1900, 0, 1);
@@ -243,6 +295,47 @@ describe('HTTPClient and Retry-After', () => {
       expect(event.nextRetryDelayMS).toBe(expected);
     },
   );
+
+  test("an HTTP-date Retry-After is measured from the response's Date when the client's clock is behind the server's", async () => {
+    let calls = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> => {
+        calls++;
+        // The server's clock two minutes ahead, to the second, as an HTTP-date reads it.
+        const serverNow = Math.floor((Date.now() + 120_000) / 1000) * 1000;
+        return Promise.resolve<AdapterResponse>(
+          calls === 1
+            ? {
+                status: 503,
+                headers: {
+                  date: new Date(serverNow).toUTCString(),
+                  'retry-after': new Date(serverNow + 5000).toUTCString(),
+                },
+                body: null,
+              }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'https://api.test',
+      retryPolicy: fixed,
+    }).get('/x');
+    let firstEnd: AttemptEndEvent | undefined;
+
+    await builder
+      .onAttemptEnd((event) => {
+        firstEnd ??= event;
+        builder.cancel();
+      })
+      .send();
+
+    // From the client's clock it would be about 125 seconds, past the 30-second cap.
+    expect(firstEnd?.willRetry).toBe(true);
+    expect(firstEnd?.nextRetryDelayMS).toBe(5000);
+  });
 
   test('a Retry-After past the cap is not retried, and the answer is returned', async () => {
     const { client, calls } = clientAnswering(

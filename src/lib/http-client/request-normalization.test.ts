@@ -16680,7 +16680,7 @@ test('a GET body an interceptor returns is refused on FetchAdapter, though its t
   }
 });
 
-test('a 307 replay of a GET whose JSON body serializes to nothing drops the headers that describe a body', async () => {
+test('a 307 replay of a GET whose JSON body serializes to nothing keeps the headers that describe a body, as the first hop sent them', async () => {
   const sentHeaders: Array<Record<string, unknown>> = [];
   const client = new HTTPClient({
     adapter: {
@@ -16714,7 +16714,9 @@ test('a 307 replay of a GET whose JSON body serializes to nothing drops the head
     type: headers['content-type'],
     language: headers['content-language'],
   }));
-  expect(replayed[1]).toEqual({ type: undefined, language: undefined });
+  // Bodiless either way, so the replay goes as the first hop went, as fetch replays a GET.
+  expect(replayed[0]).toEqual({ type: 'application/json', language: 'en' });
+  expect(replayed[1]).toEqual({ type: 'application/json', language: 'en' });
   // A body that is sent is replayed with the headers that describe it.
   expect(replayed[3]).toEqual({ type: 'application/json', language: 'en' });
 });
@@ -16849,7 +16851,7 @@ test("an interceptor's GET body on FetchAdapter is judged by the copy that is se
   }
 });
 
-test('a 307 replay of a GET on FetchAdapter drops the headers that describe a body for an interceptor-passed JSON body that serializes to nothing', async () => {
+test('a 307 replay of a GET on FetchAdapter keeps the headers that describe a body for an interceptor-passed JSON body that serializes to nothing, as the first hop sent them', async () => {
   const { sent, restore } = spyOnScriptedFetch((url) =>
     url.pathname === '/start'
       ? new Response(null, { status: 307, headers: { location: '/next' } })
@@ -16871,10 +16873,12 @@ test('a 307 replay of a GET on FetchAdapter drops the headers that describe a bo
 
     expect(response.status).toBe(200);
     expect(sent.map((request) => request.body)).toEqual([null, null]);
-    expect({
-      type: sent[1].headers.get('content-type'),
-      language: sent[1].headers.get('content-language'),
-    }).toEqual({ type: null, language: null });
+    for (const request of sent) {
+      expect({
+        type: request.headers.get('content-type'),
+        language: request.headers.get('content-language'),
+      }).toEqual({ type: 'application/json', language: 'en' });
+    }
   } finally {
     restore();
   }

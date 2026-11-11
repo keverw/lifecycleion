@@ -10,6 +10,12 @@ import { clamp } from '../../clamp';
  */
 const DEFAULT_FALLBACK_DELAY_MS = 1000;
 
+/**
+ * The exponential strategy's `maxTimeoutMS` when a policy sets none. Not exported from the
+ * package; the HTTP client's default `Retry-After` limit reads it too.
+ */
+export const DEFAULT_EXPONENTIAL_MAX_TIMEOUT_MS = 30_000;
+
 interface ExponentialDelayParams {
   retryCount: number;
   minTimeoutMS: number;

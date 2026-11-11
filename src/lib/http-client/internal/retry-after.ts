@@ -62,30 +62,61 @@ const ASCTIME_DATE = new RegExp(
  * first value, whether or not the others agree with it. Told apart by the commas between
  * them: an IMF-fixdate or RFC 850 date holds one, after its day name, so it spans the
  * first two comma-separated pieces; a number of seconds or an asctime date the first.
+ *
+ * An HTTP-date is measured two ways when the response's `Date` header, read by its first
+ * value the same way, is an HTTP-date too: from `now`, the client's clock, and from that
+ * `Date`, the server's own clock, and the shorter wait is used. A client clock behind the
+ * server's makes the first too long, and a cache's stored answer, whose `Date` is the
+ * origin's from when it was made, the second, so the shorter is the closer in both. A
+ * client clock ahead of the server's makes the first too short, as it does when `now`
+ * alone is read, and a `Date` from another clock than the `Retry-After`'s - a proxy's
+ * written over the origin's - can make the second too short. Without a readable `Date`,
+ * it is measured from `now`.
  */
 export function parseRetryAfterMS(
   value: string | undefined,
   now: number,
+  responseDate?: string,
 ): number | undefined {
   if (value === undefined) {
     return undefined;
   }
 
-  const pieces = value.split(',');
-  const first = trimHTTPWhitespace(pieces[0]);
+  const first = trimHTTPWhitespace(value.split(',')[0]);
 
   if (/^\d+$/.test(first)) {
     return Number(first) * 1000;
   }
 
-  // Rejoined as it was written, so a date spaced otherwise than `Sun, 06 Nov ...` is not
-  // made into one that is.
-  const at =
+  const at = parseFirstHTTPDate(value, now);
+  if (at === undefined) {
+    return undefined;
+  }
+
+  const serverNow =
+    responseDate === undefined
+      ? undefined
+      : parseFirstHTTPDate(responseDate, now);
+  const wait =
+    serverNow === undefined ? at - now : Math.min(at - now, at - serverNow);
+
+  return Math.max(0, wait);
+}
+
+/**
+ * The epoch time the first value of `value` names, when it is an HTTP-date: told apart
+ * from the values after it by the commas between them, as `parseRetryAfterMS` reads them.
+ * Rejoined as it was written, so a date spaced otherwise than `Sun, 06 Nov ...` is not
+ * made into one that is.
+ */
+function parseFirstHTTPDate(value: string, now: number): number | undefined {
+  const pieces = value.split(',');
+
+  return (
     (pieces.length > 1
       ? parseHTTPDate(trimHTTPWhitespace(`${pieces[0]},${pieces[1]}`), now)
-      : undefined) ?? parseHTTPDate(first, now);
-
-  return at === undefined ? undefined : Math.max(0, at - now);
+      : undefined) ?? parseHTTPDate(trimHTTPWhitespace(pieces[0]), now)
+  );
 }
 
 /** The epoch time an HTTP-date names, or `undefined` when `text` is not one. */
