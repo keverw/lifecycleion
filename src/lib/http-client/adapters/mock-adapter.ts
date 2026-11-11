@@ -1308,6 +1308,14 @@ function readMockCookieOptions(
     }
     assertCookieText(text, `${position} ${attribute}`);
   }
+  // A `Path` that does not start with `/` is ignored by a cookie jar (RFC 6265 §5.2.4),
+  // which stores the cookie at the request's default path instead: a route mistake, as
+  // every other attribute's is.
+  if (typeof path === 'string' && !path.startsWith('/')) {
+    throw new TypeError(
+      `MockAdapter cookie ${position} path must start with '/'`,
+    );
+  }
   // The typed attributes, held to their types: a string in `sameSite` or `maxAge` would
   // be written into the line as it is, and either flag would be read by truthiness.
   if (

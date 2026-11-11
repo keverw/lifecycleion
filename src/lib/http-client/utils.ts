@@ -1597,7 +1597,12 @@ export function readHostPattern(pattern: string): HostPattern {
   }
 
   if (pattern.includes('*')) {
-    const compiled = compileWildcardPattern(pattern);
+    // A filter picks which of the caller's own requests a callback sees and trusts no
+    // host, so a tail a CORS allowlist refuses - `*.internal`, `*.com` - matches what it
+    // names, as a `NO_PROXY` suffix or a request mock's host pattern does.
+    const compiled = compileWildcardPattern(pattern, {
+      allowSuffixTails: true,
+    });
     if (compiled === undefined) {
       return NO_HOST;
     }

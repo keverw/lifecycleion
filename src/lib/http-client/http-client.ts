@@ -1821,13 +1821,14 @@ export class BaseHTTPClient {
               // GET's body as it replays any other method's.
               body: isBodyDropped ? undefined : sentBody.value,
             };
-            // The headers describing a body go with the method rewritten to GET, as fetch
-            // drops them, or with a body a 303 left behind that sent something (see
-            // `sendsRequestBody`, the rule the interceptors' drop is read by below); a GET
-            // or HEAD that sent nothing keeps them on a 303, its method unchanged.
-            const isHopBodyDropped =
-              redirectMethod !== attemptResult.sentRequest.method ||
-              (isBodyDropped && sendsRequestBody(sentBody.value));
+            // See `dropsBodyHeaders`, which the interceptors' request is read by below too.
+            const isHopBodyDropped = dropsBodyHeaders(
+              {
+                method: attemptResult.sentRequest.method,
+                body: sentBody.value,
+              },
+              pendingRedirectRequest,
+            );
             let redirectRequest: ResolvedRequest;
             try {
               redirectRequest = this._sanitizeRedirectRequest(
@@ -2068,22 +2069,16 @@ export class BaseHTTPClient {
               break;
             }
 
-            // As for the target before the interceptors ran, above. A body the hop carried
-            // and the interceptors' request sends nothing of - none, or one they emptied, by
-            // the rule a retry on a cross-origin hop reads one by (see `sendsRequestBody`) -
-            // was dropped by them, and goes with the headers that describe it, as a hop
-            // rewritten to `GET` drops them - and so does a method they rewrote to `GET` or
-            // `HEAD`, as the server's rewrite does. Read inside the `try`, as a body the
-            // reads refuse fails the hop as the sanitizing does.
+            // As for the target before the interceptors ran, above, and by the same rule
+            // (see `dropsBodyHeaders`). Read inside the `try`, as a body the reads refuse
+            // fails the hop as the sanitizing does.
             let isBodyDroppedByInterceptors = false;
             let sanitizedRedirectRequest: ResolvedRequest;
             try {
-              isBodyDroppedByInterceptors =
-                (sendsRequestBody(redirectRequest.body) &&
-                  !sendsRequestBody(redirectEnd.request.body)) ||
-                (redirectEnd.request.method !== redirectRequest.method &&
-                  (redirectEnd.request.method === 'GET' ||
-                    redirectEnd.request.method === 'HEAD'));
+              isBodyDroppedByInterceptors = dropsBodyHeaders(
+                redirectRequest,
+                redirectEnd.request,
+              );
               sanitizedRedirectRequest = this._sanitizeRedirectRequest(
                 redirectEnd.request,
                 {
@@ -6920,6 +6915,30 @@ function hasRequestBody(body: unknown): boolean {
  */
 function sendsRequestBody(body: unknown): boolean {
   return emptyRequestBody(body) === undefined;
+}
+
+/**
+ * Whether a redirect hop going out as `after`, from the request it was built from
+ * (`before`), drops the headers that describe a body (`BODY_DESCRIBING_HEADERS`): when it
+ * sends no body (see `sendsRequestBody`) and either `before` sent one - a `303` that left
+ * it behind, or interceptors that removed or emptied it - or its method was changed to
+ * `GET` or `HEAD`, as fetch drops them when a redirect rewrites the method. A hop that
+ * sends a body keeps them, a `GET` an interceptor kept one on included, and so does one
+ * that sends none, as the request before it did, with its method unchanged.
+ */
+function dropsBodyHeaders(
+  before: Pick<ResolvedRequest, 'method' | 'body'>,
+  after: Pick<ResolvedRequest, 'method' | 'body'>,
+): boolean {
+  if (sendsRequestBody(after.body)) {
+    return false;
+  }
+
+  return (
+    sendsRequestBody(before.body) ||
+    (after.method !== before.method &&
+      (after.method === 'GET' || after.method === 'HEAD'))
+  );
 }
 
 /**

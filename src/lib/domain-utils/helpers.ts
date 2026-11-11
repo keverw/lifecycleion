@@ -744,15 +744,31 @@ function isSuffixLikeTail(tail: string): boolean {
   return getPublicSuffix(probe) === probe;
 }
 
+/** Why `validateConfigEntry` refuses a wildcard whose tail {@link isUnmatchableWildcardTail} refuses. */
+export const WILDCARD_TAIL_INFO =
+  'wildcard tail targets public suffix or IP (disallowed)';
+
+/**
+ * How a wildcard pattern is matched. `allowSuffixTails` matches one whose fixed tail is a
+ * public suffix or pseudo-TLD (`*.com`, `*.internal`), and a host whose own public suffix
+ * lies beneath the tail: for a filter that picks which of the caller's own requests a
+ * callback sees, which trusts no host, rather than an allowlist, which does.
+ */
+export interface WildcardMatchOptions {
+  allowSuffixTails?: boolean;
+}
+
 /**
  * Whether a wildcard pattern's fixed tail - the labels after its last wildcard - leaves it
  * matching no host: there is none, it is an IP address, it ends in a numeric label (the
  * URL parser reads any host ending in one as IPv4, so a host under it is an address or no
  * URL's host at all), or it is suffix-like (a public suffix or pseudo-TLD: `*.com`,
- * `**.co.uk`, `*.local`). The one tail rule the matcher and the validators share.
+ * `**.co.uk`, `*.local`), unless `allowSuffixTails` (see {@link WildcardMatchOptions}).
+ * The one tail rule the matcher and the validators share.
  */
 export function isUnmatchableWildcardTail(
   fixedTail: readonly string[],
+  options: WildcardMatchOptions = {},
 ): boolean {
   if (fixedTail.length === 0) {
     return true; // require a concrete tail
@@ -763,7 +779,7 @@ export function isUnmatchableWildcardTail(
   return (
     isIPAddress(tail) ||
     endsInANumber(fixedTail.at(-1) ?? '') ||
-    isSuffixLikeTail(tail)
+    (options.allowSuffixTails !== true && isSuffixLikeTail(tail))
   );
 }
 
@@ -781,6 +797,11 @@ export type CompiledWildcardPattern =
       readonly leftLabels: readonly string[];
       /** The labels after it, matched exactly. */
       readonly fixedTail: readonly string[];
+      /**
+       * Whether a host whose public suffix lies beneath the tail is refused (see
+       * {@link WildcardMatchOptions}).
+       */
+      readonly checksHostSuffix: boolean;
       /** {@link fixedTail} joined, for the public-suffix check of a match. */
       readonly tail: string;
       /** For a `**.` pattern, the normalized name it sits on, which it never matches. */
@@ -796,6 +817,7 @@ const GLOBAL_WILDCARD: CompiledWildcardPattern = { kind: 'global' };
  */
 export function compileWildcardPattern(
   pattern: string,
+  options: WildcardMatchOptions = {},
 ): CompiledWildcardPattern | undefined {
   // Normalize pattern preserving wildcard labels and trailing dot handling
   const normalizedPattern = normalizeWildcardPattern(pattern);
@@ -818,12 +840,13 @@ export function compileWildcardPattern(
   // PSL/IP tail guard: this prevents patterns like "*.com" or "**.co.uk" from matching.
   const { fixedTailStart, fixedTail } =
     extractFixedTailAfterLastWildcard(labels);
-  if (isUnmatchableWildcardTail(fixedTail)) {
+  if (isUnmatchableWildcardTail(fixedTail, options)) {
     return undefined;
   }
 
   return {
     kind: 'labels',
+    checksHostSuffix: options.allowSuffixTails !== true,
     leftLabels: labels.slice(0, fixedTailStart),
     fixedTail,
     tail: fixedTail.join('.'),
@@ -906,6 +929,10 @@ export function matchesCompiledWildcard(
   // sits under it, `evil.os.hedmark.no` - another registrant's, as a tail over a suffix
   // would (see `isUnmatchableWildcardTail`). Asked of a match alone, as a host the
   // pattern does not cover needs no lookup.
+  if (!compiled.checksHostSuffix) {
+    return true;
+  }
+
   const tail = compiled.tail;
   const suffix = readSuffix
     ? readSuffix()

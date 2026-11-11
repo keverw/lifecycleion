@@ -1117,6 +1117,17 @@ describe('deepClone', () => {
   });
 
   describe('large and deep values', () => {
+    test('a long arrayKeys list is read in one pass', () => {
+      const arrayKeys = Array.from({ length: 200_000 }, (_, i) => `k${i}`);
+      arrayKeys.push('k0', 'length');
+
+      const startedAt = performance.now();
+      deepClone([1], { arrayKeys });
+
+      // Searched per key, 200,000 keys took tens of seconds.
+      expect(performance.now() - startedAt).toBeLessThan(2000);
+    });
+
     test('a very sparse array clones by its entries, not by every index', () => {
       const sparse: number[] = [1];
       sparse[100_000_000] = 2;

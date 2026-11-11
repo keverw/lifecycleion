@@ -8016,6 +8016,53 @@ describe('HTTPClient — phase-aware interceptors', () => {
     }).toEqual({ type: undefined, language: undefined });
   });
 
+  test("a redirect-phase interceptor's rewrite to GET that keeps the body keeps the headers that describe it", async () => {
+    const sent: Array<{
+      method: string;
+      body: unknown;
+      headers: Record<string, unknown>;
+    }> = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sent.push({
+          method: request.method,
+          body: request.body,
+          headers: request.headers,
+        });
+        return Promise.resolve<AdapterResponse>(
+          request.requestURL.endsWith('/x')
+            ? { status: 307, headers: { location: '/moved' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+    });
+    client.addRequestInterceptor((request) => ({ ...request, method: 'GET' }), {
+      phases: ['redirect'],
+    });
+
+    await client
+      .post('/x')
+      .headers({
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+      })
+      .body(new Uint8Array([1, 2, 3]))
+      .send();
+
+    expect(sent.map(({ method }) => method)).toEqual(['POST', 'GET']);
+    expect(sent[1].body).toBeDefined();
+    expect({
+      type: sent[1].headers['content-type'],
+      encoding: sent[1].headers['content-encoding'],
+    }).toEqual({ type: 'application/json', encoding: 'gzip' });
+  });
+
   test('a GET whose body sends nothing keeps the headers that describe a body on a 303, as one with none does', async () => {
     const sent: Array<Record<string, unknown>> = [];
     const adapter: HTTPAdapter = {

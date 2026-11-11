@@ -3167,16 +3167,13 @@ test('an error observer sees the URL the error names when an interceptor made it
   expect(seen).toEqual(['https://public.test/x']);
 });
 
-test('a hosts entry the matcher can never match is refused; whole-label wildcards anywhere are not', () => {
+test('a hosts entry the matcher can never match is refused; whole-label wildcards anywhere, a public suffix or pseudo-TLD tail included, are not', () => {
   const client = new HTTPClient();
   for (const pattern of [
     '*api.example.com',
-    'api.*.test',
     '**',
     'api..example.com',
     '.example.com',
-    '*.internal',
-    '**.co.uk',
     '10.*.0.1',
     '10.0.0.256',
     'example.123',
@@ -3195,6 +3192,10 @@ test('a hosts entry the matcher can never match is refused; whole-label wildcard
     'api.**.example.com',
     'backend',
     'redis',
+    '*.internal',
+    '**.co.uk',
+    '*.com',
+    'api.*.test',
   ]) {
     client.addErrorObserver(() => {}, { hosts: [pattern] })();
   }
@@ -3204,6 +3205,26 @@ test('a hosts entry the matcher can never match is refused; whole-label wildcard
       client.addErrorObserver(() => {}, { hosts: [pattern] }),
     ).toThrow(/empty label/);
   }
+});
+
+test("an interceptor filtered to '*.internal' runs on that pseudo-TLD's hosts and no others", async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter });
+  const seen: string[] = [];
+  client.addRequestInterceptor(
+    (request) => {
+      seen.push(request.requestURL);
+      return request;
+    },
+    { hosts: ['*.internal'] },
+  );
+
+  await client.get('http://api.internal/x').send();
+  await client.get('http://api.internal.example.com/x').send();
+  await client.get('http://internal/x').send();
+
+  expect(seen).toEqual(['http://api.internal/x']);
 });
 
 test('a retry interceptor that makes the URL unreadable reports the hop URL to errors and host filters', async () => {
@@ -12856,6 +12877,14 @@ test('a MockAdapter cookie field of the wrong type is refused by position and ty
     [
       { value: 'v', domain: 7 },
       'MockAdapter cookie at position 1 domain must be a string (got number)',
+    ],
+    [
+      { value: 'v', path: 'api' },
+      "MockAdapter cookie at position 1 path must start with '/'",
+    ],
+    [
+      { value: 'v', path: '' },
+      "MockAdapter cookie at position 1 path must start with '/'",
     ],
     [
       { value: 'v', httpOnly: 'false' },

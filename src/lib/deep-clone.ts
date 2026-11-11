@@ -147,6 +147,8 @@ function readArrayKeys(arrayKeys: unknown): readonly string[] {
   }
 
   const keys: string[] = [];
+  // Told apart by a set, so a long list is read in one pass rather than searched per key.
+  const seenKeys = new Set<string>();
   // By index, not `for...of`, and to the length read once: a caller's array is read
   // without running its iterator, and a length that grows cannot keep the loop going.
   const length = readArrayLength(
@@ -164,7 +166,8 @@ function readArrayKeys(arrayKeys: unknown): readonly string[] {
       );
     }
 
-    if (key !== 'length' && !keys.includes(key)) {
+    if (key !== 'length' && !seenKeys.has(key)) {
+      seenKeys.add(key);
       keys.push(key);
     }
   }

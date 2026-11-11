@@ -6,20 +6,30 @@
  * domain utilities, and points here.
  */
 
+/** A character outside ASCII, which the engine's case mapping may change. */
+const NON_ASCII = /[\u0080-\uFFFF]/;
+
 /**
  * `text` with its ASCII letters uppercased, and nothing else: `toUpperCase` would also
- * turn `poſt` (U+017F) into `POST`.
+ * turn `poſt` (U+017F) into `POST`. Text that is all ASCII - every header name and
+ * method - is handed to `toUpperCase`, which changes only `a` to `z` there and is several
+ * times as fast as a replace.
  */
 export function asciiUppercase(text: string): string {
-  return text.replace(/[a-z]/g, (letter) => letter.toUpperCase());
+  return NON_ASCII.test(text)
+    ? text.replace(/[a-z]/g, (letter) => letter.toUpperCase())
+    : text.toUpperCase();
 }
 
 /**
  * `text` with its ASCII letters lowercased, and nothing else: `toLowerCase` would also
- * turn `TRAC\u212A` (KELVIN SIGN) into `track`.
+ * turn `TRAC\u212A` (KELVIN SIGN) into `track`. Text that is all ASCII is handed to
+ * `toLowerCase`, as {@link asciiUppercase} hands it to `toUpperCase`.
  */
 export function asciiLowercase(text: string): string {
-  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+  return NON_ASCII.test(text)
+    ? text.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+    : text.toLowerCase();
 }
 
 /**

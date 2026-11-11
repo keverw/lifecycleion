@@ -82,13 +82,14 @@ export function parseRetryAfterMS(
     return undefined;
   }
 
-  const first = trimHTTPWhitespace(value.split(',')[0]);
+  const pieces = value.split(',');
+  const first = trimHTTPWhitespace(pieces[0]);
 
   if (/^\d+$/.test(first)) {
     return Number(first) * 1000;
   }
 
-  const at = parseFirstHTTPDate(value, now);
+  const at = parseFirstHTTPDate(pieces, now);
   if (at === undefined) {
     return undefined;
   }
@@ -96,7 +97,7 @@ export function parseRetryAfterMS(
   const serverNow =
     responseDate === undefined
       ? undefined
-      : parseFirstHTTPDate(responseDate, now);
+      : parseFirstHTTPDate(responseDate.split(','), now);
   const wait =
     serverNow === undefined ? at - now : Math.min(at - now, at - serverNow);
 
@@ -104,14 +105,15 @@ export function parseRetryAfterMS(
 }
 
 /**
- * The epoch time the first value of `value` names, when it is an HTTP-date: told apart
- * from the values after it by the commas between them, as `parseRetryAfterMS` reads them.
- * Rejoined as it was written, so a date spaced otherwise than `Sun, 06 Nov ...` is not
- * made into one that is.
+ * The epoch time the first value of a header names, when it is an HTTP-date, from the
+ * header split at its commas (`pieces`): the first two pieces, as an IMF-fixdate or RFC
+ * 850 date holds a comma, else the first (see `parseRetryAfterMS`). Rejoined as it was
+ * written, so a date spaced otherwise than `Sun, 06 Nov ...` is not made into one that is.
  */
-function parseFirstHTTPDate(value: string, now: number): number | undefined {
-  const pieces = value.split(',');
-
+function parseFirstHTTPDate(
+  pieces: readonly string[],
+  now: number,
+): number | undefined {
   return (
     (pieces.length > 1
       ? parseHTTPDate(trimHTTPWhitespace(`${pieces[0]},${pieces[1]}`), now)

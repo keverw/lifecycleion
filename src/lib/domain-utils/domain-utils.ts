@@ -17,6 +17,7 @@ import {
   matchesCompiledWildcard,
   lazyWildcardHostSuffix,
   isUnmatchableWildcardTail,
+  WILDCARD_TAIL_INFO,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
   MAX_LABELS,
@@ -1193,7 +1194,7 @@ export function validateConfigEntry(
     if (wildcardTailIsInvalid(normalized)) {
       return {
         valid: false,
-        info: 'wildcard tail targets public suffix or IP (disallowed)',
+        info: WILDCARD_TAIL_INFO,
         wildcardKind: 'none',
       };
     }
@@ -1987,6 +1988,9 @@ export interface ParsedHost {
  * - Port with colon: `[::1]:8080` → valid
  * - Any other characters: `[::1]garbage`, `[::1][::2]` → returns empty (malformed)
  *
+ * A hostname that holds whitespace, a `%`, or a URL delimiter (`@`, `/`, `?`, `#`, `\\`,
+ * `[`, `]`) is malformed too: `good.test@evil.test` → empty.
+ *
  * @param host - Host header value (hostname[:port] or [ipv6][:port])
  * @returns Object with domain (without brackets) and port (empty string if no port).
  *          Returns `{ domain: '', port: '' }` for malformed input.
@@ -2065,13 +2069,21 @@ export function parseHostHeader(host: string): ParsedHost {
 
   // Regular hostname:port parsing
   const idx = trimmedHost.indexOf(':');
+  const domain = idx === -1 ? trimmedHost : trimmedHost.slice(0, idx);
 
-  if (idx === -1) {
-    return { domain: trimmedHost, port: '' };
+  // A hostname holds none of a URL's other parts or delimiters (`user@`, `/path`, `?`,
+  // `#`, a backslash), no whitespace, and no percent-encoding, which a `Host` header does
+  // not carry: `good.test@evil.test` names no one host, and is malformed.
+  if (
+    domain === '' ||
+    /[\s%]/.test(domain) ||
+    INVALID_DOMAIN_CHARS.test(domain)
+  ) {
+    return { domain: '', port: '' };
   }
 
-  if (idx === 0) {
-    return { domain: '', port: '' };
+  if (idx === -1) {
+    return { domain, port: '' };
   }
 
   const invalid = parsePortOrFail(trimmedHost.slice(idx + 1));
@@ -2079,10 +2091,7 @@ export function parseHostHeader(host: string): ParsedHost {
     return invalid;
   }
 
-  return {
-    domain: trimmedHost.slice(0, idx),
-    port: trimmedHost.slice(idx + 1),
-  };
+  return { domain, port: trimmedHost.slice(idx + 1) };
 }
 
 /**

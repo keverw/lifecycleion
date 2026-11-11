@@ -18,9 +18,11 @@ import {
 } from '../utils';
 import { validateConfigEntry } from '../../domain-utils/domain-utils';
 import {
+  compileWildcardPattern,
   isIPAddress,
   normalizeDomain,
   toAsciiDots,
+  WILDCARD_TAIL_INFO,
 } from '../../domain-utils/helpers';
 
 /**
@@ -75,9 +77,10 @@ const FILTER_LISTS: Record<
  * - An exact name is compared after the matcher's normalization, so it can match exactly
  *   when that normalization accepts it - single-label names (`backend`, `redis`) included.
  * - A wildcard pattern is read by the validator the matcher's wildcard rules come from:
- *   whole-label wildcards only, and never around a public suffix (`*.com`, `*.internal`).
- *   Nor around an IP address: a hostname ending in a numeric label is one, and only `*`
- *   alone wildcards an IP.
+ *   whole-label wildcards only, and never around an IP address: a hostname ending in a
+ *   numeric label is one, and only `*` alone wildcards an IP. A public suffix or
+ *   pseudo-TLD tail (`*.com`, `*.internal`), which that validator refuses for an
+ *   allowlist, is matched (see `readHostPattern`).
  */
 function describeUnmatchableHostPattern(entry: string): string | undefined {
   if (entry.includes('/')) {
@@ -113,7 +116,13 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
   const result = validateConfigEntry(entry, 'domain', {
     allowGlobalWildcard: true,
   });
-  if (!result.valid) {
+  // Its tail refused as an allowlist's would be, and nothing else: matched here, as long
+  // as the tail is no IP address, which the matcher still refuses.
+  const isSuffixTailOnly =
+    !result.valid &&
+    result.info === WILDCARD_TAIL_INFO &&
+    compileWildcardPattern(entry, { allowSuffixTails: true }) !== undefined;
+  if (!result.valid && !isSuffixTailOnly) {
     return `can never match (${result.info ?? 'invalid hostname pattern'}); give a hostname or a pattern such as '*.example.com'`;
   }
   // A hostname the pattern stands for, as the URL parser reads it: one ending in a

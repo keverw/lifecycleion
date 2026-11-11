@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'bun:test';
-import { hasNonHTTPWhitespaceEdge, trimHTTPWhitespace } from './ascii-text';
+import {
+  asciiLowercase,
+  asciiUppercase,
+  hasNonHTTPWhitespaceEdge,
+  trimHTTPWhitespace,
+} from './ascii-text';
+
+describe('asciiLowercase and asciiUppercase', () => {
+  it('change ASCII letters alone, in ASCII text and in text that is not', () => {
+    expect(asciiLowercase('Content-Type')).toBe('content-type');
+    expect(asciiUppercase('post')).toBe('POST');
+    // Beside a character the engine's case mapping would change.
+    expect(asciiLowercase('TRAC\u212A')).toBe('trac\u212A');
+    expect(asciiUppercase('po\u017Ft')).toBe('PO\u017FT');
+    expect(asciiLowercase('\u00C9A')).toBe('\u00C9a');
+    expect(asciiLowercase('')).toBe('');
+  });
+});
 
 describe('trimHTTPWhitespace', () => {
   it('trims tab, LF, CR and space from both ends and nothing else', () => {

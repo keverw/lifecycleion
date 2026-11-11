@@ -1346,35 +1346,25 @@ describe('matchesHostPattern', () => {
     });
   });
 
-  describe('PSL tail guard', () => {
-    test('rejects *.com style patterns', () => {
-      expect(matchesHostPattern('anything.com', '*.com')).toBe(false);
+  // A filter trusts no host, so the tails a CORS allowlist refuses are matched.
+  describe('public suffix and pseudo-TLD tails', () => {
+    test.each([
+      ['anything.com', '*.com'],
+      ['a.anything.co.uk', '**.co.uk'],
+      ['api.localhost', '*.localhost'],
+      ['myapp.local', '*.local'],
+      ['myapp.test', '*.test'],
+      ['api.internal', '*.internal'],
+      ['a.b.localhost', '**.localhost'],
+    ])('%p matches %p', (host, pattern) => {
+      expect(matchesHostPattern(host, pattern)).toBe(true);
     });
 
-    test('rejects **.co.uk style patterns', () => {
-      expect(matchesHostPattern('anything.co.uk', '**.co.uk')).toBe(false);
-    });
-  });
-
-  describe('pseudo-TLD wildcard guard', () => {
-    test('rejects *.localhost patterns', () => {
-      expect(matchesHostPattern('api.localhost', '*.localhost')).toBe(false);
-    });
-
-    test('rejects *.local patterns', () => {
-      expect(matchesHostPattern('myapp.local', '*.local')).toBe(false);
-    });
-
-    test('rejects *.test patterns', () => {
-      expect(matchesHostPattern('myapp.test', '*.test')).toBe(false);
-    });
-
-    test('rejects *.internal patterns', () => {
-      expect(matchesHostPattern('api.internal', '*.internal')).toBe(false);
-    });
-
-    test('rejects **.localhost patterns', () => {
-      expect(matchesHostPattern('a.b.localhost', '**.localhost')).toBe(false);
+    test('still by whole labels, and not the tail itself', () => {
+      expect(matchesHostPattern('internal', '*.internal')).toBe(false);
+      expect(matchesHostPattern('a.b.internal', '*.internal')).toBe(false);
+      expect(matchesHostPattern('apiinternal', '*.internal')).toBe(false);
+      expect(matchesHostPattern('co.uk', '**.co.uk')).toBe(false);
     });
   });
 
@@ -1423,17 +1413,25 @@ describe('matchesFilter', () => {
     );
   });
 
-  test('hosts — a wildcard does not reach a host under a public suffix beneath its tail', () => {
-    // `os.hedmark.no` is a public suffix; `hedmark.no` is not.
+  test('hosts — a wildcard reaches a host under a public suffix beneath its tail, as it names it', () => {
+    // `os.hedmark.no` is a public suffix; `hedmark.no` is not. A filter trusts no host.
+    for (const requestURL of [
+      'https://os.hedmark.no/x',
+      // A label with a hyphen at an edge, which the URL parser reads.
+      'https://evil-.os.hedmark.no/x',
+    ]) {
+      expect(
+        matchesFilter({ hosts: ['**.hedmark.no'] }, { requestURL }, 'request'),
+      ).toBe(true);
+    }
+    expect(
+      matchesFilter(
+        { hosts: ['*.hedmark.no'] },
+        { requestURL: 'https://os.hedmark.no/x' },
+        'request',
+      ),
+    ).toBe(true);
     for (const hosts of [['*.hedmark.no'], ['**.hedmark.no']]) {
-      for (const requestURL of [
-        'https://os.hedmark.no/x',
-        'https://evil.os.hedmark.no/x',
-        // A label with a hyphen at an edge, which the URL parser reads.
-        'https://evil-.os.hedmark.no/x',
-      ]) {
-        expect(matchesFilter({ hosts }, { requestURL }, 'request')).toBe(false);
-      }
       expect(
         matchesFilter(
           { hosts },

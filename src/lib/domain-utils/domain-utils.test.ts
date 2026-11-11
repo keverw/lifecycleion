@@ -3413,6 +3413,27 @@ describe('domain-utils', () => {
   });
 
   describe('parseHostHeader', () => {
+    test.each([
+      'good.test@evil.test',
+      'good.test/path',
+      'good.test?x',
+      'good.test#f',
+      'a b.test',
+      '%65vil.test',
+      'good.test\\@evil.test:80',
+      'good.test@evil.test:80',
+      'a]b.test',
+    ])('%p is malformed', (host) => {
+      expect(parseHostHeader(host)).toEqual({ domain: '', port: '' });
+    });
+
+    test('a Unicode hostname is not refused', () => {
+      expect(parseHostHeader('münchen.de:443')).toEqual({
+        domain: 'münchen.de',
+        port: '443',
+      });
+    });
+
     it('should parse regular hostname without port', () => {
       expect(parseHostHeader('example.com')).toEqual({
         domain: 'example.com',
