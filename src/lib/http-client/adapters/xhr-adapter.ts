@@ -359,13 +359,23 @@ export class XHRAdapter implements HTTPAdapter {
         if (answeredAtHeaders === undefined && xhr.readyState >= 2) {
           const status = xhr.status;
           if (status > 0) {
-            answeredAtHeaders = readAnswer(status);
-            answeringURL = answeredAtHeaders.answeringURL;
+            answeredAtHeaders = takeAnswer(status);
           }
         }
 
         return answeredAtHeaders;
       };
+
+      /**
+       * The answer as the XHR has it now (see `readAnswer`), its URL taken as
+       * `answeringURL`: every read the adapter acts on goes through here, so none resolves
+       * a `Location` against a URL the browser upgraded.
+       */
+      function takeAnswer(status?: number): AnsweredHeaders {
+        const answer = readAnswer(status);
+        answeringURL = answer.answeringURL;
+        return answer;
+      }
 
       // --- Abort signal ---
       //
@@ -815,8 +825,7 @@ export class XHRAdapter implements HTTPAdapter {
             event.loaded > maxResponseBytes &&
             isBodyKnownUncoded === undefined
           ) {
-            const answer = readAndActOnAnswer() ?? readAnswer();
-            answeringURL = answer.answeringURL;
+            const answer = readAndActOnAnswer() ?? takeAnswer();
 
             // Ended by the answer, read for the first time here.
             if (didSettle) {
@@ -888,8 +897,7 @@ export class XHRAdapter implements HTTPAdapter {
           // response regardless of adapter.
           // Read before any progress callback, as everything this listener reports is: the
           // answer, captured once (see `answeredAtHeaders`).
-          const answer = captureAnswer() ?? readAnswer();
-          answeringURL = answer.answeringURL;
+          const answer = captureAnswer() ?? takeAnswer();
           const redirectURL = answer.redirectURL;
           // Seen here only by an XHR that reported none of it before.
           if (redirectURL !== undefined) {

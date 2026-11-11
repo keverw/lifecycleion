@@ -3412,6 +3412,45 @@ describe('domain-utils', () => {
     });
   });
 
+  describe('validateConfigEntry allowSuffixTails', () => {
+    test.each([
+      ['*.internal', 'domain'],
+      ['**.co.uk', 'domain'],
+      ['*.com', 'domain'],
+      ['https://*.localhost', 'origin'],
+    ] as const)(
+      '%p is valid with it and refused without it',
+      (entry, context) => {
+        expect(validateConfigEntry(entry, context).valid).toBe(false);
+        expect(
+          validateConfigEntry(entry, context, { allowSuffixTails: true }).valid,
+        ).toBe(true);
+      },
+    );
+
+    test('still refuses an IP tail and a mixed wildcard', () => {
+      for (const entry of ['*.0.0.1', '*.example.123', '*api.internal']) {
+        expect(
+          validateConfigEntry(entry, 'domain', { allowSuffixTails: true })
+            .valid,
+        ).toBe(false);
+      }
+      // Named as the IP tail it is, not a public suffix.
+      expect(
+        validateConfigEntry('*.0.0.1', 'domain', { allowSuffixTails: true })
+          .info,
+      ).toBe('wildcard tail targets an IP address (disallowed)');
+    });
+
+    test('refuses a non-boolean value', () => {
+      expect(() =>
+        validateConfigEntry('*.com', 'domain', {
+          allowSuffixTails: 'yes' as unknown as boolean,
+        }),
+      ).toThrow(TypeError);
+    });
+  });
+
   describe('parseHostHeader', () => {
     test.each([
       'good.test@evil.test',

@@ -294,7 +294,14 @@ validateConfigEntry('*.com', 'domain');
 // { valid: false, info: '...public suffix...', wildcardKind: 'none' }
 ```
 
-Options: `{ allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean }`. Defaults: `allowGlobalWildcard: false`, `allowProtocolWildcard: true`.
+Options: `{ allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean; allowSuffixTails?: boolean }`. Defaults: `allowGlobalWildcard: false`, `allowProtocolWildcard: true`, `allowSuffixTails: false`.
+
+`allowSuffixTails` accepts a wildcard whose tail is a public suffix or an internal pseudo-TLD (`*.com`, `**.co.uk`, `*.internal`, `*.localhost`), which is refused by default. It is for a list that picks which hosts something applies to rather than one that grants them trust - the HTTP client's `hosts` filters validate their entries with it. The matchers in this module still refuse such a tail, so leave it off when validating entries for them.
+
+```typescript
+validateConfigEntry('*.internal', 'domain', { allowSuffixTails: true });
+// { valid: true, wildcardKind: 'subdomain' }
+```
 
 `allowProtocolWildcard` applies only to the protocol-only wildcard forms `http://*` and `https://*`. It does not disable scheme-qualified host wildcards such as `https://*.example.com` or `https://**.example.com`.
 

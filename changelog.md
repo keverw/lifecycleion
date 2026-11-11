@@ -211,8 +211,9 @@
 
 ## Unreleased
 
+- domain-utils: `validateConfigEntry` takes `allowSuffixTails`, which accepts a wildcard whose tail is a public suffix or an internal pseudo-TLD (`*.internal`, `*.com`) for a list that picks hosts rather than trusting them; it is off by default, and the module's matchers still refuse such a tail.
 - domain-utils: `parseHostHeader()` reads a hostname holding whitespace, a `%`, or a URL delimiter (`@`, `/`, `?`, `#`, a backslash, a bracket) as malformed, `{ domain: '', port: '' }`, where `good.test@evil.test` came back as its domain.
-- HTTP MockAdapter: a route cookie whose `path` does not start with `/` fails the request as a route mistake, as any other bad cookie attribute does, where it was written as `Path=api`, which a cookie jar ignores.
+- HTTP MockAdapter: a route cookie whose non-empty `path` does not start with `/` fails the request as a route mistake, as any other bad cookie attribute does, where it was written as `Path=api`, which a cookie jar ignores.
 - `deepClone` reads a long `arrayKeys` list in one pass, where each key was searched for among those before it.
 - **BREAKING:** Logger: `sinks`, `diagnosticSinks`, `addSink()` and `addDiagnosticSink()` throw a `TypeError` for a value that is not a sink - an object or function with a `write()` method, or for a diagnostic sink a `writeDiagnostic()` one - naming a list entry by its index; a hole in a list is refused too, as is a diagnostic sink whose `writeDiagnostic` is set but not a function. They were accepted, and each log call then failed writing to them, once per entry.
 - A copied caller list longer than 65,536 holds only the entries it was given, where one entry in a list at the 16,777,216 cap allocated about 128 MiB on every copy (a header value, a `set-cookie` array, `onChangeReasons`); `CookieJar.processResponseHeaders` reads a `set-cookie` array's own entries rather than walking its length. `deepClone` clones an array longer than 65,536 without allocating its holes on Node, where a sparse one at 16,777,216 allocated about 128 MiB per clone.

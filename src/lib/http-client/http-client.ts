@@ -2072,7 +2072,9 @@ export class BaseHTTPClient {
             // As for the target before the interceptors ran, above, and by the same rule
             // (see `dropsBodyHeaders`). Read inside the `try`, as a body the reads refuse
             // fails the hop as the sanitizing does.
-            let isBodyDroppedByInterceptors = false;
+            // Unset when reading the bodies is what threw: the hop is then reported without
+            // the headers describing a body, which cannot be told to describe one it sends.
+            let isBodyDroppedByInterceptors: boolean | undefined;
             let sanitizedRedirectRequest: ResolvedRequest;
             try {
               isBodyDroppedByInterceptors = dropsBodyHeaders(
@@ -2107,7 +2109,7 @@ export class BaseHTTPClient {
               const unsentRequest = this._unsentRedirectRequest(
                 redirectEnd.request,
                 interceptedFromURL(redirectEnd.request.requestURL),
-                isBodyDroppedByInterceptors,
+                isBodyDroppedByInterceptors ?? true,
               );
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 unsentRequest,

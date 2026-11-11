@@ -12860,6 +12860,23 @@ test('a MockAdapter cookie given as an array is refused as an array, not by a mi
   );
 });
 
+test('a MockAdapter cookie with an empty path is written with the default path, as one with none is', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/dir/page', () => ({
+    status: 200,
+    cookies: { a: { value: '1', path: '' } },
+  }));
+  const response = await new HTTPClient({
+    adapter,
+    baseURL: 'http://mock.test',
+  })
+    .get('/dir/page')
+    .send();
+
+  expect(response.status).toBe(200);
+  expect(String(response.headers['set-cookie'])).toContain('Path=/');
+});
+
 test('a MockAdapter cookie field of the wrong type is refused by position and type, not coerced', async () => {
   const cases: Array<[unknown, string]> = [
     [
@@ -12880,10 +12897,6 @@ test('a MockAdapter cookie field of the wrong type is refused by position and ty
     ],
     [
       { value: 'v', path: 'api' },
-      "MockAdapter cookie at position 1 path must start with '/'",
-    ],
-    [
-      { value: 'v', path: '' },
       "MockAdapter cookie at position 1 path must start with '/'",
     ],
     [

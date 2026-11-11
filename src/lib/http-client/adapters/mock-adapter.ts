@@ -136,7 +136,10 @@ export interface MockCookieOptions {
   httpOnly?: boolean;
   secure?: boolean;
   sameSite?: 'Strict' | 'Lax' | 'None';
-  /** Defaults to `'/'` when omitted. */
+  /**
+   * Defaults to `'/'` when omitted or empty. Any other path must start with `/`, or the
+   * request fails as a route mistake.
+   */
   path?: string;
   domain?: string;
 }
@@ -1310,8 +1313,9 @@ function readMockCookieOptions(
   }
   // A `Path` that does not start with `/` is ignored by a cookie jar (RFC 6265 §5.2.4),
   // which stores the cookie at the request's default path instead: a route mistake, as
-  // every other attribute's is.
-  if (typeof path === 'string' && !path.startsWith('/')) {
+  // every other attribute's is. An empty one is no path, as an empty `domain` is no
+  // domain, and is written as `Path=/`.
+  if (typeof path === 'string' && path !== '' && !path.startsWith('/')) {
     throw new TypeError(
       `MockAdapter cookie ${position} path must start with '/'`,
     );

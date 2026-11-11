@@ -17,7 +17,6 @@ import {
   matchesCompiledWildcard,
   lazyWildcardHostSuffix,
   isUnmatchableWildcardTail,
-  WILDCARD_TAIL_INFO,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
   MAX_LABELS,
@@ -1010,7 +1009,10 @@ function isAllowedExactHostname(normalizedHostname: string): boolean {
  * - All-wildcards domain patterns (e.g., "*.*") are invalid. The global "*" may be allowed
  *   in origin context when explicitly enabled via options.
  * - Wildcards cannot target IP tails.
- * - PSL tail guard also rejects pseudo-TLD suffix wildcards like `*.localhost`.
+ * - PSL tail guard also rejects pseudo-TLD suffix wildcards like `*.localhost`, unless
+ *   `allowSuffixTails` is set: for a list that picks which of your own requests or
+ *   hosts something applies to, rather than one that grants trust, a wildcard over a
+ *   public suffix or pseudo-TLD (`*.internal`, `*.com`) is then valid.
  */
 export type WildcardKind = 'none' | 'global' | 'protocol' | 'subdomain';
 
@@ -1036,7 +1038,11 @@ function isValidPortString(port: string): boolean {
 export function validateConfigEntry(
   entry: string,
   context: 'domain' | 'origin',
-  options?: { allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean },
+  options?: {
+    allowGlobalWildcard?: boolean;
+    allowProtocolWildcard?: boolean;
+    allowSuffixTails?: boolean;
+  },
 ): ValidationResult {
   const SCHEME_RE = /^[a-z][a-z0-9+\-.]*$/i;
   // The caller's code, not an entry from config, so refused rather than answered: any
@@ -1049,7 +1055,7 @@ export function validateConfigEntry(
   }
   assertMatcherOptions(
     options,
-    ['allowGlobalWildcard', 'allowProtocolWildcard'],
+    ['allowGlobalWildcard', 'allowProtocolWildcard', 'allowSuffixTails'],
     'validateConfigEntry options',
   );
   // Each option read once, its default for `null` or `undefined` as for one left out -
@@ -1064,6 +1070,11 @@ export function validateConfigEntry(
       options?.allowProtocolWildcard,
       true,
       'validateConfigEntry options.allowProtocolWildcard',
+    ),
+    allowSuffixTails: readBooleanOption(
+      options?.allowSuffixTails,
+      false,
+      'validateConfigEntry options.allowSuffixTails',
     ),
   };
 
@@ -1124,6 +1135,7 @@ export function validateConfigEntry(
     // The matcher's own tail rule, so the two cannot disagree.
     return isUnmatchableWildcardTail(
       extractFixedTailAfterLastWildcard(normalized.split('.')).fixedTail,
+      { allowSuffixTails: opts.allowSuffixTails },
     );
   }
 
@@ -1194,7 +1206,9 @@ export function validateConfigEntry(
     if (wildcardTailIsInvalid(normalized)) {
       return {
         valid: false,
-        info: WILDCARD_TAIL_INFO,
+        info: opts.allowSuffixTails
+          ? 'wildcard tail targets an IP address (disallowed)'
+          : 'wildcard tail targets public suffix or IP (disallowed)',
         wildcardKind: 'none',
       };
     }

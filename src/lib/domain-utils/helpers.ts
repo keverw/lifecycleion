@@ -744,10 +744,6 @@ function isSuffixLikeTail(tail: string): boolean {
   return getPublicSuffix(probe) === probe;
 }
 
-/** Why `validateConfigEntry` refuses a wildcard whose tail {@link isUnmatchableWildcardTail} refuses. */
-export const WILDCARD_TAIL_INFO =
-  'wildcard tail targets public suffix or IP (disallowed)';
-
 /**
  * How a wildcard pattern is matched. `allowSuffixTails` matches one whose fixed tail is a
  * public suffix or pseudo-TLD (`*.com`, `*.internal`), and a host whose own public suffix

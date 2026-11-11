@@ -18,11 +18,9 @@ import {
 } from '../utils';
 import { validateConfigEntry } from '../../domain-utils/domain-utils';
 import {
-  compileWildcardPattern,
   isIPAddress,
   normalizeDomain,
   toAsciiDots,
-  WILDCARD_TAIL_INFO,
 } from '../../domain-utils/helpers';
 
 /**
@@ -113,16 +111,12 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
   if (toAsciiDots(entry) === '*.') {
     return "is a wildcard with an empty label after it, so it can never match; give '*' to match every host";
   }
+  // A suffix tail is matched (see `readHostPattern`), so validated as one that is.
   const result = validateConfigEntry(entry, 'domain', {
     allowGlobalWildcard: true,
+    allowSuffixTails: true,
   });
-  // Its tail refused as an allowlist's would be, and nothing else: matched here, as long
-  // as the tail is no IP address, which the matcher still refuses.
-  const isSuffixTailOnly =
-    !result.valid &&
-    result.info === WILDCARD_TAIL_INFO &&
-    compileWildcardPattern(entry, { allowSuffixTails: true }) !== undefined;
-  if (!result.valid && !isSuffixTailOnly) {
+  if (!result.valid) {
     return `can never match (${result.info ?? 'invalid hostname pattern'}); give a hostname or a pattern such as '*.example.com'`;
   }
   // A hostname the pattern stands for, as the URL parser reads it: one ending in a

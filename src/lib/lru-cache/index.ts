@@ -554,7 +554,8 @@ export class LRUCache<K, V> {
             continue;
           }
 
-          estimatedSize += this.calculateSize(entry, visitedArrays);
+          estimatedSize +=
+            primitiveSize(entry) ?? this.calculateSize(entry, visitedArrays);
         }
 
         if (sparseFrom === undefined) {
@@ -594,7 +595,8 @@ export class LRUCache<K, V> {
             continue;
           }
 
-          estimatedSize += this.calculateSize(entry, visitedArrays);
+          estimatedSize +=
+            primitiveSize(entry) ?? this.calculateSize(entry, visitedArrays);
         }
 
         return estimatedSize;
@@ -717,5 +719,25 @@ export class LRUCache<K, V> {
     if (!Number.isFinite(value) || value < 0) {
       throw new RangeError(message);
     }
+  }
+}
+
+/**
+ * The default estimate of a primitive's size, as `calculateSize` makes it, or `undefined`
+ * for an object or a function: read inline for an array's entries, which are most often
+ * primitives, so a large array is not a method call per entry.
+ */
+function primitiveSize(value: unknown): number | undefined {
+  switch (typeof value) {
+    case 'number':
+      return 8;
+    case 'string':
+      return value.length * 2;
+    case 'boolean':
+      return 4;
+    case 'undefined':
+      return 0;
+    default:
+      return value === null ? 0 : undefined;
   }
 }
