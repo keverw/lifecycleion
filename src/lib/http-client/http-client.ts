@@ -1930,18 +1930,10 @@ export class BaseHTTPClient {
               // A cancel made before the failure ends the hop as the cancel below does,
               // as the initial phase's does; see there.
               if (!cancelSignal.aborted) {
-                const failedObserverRequest =
-                  this._bestEffortAttemptRequestFromPending(
-                    failedRedirectRequest,
-                    attemptLimits,
-                    requestID,
-                    { fallbackURL: redirectURL },
-                    // See the initial phase's.
-                    redirectBodyCopy.didFail ? 'unbuildable' : undefined,
-                  );
                 // The interceptor's request may be what failed; see the initial phase.
-                // Its URL's userinfo cut when it is another origin's, as a hop that went
-                // out is recorded (see `_unsentRedirectRequest`).
+                // Its URL is read once, and reported with its userinfo cut when it is
+                // another origin's, as a hop that went out is recorded (see
+                // `_unsentRedirectRequest`).
                 const readFailedURL = readStringMember(
                   failedRedirectRequest,
                   'requestURL',
@@ -1953,14 +1945,20 @@ export class BaseHTTPClient {
                 )
                   ? stripURLCredentials(readFailedURL)
                   : readFailedURL;
+                const failedObserverRequest =
+                  this._bestEffortAttemptRequestFromPending(
+                    failedRedirectRequest,
+                    attemptLimits,
+                    requestID,
+                    { reportedURL: failedRequestURL },
+                    // See the initial phase's.
+                    redirectBodyCopy.didFail ? 'unbuildable' : undefined,
+                  );
 
                 // The reads above run the interceptors' getters; a cancel made in one
                 // ends the hop cancelled, below, as one made before the failure does.
                 if (!cancelSignal.aborted) {
-                  observerRequest = {
-                    ...failedObserverRequest,
-                    requestURL: failedRequestURL,
-                  };
+                  observerRequest = failedObserverRequest;
                   response = buildUnsentHopResponse(failedRequestURL);
 
                   // A body that could not be copied is the body's failure; see

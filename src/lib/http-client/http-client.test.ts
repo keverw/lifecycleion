@@ -7880,6 +7880,60 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(observerRequestURLs).toEqual(['https://other.example/x']);
   });
 
+  test("a redirect-phase interceptor result that cannot be read has its requestURL read once more for the failure's report, which every report names", async () => {
+    const start = 'https://example.com/start';
+    const target = 'https://example.com/target';
+    const answers = [
+      'https://example.com/first',
+      'https://example.com/second',
+      'https://example.com/third',
+    ];
+    let reads = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === start) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: target },
+            body: null,
+          });
+        }
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    const observerRequestURLs: string[] = [];
+    client.addErrorObserver((_err, request) => {
+      observerRequestURLs.push(request.requestURL);
+    });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        get requestURL(): string {
+          return answers[Math.min(reads++, answers.length - 1)];
+        },
+        get headers(): Record<string, string> {
+          throw new Error('headers could not be read');
+        },
+      }),
+      { phases: ['redirect'] },
+    );
+
+    const builder = client.get(start);
+    const res = await builder.send();
+
+    expect(builder.error?.code).toBe('interceptor_error');
+    // Once as the chain copied the result, once for the report.
+    expect(reads).toBe(2);
+    const reported = answers[1];
+    expect(res.requestURL).toBe(reported);
+    expect(res.redirectHistory).toEqual([reported]);
+    expect(observerRequestURLs).toEqual([reported]);
+  });
+
   test('redirect-phase interceptor cancel sets requestURL and redirectHistory to redirect target', async () => {
     const start = 'https://example.com/a';
     const target = 'https://example.com/b';
