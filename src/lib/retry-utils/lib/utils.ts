@@ -20,12 +20,6 @@ interface ExponentialDelayParams {
   randomFn: () => number;
 }
 
-export function calculateExponentialDelay(
-  params: ExponentialDelayParams,
-): number {
-  return calculateExponentialDelays(params).delayMS;
-}
-
 /**
  * The exponential backoff for `retryCount`, with its jitter (`delayMS`) and without it
  * (`baseDelayMS`), from one computation of the backoff: the jitter is applied to the base,
