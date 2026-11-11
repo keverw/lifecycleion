@@ -29,6 +29,7 @@ import {
   compileWildcardPattern,
   isIPAddress,
   matchesCompiledWildcard,
+  lazyWildcardHostSuffix,
   type CompiledWildcardPattern,
 } from '../domain-utils/helpers';
 import type {
@@ -1587,7 +1588,7 @@ export function isGlobalHostPattern(pattern: string): boolean {
 /**
  * A `hosts` pattern read once - done when a filter is registered, rather than on every
  * request it is checked for: normalizing parses with the URL parser and runs IDNA, and a
- * wildcard's checks look its tail up in the Public Suffix List.
+ * wildcard is compiled once, its tail checked as `compileWildcardPattern` checks it.
  */
 export function readHostPattern(pattern: string): HostPattern {
   if (hasNonHTTPWhitespaceEdge(pattern)) {
@@ -1599,9 +1600,11 @@ export function readHostPattern(pattern: string): HostPattern {
   }
 
   if (pattern.includes('*')) {
-    // A filter picks which of the caller's own requests a callback sees and trusts no
-    // host, so a tail a CORS allowlist refuses - `*.internal`, `*.com` - matches what it
-    // names, as a `NO_PROXY` suffix or a request mock's host pattern does.
+    // A tail a CORS allowlist refuses - `*.internal`, `*.com` - names that suffix's hosts,
+    // as a `NO_PROXY` suffix or a request mock's host pattern does: written out, it is the
+    // caller's choice. A host under an ICANN public suffix beneath the tail is still not
+    // matched (see `matchesCompiledWildcard`), so `**.hedmark.no` scoping a token does not
+    // reach another registrant's `evil.os.hedmark.no`.
     const compiled = compileWildcardPattern(pattern, {
       allowSuffixTails: true,
     });
@@ -1634,12 +1637,12 @@ function readParsedHostname(hostname: string): string {
 
 /**
  * A request's hostname as one filter check reads it: normalized, and told whether it is
- * an IP address, each at most once and only if a pattern asks. Its public suffix is never
- * read: a filter's wildcards match a suffix tail as written (see `readHostPattern`).
+ * an IP address, and its public suffix read, each at most once and only if a pattern asks.
  */
 class CheckedHost {
   private normalizedName: string | undefined;
   private isIPName: boolean | undefined;
+  private suffixReader: (() => string | null) | undefined;
 
   constructor(public readonly hostname: string) {}
 
@@ -1653,6 +1656,12 @@ class CheckedHost {
     this.isIPName ??= isIPAddress(this.normalized);
     return this.isIPName;
   }
+
+  /** Its public suffix, as a wildcard match checks it (see `wildcardHostSuffix`). */
+  public readonly readSuffix = (): string | null => {
+    this.suffixReader ??= lazyWildcardHostSuffix(this.normalized);
+    return this.suffixReader();
+  };
 }
 
 /**
@@ -1687,7 +1696,12 @@ function matchesReadHostPattern(
     case 'wildcard':
       return (
         host.normalized !== '' &&
-        matchesCompiledWildcard(host.normalized, pattern.compiled, host.isIP)
+        matchesCompiledWildcard(
+          host.normalized,
+          pattern.compiled,
+          host.isIP,
+          host.readSuffix,
+        )
       );
   }
 }
@@ -1787,8 +1801,8 @@ export function matchesFilterPhase(
  * - `hosts`: supports exact hostnames and wildcard patterns. `*.example.com` matches
  *   exactly one subdomain label; `**.example.com` matches any depth. Neither matches the
  *   apex — list it explicitly. A public suffix or pseudo-TLD tail is matched as written
- *   (`*.internal`, `*.com`). `*` is a global wildcard that matches any hostname a URL can
- *   carry. Skipped if
+ *   (`*.internal`, `*.com`), but never a host under a public suffix beneath the tail.
+ *   `*` is a global wildcard that matches any hostname a URL can carry. Skipped if
  *   `context.requestURL` is absent.
  * - `schemes`: `'http'` or `'https'`. `requestURL` is absolute whenever the
  *   request could be resolved before dispatch. For `MockAdapter`, path-only

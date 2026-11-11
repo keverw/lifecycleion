@@ -3207,6 +3207,26 @@ test('a hosts entry the matcher can never match is refused; whole-label wildcard
   }
 });
 
+test("a hosts wildcard does not reach another registrant's host under an ICANN public suffix beneath its tail", async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter });
+  const seen: string[] = [];
+  client.addRequestInterceptor(
+    (request) => {
+      seen.push(request.requestURL);
+      return request;
+    },
+    { hosts: ['**.hedmark.no'] },
+  );
+
+  // `os.hedmark.no` is a public suffix: a host under it is another registrant's.
+  await client.get('https://evil.os.hedmark.no/x').send();
+  await client.get('https://api.hedmark.no/x').send();
+
+  expect(seen).toEqual(['https://api.hedmark.no/x']);
+});
+
 test("an interceptor filtered to '*.internal' runs on that pseudo-TLD's hosts and no others", async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({ status: 200 }));

@@ -82,29 +82,17 @@ export function parseRetryAfterMS(
     return Number(first) * 1000;
   }
 
-  const at = parseFirstHTTPDate(pieces, now);
+  // Rejoined as it was written, so a date spaced otherwise than `Sun, 06 Nov ...` is not
+  // made into one that is.
+  const at =
+    (pieces.length > 1
+      ? parseHTTPDate(trimHTTPWhitespace(`${pieces[0]},${pieces[1]}`), now)
+      : undefined) ?? parseHTTPDate(first, now);
   if (at === undefined) {
     return undefined;
   }
 
   return Math.max(0, at - now);
-}
-
-/**
- * The epoch time the first value of `Retry-After` names, when it is an HTTP-date, from the
- * value split at its commas (`pieces`): the first two pieces, as an IMF-fixdate or RFC
- * 850 date holds a comma, else the first (see `parseRetryAfterMS`). Rejoined as it was
- * written, so a date spaced otherwise than `Sun, 06 Nov ...` is not made into one that is.
- */
-function parseFirstHTTPDate(
-  pieces: readonly string[],
-  now: number,
-): number | undefined {
-  return (
-    (pieces.length > 1
-      ? parseHTTPDate(trimHTTPWhitespace(`${pieces[0]},${pieces[1]}`), now)
-      : undefined) ?? parseHTTPDate(trimHTTPWhitespace(pieces[0]), now)
-  );
 }
 
 /** The epoch time an HTTP-date names, or `undefined` when `text` is not one. */

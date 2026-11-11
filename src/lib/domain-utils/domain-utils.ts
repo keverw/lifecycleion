@@ -1131,12 +1131,28 @@ export function validateConfigEntry(
   }
 
   // Helper: PSL tail guard and IP-tail rejection for wildcard patterns
-  function wildcardTailIsInvalid(normalized: string): boolean {
-    // The matcher's own tail rule, so the two cannot disagree.
-    return isUnmatchableWildcardTail(
-      extractFixedTailAfterLastWildcard(normalized.split('.')).fixedTail,
-      { allowSuffixTails: opts.allowSuffixTails },
+  // Why a wildcard's tail is refused, or `undefined` when it is not: the matcher's own
+  // tail rule, so the two cannot disagree, its refusal named for what the tail is.
+  function wildcardTailRefusal(normalized: string): string | undefined {
+    const { fixedTail } = extractFixedTailAfterLastWildcard(
+      normalized.split('.'),
     );
+
+    if (
+      !isUnmatchableWildcardTail(fixedTail, {
+        allowSuffixTails: opts.allowSuffixTails,
+      })
+    ) {
+      return undefined;
+    }
+
+    if (fixedTail.length === 0) {
+      return 'wildcard has no fixed label after it (disallowed)';
+    }
+
+    return opts.allowSuffixTails
+      ? 'wildcard tail targets an IP address (disallowed)'
+      : 'wildcard tail targets public suffix or IP (disallowed)';
   }
 
   // Helper: domain-wildcard structural checks (no URL chars, full labels, etc.)
@@ -1203,14 +1219,9 @@ export function validateConfigEntry(
       };
     }
 
-    if (wildcardTailIsInvalid(normalized)) {
-      return {
-        valid: false,
-        info: opts.allowSuffixTails
-          ? 'wildcard tail targets an IP address (disallowed)'
-          : 'wildcard tail targets public suffix or IP (disallowed)',
-        wildcardKind: 'none',
-      };
+    const tailRefusal = wildcardTailRefusal(normalized);
+    if (tailRefusal !== undefined) {
+      return { valid: false, info: tailRefusal, wildcardKind: 'none' };
     }
 
     return { valid: true, wildcardKind: 'subdomain' };
@@ -2025,6 +2036,27 @@ export interface ParsedHost {
  * parseHostHeader('[::1][::2]') // malformed
  * // => { domain: '', port: '' }
  */
+/**
+ * Whether `name` holds a forbidden domain code point of the URL standard (a C0 control,
+ * space, `#`, `%`, `/`, `:`, `<`, `>`, `?`, `@`, `[`, a backslash, `]`, `^`, `|`, DEL)
+ * or any other whitespace, which no hostname holds.
+ */
+function hasForbiddenDomainCodePoint(name: string): boolean {
+  for (let index = 0; index < name.length; index++) {
+    const code = name.charCodeAt(index);
+
+    if (
+      code <= 0x20 ||
+      code === 0x7f ||
+      '#%/:<>?@[\\]^|'.includes(name[index])
+    ) {
+      return true;
+    }
+  }
+
+  return /\s/.test(name);
+}
+
 export function parseHostHeader(host: string): ParsedHost {
   // A value that is not a string - a `Host` header that was never sent - is malformed.
   if (typeof host !== 'string') {
@@ -2085,14 +2117,10 @@ export function parseHostHeader(host: string): ParsedHost {
   const idx = trimmedHost.indexOf(':');
   const domain = idx === -1 ? trimmedHost : trimmedHost.slice(0, idx);
 
-  // A hostname holds none of a URL's other parts or delimiters (`user@`, `/path`, `?`,
-  // `#`, a backslash), no whitespace, and no percent-encoding, which a `Host` header does
-  // not carry: `good.test@evil.test` names no one host, and is malformed.
-  if (
-    domain === '' ||
-    /[\s%]/.test(domain) ||
-    INVALID_DOMAIN_CHARS.test(domain)
-  ) {
+  // A hostname holds none of the URL standard's forbidden domain code points - a URL's
+  // delimiters (`@`, `/`, `?`, `#`, a backslash, `<`, `>`, `^`, `|`), a C0 control, DEL,
+  // `%` - and no other whitespace: `good.test@evil.test` names no one host.
+  if (domain === '' || hasForbiddenDomainCodePoint(domain)) {
     return { domain: '', port: '' };
   }
 

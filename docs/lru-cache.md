@@ -333,6 +333,8 @@ When no `sizeCalculator` is provided the cache uses a built-in estimator:
 | Non-serializable object                   | 1000 bytes (fallback)                            |
 | Other non-object values                   | 100 bytes (fallback)                             |
 
+Within one value, an array met again - the same array in two places - counts 8 bytes, a reference, rather than its elements again; one met inside itself (a cycle) counts 1000 bytes, and so does one nested more than 1000 arrays deep, so a deeply nested value does not overflow the stack.
+
 The `Object` row applies to values that reach the object/JSON-size estimation branch. Values outside the listed branches, such as functions and symbols, fall back to the generic `Other non-object values` estimate.
 
 These estimates are approximate. For accurate memory accounting provide a custom `sizeCalculator`.

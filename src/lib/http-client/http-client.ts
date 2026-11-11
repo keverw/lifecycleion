@@ -1821,14 +1821,12 @@ export class BaseHTTPClient {
               // GET's body as it replays any other method's.
               body: isBodyDropped ? undefined : sentBody.value,
             };
-            // See `dropsBodyHeaders`, which the interceptors' request is read by below too.
-            const isHopBodyDropped = dropsBodyHeaders(
-              {
-                method: attemptResult.sentRequest.method,
-                body: sentBody.value,
-              },
-              pendingRedirectRequest,
-            );
+            // The request this hop is built from, which decides whether it drops the
+            // headers describing a body (see `dropsBodyHeaders`).
+            const hopBefore = {
+              method: attemptResult.sentRequest.method,
+              body: sentBody.value,
+            };
             let redirectRequest: ResolvedRequest;
             try {
               redirectRequest = this._sanitizeRedirectRequest(
@@ -1836,7 +1834,7 @@ export class BaseHTTPClient {
                 {
                   fromURL: hopFromURL,
                   cookieJar: jar ?? undefined,
-                  isBodyDropped: isHopBodyDropped,
+                  before: hopBefore,
                 },
               );
             } catch (error) {
@@ -1846,7 +1844,7 @@ export class BaseHTTPClient {
                 this._unsentRedirectRequest(
                   pendingRedirectRequest,
                   hopFromURL,
-                  isHopBodyDropped,
+                  hopBefore,
                 ),
                 attemptLimits,
                 requestID,
@@ -2069,18 +2067,10 @@ export class BaseHTTPClient {
               break;
             }
 
-            // As for the target before the interceptors ran, above, and by the same rule
-            // (see `dropsBodyHeaders`). Read inside the `try`, as a body the reads refuse
-            // fails the hop as the sanitizing does.
-            // Unset when reading the bodies is what threw: the hop is then reported without
-            // the headers describing a body, which cannot be told to describe one it sends.
-            let isBodyDroppedByInterceptors: boolean | undefined;
+            // As for the target before the interceptors ran, above, read from the hop's
+            // request as they were handed it.
             let sanitizedRedirectRequest: ResolvedRequest;
             try {
-              isBodyDroppedByInterceptors = dropsBodyHeaders(
-                redirectRequest,
-                redirectEnd.request,
-              );
               sanitizedRedirectRequest = this._sanitizeRedirectRequest(
                 redirectEnd.request,
                 {
@@ -2099,7 +2089,7 @@ export class BaseHTTPClient {
                   // returned, never with itself (see `interceptedFromURL`).
                   fromURL: interceptedFromURL(redirectEnd.request.requestURL),
                   cookieJar: jar ?? undefined,
-                  isBodyDropped: isBodyDroppedByInterceptors,
+                  before: redirectRequest,
                 },
               );
             } catch (error) {
@@ -2109,7 +2099,7 @@ export class BaseHTTPClient {
               const unsentRequest = this._unsentRedirectRequest(
                 redirectEnd.request,
                 interceptedFromURL(redirectEnd.request.requestURL),
-                isBodyDroppedByInterceptors ?? true,
+                redirectRequest,
               );
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 unsentRequest,
@@ -2430,19 +2420,19 @@ export class BaseHTTPClient {
    * carrying the previous request's credentials under that origin's URL, and with no
    * `Cookie`: the jar, whose failure ended the hop, decides every `Cookie` sent, and the
    * one the request holds is the jar's for the previous URL. No headers at all if even
-   * that throws, and its URL's userinfo cut when it is another origin's, as sanitizing
-   * would have cut it.
+   * that throws - reading the bodies `before` says it is built from included - and its
+   * URL's userinfo cut when it is another origin's, as sanitizing would have cut it.
    */
   private _unsentRedirectRequest(
     request: ResolvedRequest,
     fromURL: string,
-    isBodyDropped: boolean,
+    before: Pick<ResolvedRequest, 'method' | 'body'>,
   ): ResolvedRequest {
     try {
       const unsent = this._sanitizeRedirectRequest(request, {
         fromURL,
         cookieJar: null,
-        isBodyDropped,
+        before,
       });
       delete unsent.headers.cookie;
       return unsent;
@@ -2463,13 +2453,15 @@ export class BaseHTTPClient {
       fromURL: string;
       cookieJar?: CookieJar | null;
       /**
-       * Whether the hop no longer carries the body the request before it did: its
-       * headers describing a body (`BODY_DESCRIBING_HEADERS`) are dropped with it.
+       * The request the hop is built from: the one that answered with the redirect, or
+       * the hop's own as the interceptors were handed it. Whether `request` drops the
+       * headers describing a body is read from the two (see `dropsBodyHeaders`), so a
+       * body whose reads throw fails the sanitizing.
        */
-      isBodyDropped: boolean;
+      before: Pick<ResolvedRequest, 'method' | 'body'>;
     },
   ): ResolvedRequest {
-    const { fromURL, cookieJar, isBodyDropped } = params;
+    const { fromURL, cookieJar, before } = params;
     const isCrossOriginHop = isCrossOrigin(fromURL, request.requestURL);
 
     // Credentials in the target URL itself, stripped on the same rule `Authorization` is.
@@ -2527,7 +2519,7 @@ export class BaseHTTPClient {
       headers = copyHeaderRecord(request.headers);
     }
 
-    if (isBodyDropped) {
+    if (dropsBodyHeaders(before, request)) {
       // Dropped with the body, as fetch drops them when a redirect rewrites the method to
       // GET. A hop that carries the body it had - a 307/308 replay, or a GET or HEAD that
       // had none - keeps them, as fetch keeps a bodiless GET's `Content-Type`.

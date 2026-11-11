@@ -11727,7 +11727,10 @@ describe('HTTPClient — redirect hop header copies', () => {
           headers: { [name]: values },
           body: undefined,
         },
-        { fromURL: 'https://a.test/start' },
+        {
+          fromURL: 'https://a.test/start',
+          before: { method: 'GET', body: undefined },
+        },
       ]);
 
       expect(next.headers[name]).toEqual(values);

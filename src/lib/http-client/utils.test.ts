@@ -1346,7 +1346,7 @@ describe('matchesHostPattern', () => {
     });
   });
 
-  // A filter trusts no host, so the tails a CORS allowlist refuses are matched.
+  // Written out, a tail a CORS allowlist refuses is the caller's choice, and matched.
   describe('public suffix and pseudo-TLD tails', () => {
     test.each([
       ['anything.com', '*.com'],
@@ -1413,25 +1413,17 @@ describe('matchesFilter', () => {
     );
   });
 
-  test('hosts — a wildcard reaches a host under a public suffix beneath its tail, as it names it', () => {
-    // `os.hedmark.no` is a public suffix; `hedmark.no` is not. A filter trusts no host.
-    for (const requestURL of [
-      'https://os.hedmark.no/x',
-      // A label with a hyphen at an edge, which the URL parser reads.
-      'https://evil-.os.hedmark.no/x',
-    ]) {
-      expect(
-        matchesFilter({ hosts: ['**.hedmark.no'] }, { requestURL }, 'request'),
-      ).toBe(true);
-    }
-    expect(
-      matchesFilter(
-        { hosts: ['*.hedmark.no'] },
-        { requestURL: 'https://os.hedmark.no/x' },
-        'request',
-      ),
-    ).toBe(true);
+  test('hosts — a wildcard does not reach a host under a public suffix beneath its tail', () => {
+    // `os.hedmark.no` is a public suffix; `hedmark.no` is not.
     for (const hosts of [['*.hedmark.no'], ['**.hedmark.no']]) {
+      for (const requestURL of [
+        'https://os.hedmark.no/x',
+        'https://evil.os.hedmark.no/x',
+        // A label with a hyphen at an edge, which the URL parser reads.
+        'https://evil-.os.hedmark.no/x',
+      ]) {
+        expect(matchesFilter({ hosts }, { requestURL }, 'request')).toBe(false);
+      }
       expect(
         matchesFilter(
           { hosts },

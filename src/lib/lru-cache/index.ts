@@ -18,6 +18,20 @@ const CHECKED_LEAD = 4096;
 const CHECK_GAP = 128;
 
 /**
+ * How deep the default size estimate follows arrays nested in arrays: one nested deeper
+ * takes the fallback estimate, so a value nested 200,000 deep does not overflow the stack.
+ */
+const MAX_SIZED_ARRAY_DEPTH = 1000;
+
+/** The arrays one default size estimate has met (see `calculateSize`). */
+interface ArraySizing {
+  /** Arrays being sized now, so one met inside itself is a cycle. */
+  readonly visiting: WeakSet<object>;
+  /** Arrays already sized, so one met again counts as a reference to it. */
+  readonly sized: WeakSet<object>;
+}
+
+/**
  * TTL-aware LRU (Least Recently Used) Cache implementation
  *
  * Features:
@@ -426,7 +440,8 @@ export class LRUCache<K, V> {
 
   private calculateSize(
     value: unknown,
-    visitedArrays = new WeakSet<object>(),
+    sizing: ArraySizing = { visiting: new WeakSet(), sized: new WeakSet() },
+    depth = 0,
   ): number {
     // Use custom size calculator if provided (cast to V for the callback)
     if (this.sizeCalculator) {
@@ -442,14 +457,9 @@ export class LRUCache<K, V> {
     }
 
     // Default size estimation logic
-    if (value === null || value === undefined) {
-      return 0;
-    } else if (typeof value === 'boolean') {
-      return 4; // Boolean is typically 4 bytes
-    } else if (typeof value === 'number') {
-      return 8; // Number is typically 8 bytes (double)
-    } else if (typeof value === 'string') {
-      return value.length * 2; // String is ~2 bytes per character in UTF-16
+    const primitive = primitiveSize(value);
+    if (primitive !== undefined) {
+      return primitive;
     } else if (this.isBufferValue(value)) {
       return value.length; // Buffer size in bytes
     } else if (ArrayBuffer.isView(value)) {
@@ -457,11 +467,22 @@ export class LRUCache<K, V> {
     } else if (value instanceof ArrayBuffer) {
       return value.byteLength; // ArrayBuffer size
     } else if (Array.isArray(value)) {
-      if (visitedArrays.has(value)) {
+      if (sizing.visiting.has(value)) {
         return 1000; // Fallback size for circular arrays
       }
 
-      visitedArrays.add(value);
+      // Met again - shared between two entries, say - it is one array, already counted:
+      // walked again, `[a, a]` nested 22 deep would take half a second and count 2^22
+      // copies.
+      if (sizing.sized.has(value)) {
+        return 8;
+      }
+
+      if (depth >= MAX_SIZED_ARRAY_DEPTH) {
+        return 1000;
+      }
+
+      sizing.visiting.add(value);
 
       // Rough estimate for arrays: their own entries, by index, not through the array's
       // own `reduce`, which a cached value may replace - a hole, one its prototype fills
@@ -555,7 +576,8 @@ export class LRUCache<K, V> {
           }
 
           estimatedSize +=
-            primitiveSize(entry) ?? this.calculateSize(entry, visitedArrays);
+            primitiveSize(entry) ??
+            this.calculateSize(entry, sizing, depth + 1);
         }
 
         if (sparseFrom === undefined) {
@@ -596,12 +618,14 @@ export class LRUCache<K, V> {
           }
 
           estimatedSize +=
-            primitiveSize(entry) ?? this.calculateSize(entry, visitedArrays);
+            primitiveSize(entry) ??
+            this.calculateSize(entry, sizing, depth + 1);
         }
 
         return estimatedSize;
       } finally {
-        visitedArrays.delete(value);
+        sizing.visiting.delete(value);
+        sizing.sized.add(value);
       }
     } else if (typeof value === 'object') {
       try {
@@ -723,16 +747,17 @@ export class LRUCache<K, V> {
 }
 
 /**
- * The default estimate of a primitive's size, as `calculateSize` makes it, or `undefined`
- * for an object or a function: read inline for an array's entries, which are most often
- * primitives, so a large array is not a method call per entry.
+ * The default estimate of a primitive's size, or `undefined` for an object, a function, a
+ * `bigint` or a symbol: the first step of `calculateSize`'s estimate, and read inline for
+ * an array's entries, which are most often primitives, so a large array is not a method
+ * call per entry.
  */
 function primitiveSize(value: unknown): number | undefined {
   switch (typeof value) {
     case 'number':
-      return 8;
+      return 8; // A double
     case 'string':
-      return value.length * 2;
+      return value.length * 2; // UTF-16
     case 'boolean':
       return 4;
     case 'undefined':

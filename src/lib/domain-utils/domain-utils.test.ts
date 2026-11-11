@@ -2886,7 +2886,7 @@ describe('domain-utils', () => {
 
         expect(validateConfigEntry('foo.**', 'domain')).toEqual({
           valid: false,
-          info: 'wildcard tail targets public suffix or IP (disallowed)',
+          info: 'wildcard has no fixed label after it (disallowed)',
           wildcardKind: 'none',
         });
 
@@ -3435,7 +3435,12 @@ describe('domain-utils', () => {
             .valid,
         ).toBe(false);
       }
-      // Named as the IP tail it is, not a public suffix.
+      // Named for what the tail is: none at all, or an IP address.
+      for (const allowSuffixTails of [false, true]) {
+        expect(
+          validateConfigEntry('api.*', 'domain', { allowSuffixTails }).info,
+        ).toBe('wildcard has no fixed label after it (disallowed)');
+      }
       expect(
         validateConfigEntry('*.0.0.1', 'domain', { allowSuffixTails: true })
           .info,
@@ -3462,6 +3467,13 @@ describe('domain-utils', () => {
       'good.test\\@evil.test:80',
       'good.test@evil.test:80',
       'a]b.test',
+      'good.test\u0000evil.test',
+      'a<b>.test:80',
+      'a^b.test',
+      'a|b.test',
+      'a\u007Fb.test',
+      'a\u0001b.test',
+      'a\u00A0b.test',
     ])('%p is malformed', (host) => {
       expect(parseHostHeader(host)).toEqual({ domain: '', port: '' });
     });

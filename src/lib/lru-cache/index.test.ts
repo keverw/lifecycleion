@@ -949,6 +949,35 @@ describe('LRUCache', () => {
     });
   });
 
+  describe('Default size estimate of nested arrays', () => {
+    test('an array met again is counted once, not walked again', () => {
+      const cache = new LRUCache<string, unknown>(10);
+      let shared: unknown[] = [1];
+      for (let level = 0; level < 22; level++) {
+        shared = [shared, shared];
+      }
+
+      const startedAt = performance.now();
+      cache.set('k', shared);
+
+      // Walked once per reference, it took half a second and counted about 369 MB.
+      expect(performance.now() - startedAt).toBeLessThan(200);
+      expect(cache.byteSize).toBeLessThan(10_000);
+    });
+
+    test('an array nested past the depth the estimate follows takes the fallback, rather than failing set()', () => {
+      const cache = new LRUCache<string, unknown>(10);
+      let deep: unknown[] = [];
+      for (let level = 0; level < 200_000; level++) {
+        deep = [deep];
+      }
+
+      expect(() => cache.set('deep', deep)).not.toThrow();
+      expect(cache.get('deep')).toBe(deep);
+      expect(cache.byteSize).toBeGreaterThan(0);
+    });
+  });
+
   describe('Custom size calculator', () => {
     test('should use custom size calculator when provided', () => {
       const sizeCalculator = (value: any) => {

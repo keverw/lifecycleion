@@ -320,11 +320,13 @@ export class XHRAdapter implements HTTPAdapter {
       let answeringURL = answeredURL;
 
       /**
-       * The answer as the XHR has it now. A redirect the browser followed is told by its URL
-       * alone, which is all it is reported by: its headers are the final page's, so they are
-       * not read, and one that cannot be read does not lose the redirect.
+       * The answer as the XHR has it now, its URL taken as `answeringURL`: the one read the
+       * adapter acts on, so none resolves a `Location` against a URL the browser upgraded.
+       * A redirect the browser followed is told by its URL alone, which is all it is
+       * reported by: its headers are the final page's, so they are not read, and one that
+       * cannot be read does not lose the redirect.
        */
-      const readAnswer = (status: number = xhr.status): AnsweredHeaders => {
+      const takeAnswer = (status: number = xhr.status): AnsweredHeaders => {
         // A string or none: an XHR outside a browser may have no `responseURL` at all, which
         // says nothing of a redirect.
         const reportedURL: unknown = xhr.responseURL;
@@ -338,12 +340,12 @@ export class XHRAdapter implements HTTPAdapter {
             : compareResponseURL(responseURL, answeredURL);
         const redirectURL =
           comparison?.kind === 'redirected' ? responseURL : undefined;
+        answeringURL =
+          comparison?.kind === 'upgraded'
+            ? comparison.upgradedURL
+            : answeredURL;
 
         return {
-          answeringURL:
-            comparison?.kind === 'upgraded'
-              ? comparison.upgradedURL
-              : answeredURL,
           status,
           headers:
             redirectURL === undefined
@@ -365,17 +367,6 @@ export class XHRAdapter implements HTTPAdapter {
 
         return answeredAtHeaders;
       };
-
-      /**
-       * The answer as the XHR has it now (see `readAnswer`), its URL taken as
-       * `answeringURL`: every read the adapter acts on goes through here, so none resolves
-       * a `Location` against a URL the browser upgraded.
-       */
-      function takeAnswer(status?: number): AnsweredHeaders {
-        const answer = readAnswer(status);
-        answeringURL = answer.answeringURL;
-        return answer;
-      }
 
       // --- Abort signal ---
       //
@@ -1286,11 +1277,6 @@ function readProgressEvent(event: {
 
 /** An answer as read when its headers arrived, before a later failure resets the XHR. */
 interface AnsweredHeaders {
-  /**
-   * The URL that answered: the one opened, or its `https:` form when the answer shows the
-   * browser upgraded it (see `compareResponseURL`). The caller takes it as `answeringURL`.
-   */
-  answeringURL: string;
   status: number;
   headers: Record<string, string | string[]>;
   responseURL: string;
