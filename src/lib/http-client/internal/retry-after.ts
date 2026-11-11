@@ -63,20 +63,13 @@ const ASCTIME_DATE = new RegExp(
  * them: an IMF-fixdate or RFC 850 date holds one, after its day name, so it spans the
  * first two comma-separated pieces; a number of seconds or an asctime date the first.
  *
- * An HTTP-date is measured two ways when the response's `Date` header, read by its first
- * value the same way, is an HTTP-date too: from `now`, the client's clock, and from that
- * `Date`, the server's own clock, and the shorter wait is used. A client clock behind the
- * server's makes the first too long, and a cache's stored answer, whose `Date` is the
- * origin's from when it was made, the second, so the shorter is the closer in both. A
- * client clock ahead of the server's makes the first too short, as it does when `now`
- * alone is read, and a `Date` from another clock than the `Retry-After`'s - a proxy's
- * written over the origin's - can make the second too short. Without a readable `Date`,
- * it is measured from `now`.
+ * An HTTP-date is measured from `now`, the client's clock, as got, ky and Python's urllib3
+ * measure it - not from the response's `Date`, so a client clock behind or ahead of the
+ * server's lengthens or shortens the wait by the difference.
  */
 export function parseRetryAfterMS(
   value: string | undefined,
   now: number,
-  responseDate?: string,
 ): number | undefined {
   if (value === undefined) {
     return undefined;
@@ -94,19 +87,12 @@ export function parseRetryAfterMS(
     return undefined;
   }
 
-  const serverNow =
-    responseDate === undefined
-      ? undefined
-      : parseFirstHTTPDate(responseDate.split(','), now);
-  const wait =
-    serverNow === undefined ? at - now : Math.min(at - now, at - serverNow);
-
-  return Math.max(0, wait);
+  return Math.max(0, at - now);
 }
 
 /**
- * The epoch time the first value of a header names, when it is an HTTP-date, from the
- * header split at its commas (`pieces`): the first two pieces, as an IMF-fixdate or RFC
+ * The epoch time the first value of `Retry-After` names, when it is an HTTP-date, from the
+ * value split at its commas (`pieces`): the first two pieces, as an IMF-fixdate or RFC
  * 850 date holds a comma, else the first (see `parseRetryAfterMS`). Rejoined as it was
  * written, so a date spaced otherwise than `Sun, 06 Nov ...` is not made into one that is.
  */

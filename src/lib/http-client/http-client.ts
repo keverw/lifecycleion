@@ -3910,7 +3910,6 @@ export class BaseHTTPClient {
               ? parseRetryAfterMS(
                   scalarHeader(adapterResponse.headers, 'retry-after'),
                   Date.now(),
-                  scalarHeader(adapterResponse.headers, 'date'),
                 )
               : undefined;
           const isRetryAfterTooLong =
