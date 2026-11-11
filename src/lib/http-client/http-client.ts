@@ -1822,11 +1822,12 @@ export class BaseHTTPClient {
               body: isBodyDropped ? undefined : sentBody.value,
             };
             // The headers describing a body go with the method rewritten to GET, as fetch
-            // drops them, or with a body a 303 left behind; a bodiless GET or HEAD sent
-            // to a 303's target keeps them, its method unchanged.
+            // drops them, or with a body a 303 left behind that sent something (see
+            // `sendsRequestBody`, the rule the interceptors' drop is read by below); a GET
+            // or HEAD that sent nothing keeps them on a 303, its method unchanged.
             const isHopBodyDropped =
               redirectMethod !== attemptResult.sentRequest.method ||
-              (isBodyDropped && hasRequestBody(sentBody.value));
+              (isBodyDropped && sendsRequestBody(sentBody.value));
             let redirectRequest: ResolvedRequest;
             try {
               redirectRequest = this._sanitizeRedirectRequest(
@@ -2071,14 +2072,18 @@ export class BaseHTTPClient {
             // and the interceptors' request sends nothing of - none, or one they emptied, by
             // the rule a retry on a cross-origin hop reads one by (see `sendsRequestBody`) -
             // was dropped by them, and goes with the headers that describe it, as a hop
-            // rewritten to `GET` drops them. Read inside the `try`, as a body the reads
-            // refuse fails the hop as the sanitizing does.
+            // rewritten to `GET` drops them - and so does a method they rewrote to `GET` or
+            // `HEAD`, as the server's rewrite does. Read inside the `try`, as a body the
+            // reads refuse fails the hop as the sanitizing does.
             let isBodyDroppedByInterceptors = false;
             let sanitizedRedirectRequest: ResolvedRequest;
             try {
               isBodyDroppedByInterceptors =
-                sendsRequestBody(redirectRequest.body) &&
-                !sendsRequestBody(redirectEnd.request.body);
+                (sendsRequestBody(redirectRequest.body) &&
+                  !sendsRequestBody(redirectEnd.request.body)) ||
+                (redirectEnd.request.method !== redirectRequest.method &&
+                  (redirectEnd.request.method === 'GET' ||
+                    redirectEnd.request.method === 'HEAD'));
               sanitizedRedirectRequest = this._sanitizeRedirectRequest(
                 redirectEnd.request,
                 {

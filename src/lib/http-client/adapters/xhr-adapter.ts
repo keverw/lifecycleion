@@ -336,13 +336,14 @@ export class XHRAdapter implements HTTPAdapter {
           responseURL === ''
             ? undefined
             : compareResponseURL(responseURL, answeredURL);
-        if (comparison?.kind === 'upgraded') {
-          answeringURL = comparison.upgradedURL;
-        }
         const redirectURL =
           comparison?.kind === 'redirected' ? responseURL : undefined;
 
         return {
+          answeringURL:
+            comparison?.kind === 'upgraded'
+              ? comparison.upgradedURL
+              : answeredURL,
           status,
           headers:
             redirectURL === undefined
@@ -359,6 +360,7 @@ export class XHRAdapter implements HTTPAdapter {
           const status = xhr.status;
           if (status > 0) {
             answeredAtHeaders = readAnswer(status);
+            answeringURL = answeredAtHeaders.answeringURL;
           }
         }
 
@@ -814,6 +816,7 @@ export class XHRAdapter implements HTTPAdapter {
             isBodyKnownUncoded === undefined
           ) {
             const answer = readAndActOnAnswer() ?? readAnswer();
+            answeringURL = answer.answeringURL;
 
             // Ended by the answer, read for the first time here.
             if (didSettle) {
@@ -886,6 +889,7 @@ export class XHRAdapter implements HTTPAdapter {
           // Read before any progress callback, as everything this listener reports is: the
           // answer, captured once (see `answeredAtHeaders`).
           const answer = captureAnswer() ?? readAnswer();
+          answeringURL = answer.answeringURL;
           const redirectURL = answer.redirectURL;
           // Seen here only by an XHR that reported none of it before.
           if (redirectURL !== undefined) {
@@ -1274,6 +1278,11 @@ function readProgressEvent(event: {
 
 /** An answer as read when its headers arrived, before a later failure resets the XHR. */
 interface AnsweredHeaders {
+  /**
+   * The URL that answered: the one opened, or its `https:` form when the answer shows the
+   * browser upgraded it (see `compareResponseURL`). The caller takes it as `answeringURL`.
+   */
+  answeringURL: string;
   status: number;
   headers: Record<string, string | string[]>;
   responseURL: string;

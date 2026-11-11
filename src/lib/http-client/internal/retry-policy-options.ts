@@ -19,13 +19,6 @@ import { defineEntry } from '../../internal/define-entry';
 type RetryAfterField = Pick<HTTPRetryPolicyOptions, 'maxRetryAfterMS'>;
 
 /**
- * The longest `Retry-After` a fixed policy waits for when it sets no `maxRetryAfterMS`:
- * the exponential strategy's default `maxTimeoutMS` (30 seconds), the one constant both
- * read, so the two cannot drift apart.
- */
-const DEFAULT_MAX_RETRY_AFTER_MS = DEFAULT_EXPONENTIAL_MAX_TIMEOUT_MS;
-
-/**
  * The least an unset `maxRetryAfterMS` defaults to: `Retry-After` is a whole number of
  * seconds, so a default below one second - an exponential policy's sub-second
  * `maxTimeoutMS` - would refuse every wait a server can ask for.
@@ -155,7 +148,8 @@ export function snapshotRetryPolicyOptions(
       plain.maxRetryAfterMS as number | null | undefined,
       policyInfo.strategy === 'exponential'
         ? Math.max(policyInfo.maxTimeoutMS, MIN_DEFAULT_MAX_RETRY_AFTER_MS)
-        : DEFAULT_MAX_RETRY_AFTER_MS,
+        : // A fixed policy's: the exponential strategy's default `maxTimeoutMS`.
+          DEFAULT_EXPONENTIAL_MAX_TIMEOUT_MS,
       'Retry maxRetryAfterMS',
     ),
   });

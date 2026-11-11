@@ -7981,6 +7981,70 @@ describe('HTTPClient — phase-aware interceptors', () => {
     });
   });
 
+  test("a redirect-phase interceptor's rewrite to GET drops the headers that describe a body, as the server's does", async () => {
+    const sent: Array<{ method: string; headers: Record<string, unknown> }> =
+      [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sent.push({ method: request.method, headers: request.headers });
+        return Promise.resolve<AdapterResponse>(
+          request.requestURL.endsWith('/x')
+            ? { status: 307, headers: { location: '/moved' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+    });
+    client.addRequestInterceptor((request) => ({ ...request, method: 'GET' }), {
+      phases: ['redirect'],
+    });
+
+    await client
+      .post('/x')
+      .headers({ 'content-type': 'application/json', 'content-language': 'en' })
+      .send();
+
+    expect(sent.map(({ method }) => method)).toEqual(['POST', 'GET']);
+    expect({
+      type: sent[1].headers['content-type'],
+      language: sent[1].headers['content-language'],
+    }).toEqual({ type: undefined, language: undefined });
+  });
+
+  test('a GET whose body sends nothing keeps the headers that describe a body on a 303, as one with none does', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sent.push(request.headers);
+        return Promise.resolve<AdapterResponse>(
+          request.requestURL.endsWith('/x')
+            ? { status: 303, headers: { location: '/moved' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://example.com',
+      followRedirects: true,
+    });
+
+    await client
+      .get('/x')
+      .headers({ 'content-type': 'application/octet-stream' })
+      .body(new Uint8Array(0))
+      .send();
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]['content-type']).toBe('application/octet-stream');
+  });
+
   test('a body a redirect-phase interceptor empties goes without the headers that describe it', async () => {
     const sent: Array<{ body: unknown; headers: Record<string, unknown> }> = [];
     const adapter: HTTPAdapter = {
