@@ -26,6 +26,12 @@ import { describeValue } from '../internal/describe-value';
 import { isNullish } from '../internal/is-nullish';
 import { copyArrayValue } from '../internal/array-copy';
 import {
+  checkedHostFor,
+  matchesReadHostPattern,
+  readHostPattern,
+  type HostPattern,
+} from './host-filter';
+import {
   assertKnownFields,
   assertOptionsObject,
 } from '../internal/known-fields';
@@ -968,6 +974,58 @@ export function matchesDomainList(
   }
 
   return false;
+}
+
+/**
+ * Each host filter's patterns, read once against the list itself, as
+ * `compiledDomainLists` keeps a domain list's: checked against a copy of its entries on
+ * every call, so a list the caller changes is read afresh.
+ */
+const hostFilterLists = new WeakMap<
+  readonly string[],
+  { source: readonly string[]; patterns: readonly HostPattern[] }
+>();
+
+/**
+ * Whether `hostname` matches any of `patterns` as a host filter - which of your own
+ * requests or hosts something applies to, rather than whom to trust - by the rules the
+ * HTTP client's `hosts` filters match by:
+ *
+ * - An exact name matches that host, after normalization (case, IDNA, a trailing dot).
+ * - `*.example.com` matches one label under the tail and `**.example.com` any depth;
+ *   neither matches the tail itself. A tail that is a public suffix or pseudo-TLD is
+ *   matched as written - `*.internal` matches `api.internal`, `**.co.uk` every host under
+ *   `co.uk` - where {@link matchesDomainList} refuses it. A host under an ICANN public
+ *   suffix beneath the tail is still never matched: `**.hedmark.no` does not reach
+ *   `evil.os.hedmark.no`, another registrant's.
+ * - `*` alone matches any non-empty hostname, an IP address included; no other wildcard
+ *   matches an IP address.
+ * - A pattern that can never match - `*.*`, a wildcard around an IP or numeric tail, an
+ *   entry with whitespace other than spaces, tabs, CRs and LFs at an end - matches
+ *   nothing. Validate entries with
+ *   `validateConfigEntry(entry, 'domain', { allowSuffixTails: true })`.
+ *
+ * Pass a URL's `hostname`. Throws a `TypeError` for a list that is not an array of
+ * strings; a `hostname` that is not a string matches nothing.
+ */
+export function matchesHostFilter(
+  hostname: string,
+  patterns: readonly string[],
+): boolean {
+  const source = copyEntryList(patterns, 'matchesHostFilter', 'patterns');
+  let kept = hostFilterLists.get(patterns);
+
+  if (kept === undefined || !isSameList(kept.source, source)) {
+    kept = { source, patterns: source.map(readHostPattern) };
+    hostFilterLists.set(patterns, kept);
+  }
+
+  if (typeof hostname !== 'string') {
+    return false;
+  }
+
+  const host = checkedHostFor(hostname);
+  return kept.patterns.some((pattern) => matchesReadHostPattern(host, pattern));
 }
 
 function isAllowedExactHostname(normalizedHostname: string): boolean {

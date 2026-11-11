@@ -212,6 +212,7 @@
 ## Unreleased
 
 - LRUCache: the default size estimate counts an array met again within one value as an 8-byte reference rather than walking it again, so arrays shared at every level no longer take exponential time and report an exponential size, and an array nested more than 1000 deep takes the 1000-byte fallback rather than `set()` overflowing the stack.
+- domain-utils: `matchesHostFilter(hostname, patterns)` matches a hostname against a host filter by the rules the HTTP client's `hosts` filters match by, which now call it: a wildcard over a public suffix or pseudo-TLD (`*.internal`) matches the hosts it names, for a list that picks hosts rather than trusting them.
 - domain-utils: `validateConfigEntry` takes `allowSuffixTails`, which accepts a wildcard whose tail is a public suffix or an internal pseudo-TLD (`*.internal`, `*.com`) for a list that picks hosts rather than trusting them; it is off by default, and the module's matchers still refuse such a tail.
 - domain-utils: `parseHostHeader()` reads a hostname holding whitespace, a `%`, or a URL delimiter (`@`, `/`, `?`, `#`, a backslash, a bracket) as malformed, `{ domain: '', port: '' }`, where `good.test@evil.test` came back as its domain.
 - HTTP MockAdapter: a route cookie whose non-empty `path` does not start with `/` fails the request as a route mistake, as any other bad cookie attribute does, where it was written as `Path=api`, which a cookie jar ignores.

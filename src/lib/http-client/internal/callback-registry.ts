@@ -11,11 +11,11 @@ import {
   hasNonHTTPWhitespaceEdge,
   trimHTTPWhitespace,
 } from '../../internal/ascii-text';
+import { normalizeFilterMethods } from '../utils';
 import {
   isGlobalHostPattern,
-  normalizeFilterMethods,
   readHostPattern,
-} from '../utils';
+} from '../../domain-utils/host-filter';
 import { validateConfigEntry } from '../../domain-utils/domain-utils';
 import {
   isIPAddress,

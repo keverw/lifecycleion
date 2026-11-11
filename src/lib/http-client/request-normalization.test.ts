@@ -24,12 +24,12 @@ import {
   extractFetchHeaders,
   isCrossOrigin,
   matchesFilter,
-  readHostPattern,
   mergeHeaders,
   parseContentType,
   reportedRedirectTarget,
   stripCrossOriginURLCredentials,
 } from './utils';
+import { readHostPattern } from '../domain-utils/host-filter';
 import * as httpUtils from './utils';
 import {
   ADAPTER_ERROR_CARRIER_KEY,

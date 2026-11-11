@@ -6,6 +6,7 @@ import {
   matchesWildcardDomain,
   matchesWildcardOrigin,
   matchesDomainList,
+  matchesHostFilter,
   matchesOriginList,
   matchesCORSCredentialsList,
   isIPAddress,
@@ -3409,6 +3410,82 @@ describe('domain-utils', () => {
       expect(matchesWildcardDomain('a.b.example.org', 'a.**.example.com')).toBe(
         false,
       );
+    });
+  });
+
+  describe('matchesHostFilter', () => {
+    test.each([
+      ['api.internal', ['*.internal'], true],
+      ['example.com', ['*.com'], true],
+      ['a.example.com', ['*.com'], false],
+      ['a.example.com', ['**.com'], true],
+      ['a.b.example.co.uk', ['**.co.uk'], true],
+      ['co.uk', ['**.co.uk'], false],
+      ['evil.os.hedmark.no', ['**.hedmark.no'], false],
+      ['api.hedmark.no', ['**.hedmark.no'], true],
+      ['API.Example.COM', ['api.example.com'], true],
+      ['-edge.example.com', ['*.example.com'], true],
+      ['10.0.0.1', ['*'], true],
+      ['10.0.0.1', ['10.0.0.1'], true],
+      ['10.0.0.1', ['*.0.0.1'], false],
+      ['a.example.com', ['*.*'], false],
+      ['a.example.com', ['other.test', '*.example.com'], true],
+      ['', ['*'], false],
+    ] as const)('%p in %p is %p', (hostname, patterns, isMatch) => {
+      expect(matchesHostFilter(hostname, [...patterns])).toBe(isMatch);
+    });
+
+    test('matches as a hosts filter on a client does, for the same patterns', async () => {
+      const { HTTPClient } = await import('../http-client/http-client');
+      const { MockAdapter } =
+        await import('../http-client/adapters/mock-adapter');
+      const patterns = ['*.internal', '**.hedmark.no', 'exact.test'];
+      const hosts = [
+        'api.internal',
+        'a.b.internal',
+        'evil.os.hedmark.no',
+        'api.hedmark.no',
+        'exact.test',
+        'other.test',
+      ];
+      const adapter = new MockAdapter();
+      adapter.routes.get('/x', () => ({ status: 200 }));
+      const client = new HTTPClient({ adapter });
+      const seen: string[] = [];
+      client.addRequestInterceptor(
+        (request) => {
+          seen.push(new URL(request.requestURL).hostname);
+          return request;
+        },
+        { hosts: patterns },
+      );
+
+      for (const host of hosts) {
+        await client.get(`https://${host}/x`).send();
+      }
+
+      expect(seen).toEqual(
+        hosts.filter((host) => matchesHostFilter(host, patterns)),
+      );
+      expect(seen).toEqual(['api.internal', 'api.hedmark.no', 'exact.test']);
+    });
+
+    test('reads a changed list afresh', () => {
+      const patterns = ['*.internal'];
+      expect(matchesHostFilter('api.internal', patterns)).toBe(true);
+      patterns[0] = '*.test';
+      expect(matchesHostFilter('api.internal', patterns)).toBe(false);
+      expect(matchesHostFilter('api.test', patterns)).toBe(true);
+    });
+
+    test('refuses a list that is not an array of strings', () => {
+      expect(() =>
+        matchesHostFilter('a.test', 'a.test' as unknown as string[]),
+      ).toThrow(TypeError);
+      expect(() =>
+        matchesHostFilter('a.test', [42] as unknown as string[]),
+      ).toThrow(TypeError);
+      expect(matchesHostFilter(42 as unknown as string, ['*'])).toBe(false);
     });
   });
 
