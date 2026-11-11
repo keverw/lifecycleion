@@ -1134,6 +1134,16 @@ describe('deepClone', () => {
       expect(clonedWidest[2 ** 32 - 2]).toBe(3);
     });
 
+    test('an array as long as an array can be, holding no last entry, clones to its length with no entry past it', () => {
+      const original: number[] = [1];
+      original.length = 2 ** 32 - 1;
+
+      const cloned = deepClone(original);
+
+      expect(cloned).toHaveLength(2 ** 32 - 1);
+      expect(Object.keys(cloned)).toEqual(['0']);
+    });
+
     test('nesting far past the call stack clones without overflowing it', () => {
       let objects: Record<string, unknown> = {};
       let arrays: unknown[] = [];

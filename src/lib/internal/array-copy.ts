@@ -77,9 +77,8 @@ function refusal(error: TypeError): TypeError {
  * `Object.prototype` are taken as filling none (see {@link forEachOwnIndex}) - so a check
  * that reads every index reads it as the `undefined` it is.
  * Past enough holes the rest are read by its own keys (see {@link forEachOwnIndex}), and a
- * copy longer than {@link SPARSE_RUN} holds only the entries it was given: V8 allocates
- * `new Array(length)` whole, as JavaScriptCore does, so one entry in a list at the copy cap
- * would cost 128 MiB.
+ * copy longer than {@link SPARSE_RUN} holds only the entries it was given (see
+ * {@link newArrayCopy}), so one entry in a list at the copy cap does not cost 128 MiB.
  * A length an array cannot have, or one over {@link MAX_COPIED_ARRAY_LENGTH}, is refused
  * (see {@link readArrayLength}).
  */
@@ -90,18 +89,33 @@ export function copyArrayValue<V>(value: V, label = 'A list'): V {
 
   const source: unknown[] = value;
   const length = readArrayLength(source, label, MAX_COPIED_ARRAY_LENGTH);
-  const copy: unknown[] = length <= SPARSE_RUN ? new Array(length) : [];
+  const copy = newArrayCopy(length);
   forEachOwnIndex(source, length, (index) => {
     copy[index] = source[index];
   });
-
-  // Lengthened past its last entry by writing one index beyond, then cut back: a length
-  // set on its own makes V8 allocate the holes up to it, where an index written far past
-  // the last makes the array a sparse one first.
-  if (copy.length < length) {
-    copy[length] = undefined;
-    copy.length = length;
-  }
+  lengthenArrayCopy(copy, length);
 
   return copy as V;
+}
+
+/**
+ * A new array to copy `length` entries into: allocated whole up to {@link SPARSE_RUN},
+ * and empty past it, since V8 allocates `new Array(length)` whole, as JavaScriptCore
+ * does. Brought to `length` by {@link lengthenArrayCopy} once its entries are written.
+ */
+export function newArrayCopy(length: number): unknown[] {
+  return length <= SPARSE_RUN ? new Array(length) : [];
+}
+
+/**
+ * `copy` lengthened to `length` when its entries stop short of it, without allocating
+ * the holes: its last index is written and deleted, which makes it a sparse array first,
+ * where setting `length` on its own makes V8 allocate every hole up to it. The last
+ * index, not one past it, so a length of `2 ** 32 - 1` is reached too.
+ */
+export function lengthenArrayCopy(copy: unknown[], length: number): void {
+  if (copy.length < length) {
+    copy[length - 1] = undefined;
+    Reflect.deleteProperty(copy, length - 1);
+  }
 }

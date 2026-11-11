@@ -14,9 +14,12 @@ import {
   holdsOwnIndex,
   indicesFrom,
   isMostlyHoles,
+  readCopiedIndex,
 } from './internal/array-indices';
 import {
+  lengthenArrayCopy,
   MAX_COPIED_ARRAY_LENGTH,
+  newArrayCopy,
   readArrayLength,
 } from './internal/array-copy';
 import { isDOMExceptionInstance } from './internal/dom-exception';
@@ -153,9 +156,7 @@ function readArrayKeys(arrayKeys: unknown): readonly string[] {
   );
   for (let index = 0; index < length; index++) {
     // Its own entries only: a hole, one its prototype fills included, is no key.
-    const key: unknown = Object.hasOwn(arrayKeys, index)
-      ? arrayKeys[index]
-      : undefined;
+    const key: unknown = readCopiedIndex(arrayKeys, index);
 
     if (typeof key !== 'string') {
       throw new TypeError(
@@ -203,9 +204,11 @@ function cloneValue<T>(obj: T, state: CloneState): T {
   if (Array.isArray(obj)) {
     const source = obj as unknown[];
     // A `Proxy`'s length is whatever its trap answers: one an array cannot have is refused.
-    const cloned = remember<unknown[]>(state.seen, obj, []);
-    cloned.length = readArrayLength(source, 'deepClone: an array');
-    state.frames.push(new ArrayFrame(source, cloned));
+    const length = readArrayLength(source, 'deepClone: an array');
+    // Brought to its length once its entries are written (see `ArrayFrame`), so a long
+    // sparse array's holes are not allocated.
+    const cloned = remember<unknown[]>(state.seen, obj, newArrayCopy(length));
+    state.frames.push(new ArrayFrame(source, cloned, length));
     return cloned as T;
   }
 
@@ -532,8 +535,9 @@ class ArrayFrame implements Frame {
   constructor(
     private readonly source: unknown[],
     private readonly target: unknown[],
+    length: number,
   ) {
-    this.length = target.length;
+    this.length = length;
   }
 
   public step(state: CloneState): boolean {
@@ -589,6 +593,7 @@ class ArrayFrame implements Frame {
       }
     }
 
+    lengthenArrayCopy(target, this.length);
     return this.stepNamed(state);
   }
 

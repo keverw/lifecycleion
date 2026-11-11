@@ -7793,6 +7793,93 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(builder.error?.redirectHistory).toEqual([target]);
   });
 
+  test('a redirect-phase interceptor result that rewrote the hop and cannot be read reports the rewritten URL as requestURL and the last redirectHistory entry', async () => {
+    const start = 'https://example.com/start';
+    const target = 'https://example.com/target';
+    const rewritten = 'https://example.com/rewritten';
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === start) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: target },
+            body: null,
+          });
+        }
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        requestURL: rewritten,
+        get headers(): Record<string, string> {
+          throw new Error('headers could not be read');
+        },
+      }),
+      { phases: ['redirect'] },
+    );
+
+    const builder = client.get(start);
+    const res = await builder.send();
+
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(res.requestURL).toBe(rewritten);
+    expect(res.redirectHistory).toEqual([rewritten]);
+    expect(res.detectedRedirectURL).toBe(target);
+    expect(res.wasRedirectFollowed).toBe(false);
+    expect(builder.error?.requestURL).toBe(rewritten);
+    expect(builder.error?.redirectHistory).toEqual([rewritten]);
+  });
+
+  test("a redirect-phase interceptor result that rewrote the hop to another origin and cannot be read is reported without the URL's userinfo", async () => {
+    const start = 'https://example.com/start';
+    const target = 'https://example.com/target';
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        if (request.requestURL === start) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: target },
+            body: null,
+          });
+        }
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    const observerRequestURLs: string[] = [];
+    client.addErrorObserver((_err, request) => {
+      observerRequestURLs.push(request.requestURL);
+    });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        requestURL: 'https://user:secret@other.example/x',
+        get headers(): Record<string, string> {
+          throw new Error('headers could not be read');
+        },
+      }),
+      { phases: ['redirect'] },
+    );
+
+    const builder = client.get(start);
+    const res = await builder.send();
+
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(res.requestURL).toBe('https://other.example/x');
+    expect(res.redirectHistory).toEqual(['https://other.example/x']);
+    expect(builder.error?.requestURL).toBe('https://other.example/x');
+    expect(observerRequestURLs).toEqual(['https://other.example/x']);
+  });
+
   test('redirect-phase interceptor cancel sets requestURL and redirectHistory to redirect target', async () => {
     const start = 'https://example.com/a';
     const target = 'https://example.com/b';

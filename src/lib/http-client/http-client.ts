@@ -1780,7 +1780,9 @@ export class BaseHTTPClient {
             // a `Location` nobody fixed fails, and it fails as the server's fault.
             const wasLocationUnsupported = !isAbsoluteWebURL(redirectURL);
 
-            // A hop that failed before it went out, as every such failure reports it.
+            // A hop that failed before it went out, as every such failure reports it: the
+            // URL it would have gone to is its `requestURL` and its `redirectHistory`
+            // entry both, as for a hop that is followed or cancelled.
             const buildUnsentHopResponse = (requestURL: string) =>
               this._buildResponse<T>({
                 adapterResponse: null,
@@ -1790,7 +1792,7 @@ export class BaseHTTPClient {
                 adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL,
-                redirectHistory: nextRedirectHistory,
+                redirectHistory: [...redirectHistory, requestURL],
                 undispatchedRedirect: {
                   url: detectedTargetURL,
                   isRecorded: true,
@@ -1938,16 +1940,27 @@ export class BaseHTTPClient {
                     redirectBodyCopy.didFail ? 'unbuildable' : undefined,
                   );
                 // The interceptor's request may be what failed; see the initial phase.
-                const failedRequestURL = readStringMember(
+                // Its URL's userinfo cut when it is another origin's, as a hop that went
+                // out is recorded (see `_unsentRedirectRequest`).
+                const readFailedURL = readStringMember(
                   failedRedirectRequest,
                   'requestURL',
                   redirectURL,
                 );
+                const failedRequestURL = isCrossOrigin(
+                  redirectTargetURL,
+                  readFailedURL,
+                )
+                  ? stripURLCredentials(readFailedURL)
+                  : readFailedURL;
 
                 // The reads above run the interceptors' getters; a cancel made in one
                 // ends the hop cancelled, below, as one made before the failure does.
                 if (!cancelSignal.aborted) {
-                  observerRequest = failedObserverRequest;
+                  observerRequest = {
+                    ...failedObserverRequest,
+                    requestURL: failedRequestURL,
+                  };
                   response = buildUnsentHopResponse(failedRequestURL);
 
                   // A body that could not be copied is the body's failure; see

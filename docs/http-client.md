@@ -968,7 +968,13 @@ over a secure request: `https:` or `wss:`, or `http:` or `ws:` to a loopback hos
 treat as secure, so a local dev server's Secure session cookie works as it does in the
 browser. The jar takes the host's word for it: a `fetch` that routes even loopback through
 an `HTTP_PROXY` (Bun's does, unless `NO_PROXY` names it) sends those cookies to the proxy
-in plain text, so list `localhost` in `NO_PROXY` there. Response parsing refuses Secure cookies from any other request,
+in plain text, so list `localhost` in `NO_PROXY` there. It also takes the resolver's word
+that a name under `.localhost` is this machine. Browsers answer those names with loopback
+themselves, as RFC 6761 asks, and so do macOS and systemd-resolved, but on a server the
+adapter asks the system resolver, and one that forwards `.localhost` names to DNS (some
+minimal Linux images do) lets that DNS point `app.localhost` at another machine, which
+would then receive its Secure cookies in plain text. Where that resolver cannot be
+trusted, map the names used in `/etc/hosts`, or send to `localhost` itself. Response parsing refuses Secure cookies from any other request,
 and refuses insecure cookies that would replace or shadow an existing, unexpired Secure
 cookie of the same name whose scope covers it, including deletion attempts: domains that
 match in either direction, and a path at or inside the Secure cookie's. As in RFC 6265bis
