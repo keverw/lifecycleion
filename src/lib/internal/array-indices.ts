@@ -125,9 +125,10 @@ export function indexFreePrototype(array: object): object | null | undefined {
  * each told as {@link holdsCopiedIndex} tells one. Past enough holes the rest are found
  * from its own keys, listed once, and each checked again by `Object.hasOwn` as it is
  * reached - an entry visited before can have removed it, and one it adds is not visited,
- * nor is a hole a `Proxy`'s `has` answers for - so a sparse array's length is not walked. As each hole walked costs an `Object.hasOwn`,
- * about what listing and checking an entry does, that is past {@link SPARSE_RUN} holes
- * once they outnumber the entries, not {@link isMostlyHoles}' many times as many.
+ * nor is a hole a `Proxy`'s `has` answers for - so a sparse array's length is not walked.
+ * As each hole walked costs an `Object.hasOwn`, about what listing and checking an entry
+ * does, that is past {@link SPARSE_RUN} holes once they outnumber the entries, not
+ * {@link isMostlyHoles}' many times as many.
  */
 export function forEachOwnIndex(
   source: unknown[],

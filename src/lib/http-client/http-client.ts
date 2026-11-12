@@ -137,6 +137,7 @@ import type {
   BuilderCallbacks,
   ResolvedBuilderOptions,
   BuilderSendContext,
+  SendFn,
 } from './http-request-builder';
 import type { CookieJar } from './cookie-jar';
 // Shared error normalization preserves Error instances and wraps other thrown values.
@@ -426,6 +427,9 @@ export class BaseHTTPClient {
 
   private _disabled = false;
 
+  /** What every builder of this client sends through; see `clientSendFn`. */
+  private readonly _sendFn = clientSendFn((ctx) => this._execute(ctx));
+
   constructor(
     config: HTTPClientConfig = {},
     internal: InternalClientState = {},
@@ -590,7 +594,7 @@ export class BaseHTTPClient {
     return new HTTPRequestBuilder<T>(
       normalizeStandardMethod(method),
       path,
-      clientSendFn((ctx) => this._execute(ctx)),
+      this._sendFn as SendFn<T>,
       options,
     );
   }
@@ -3597,6 +3601,17 @@ export class BaseHTTPClient {
             params.latestUpload.outcome = responseUploadOutcome;
           }
         }
+        // Refused as the client's own error, as an invalid status is below, rather than
+        // left to the engine's error for reading a field of `undefined`.
+        if (
+          (typeof rawAdapterResponse !== 'object' &&
+            typeof rawAdapterResponse !== 'function') ||
+          rawAdapterResponse === null
+        ) {
+          throw new TypeError(
+            `HTTPClient adapter answered with no response object (got ${rawAdapterResponse === null ? 'null' : typeof rawAdapterResponse})`,
+          );
+        }
         const headers = rawAdapterResponse.headers;
         // Advisory as well, and read under the same rule: it only feeds observers (see
         // `snapshotHeaderRecord` below), so a throwing accessor means absent.
@@ -5534,12 +5549,13 @@ export class BaseHTTPClient {
    * until the runtime warns of a leak.
    *
    * Released when the request settles rather than when the attempt does: an attempt's
-   * signal stays in an adapter's hands after `send()` resolves - `NodeAdapter` listens
-   * on it for the settle-deadline teardown of an early-ack upload - and the attempt loop
-   * has several exits, where the request has one. What the fallback gives up by that is
-   * only a cancel arriving *after* the request settled, from a `final` observer or once
-   * the response was handed back, which would no longer reach an upload still trailing on that attempt's socket; the adapter's own stall
-   * watchdog ends such an upload regardless.
+   * signal stays in an adapter's hands after `send()` resolves - `NodeAdapter` listens on
+   * it for the settle-deadline teardown of an early-ack upload - and the attempt loop has
+   * several exits, where the request has one. What the fallback gives up by that is only
+   * a cancel arriving *after* the request settled, from a `final` observer or once the
+   * response was handed back, which would no longer reach an upload still trailing on
+   * that attempt's socket; the adapter's own stall watchdog ends such an upload
+   * regardless.
    */
   private _composeSignals(
     a: AbortSignal,

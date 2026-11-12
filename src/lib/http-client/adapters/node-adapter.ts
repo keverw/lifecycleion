@@ -2374,19 +2374,20 @@ export class NodeAdapter implements HTTPAdapter {
               (isWritingBody || req.writableEnded) && !req.writableFinished;
 
             // A stray `205`'s answer (see below): settled now, its bytes read and dropped
-            // until they end. An upload still going out goes on, its writer watched by the
-            // stall watchdog, armed now rather than once the answer closes; one whose writer
-            // fails tears the connection down with it (see `reportWriteErrorAfterResponse`).
-            // The read is bounded by the caller's signal, which ends it as it ends the same
-            // read behind a `fetch` answer, and, once the upload has gone out, by
-            // `maxResponseBytes` and the same five-second windows: past the limit - as the
-            // upload's last bytes go out, or as a byte arrives after them - after a whole
-            // window with no bytes, or at the end of the {@link STRAY_205_DRAIN_WINDOWS}th
-            // window however the bytes trickle, the connection is let go. The request's timeout stopped with the answer, so
-            // nothing else would end a read that a server keeps alive a byte at a time.
-            // Bytes past the limit during an upload are dropped as they come, so they cost
-            // no memory; `isDeclaredPastLimit` counts a `Content-Length` saying they will
-            // pass it as passing it.
+            // until they end. An upload still going out goes on, its writer watched by
+            // the stall watchdog, armed now rather than once the answer closes; one whose
+            // writer fails tears the connection down with it (see
+            // `reportWriteErrorAfterResponse`). The read is bounded by the caller's
+            // signal, which ends it as it ends the same read behind a `fetch` answer,
+            // and, once the upload has gone out, by `maxResponseBytes` and the same
+            // five-second windows: past the limit - as the upload's last bytes go out, or
+            // as a byte arrives after them - after a whole window with no bytes, or at
+            // the end of the {@link STRAY_205_DRAIN_WINDOWS}th window however the bytes
+            // trickle, the connection is let go. The request's timeout stopped with the
+            // answer, so nothing else would end a read that a server keeps alive a byte
+            // at a time. Bytes past the limit during an upload are dropped as they come,
+            // so they cost no memory; `isDeclaredPastLimit` counts a `Content-Length`
+            // saying they will pass it as passing it.
             const answerAndDrainStray205 = (
               isDeclaredPastLimit: boolean,
             ): void => {

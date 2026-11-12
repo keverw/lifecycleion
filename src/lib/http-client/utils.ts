@@ -1724,24 +1724,6 @@ export function matchesFilter(
     }
   }
 
-  if (
-    kind !== 'error' &&
-    filter.bodyContainsKeys &&
-    filter.bodyContainsKeys.length > 0
-  ) {
-    // A plain object, as documented: a typed array or a boxed string has index keys,
-    // so `'0'` would match every binary body.
-    if (!isPlainRecord(context.body)) {
-      return false;
-    }
-
-    const body = context.body;
-
-    if (!filter.bodyContainsKeys.some((k) => hasNestedKey(body, k))) {
-      return false;
-    }
-  }
-
   // Checked whenever the filter names hosts or schemes, as `methods` is: a request whose
   // URL could not be read (`''`), or that has none, matches no host or scheme rather
   // than skipping the filter, so a host-scoped observer does not hear about other hosts.
@@ -1779,6 +1761,27 @@ export function matchesFilter(
       protocol === 'http:' ? 'http' : protocol === 'https:' ? 'https' : null;
 
     if (!scheme || !filter.schemes.includes(scheme)) {
+      return false;
+    }
+  }
+
+  // Last, since it reads the body - which a request interceptor's filter may have to
+  // parse first (see `fillRequestBody`) - so a filter that cannot match on the rest
+  // never reads it.
+  if (
+    kind !== 'error' &&
+    filter.bodyContainsKeys &&
+    filter.bodyContainsKeys.length > 0
+  ) {
+    // A plain object, as documented: a typed array or a boxed string has index keys,
+    // so `'0'` would match every binary body.
+    if (!isPlainRecord(context.body)) {
+      return false;
+    }
+
+    const body = context.body;
+
+    if (!filter.bodyContainsKeys.some((k) => hasNestedKey(body, k))) {
       return false;
     }
   }

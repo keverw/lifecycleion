@@ -5,6 +5,7 @@ import type {
   InterceptedRequest,
   RequestPhase,
   RequestInterceptorContext,
+  RequestInterceptorFilter,
 } from './types';
 
 function makeRequest(
@@ -926,6 +927,50 @@ describe('JSON body copies read by interceptors', () => {
     }
     expect(sent).toEqual(['{"a":1,"nested":{"b":2}}']);
   });
+
+  test.each<[string, RequestInterceptorFilter, unknown]>([
+    ['its method', { methods: ['GET'] }, { a: 1 }],
+    ['its host', { hosts: ['auth.example.com'] }, { a: 1 }],
+    ['its scheme', { schemes: ['http'] }, { a: 1 }],
+    ['an array body', {}, [{ a: 1 }]],
+  ])(
+    'a bodyContainsKeys filter that cannot match on %s leaves the JSON body unparsed',
+    async (_label, rest, json) => {
+      const sent: unknown[] = [];
+      const client = new HTTPClient({
+        adapter: {
+          getType: () => 'mock',
+          send: (request) => {
+            sent.push(request.body);
+            return Promise.resolve({
+              status: 200,
+              headers: { 'content-type': 'text/plain' },
+              body: new TextEncoder().encode('ok'),
+            });
+          },
+        },
+      });
+      client.addRequestInterceptor(
+        () => {
+          throw new Error('must not be called');
+        },
+        { ...rest, bodyContainsKeys: ['a'] },
+      );
+      const parse = spyOn(JSON, 'parse');
+      try {
+        const response = await client
+          .put('https://api.example.com/x')
+          .json(json)
+          .send();
+
+        expect(response.status).toBe(200);
+        expect(parse).toHaveBeenCalledTimes(0);
+      } finally {
+        parse.mockRestore();
+      }
+      expect(sent).toEqual([JSON.stringify(json)]);
+    },
+  );
 
   test('a bodyContainsKeys filter and the interceptors are handed the body as its data, in every phase', async () => {
     let attempts = 0;

@@ -630,3 +630,35 @@ describe('MockAdapter with a signal that refuses listeners', () => {
     expect(escaped).toEqual([]);
   });
 });
+
+test.each([
+  ['undefined', undefined],
+  ['null', null],
+  ['string', 'ok'],
+] as const)(
+  'an adapter that answers with %s fails as adapter_error, refused by the client',
+  async (got, answer) => {
+    let sends = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () => {
+          sends++;
+          return Promise.resolve(answer as unknown as AdapterResponse);
+        },
+      },
+      retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 2 },
+    });
+    const builder = client.get('https://api.example.com/x');
+
+    const response = await builder.send();
+
+    expect(response.status).toBe(0);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(String(builder.error?.cause)).toContain(
+      `HTTPClient adapter answered with no response object (got ${got})`,
+    );
+    // The adapter answered, so it is not sent again.
+    expect(sends).toBe(1);
+  },
+);

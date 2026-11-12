@@ -165,10 +165,7 @@ async function runInterceptors(
       isCurrentUncopied = false;
     }
 
-    // A JSON body copy is filled from its text only for a filter that reads its keys.
-    if (filter.bodyContainsKeys !== undefined) {
-      fillRequestBody(current.body);
-    }
+    const { body } = current;
 
     if (
       !matchesFilter(
@@ -176,7 +173,16 @@ async function runInterceptors(
         {
           method: current.method,
           requestURL: current.requestURL,
-          body: current.body,
+          // Read only by a `bodyContainsKeys` filter, once the rest of it has matched:
+          // a JSON body copy is filled from its text then (see `fillRequestBody`), and
+          // never for an array, which no such filter matches.
+          get body() {
+            if (!Array.isArray(body)) {
+              fillRequestBody(body);
+            }
+
+            return body;
+          },
         },
         'request',
       )

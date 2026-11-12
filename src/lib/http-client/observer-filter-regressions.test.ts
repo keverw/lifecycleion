@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
+import type { AdapterResponse } from './types';
 import { captureErrorReports } from './test-helpers/capture-error-reports';
 import {
   THROWING_FILTER_HOST,
@@ -375,4 +376,59 @@ test('a JSON rawBody is parsed back only for an attempt an observer runs for, on
   expect(parsedTexts.filter((source) => source === text)).toHaveLength(1);
   expect(rawBodies).toEqual([{ value: 1 }, { value: 1 }]);
   expect(rawBodies[0]).toBe(rawBodies[1]);
+});
+
+test('every observer, in every phase, is handed a JSON rawBody as the data sent', async () => {
+  let calls = 0;
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () => {
+        calls++;
+        if (calls === 1) {
+          return Promise.reject(new Error('down'));
+        }
+
+        return Promise.resolve<AdapterResponse>(
+          calls === 2
+            ? { status: 503, headers: {}, body: null }
+            : calls === 3
+              ? {
+                  status: 307,
+                  headers: { location: 'https://api.example.com/next' },
+                  body: null,
+                }
+              : { status: 200, headers: {}, body: null },
+        );
+      },
+    },
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 3 },
+  });
+  const seen: { phase: string; rawBody: unknown }[] = [];
+  client.addResponseObserver(
+    (_response, request, phase) => {
+      seen.push({ phase: `response ${phase.type}`, rawBody: request.rawBody });
+    },
+    { phases: ['retry', 'redirect', 'final'] },
+  );
+  client.addErrorObserver(
+    (_error, request, phase) => {
+      seen.push({ phase: `error ${phase.type}`, rawBody: request.rawBody });
+    },
+    { phases: ['retry', 'final'] },
+  );
+
+  const response = await client
+    .put('https://api.example.com/x')
+    .json({ a: 1 })
+    .send();
+
+  expect(response.status).toBe(200);
+  expect(seen).toEqual([
+    { phase: 'error retry', rawBody: { a: 1 } },
+    { phase: 'response retry', rawBody: { a: 1 } },
+    { phase: 'response redirect', rawBody: { a: 1 } },
+    { phase: 'response final', rawBody: { a: 1 } },
+  ]);
 });

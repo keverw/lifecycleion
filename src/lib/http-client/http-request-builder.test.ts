@@ -1038,3 +1038,26 @@ test('a byte body whose prototype is a Proxy is copied without running its traps
   expect(() => builder.body(bytes)).not.toThrow();
   expect(trapCalls).toBe(0);
 });
+
+test("a builder's own send function is handed a JSON body it may change and send on", async () => {
+  const adapter = new MockAdapter();
+  const received: unknown[] = [];
+  adapter.routes.post('/x', (request) => {
+    received.push(request.body);
+    return { status: 200, body: 'ok' };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'https://api.example.com',
+  });
+  const builder = new HTTPRequestBuilder('POST', '/x', (ctx) => {
+    const body = ctx.options.body as Record<string, unknown>;
+    body.traceID = 't1';
+    return client.post('/x').json(body).send();
+  }).json({ a: 1 });
+
+  const response = await builder.send();
+
+  expect(response.status).toBe(200);
+  expect(received).toEqual([{ a: 1, traceID: 't1' }]);
+});

@@ -1,13 +1,13 @@
 /**
  * A JSON body's `rawBody` for the observers, parsed back from the text sent the first time
- * an observer is handed the attempt's request (see `handedRawBody`), rather than as the
- * attempt is dispatched: an attempt no observer runs for - a retry with only `final`
- * observers registered, an observer whose filter does not match - never parses it.
+ * an observer is handed the attempt's request (see `handedRawBody`): an attempt no
+ * observer runs for - a retry with only `final` observers registered, an observer whose
+ * filter does not match - never parses it.
  *
  * The attempt's request holds a token in place of the value. The token is the client's:
  * a request holding one is never handed to caller code, only the copy `handedRawBody`
  * reads it into. The copies of one attempt's request share the token, and so the one
- * value parsed for it, as they would share a value parsed at dispatch.
+ * value parsed for it.
  */
 const pendingByToken = new WeakMap<object, { text: string; value?: unknown }>();
 

@@ -4,22 +4,25 @@ import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { filePartNameToSend, formEntries, isFormData } from './form-entries';
 
 /**
- * The text each JSON body copy is read back from - exactly the text it serializes to, its
- * own `toJSON` wrapper's included, or `undefined` for one that serializes to nothing - by
- * the copy. Only a copy no caller holds is here: one is forgotten as it is handed to an
- * interceptor (see `releaseRequestBody`), and nothing else hands a request's body to
- * caller code - an attempt's observers are handed their own, parsed back from the text
- * sent.
+ * What the client knows of a JSON body copy it made (see `copyRequestBody`): the text it
+ * serializes to, its own `toJSON` wrapper's included, or `undefined` for one that
+ * serializes to nothing; and whether it has been filled from that text. A copy not yet
+ * filled is an empty object or array of the shape its text has (see `fillRequestBody`),
+ * so a copy that is only ever sent - no interceptor function is handed it and no
+ * `bodyContainsKeys` filter reads it - is never parsed back at all.
  */
-const jsonTextByCopy = new WeakMap<object, string | undefined>();
+type CopyRecord =
+  | { readonly text: string; readonly isFilled: false }
+  | { readonly text: string | undefined; readonly isFilled: true };
 
 /**
- * The JSON body copies not yet filled from their text (see `fillRequestBody`): each an
- * empty object or array of the shape its text has, so a copy that is only ever sent - no
- * interceptor function is handed it and no `bodyContainsKeys` filter reads it - is never
- * parsed back at all.
+ * The record of each JSON body copy no caller holds. One is forgotten as it is handed to
+ * caller code, which may keep it and change it in place - an interceptor, or a builder's
+ * own send function (see `releaseRequestBody`). Nothing else hands a request's body to
+ * caller code: an attempt's observers are handed their own, parsed back from the text
+ * sent.
  */
-const unfilledCopies = new WeakSet<object>();
+const recordByCopy = new WeakMap<object, CopyRecord>();
 
 /**
  * A request body as a value the client owns, which no caller holds: taken when a body is
@@ -30,13 +33,13 @@ const unfilledCopies = new WeakSet<object>();
  *   serialized once, by `JSON.stringify` - so every nested `toJSON` is applied and what
  *   JSON reads from prototypes is honored, where a structural copy would lose them - and
  *   parsed back when its contents are first read (see `fillRequestBody`). Until then it
- *   is an empty object or array, the shape its text has, sent as that text. A `Date` is its ISO string, a class instance a plain object, an
- *   `undefined` member dropped. A top-level `toJSON` that answers something other than an
- *   object or an array - `null`, a string, a number, nothing - reads back as that value,
- *   which is no JSON body: a string is sent as text, `null` as no body at all, and a
- *   number is refused. Such a copy is wrapped as a plain object whose own `toJSON`
- *   answers it, so it is still a JSON body and serializes to exactly the text the
- *   caller's does.
+ *   is an empty object or array, the shape its text has, sent as that text. A `Date` is
+ *   its ISO string, a class instance a plain object, an `undefined` member dropped. A
+ *   top-level `toJSON` that answers something other than an object or an array - `null`,
+ *   a string, a number, nothing - reads back as that value, which is no JSON body: a
+ *   string is sent as text, `null` as no body at all, and a number is refused. Such a
+ *   copy is wrapped as a plain object whose own `toJSON` answers it, so it is still a
+ *   JSON body and serializes to exactly the text the caller's does.
  * - Bytes are copied, into this realm; a `Buffer` as a `Buffer` (see `copyBytes`).
  * - Form data - told by `FormData`'s own methods (see `isFormData`) - is a new form with
  *   the same entries; a `Blob` or `File` entry is kept as it is, being
@@ -68,22 +71,21 @@ export function copyRequestBody(body: unknown): unknown {
     // A top-level `toJSON` that answers `undefined` serializes to nothing.
     if (text === undefined) {
       const copy = { toJSON: () => undefined };
-      jsonTextByCopy.set(copy, undefined);
+      recordByCopy.set(copy, { text: undefined, isFilled: true });
       return copy;
     }
 
     // `JSON.stringify` writes no whitespace before a value, so the first character tells
     // an object or an array from every other value.
-    let copy: object;
     if (text.startsWith('{') || text.startsWith('[')) {
-      copy = text.startsWith('[') ? [] : {};
-      unfilledCopies.add(copy);
-    } else {
-      const parsed: unknown = JSON.parse(text);
-      copy = { toJSON: () => parsed };
+      const copy = text.startsWith('[') ? [] : {};
+      recordByCopy.set(copy, { text, isFilled: false });
+      return copy;
     }
 
-    jsonTextByCopy.set(copy, text);
+    const parsed: unknown = JSON.parse(text);
+    const copy = { toJSON: () => parsed };
+    recordByCopy.set(copy, { text, isFilled: true });
     return copy;
   }
 
@@ -93,39 +95,41 @@ export function copyRequestBody(body: unknown): unknown {
 
 /**
  * The JSON text a JSON body copy serializes to, when it is one `copyRequestBody` returned
- * that no interceptor has been handed (see `jsonTextByCopy`), so it is sent - or copied
+ * that no caller code has been handed (see `recordByCopy`), so it is sent - or copied
  * again - without being serialized a second time; `undefined` for any other value.
  */
 export function copiedJSONText(body: unknown): string | undefined {
   return typeof body === 'object' && body !== null
-    ? jsonTextByCopy.get(body)
+    ? recordByCopy.get(body)?.text
     : undefined;
 }
 
 /**
- * Whether `body` is a JSON body copy, not yet handed to an interceptor, that serializes to
+ * Whether `body` is a JSON body copy, not yet handed to caller code, that serializes to
  * nothing (a top-level `toJSON` that answers `undefined`). Read from the copy's own record
- * (see `jsonTextByCopy`) rather than by serializing, so a value an interceptor returned -
+ * (see `recordByCopy`) rather than by serializing, so a value an interceptor returned -
  * whose `toJSON` may answer differently the next time - is never asked.
  */
 export function isCopySerializingToNothing(body: unknown): boolean {
   return typeof body === 'object' && body !== null && isRecordedAsNothing(body);
 }
 
-/** Whether `jsonTextByCopy` records `body` as a copy that serializes to nothing. */
+/** Whether `recordByCopy` records `body` as a copy that serializes to nothing. */
 function isRecordedAsNothing(body: object): boolean {
-  return jsonTextByCopy.has(body) && jsonTextByCopy.get(body) === undefined;
+  const record = recordByCopy.get(body);
+  return record !== undefined && record.text === undefined;
 }
 
 /**
  * The text a JSON body - a plain object or an array - serializes to, or `undefined` when
  * it serializes to nothing (a top-level `toJSON` that answers `undefined`): a copy's own
- * (see `jsonTextByCopy`), or serialized now for any other value. Throws as
+ * (see `recordByCopy`), or serialized now for any other value. Throws as
  * `JSON.stringify` throws on it.
  */
 function jsonTextOf(body: object): string | undefined {
-  if (jsonTextByCopy.has(body)) {
-    return jsonTextByCopy.get(body);
+  const record = recordByCopy.get(body);
+  if (record !== undefined) {
+    return record.text;
   }
 
   const text: unknown = JSON.stringify(body);
@@ -135,7 +139,7 @@ function jsonTextOf(body: object): string | undefined {
 /**
  * Whether a JSON body - a plain object or an array - serializes to nothing, as
  * `JSON.stringify(body) === undefined` would answer, without serializing it: a copy's own
- * record (see `jsonTextByCopy`), or for any other value its top-level `toJSON`, own or
+ * record (see `recordByCopy`), or for any other value its top-level `toJSON`, own or
  * inherited, read once and called once with the key `''`, as `JSON.stringify` calls it.
  * Only an answer `JSON.stringify` writes nothing for - `undefined`, a symbol or a function
  * - serializes to nothing; a body with no `toJSON`, or one answering anything else, is
@@ -143,7 +147,7 @@ function jsonTextOf(body: object): string | undefined {
  * `toJSON` throws.
  */
 export function serializesToNothing(body: object): boolean {
-  if (jsonTextByCopy.has(body)) {
+  if (recordByCopy.has(body)) {
     return isRecordedAsNothing(body);
   }
 
@@ -164,17 +168,23 @@ export function serializesToNothing(body: object): boolean {
  * Fill a JSON body copy `copyRequestBody` returned empty with the data its text parses
  * to, in place, so it is the same object - the one the builder holds, the one an earlier
  * filter read - once its contents are read: by an interceptor's `bodyContainsKeys`
- * filter, and as it is handed to an interceptor. Any other value, a copy already filled
- * among them, is left as it is. Each member is defined as the parsed data's own, so a
- * `__proto__` key is a member, as `JSON.parse` makes it, not the copy's prototype.
+ * filter, and as it is handed to caller code (see `releaseRequestBody`). Any other value,
+ * a copy already filled among them, is left as it is. Each member is defined as the
+ * parsed data's own, so a `__proto__` key is a member, as `JSON.parse` makes it, not the
+ * copy's prototype.
  */
 export function fillRequestBody(body: unknown): void {
-  if (typeof body !== 'object' || body === null || !unfilledCopies.has(body)) {
+  if (typeof body !== 'object' || body === null) {
     return;
   }
 
-  unfilledCopies.delete(body);
-  const parsed = JSON.parse(jsonTextByCopy.get(body) as string) as object;
+  const record = recordByCopy.get(body);
+  if (record === undefined || record.isFilled) {
+    return;
+  }
+
+  recordByCopy.set(body, { text: record.text, isFilled: true });
+  const parsed = JSON.parse(record.text) as object;
 
   if (Array.isArray(body)) {
     for (const member of parsed as unknown[]) {
@@ -195,15 +205,15 @@ export function fillRequestBody(body: unknown): void {
 }
 
 /**
- * Called as a request's body is handed to caller code - an interceptor - which may keep
- * it and change it in place: the copy is filled (see `fillRequestBody`), and since its
- * text no longer says what it serializes to, the text is forgotten, and the copy is
- * serialized from then on as any other value is.
+ * Called as a request's body is handed to caller code - an interceptor, or a builder's own
+ * send function - which may keep it and change it in place: the copy is filled (see
+ * `fillRequestBody`), and since its text no longer says what it serializes to, its record
+ * is forgotten, and the copy is serialized from then on as any other value is.
  */
 export function releaseRequestBody(body: unknown): void {
   if (typeof body === 'object' && body !== null) {
     fillRequestBody(body);
-    jsonTextByCopy.delete(body);
+    recordByCopy.delete(body);
   }
 }
 

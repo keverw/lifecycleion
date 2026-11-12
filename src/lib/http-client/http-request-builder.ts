@@ -11,7 +11,10 @@ import {
   lowerCaseHeaderName,
 } from './internal/header-utils';
 import { isBlankText } from '../internal/ascii-text';
-import { copyRequestBody, fillRequestBody } from './internal/request-body-copy';
+import {
+  copyRequestBody,
+  releaseRequestBody,
+} from './internal/request-body-copy';
 import { isFormData } from './internal/form-entries';
 import {
   assertKnownFields,
@@ -64,7 +67,9 @@ export interface ResolvedBuilderOptions extends HTTPRequestOptions {
   headers: RequestHeadersInput;
 }
 
-type SendFn<T> = (context: BuilderSendContext<T>) => Promise<HTTPResponse<T>>;
+export type SendFn<T> = (
+  context: BuilderSendContext<T>,
+) => Promise<HTTPResponse<T>>;
 
 /** The fields an {@link HTTPRequestOptions} takes; any other is refused as misspelled. */
 const REQUEST_OPTION_FIELDS = fieldNames<HTTPRequestOptions>({
@@ -85,14 +90,15 @@ const REQUEST_OPTION_FIELDS = fieldNames<HTTPRequestOptions>({
 });
 
 /**
- * The send functions an `HTTPClient` builds its builders with, which read a JSON body copy
- * through its text (see `copyRequestBody`). Any other is caller code, handed the body
- * filled (see `fillRequestBody`).
+ * The send functions `HTTPClient`s build their builders with, one per client, which read a
+ * JSON body copy through its text (see `copyRequestBody`). Any other is caller code -
+ * `HTTPRequestBuilder` is exported - handed the body released (see `releaseRequestBody`),
+ * so it may keep and change it.
  */
 const clientSendFns = new WeakSet<object>();
 
-/** Record `sendFn` as one an `HTTPClient` built; see `clientSendFns`. */
-export function clientSendFn<T>(sendFn: SendFn<T>): SendFn<T> {
+/** Record `sendFn` as an `HTTPClient`'s own; see `clientSendFns`. */
+export function clientSendFn(sendFn: SendFn<unknown>): SendFn<unknown> {
   clientSendFns.add(sendFn);
   return sendFn;
 }
@@ -563,7 +569,7 @@ export class HTTPRequestBuilder<T = unknown> {
 
   private async _sendRequest<U>(): Promise<HTTPResponse<U>> {
     if (!clientSendFns.has(this._sendFn)) {
-      fillRequestBody(this._body);
+      releaseRequestBody(this._body);
     }
 
     const pending = this._sendFn({

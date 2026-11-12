@@ -274,8 +274,11 @@ export function runParentThenOwnErrorObservers(
  *
  * The filters of both chains are matched against `readContext`, read before the first
  * observer of either runs (see `readFilterContextOnce`) from `request` - which no observer
- * is handed - and the response or error, so a parent's observer that rewrites the request
- * or the response does not change which of the client's own run.
+ * is handed - and the response or error, so a parent's observer that rewrites the
+ * request, or the response's status, content type or body, does not change which of the
+ * client's own run. A `bodyContainsKeys` filter reads the keys of that body when it is
+ * asked, so an observer that changes the body's contents in place is seen by the filters
+ * after it, a sub-client's included.
  */
 async function runParentThenOwn<Chain>(
   parent: { readonly isEmpty: boolean; snapshot(): Chain } | undefined,

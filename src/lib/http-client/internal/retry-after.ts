@@ -50,10 +50,10 @@ const ASCTIME_DATE = new RegExp(
  * epoch time), or `undefined` for a value that is neither form RFC 9110 defines: a whole
  * number of seconds (`120`), or an HTTP-date in any of its three forms, which a recipient
  * must accept - read as GMT, case-sensitively, as written, its day name not checked
- * against the date, as browsers' and most HTTP libraries' parsers do not check it. A
- * date already past asks for no wait (`0`). Trimmed of HTTP whitespace only. Anything else - a fraction, a sign, a
- * date in another format or spaced otherwise - is unreadable, and the retry policy's own
- * delay is used.
+ * against the date, as browsers' and most HTTP libraries' parsers do not check it. A date
+ * already past asks for no wait (`0`). Trimmed of HTTP whitespace only. Anything else - a
+ * fraction, a sign, a date in another format or spaced otherwise - is unreadable, and the
+ * retry policy's own delay is used.
  *
  * Only the first value is read. A header seen twice reaches the client joined
  * (`120, 60`) from `fetch` and XHR, and as its first value from Node, which drops a

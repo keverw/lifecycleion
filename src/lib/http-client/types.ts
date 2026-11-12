@@ -1195,12 +1195,12 @@ export type AttemptRequest = Omit<
    * as the adapter-facing `body`, built for each attempt from the request's body (after
    * interceptors), when `body` is. A JSON body is the value sent, parsed back from `body`
    * (so a `toJSON` is applied and a `Date` is its ISO string) when the attempt's first
-   * observer runs, and shared by all of them; a `Uint8Array` or
-   * `FormData` body is the same copy as `body`, so redacting it in place leaves the bytes
-   * on the wire alone; a string is the string. Changing or replacing it reaches neither
-   * the adapter nor a later attempt. When a body an interceptor returned could not be
-   * copied or built - a JSON body `JSON.stringify` refuses, an unsupported type - `body` is
-   * `null` and this is the value the interceptor returned.
+   * observer runs, and shared by all of them; a `Uint8Array` or `FormData` body is the
+   * same copy as `body`, so redacting it in place leaves the bytes on the wire alone; a
+   * string is the string. Changing or replacing it reaches neither the adapter nor a
+   * later attempt. When a body an interceptor returned could not be copied or built - a
+   * JSON body `JSON.stringify` refuses, an unsupported type - `body` is `null` and this
+   * is the value the interceptor returned.
    */
   rawBody?: unknown;
   /** Effective per-attempt timeout in ms. */

@@ -372,17 +372,18 @@ export interface CookieJarOptions {
  *   (RFC 6265bis "Leave Secure Cookies Alone")
  * - Enforces the `__Secure-` and `__Host-` name prefixes (RFC 6265bis)
  *
- * Growth is bounded as Chromium bounds it: past 180 cookies in a site, or 3300 in the jar,
- * expired cookies go first and then the least recently used, non-`Secure` before `Secure`,
- * down to 150 and 3000. The jar-wide limit evicts only cookies not used in the last 30 days,
- * as Chromium's does, so a flood of cookies from other sites cannot push out a session in
- * use; while more than 3000 have been used that recently, the jar holds them all, bounded
- * only by each site's 180, and its pass - the jar-wide removal of expired cookies with it -
- * does not run until some cookie may have gone 30 days unused. Any store can evict a `Secure` cookie once no non-`Secure` one is
- * left to go, as in Chromium, so `Secure` cookies cannot fill a site and lock others out.
- * Within a site a flood of non-`Secure` cookies pushes them no lower than 150. The jar-wide
- * limit passes over a flood's cookies, just stored, so it can take `Secure` ones unused for
- * 30 days down to none. `Priority` is not read: every cookie evicts as Chromium's default
+ * Growth is bounded as Chromium bounds it: past 180 cookies in a site, or 3300 in the
+ * jar, expired cookies go first and then the least recently used, non-`Secure` before
+ * `Secure`, down to 150 and 3000. The jar-wide limit evicts only cookies not used in the
+ * last 30 days, as Chromium's does, so a flood of cookies from other sites cannot push
+ * out a session in use; while more than 3000 have been used that recently, the jar holds
+ * them all, bounded only by each site's 180, and its pass - the jar-wide removal of
+ * expired cookies with it - does not run until some cookie may have gone 30 days unused.
+ * Any store can evict a `Secure` cookie once no non-`Secure` one is left to go, as in
+ * Chromium, so `Secure` cookies cannot fill a site and lock others out. Within a site a
+ * flood of non-`Secure` cookies pushes them no lower than 150. The jar-wide limit passes
+ * over a flood's cookies, just stored, so it can take `Secure` ones unused for 30 days
+ * down to none. `Priority` is not read: every cookie evicts as Chromium's default
  * priority does.
  *
  * IPs are never treated as public suffixes. A bare single-label hostname - `localhost`,
@@ -438,18 +439,18 @@ export class CookieJar {
    * the life of the jar - see {@link fromJSON}. A `lastAccessedAt` that is not a finite
    * number is refused too.
    *
-   * Also returns false for a name or value that cannot be written into a `Cookie`
-   * header as one cookie-pair: a name that holds `=`, `;` or a control character other
-   * than a tab, or starts or ends with a space or tab (one inside it is kept, as RFC
-   * 6265bis keeps it), or a value holding `;` or a control character other than a tab
-   * or starting or ending with a space or tab, or a name and value together longer than 4096 characters, the limit a `Set-Cookie`
-   * is held to. A name may be
-   * empty - a nameless cookie, sent as its value alone - when the value is not empty and
-   * does not start with `__Secure-` / `__Host-`. The header is
-   * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` would be
-   * sent as two cookies, and a CR LF would be a header injection. The Set-Cookie parser
-   * cannot produce these - it splits on `;` first - so this covers the programmatic path
-   * and a persisted jar that was edited or tampered with.
+   * Also returns false for a name or value that cannot be written into a `Cookie` header
+   * as one cookie-pair: a name that holds `=`, `;` or a control character other than a
+   * tab, or starts or ends with a space or tab (one inside it is kept, as RFC 6265bis
+   * keeps it), or a value holding `;` or a control character other than a tab or starting
+   * or ending with a space or tab, or a name and value together longer than 4096
+   * characters, the limit a `Set-Cookie` is held to. A name may be empty - a nameless
+   * cookie, sent as its value alone - when the value is not empty and does not start with
+   * `__Secure-` / `__Host-`. The header is built as `name=value` pairs joined by `; `, so
+   * a value of `x; other=evil` would be sent as two cookies, and a CR LF would be a
+   * header injection. The Set-Cookie parser cannot produce these - it splits on `;`
+   * first - so this covers the programmatic path and a persisted jar that was edited or
+   * tampered with.
    *
    * Valid domains include: hostnames (example.com, localhost, myapp.test),
    * IPv4 (127.0.0.1), and IPv6 ([::1]). One trailing dot is kept as part of the host:
