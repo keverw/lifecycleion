@@ -1185,15 +1185,17 @@ export type AttemptRequest = Omit<
    * The body as serialized for the adapter: a JSON body's string, or the string given. A
    * `Uint8Array` or `FormData` body is a copy of the one sent, taken before the adapter is
    * handed it - the same copy as `rawBody` - so changing it in place leaves what is
-   * written alone. Built at dispatch, and only when a response or error observer is
-   * registered on the client or its parent; absent otherwise, with `rawBody`.
+   * written alone. Built at dispatch (a JSON `rawBody` is parsed later, see below), and
+   * only when a response or error observer is registered on the client or its parent;
+   * absent otherwise, with `rawBody`.
    */
   body?: string | Uint8Array | FormData | null;
   /**
    * The attempt's body before serialization, for observers that need the payload as well
    * as the adapter-facing `body`, built for each attempt from the request's body (after
    * interceptors), when `body` is. A JSON body is the value sent, parsed back from `body`
-   * (so a `toJSON` is applied and a `Date` is its ISO string); a `Uint8Array` or
+   * (so a `toJSON` is applied and a `Date` is its ISO string) when the attempt's first
+   * observer runs, and shared by all of them; a `Uint8Array` or
    * `FormData` body is the same copy as `body`, so redacting it in place leaves the bytes
    * on the wire alone; a string is the string. Changing or replacing it reaches neither
    * the adapter nor a later attempt. When a body an interceptor returned could not be

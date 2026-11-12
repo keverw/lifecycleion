@@ -118,13 +118,14 @@ function readParsedHostname(hostname: string): string {
 }
 
 /**
- * Whether `name`'s last label, one trailing dot aside, is a number (`foo.1`, `foo.0x1.`):
- * the URL parser reads such a host as IPv4, so `readExactHostName` refuses it as a name.
+ * Whether the last label of `name` - text already trimmed of HTTP whitespace - is a
+ * number, one trailing dot aside (`foo.1`, `foo.0x1.`): the URL parser reads such a host
+ * as IPv4, so `readExactHostName` refuses it as a name.
  */
 export function endsInNumericLabel(name: string): boolean {
-  const trimmed = withoutTrailingDot(trimHTTPWhitespace(name));
+  const withoutDot = withoutTrailingDot(name);
 
-  return endsInANumber(trimmed.slice(trimmed.lastIndexOf('.') + 1));
+  return endsInANumber(withoutDot.slice(withoutDot.lastIndexOf('.') + 1));
 }
 
 function withoutTrailingDot(name: string): string {

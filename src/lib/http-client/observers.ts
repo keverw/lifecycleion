@@ -9,6 +9,7 @@ import {
 } from './internal/callback-registry';
 import type { RegisteredCallback } from './internal/callback-registry';
 import { copyHeaderRecord } from './internal/header-utils';
+import { handedRawBody } from './internal/observed-raw-body';
 import type {
   ResponseObserverFilter,
   ErrorObserverFilter,
@@ -45,21 +46,14 @@ export class ResponseObserverManager extends CallbackRegistry<
 
   /**
    * Take the current registrations as a chain that later `add()` and removal calls do
-   * not reach. See `RequestInterceptorManager.snapshot()`. The filters are matched
-   * against `readContext` (see `readResponseFilterContext`), taken for this chain alone
-   * unless one is given: `runParentThenOwn` gives a parent's chain and the
-   * client's own the same one.
+   * not reach. See `RequestInterceptorManager.snapshot()`. Run through
+   * `runParentThenOwnResponseObservers`, which hands a parent's chain and the client's own
+   * one request and one filter context.
    */
   public snapshot(): ResponseObserverChain {
     const observers = this.currentRegistrations();
 
-    return (
-      response,
-      request,
-      phase,
-      cancelSignal,
-      readContext = readResponseFilterContext(response, request),
-    ) =>
+    return (response, handedRequest, phase, cancelSignal, readContext) =>
       runObservers(
         'ResponseObserver',
         observers,
@@ -67,17 +61,17 @@ export class ResponseObserverManager extends CallbackRegistry<
         (filter) =>
           matchesFilterPhase(filter.phases, phase.type) &&
           matchesFilter(filter, readContext(), 'response'),
-        () => [response, request, copyCallbackPhase(phase)],
+        () => [response, handedRequest(), copyCallbackPhase(phase)],
       );
   }
 }
 
-export type ResponseObserverChain = (
+type ResponseObserverChain = (
   response: HTTPResponse,
-  request: AttemptRequest,
+  handedRequest: () => AttemptRequest,
   phase: ResponseObserverPhase,
-  cancelSignal?: AbortSignal,
-  readContext?: () => ObserverFilterContext,
+  cancelSignal: AbortSignal | undefined,
+  readContext: () => ObserverFilterContext,
 ) => Promise<void>;
 
 export class ErrorObserverManager extends CallbackRegistry<
@@ -93,18 +87,13 @@ export class ErrorObserverManager extends CallbackRegistry<
 
   /**
    * Take the current registrations as a chain that later `add()` and removal calls do
-   * not reach. See `ResponseObserverManager.snapshot()`.
+   * not reach. See `ResponseObserverManager.snapshot()`; run through
+   * `runParentThenOwnErrorObservers`.
    */
   public snapshot(): ErrorObserverChain {
     const observers = this.currentRegistrations();
 
-    return (
-      error,
-      request,
-      phase,
-      cancelSignal,
-      readContext = readErrorFilterContext(request),
-    ) =>
+    return (error, handedRequest, phase, cancelSignal, readContext) =>
       runObservers(
         'ErrorObserver',
         observers,
@@ -112,17 +101,17 @@ export class ErrorObserverManager extends CallbackRegistry<
         (filter) =>
           matchesFilterPhase(filter.phases, phase.type) &&
           matchesFilter(filter, readContext(), 'error'),
-        () => [error, request, copyCallbackPhase(phase)],
+        () => [error, handedRequest(), copyCallbackPhase(phase)],
       );
   }
 }
 
-export type ErrorObserverChain = (
+type ErrorObserverChain = (
   error: HTTPClientError,
-  request: AttemptRequest,
+  handedRequest: () => AttemptRequest,
   phase: ErrorObserverPhase,
-  cancelSignal?: AbortSignal,
-  readContext?: () => ObserverFilterContext,
+  cancelSignal: AbortSignal | undefined,
+  readContext: () => ObserverFilterContext,
 ) => Promise<void>;
 
 /** What an observer's filter is matched against; see `matchesFilter`. */
@@ -189,8 +178,9 @@ function readFilterContextOnce<Context>(read: () => Context): () => Context {
  * the next. `matches` is asked once per observer, against what was read before the first
  * ran (see `readFilterContextOnce`). A filter that throws is reported and its observer
  * skipped, and an observer that throws is reported without stopping the rest. Each
- * observer's arguments come from `argsFor`, so each is handed its own phase object. Once `cancelSignal` has aborted no
- * further observer runs: `send()` has stopped waiting on the chain, and may have answered.
+ * observer's arguments come from `argsFor`, so each is handed its own phase object. Once
+ * `cancelSignal` has aborted no further observer runs: `send()` has stopped waiting on
+ * the chain, and may have answered.
  */
 async function runObservers<Filter, Args extends unknown[]>(
   label: 'ResponseObserver' | 'ErrorObserver',
@@ -241,7 +231,7 @@ export function runParentThenOwnResponseObservers(
     parent,
     own,
     request,
-    (handedRequest) => readResponseFilterContext(response, handedRequest),
+    readResponseFilterContext(response, request),
     (chain, handedRequest, readContext) =>
       chain(response, handedRequest, phase, cancelSignal, readContext),
   );
@@ -263,7 +253,7 @@ export function runParentThenOwnErrorObservers(
     parent,
     own,
     request,
-    (handedRequest) => readErrorFilterContext(handedRequest),
+    readErrorFilterContext(request),
     (chain, handedRequest, readContext) =>
       chain(error, handedRequest, phase, cancelSignal, readContext),
   );
@@ -274,26 +264,27 @@ export function runParentThenOwnErrorObservers(
  * before either runs - as `HTTPClient._runInterceptors` takes them. An empty manager has
  * nothing to snapshot or run, and a missing parent is skipped.
  *
- * Both chains are handed one copy of `request`, its header record copied too, so an
- * observer's edit to it in place - redacting `requestURL` or a header - is seen by the
- * observers after it and by nothing the client goes on to read: the method the next
- * redirect hop is judged by, the request a cancelled retry wait is reported with. The
- * body and `rawBody` are the attempt's own copies (see `AttemptRequest`), handed on as
- * they are. The filters of both chains are matched against one context, read before the
- * first observer of either runs (see `readFilterContextOnce`), so a parent's observer
- * that rewrites the request or the response does not change which of the client's own
- * run.
+ * The observers of both chains are handed one copy of `request`, its header record copied
+ * too, so an observer's edit to it in place - redacting `requestURL` or a header - is seen
+ * by the observers after it and by nothing the client goes on to read: the method the
+ * next redirect hop is judged by, the request a cancelled retry wait is reported with.
+ * The body and `rawBody` are the attempt's own (see `AttemptRequest`), a JSON `rawBody`
+ * parsed back as the copy is taken (see `handedRawBody`). The copy is taken when the first
+ * observer runs, so a phase no observer runs for copies and parses nothing.
+ *
+ * The filters of both chains are matched against `readContext`, read before the first
+ * observer of either runs (see `readFilterContextOnce`) from `request` - which no observer
+ * is handed - and the response or error, so a parent's observer that rewrites the request
+ * or the response does not change which of the client's own run.
  */
 async function runParentThenOwn<Chain>(
   parent: { readonly isEmpty: boolean; snapshot(): Chain } | undefined,
   own: { readonly isEmpty: boolean; snapshot(): Chain },
   request: AttemptRequest,
-  readContextFor: (
-    handedRequest: AttemptRequest,
-  ) => () => ObserverFilterContext,
+  readContext: () => ObserverFilterContext,
   run: (
     chain: Chain,
-    handedRequest: AttemptRequest,
+    handedRequest: () => AttemptRequest,
     readContext: () => ObserverFilterContext,
   ) => Promise<void>,
 ): Promise<void> {
@@ -301,16 +292,8 @@ async function runParentThenOwn<Chain>(
     parent === undefined || parent.isEmpty ? undefined : parent.snapshot();
   const ownChain = own.isEmpty ? undefined : own.snapshot();
 
-  if (parentChain === undefined && ownChain === undefined) {
-    return;
-  }
-
-  // The client's own, built from its records, so copying it reads no caller code.
-  const handedRequest: AttemptRequest = {
-    ...request,
-    headers: copyHeaderRecord(request.headers),
-  };
-  const readContext = readContextFor(handedRequest);
+  let handed: AttemptRequest | undefined;
+  const handedRequest = () => (handed ??= handedAttemptRequest(request));
 
   if (parentChain !== undefined) {
     await run(parentChain, handedRequest, readContext);
@@ -319,4 +302,21 @@ async function runParentThenOwn<Chain>(
   if (ownChain !== undefined) {
     await run(ownChain, handedRequest, readContext);
   }
+}
+
+/**
+ * The copy of an attempt's request its observers are handed; see `runParentThenOwn`. The
+ * request is the client's own, built from its records, so copying it reads no caller code.
+ */
+function handedAttemptRequest(request: AttemptRequest): AttemptRequest {
+  const handed: AttemptRequest = {
+    ...request,
+    headers: copyHeaderRecord(request.headers),
+  };
+
+  if ('rawBody' in request) {
+    handed.rawBody = handedRawBody(request.rawBody);
+  }
+
+  return handed;
 }

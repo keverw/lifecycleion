@@ -323,3 +323,56 @@ test.each(['answered', 'thrown'] as const)(
     ]);
   },
 );
+
+test('a JSON rawBody is parsed back only for an attempt an observer runs for, once for all of them', async () => {
+  let attempts = 0;
+  const root = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: ++attempts < 3 ? 503 : 200,
+          headers: { 'content-type': 'text/plain' },
+          body: new TextEncoder().encode('ok'),
+        }),
+    },
+    retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 2 },
+  });
+  const sub = root.createSubClient();
+  const rawBodies: unknown[] = [];
+  root.addResponseObserver((_response, request) => {
+    rawBodies.push(request.rawBody);
+  });
+  sub.addResponseObserver((_response, request) => {
+    rawBodies.push(request.rawBody);
+  });
+  // Registered for every phase, but never matching: it runs for no attempt.
+  sub.addResponseObserver(() => {}, {
+    phases: ['retry', 'final'],
+    hosts: ['other.test'],
+  });
+  const text = JSON.stringify({ value: 1 });
+  const parsedTexts: unknown[] = [];
+  const parse = JSON.parse;
+  JSON.parse = ((source: string, reviver?: Parameters<typeof parse>[1]) => {
+    parsedTexts.push(source);
+    return parse(source, reviver) as unknown;
+  }) as typeof JSON.parse;
+  let response;
+  try {
+    response = await sub
+      .put('https://api.example.com/x')
+      .json({ value: 1 })
+      .send();
+  } finally {
+    JSON.parse = parse;
+  }
+
+  expect(response.status).toBe(200);
+  expect(attempts).toBe(3);
+  // Once as `.json()` copies the body, and once for the final attempt: the two retried
+  // attempts had no observer run for them.
+  expect(parsedTexts.filter((source) => source === text)).toHaveLength(2);
+  expect(rawBodies).toEqual([{ value: 1 }, { value: 1 }]);
+  expect(rawBodies[0]).toBe(rawBodies[1]);
+});

@@ -49,6 +49,7 @@ import {
   runParentThenOwnErrorObservers,
   runParentThenOwnResponseObservers,
 } from './observers';
+import { deferredJSONRawBody } from './internal/observed-raw-body';
 import {
   assertSupportedAdapterRuntimeAndConfig,
   assertSupportedRequestBody,
@@ -5840,9 +5841,10 @@ function buildAttemptBodies(
 
   // A JSON body is serialized once, by `JSON.stringify` - or not at all: the client's
   // copy is sent as the text it was read back from (see `copiedJSONText`) - and the
-  // observers' copy is parsed back from the bytes sent, so `rawBody` is exactly what went
+  // observers' copy is parsed back from the text sent, so `rawBody` is exactly what went
   // out. Parsed for each attempt, so an observer that changes it changes no other
-  // attempt's - every observer of one attempt shares the one copy.
+  // attempt's - every observer of one attempt shares the one copy - and only once an
+  // observer is handed it (see `deferredJSONRawBody`).
   if (Array.isArray(rawBody) || isPlainRecord(rawBody)) {
     const { body, contentType } = serializeBody(
       rawBody,
@@ -5858,9 +5860,7 @@ function buildAttemptBodies(
             body,
             // A top-level `toJSON` that answers `undefined` serializes to nothing.
             rawBody:
-              typeof body === 'string'
-                ? (JSON.parse(body) as unknown)
-                : undefined,
+              typeof body === 'string' ? deferredJSONRawBody(body) : undefined,
           }
         : undefined,
     };

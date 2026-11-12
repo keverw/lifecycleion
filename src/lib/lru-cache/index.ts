@@ -28,22 +28,31 @@ interface ArraySizing {
   /** Arrays being sized now, so one met inside itself is a cycle. */
   readonly visiting: WeakSet<object>;
   /**
-   * Arrays already sized, so one met again counts as a reference to it - in the order
-   * they were, so an array sized again from the start forgets the arrays its abandoned
-   * pass sized, each counted in a total that was thrown away, and counts them in full
-   * again. Held for one estimate only.
+   * Arrays already sized, so one met again counts as a reference to it. Held for one
+   * estimate only.
    */
   readonly sized: Set<object>;
+  /**
+   * The arrays in `sized`, in the order they were sized, so an array sized again from the
+   * start forgets the arrays its abandoned pass sized - each counted in a total that was
+   * thrown away - and counts them in full again (see `forgetSizedAfter`).
+   */
+  readonly sizedOrder: object[];
 }
 
-/** Removes from `sized` every array after its first `count`, in the order they were added. */
-function forgetSizedAfter(sized: Set<object>, count: number): void {
-  let index = 0;
+/** Records `array` as sized; see `ArraySizing.sized`. */
+function markSized(sizing: ArraySizing, array: object): void {
+  sizing.sized.add(array);
+  sizing.sizedOrder.push(array);
+}
 
-  for (const array of sized) {
-    if (index++ >= count) {
-      sized.delete(array);
-    }
+/**
+ * Forgets every array sized after the first `count`, latest first, so a restart costs
+ * the arrays it forgets rather than all those sized so far.
+ */
+function forgetSizedAfter(sizing: ArraySizing, count: number): void {
+  while (sizing.sizedOrder.length > count) {
+    sizing.sized.delete(sizing.sizedOrder.pop() as object);
   }
 }
 
@@ -484,7 +493,11 @@ export class LRUCache<K, V> {
       return value.byteLength; // ArrayBuffer size
     } else if (Array.isArray(value)) {
       // Made for the outermost array only: a value with none needs none.
-      sizing ??= { visiting: new WeakSet(), sized: new Set() };
+      sizing ??= {
+        visiting: new WeakSet(),
+        sized: new Set(),
+        sizedOrder: [],
+      };
 
       if (sizing.visiting.has(value)) {
         return 1000; // Fallback size for circular arrays
@@ -542,7 +555,7 @@ export class LRUCache<K, V> {
         // `set()` to the next, its getters run up to a gap's worth of times before it is.
         let checkedPrototype = indexFreePrototype(items);
         let untilCheck = 1;
-        const sizedBefore = sizing.sized.size;
+        const sizedBefore = sizing.sizedOrder.length;
 
         for (let index = 0; index < length; index++) {
           let isOwn: boolean;
@@ -559,7 +572,7 @@ export class LRUCache<K, V> {
                 untilCheck = 1 + Math.floor(Math.random() * CHECK_GAP);
 
                 if (!Object.hasOwn(items, index)) {
-                  forgetSizedAfter(sizing.sized, sizedBefore);
+                  forgetSizedAfter(sizing, sizedBefore);
 
                   checkedPrototype = undefined;
                   estimatedSize = 40;
@@ -647,7 +660,7 @@ export class LRUCache<K, V> {
         return estimatedSize;
       } finally {
         sizing.visiting.delete(value);
-        sizing.sized.add(value);
+        markSized(sizing, value);
       }
     } else if (typeof value === 'object') {
       try {

@@ -1475,6 +1475,29 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(40 + 40 + 1000 * 20);
     });
 
+    test('sizes many arrays that are each caught and sized again in time linear in their count', () => {
+      const prototype = new Proxy(Object.create(Array.prototype) as object, {
+        has: () => true,
+      });
+      // Each caught at its hole and sized again, after every array before it was sized.
+      const value = Array.from({ length: 60_000 }, () => {
+        const array: unknown[] = [1];
+        array.length = 2;
+        Object.setPrototypeOf(array, prototype);
+        return array;
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1e12 });
+
+      const startedAt = performance.now();
+      cache.set('a', value);
+      const elapsedMS = performance.now() - startedAt;
+
+      // 40 for the outer array, and 40 and 8 for its one number for each array in it.
+      expect(cache.byteSize).toBe(40 + 60_000 * 48);
+      // Linear in the arrays' count this is tens of milliseconds; quadratic, seconds.
+      expect(elapsedMS).toBeLessThan(1500);
+    }, 30_000);
+
     test("neither reads nor walks the holes a Proxy prototype's has answers for", () => {
       let inheritedReads = 0;
       const prototype = new Proxy(Object.create(Array.prototype) as object, {

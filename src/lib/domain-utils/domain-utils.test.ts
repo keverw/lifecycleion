@@ -2431,7 +2431,7 @@ describe('domain-utils', () => {
 
         expect(validateConfigEntry('*.*.com', 'origin')).toEqual({
           valid: false,
-          info: 'wildcard tail targets a public suffix (disallowed)',
+          info: 'wildcard tail targets a public suffix or internal pseudo-TLD (disallowed)',
           wildcardKind: 'none',
         });
       });
@@ -3007,7 +3007,7 @@ describe('domain-utils', () => {
         const psl = validateConfigEntry('https://*.com', 'origin');
         expect(psl.valid).toBe(false);
         expect(psl.info).toBe(
-          'wildcard tail targets a public suffix (disallowed)',
+          'wildcard tail targets a public suffix or internal pseudo-TLD (disallowed)',
         );
       });
 
@@ -3117,7 +3117,7 @@ describe('domain-utils', () => {
         const ok = validateConfigEntry('*.localhost', 'origin');
         expect(ok.valid).toBe(false);
         expect(ok.info).toBe(
-          'wildcard tail targets a public suffix (disallowed)',
+          'wildcard tail targets a public suffix or internal pseudo-TLD (disallowed)',
         );
 
         const bad = validateConfigEntry('*.127.0.0.1', 'origin');

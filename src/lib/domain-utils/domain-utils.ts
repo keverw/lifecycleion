@@ -1300,7 +1300,6 @@ export function validateConfigEntry(
     return true;
   }
 
-  // Helper: PSL tail guard and IP-tail rejection for wildcard patterns
   // Why a wildcard's tail is refused, or `undefined` when it is not: the matcher's own
   // tail rule, so the two cannot disagree, its refusal named for what the tail is.
   function wildcardTailRefusal(normalized: string): string | undefined {
@@ -1312,25 +1311,24 @@ export function validateConfigEntry(
       allowSuffixTails: opts.allowSuffixTails,
     });
 
-    if (refusal === undefined) {
-      return undefined;
-    }
-
-    if (refusal === 'no-tail') {
-      return 'wildcard has no fixed label after it (disallowed)';
-    }
-
-    if (refusal === 'suffix') {
-      return 'wildcard tail targets a public suffix (disallowed)';
-    }
-
     switch (refusal) {
+      case undefined:
+        return undefined;
+      case 'no-tail':
+        return 'wildcard has no fixed label after it (disallowed)';
+      case 'suffix':
+        return 'wildcard tail targets a public suffix or internal pseudo-TLD (disallowed)';
       case 'suffix-wildcard-rule':
         return 'wildcard tail is under a public suffix wildcard rule, so every label beneath it is a public suffix (disallowed)';
       case 'numeric':
         return 'wildcard tail ends in a numeric label, so a host under it is an IP address or no URL host at all (disallowed)';
       case 'ip':
         return 'wildcard tail targets an IP address (disallowed)';
+      default: {
+        // A refusal added to `WildcardTailRefusal` without a reason here fails to compile.
+        const unnamed: never = refusal;
+        return unnamed;
+      }
     }
   }
 
