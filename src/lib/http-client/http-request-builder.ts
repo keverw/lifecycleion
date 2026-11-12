@@ -247,7 +247,10 @@ export class HTTPRequestBuilder<T = unknown> {
     return this;
   }
 
-  /** A string body, sent as `text/plain`, or `null` / `undefined` for none; anything else is refused. */
+  /**
+   * A string body, sent as `text/plain`, or `null` / `undefined` for none; anything else
+   * is refused.
+   */
   public text(data: string): this {
     this._assertNotSent('text');
     const candidate: unknown = data;

@@ -49,7 +49,10 @@ import {
   runParentThenOwnErrorObservers,
   runParentThenOwnResponseObservers,
 } from './observers';
-import { deferredJSONRawBody } from './internal/observed-raw-body';
+import {
+  deferredBodyCopy,
+  deferredJSONRawBody,
+} from './internal/observed-bodies';
 import {
   assertSupportedAdapterRuntimeAndConfig,
   assertSupportedRequestBody,
@@ -1545,13 +1548,7 @@ export class BaseHTTPClient {
           // `wasRedirectDetected` and `detectedRedirectURL` are all still reported.
           // A body that only failed to decode never gets here as one: the attempt reads it
           // as a bodiless 3xx (see `_dispatchRequestAttempts`).
-          if (
-            this._config.followRedirects &&
-            adapterResponse &&
-            !adapterResponse.isStreamError &&
-            !adapterResponse.isTransportError &&
-            REDIRECT_STATUS_CODES.has(adapterResponse.status)
-          ) {
+          if (adapterResponse && this._isRedirectToFollow(adapterResponse)) {
             // Resolve the Location header into an absolute URL. Read before the hop is
             // counted: a 3xx with nothing to follow is the final response, not a redirect
             // over the limit.
@@ -2601,7 +2598,10 @@ export class BaseHTTPClient {
     credentialScope: { url: string };
     /** Per-attempt timeout in ms. Each attempt gets its own independent timer — NOT a total deadline across all retries. */
     timeout: number;
-    /** The most bytes of a buffered response body each attempt's adapter reads; `Infinity` for no limit. */
+    /**
+     * The most bytes of a buffered response body each attempt's adapter reads; `Infinity`
+     * for no limit.
+     */
     maxResponseBytes: number;
     /** Cancellation signal from user cancel / cancelAll / external AbortSignal — NOT timeout. Also used to abort retry delays. */
     cancelSignal: AbortSignal;
@@ -2637,7 +2637,10 @@ export class BaseHTTPClient {
      * hop that never went out, which is no followed redirect.
      */
     isHopUndispatched?: boolean;
-    /** Headers for following a redirect, excluding adapter-generated origin headers. */
+    /**
+     * Headers for following a redirect, excluding adapter-generated origin headers: set
+     * for an answer `_isRedirectToFollow` reads as one, the only kind that reads them.
+     */
     redirectRequestHeaders?: Record<string, string | string[]>;
     attemptCount: number;
     wasCancelled: boolean;
@@ -3240,12 +3243,12 @@ export class BaseHTTPClient {
         }
 
         knownBodies = 'unbuildable';
-        // The observers' bodies are built here, once, and only when an observer is
-        // registered to be handed them: copying bytes or a form, or parsing JSON back,
-        // for an attempt nothing looks at is waste.
+        // The observers' bodies are set up here, once, and only when an observer is
+        // registered to be handed them; each is built when the first observer is handed
+        // it, so an attempt no observer runs for copies or parses nothing.
         const attemptBodies = buildAttemptBodies(
           attemptRequest.body,
-          this._hasAttemptRequestObservers(),
+          this._hasAttemptRequestObservers() ? 'deferred' : 'none',
         );
         knownBodies = attemptBodies;
         sentBody = attemptBodies.sentBody;
@@ -4076,25 +4079,11 @@ export class BaseHTTPClient {
         // handed carry through same-origin redirects and caller-directed failover
         // retries. Arrays copied: taken before the redirect-phase observers are handed
         // the attempt's request, so an item one of them changes in place does not reach
-        // the next hop.
-        const redirectRequestHeaders = copyHeaderRecord(sentRequest.headers);
-
-        // Body headers inferred by the client or adapter describe this attempt's
-        // body, which a redirect interceptor may replace or remove. Carry only
-        // authored values forward and infer the rest again for the next body.
-        // Use the latest intercepted request, before Content-Type inference.
-        // Already normalized (a `ResolvedRequest`), and only read here.
-        const authoredHeaders = attemptRequest.headers;
-        for (const key of ['content-length', 'content-type']) {
-          if (Object.hasOwn(authoredHeaders, key)) {
-            redirectRequestHeaders[key] = copyArrayValue(
-              authoredHeaders[key],
-              HEADER_VALUE_LABEL,
-            );
-          } else {
-            delete redirectRequestHeaders[key];
-          }
-        }
+        // the next hop. Built only for a redirect that is followed, the one answer that
+        // reads them.
+        const redirectRequestHeaders = this._isRedirectToFollow(adapterResponse)
+          ? this._redirectRequestHeaders(sentRequest, attemptRequest)
+          : undefined;
 
         return {
           adapterResponse,
@@ -4806,6 +4795,47 @@ export class BaseHTTPClient {
     }
   }
 
+  /**
+   * Whether an adapter's answer is a redirect the client follows: redirects on, and a 3xx
+   * the adapter reports neither as a transport failure nor as a stream error. Asked where
+   * an attempt builds the headers the next hop starts from (see `_redirectRequestHeaders`)
+   * and where the hop is followed, so the two agree.
+   */
+  private _isRedirectToFollow(adapterResponse: AdapterResponse): boolean {
+    return (
+      this._config.followRedirects &&
+      !adapterResponse.isStreamError &&
+      !adapterResponse.isTransportError &&
+      REDIRECT_STATUS_CODES.has(adapterResponse.status)
+    );
+  }
+
+  /**
+   * The headers the next redirect hop starts from: the attempt's as sent, with its body
+   * headers as the caller or an interceptor authored them. Body headers inferred by the
+   * client or adapter describe this attempt's body, which a redirect interceptor may
+   * replace or remove, so only authored values are carried forward and the rest inferred
+   * again for the next body - read from the latest intercepted request, before
+   * `Content-Type` inference, already normalized (a `ResolvedRequest`) and only read here.
+   */
+  private _redirectRequestHeaders(
+    sentRequest: AttemptRequest,
+    attemptRequest: ResolvedRequest,
+  ): Record<string, string | string[]> {
+    const headers = copyHeaderRecord(sentRequest.headers);
+    const authoredHeaders = attemptRequest.headers;
+
+    for (const key of ['content-length', 'content-type']) {
+      if (Object.hasOwn(authoredHeaders, key)) {
+        headers[key] = copyArrayValue(authoredHeaders[key], HEADER_VALUE_LABEL);
+      } else {
+        delete headers[key];
+      }
+    }
+
+    return headers;
+  }
+
   private _buildResponse<T>(params: {
     adapterResponse: AdapterResponse | null;
     requestID: string;
@@ -5459,7 +5489,7 @@ export class BaseHTTPClient {
       // second time; it is reported as it came, as one that fails to build here is.
       if (knownBodies === undefined) {
         try {
-          observed = buildAttemptBodies(rawBody, true).observed;
+          observed = buildAttemptBodies(rawBody, 'now').observed;
         } catch {
           // Reported as it came, below.
         }
@@ -5839,18 +5869,23 @@ function snapshotClientConfigFields(config: SubClientConfig) {
 
 /**
  * The bodies of one attempt, built from the request's body before the adapter is handed
- * any: the one sent, and, when `isObserved`, the observers' own, so nothing an observer
- * does to theirs reaches the adapter or a later attempt. On an attempt the request's body
- * is the client's own copy (see `copyRequestBody`), which no caller holds; a best-effort
- * snapshot of a request that failed before one existed may be handed any value.
+ * any: the one sent, and, unless `observers` is `'none'`, the observers' own, so nothing
+ * an observer does to theirs reaches the adapter or a later attempt. On an attempt the
+ * request's body is the client's own copy (see `copyRequestBody`), which no caller holds,
+ * and the observers' bytes or form is copied from it when an observer is first handed it
+ * (`'deferred'`, see `deferredBodyCopy`); a best-effort snapshot of a request that failed
+ * before one existed may be handed any value - one a caller may still hold - so its copy
+ * is taken at once (`'now'`).
  *
  * Bytes and form data are sent as the request's own body: copied for the adapter, where
  * it may change them, by `adapterRequestBody`.
  */
 function buildAttemptBodies(
   rawBody: unknown,
-  isObserved: boolean,
+  observers: 'none' | 'deferred' | 'now',
 ): AttemptBodies {
+  const isObserved = observers !== 'none';
+
   // Validate first so unsupported object-like values (URLSearchParams, Blob, etc.) fail
   // explicitly instead of being stringified into `{}`.
   assertSupportedRequestBody(rawBody);
@@ -5883,16 +5918,19 @@ function buildAttemptBodies(
   }
 
   // No observer is handed the bytes or form sent: their `body` and `rawBody` are one copy
-  // of it, taken now - before the adapter can change or transfer it. NodeAdapter writes a
-  // FormData's parts as it walks them, so a redirect- or retry-phase observer changing
-  // the one being sent, while its upload is still under way, would change parts not yet
-  // written.
+  // of it. NodeAdapter writes a FormData's parts as it walks them, so a redirect- or
+  // retry-phase observer changing the one being sent, while its upload is still under
+  // way, would change parts not yet written.
   const { body, contentType } = serializeBody(rawBody);
   let observed: ObservedBodies | undefined;
 
   if (isObserved) {
     if (isRequestBodyBytes(body) || isFormData(body)) {
-      const copy = cloneBodyValue(body) as typeof body;
+      // The token stands in for the copy until an observer is handed it (see
+      // `handedBodyValue`).
+      const copy = (
+        observers === 'deferred' ? deferredBodyCopy(body) : cloneBodyValue(body)
+      ) as typeof body;
       observed = { body: copy, rawBody: copy };
     } else {
       // A string, or nothing: `rawBody` is the request's body as it is, `undefined`
@@ -5943,7 +5981,10 @@ function assertLabelArgument(label: unknown, method: string): void {
   }
 }
 
-/** A non-string request path, for the refusal: `instanceof` guarded, as the value is the caller's. */
+/**
+ * A non-string request path, for the refusal: `instanceof` guarded, as the value is the
+ * caller's.
+ */
 function describeRequestPath(value: unknown): string {
   if (value === null) {
     return 'null';
@@ -6417,9 +6458,15 @@ function tearDownStreamFactoryAnswer(answer: object): StreamFactoryState {
 /** How a wait on the previous attempt's upload ended. */
 type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
 
-/** When a request's upload last showed activity - dispatched, or reported progress. One per request. */
+/**
+ * When a request's upload last showed activity - dispatched, or reported progress. One
+ * per request.
+ */
 interface UploadActivity {
-  /** `performance.now()` of the last dispatch or progress report, so a wall-clock step cannot fake a stall or hide one. */
+  /**
+   * `performance.now()` of the last dispatch or progress report, so a wall-clock step
+   * cannot fake a stall or hide one.
+   */
   at: number;
   /**
    * `performance.now()` of when the latest attempt's body writer first parked on its

@@ -3,6 +3,7 @@ import {
   copiedJSONText,
   copyRequestBody,
   fillRequestBody,
+  readRequestBodyContents,
   releaseRequestBody,
   serializesToNothing,
 } from './request-body-copy';
@@ -168,6 +169,63 @@ test('releasing a copy fills it and forgets its text, and a copy of an unfilled 
   fillRequestBody(second);
 
   expect(second).toEqual({ a: 1 });
+});
+
+test('a fill whose parse throws leaves the copy unfilled with its text, so the next fill fills it', () => {
+  const copy = copyRequestBody({ a: 1 }) as Record<string, unknown>;
+  const parse = spyOn(JSON, 'parse').mockImplementationOnce(() => {
+    throw new RangeError('Maximum call stack size exceeded');
+  });
+  try {
+    expect(() => fillRequestBody(copy)).toThrow(RangeError);
+  } finally {
+    parse.mockRestore();
+  }
+
+  expect(copy).toEqual({});
+  expect(copiedJSONText(copy)).toBe('{"a":1}');
+
+  fillRequestBody(copy);
+
+  expect(copy).toEqual({ a: 1 });
+});
+
+test('the contents a filter reads are parsed once, and fill the copy or a copy taken from it', () => {
+  const parse = spyOn(JSON, 'parse');
+  try {
+    const kept = copyRequestBody({ a: 1, nested: { b: 2 } }) as Record<
+      string,
+      unknown
+    >;
+    const contents = readRequestBodyContents(kept);
+
+    expect(contents).toEqual({ a: 1, nested: { b: 2 } });
+    expect(readRequestBodyContents(kept)).toBe(contents);
+    // The copy itself is left as it was, an empty object sent as its text.
+    expect(kept).toEqual({});
+
+    const handed = copyRequestBody(kept) as Record<string, unknown>;
+    fillRequestBody(handed);
+
+    expect(handed).toEqual({ a: 1, nested: { b: 2 } });
+    expect(handed.nested).toBe(contents.nested);
+    expect(parse).toHaveBeenCalledTimes(1);
+
+    // The data passed to `handed`, so `kept` is filled from its text, sharing nothing.
+    fillRequestBody(kept);
+
+    expect(kept).toEqual({ a: 1, nested: { b: 2 } });
+    expect(kept.nested).not.toBe(handed.nested);
+    expect(parse).toHaveBeenCalledTimes(2);
+  } finally {
+    parse.mockRestore();
+  }
+});
+
+test('a body that is no copy is read by a filter as it is', () => {
+  const body = { a: 1 };
+
+  expect(readRequestBodyContents(body)).toBe(body);
 });
 
 test('a top-level toJSON that answers a value other than an object or array is still a wrapper answering it', () => {

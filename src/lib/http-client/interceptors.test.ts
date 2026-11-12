@@ -2,6 +2,7 @@ import { describe, test, expect, spyOn } from 'bun:test';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
 import { HTTPClient } from './http-client';
 import type {
+  AdapterResponse,
   InterceptedRequest,
   RequestPhase,
   RequestInterceptorContext,
@@ -1011,5 +1012,105 @@ describe('JSON body copies read by interceptors', () => {
       { phase: 'initial', body: { a: 1, nested: { b: [2] } } },
       { phase: 'retry', body: { a: 1, nested: { b: [2] } } },
     ]);
+  });
+
+  test('a retry interceptor whose bodyContainsKeys filter matches parses the body once a phase', async () => {
+    const statuses = [503, 503, 200];
+    const sent: unknown[] = [];
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: (request) => {
+          sent.push(request.body);
+          return Promise.resolve({
+            status: statuses[sent.length - 1],
+            headers: {},
+            body: null,
+          });
+        },
+      },
+      retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 2 },
+    });
+    const text = '{"a":1,"marker":"probe"}';
+    const handed: unknown[] = [];
+    client.addRequestInterceptor(
+      (request) => {
+        handed.push(structuredClone(request.body));
+        if (handed.length === 1) {
+          (request.body as Record<string, unknown>).a = 99;
+        }
+        return request;
+      },
+      { phases: ['retry'], bodyContainsKeys: ['a'] },
+    );
+    const parse = spyOn(JSON, 'parse');
+    let parses: number;
+    try {
+      const response = await client
+        .put('https://api.example.com/x')
+        .json({ a: 1, marker: 'probe' })
+        .send();
+
+      expect(response.status).toBe(200);
+      parses = parse.mock.calls.filter(([source]) => source === text).length;
+    } finally {
+      parse.mockRestore();
+    }
+
+    expect(parses).toBe(2);
+    expect(handed).toEqual([
+      { a: 1, marker: 'probe' },
+      { a: 1, marker: 'probe' },
+    ]);
+    expect(sent).toEqual([text, '{"a":99,"marker":"probe"}', text]);
+  });
+
+  test('a redirect interceptor whose bodyContainsKeys filter matches parses the body once', async () => {
+    const sent: unknown[] = [];
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: (request) => {
+          sent.push(request.body);
+          return Promise.resolve<AdapterResponse>(
+            sent.length === 1
+              ? {
+                  status: 307,
+                  headers: { location: 'https://api.example.com/y' },
+                  body: null,
+                }
+              : { status: 200, headers: {}, body: null },
+          );
+        },
+      },
+      followRedirects: true,
+    });
+    const text = '{"a":1,"marker":"probe"}';
+    const handed: unknown[] = [];
+    client.addRequestInterceptor(
+      (request) => {
+        handed.push(structuredClone(request.body));
+        (request.body as Record<string, unknown>).a = 99;
+        return request;
+      },
+      { phases: ['redirect'], bodyContainsKeys: ['a'] },
+    );
+    const parse = spyOn(JSON, 'parse');
+    let parses: number;
+    try {
+      const response = await client
+        .put('https://api.example.com/x')
+        .json({ a: 1, marker: 'probe' })
+        .send();
+
+      expect(response.status).toBe(200);
+      parses = parse.mock.calls.filter(([source]) => source === text).length;
+    } finally {
+      parse.mockRestore();
+    }
+
+    expect(parses).toBe(1);
+    expect(handed).toEqual([{ a: 1, marker: 'probe' }]);
+    expect(sent).toEqual([text, '{"a":99,"marker":"probe"}']);
   });
 });

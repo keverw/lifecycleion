@@ -5038,7 +5038,10 @@ function describeFactoryReturn(value: unknown): string {
   return typeof value;
 }
 
-/** A refusal of a `NodeAdapter` option: a `TypeError`, not retried - every attempt reads it alike. */
+/**
+ * A refusal of a `NodeAdapter` option: a `TypeError`, not retried - every attempt reads
+ * it alike.
+ */
 function optionRefusal(message: string): TypeError {
   const error = new TypeError(message);
   markNonRetryableAdapterError(error);

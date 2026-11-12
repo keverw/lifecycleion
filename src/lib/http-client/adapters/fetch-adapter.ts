@@ -620,9 +620,9 @@ async function readBodyWithin(
   let emptyChunks = 0;
   let encoder: TextEncoder | undefined;
 
-  // The body is let go of on an abort, not only when a chunk next arrives: a polyfill's stream need not
-  // heed the signal, and would otherwise hold its socket with a read stalled, or go on
-  // being read and kept after the request had ended.
+  // The body is let go of on an abort, not only when a chunk next arrives: a polyfill's
+  // stream need not heed the signal, and would otherwise hold its socket with a read
+  // stalled, or go on being read and kept after the request had ended.
   let didLetGo = false;
   const letGo = (): void => {
     if (!didLetGo) {

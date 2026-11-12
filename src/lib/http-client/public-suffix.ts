@@ -373,7 +373,10 @@ export class PublicSuffixResolver {
   }
 }
 
-/** Whether the bundled list, without the caller's overrides, reads `normalized` as a public suffix. */
+/**
+ * Whether the bundled list, without the caller's overrides, reads `normalized` as a
+ * public suffix.
+ */
 function isBundledPublicSuffix(normalized: string): boolean {
   const labels = normalized.split('.');
 

@@ -65,7 +65,10 @@ export function trimEndWhere(
   return text.slice(0, end);
 }
 
-/** Whether `code` is HTTP whitespace (tab, LF, CR, space), what `fetch` trims from a header value. */
+/**
+ * Whether `code` is HTTP whitespace (tab, LF, CR, space), what `fetch` trims from a
+ * header value.
+ */
 function isHTTPWhitespace(code: number): boolean {
   return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d;
 }

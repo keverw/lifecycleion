@@ -9,7 +9,7 @@ import { isPlainRecord } from './internal/plain-record';
 import { describeValue } from '../internal/describe-value';
 import { adoptPromise } from '../internal/adopt-promise';
 import {
-  fillRequestBody,
+  readRequestBodyContents,
   releaseRequestBody,
 } from './internal/request-body-copy';
 import {
@@ -165,26 +165,19 @@ async function runInterceptors(
       isCurrentUncopied = false;
     }
 
-    const { body } = current;
-
+    // A JSON body copy's contents are parsed from its text only for a
+    // `bodyContainsKeys` filter the rest of which has matched (see
+    // `readRequestBodyContents`).
     if (
       !matchesFilter(
         filter,
         {
           method: current.method,
           requestURL: current.requestURL,
-          // Read only by a `bodyContainsKeys` filter, once the rest of it has matched:
-          // a JSON body copy is filled from its text then (see `fillRequestBody`), and
-          // never for an array, which no such filter matches.
-          get body() {
-            if (!Array.isArray(body)) {
-              fillRequestBody(body);
-            }
-
-            return body;
-          },
+          body: current.body,
         },
         'request',
+        readRequestBodyContents,
       )
     ) {
       continue;

@@ -2,6 +2,7 @@ import { isRequestBodyBytes, UNSUPPORTED_REQUEST_BODY_MESSAGE } from '../utils';
 import { isPlainRecord } from './plain-record';
 import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { filePartNameToSend, formEntries, isFormData } from './form-entries';
+import { defineEntry } from '../../internal/define-entry';
 
 /**
  * What the client knows of a JSON body copy it made (see `copyRequestBody`): the text it
@@ -9,10 +10,16 @@ import { filePartNameToSend, formEntries, isFormData } from './form-entries';
  * serializes to nothing; and whether it has been filled from that text. A copy not yet
  * filled is an empty object or array of the shape its text has (see `fillRequestBody`),
  * so a copy that is only ever sent - no interceptor function is handed it and no
- * `bodyContainsKeys` filter reads it - is never parsed back at all.
+ * `bodyContainsKeys` filter reads it - is never parsed back at all. `parsed` is its text
+ * parsed for a filter that read it (see `readRequestBodyContents`), kept for the copy to
+ * be filled with, so its text is parsed once however it is read.
  */
 type CopyRecord =
-  | { readonly text: string; readonly isFilled: false }
+  | {
+      readonly text: string;
+      readonly isFilled: false;
+      readonly parsed?: object;
+    }
   | { readonly text: string | undefined; readonly isFilled: true };
 
 /**
@@ -65,8 +72,12 @@ export function copyRequestBody(body: unknown): unknown {
   }
 
   if (Array.isArray(body) || isPlainRecord(body)) {
-    // A copy of a copy is read back from the text it was read from.
+    // A copy of a copy is read back from the text it was read from, and takes the data
+    // that text was parsed to for a filter, if any (see `readRequestBodyContents`): the
+    // copy it is taken from is the one no caller is handed, so the data passes to the
+    // new copy, and the one it was taken from parses its text again if it is filled.
     const text = jsonTextOf(body);
+    const parsed = takeParsedContents(body);
 
     // A top-level `toJSON` that answers `undefined` serializes to nothing.
     if (text === undefined) {
@@ -77,14 +88,15 @@ export function copyRequestBody(body: unknown): unknown {
 
     // `JSON.stringify` writes no whitespace before a value, so the first character tells
     // an object or an array from every other value.
-    if (text.startsWith('{') || text.startsWith('[')) {
-      const copy = text.startsWith('[') ? [] : {};
-      recordByCopy.set(copy, { text, isFilled: false });
+    const first = text[0];
+    if (first === '{' || first === '[') {
+      const copy = first === '[' ? [] : {};
+      recordByCopy.set(copy, { text, isFilled: false, parsed });
       return copy;
     }
 
-    const parsed: unknown = JSON.parse(text);
-    const copy = { toJSON: () => parsed };
+    const value: unknown = JSON.parse(text);
+    const copy = { toJSON: () => value };
     recordByCopy.set(copy, { text, isFilled: true });
     return copy;
   }
@@ -165,13 +177,52 @@ export function serializesToNothing(body: object): boolean {
 }
 
 /**
+ * The data a JSON body - a plain object - holds, as an interceptor's `bodyContainsKeys`
+ * filter reads it: for a copy `copyRequestBody` returned empty, its text parsed, the data
+ * kept with its record for the copy to be filled with (see `fillRequestBody`) or for a
+ * copy taken from it, so a body is parsed once however often it is read; any other body
+ * as it is.
+ */
+export function readRequestBodyContents(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const record = recordByCopy.get(body);
+  if (record === undefined || record.isFilled) {
+    return body;
+  }
+
+  if (record.parsed !== undefined) {
+    return record.parsed as Record<string, unknown>;
+  }
+
+  const parsed = JSON.parse(record.text) as Record<string, unknown>;
+  recordByCopy.set(body, { text: record.text, isFilled: false, parsed });
+  return parsed;
+}
+
+/**
+ * The data a filter read an unfilled JSON body copy's text parsed to (see
+ * `readRequestBodyContents`), taken from its record, so only one copy is ever filled with
+ * it; `undefined` when there is none.
+ */
+function takeParsedContents(body: object): object | undefined {
+  const record = recordByCopy.get(body);
+  if (record === undefined || record.isFilled || record.parsed === undefined) {
+    return undefined;
+  }
+
+  recordByCopy.set(body, { text: record.text, isFilled: false });
+  return record.parsed;
+}
+
+/**
  * Fill a JSON body copy `copyRequestBody` returned empty with the data its text parses
- * to, in place, so it is the same object - the one the builder holds, the one an earlier
- * filter read - once its contents are read: by an interceptor's `bodyContainsKeys`
- * filter, and as it is handed to caller code (see `releaseRequestBody`). Any other value,
- * a copy already filled among them, is left as it is. Each member is defined as the
- * parsed data's own, so a `__proto__` key is a member, as `JSON.parse` makes it, not the
- * copy's prototype.
+ * to - or the data a filter read it as (see `readRequestBodyContents`) - in place, so it is
+ * the same object, the one the builder holds, as it is handed to caller code (see
+ * `releaseRequestBody`). Any other value, a copy already filled among them, is left as it
+ * is. Recorded as filled once it is, so a parse that throws leaves it unfilled, its text
+ * kept. Each member is defined as the parsed data's own, so a `__proto__` key is a member,
+ * as `JSON.parse` makes it, not the copy's prototype.
  */
 export function fillRequestBody(body: unknown): void {
   if (typeof body !== 'object' || body === null) {
@@ -183,25 +234,23 @@ export function fillRequestBody(body: unknown): void {
     return;
   }
 
-  recordByCopy.set(body, { text: record.text, isFilled: true });
-  const parsed = JSON.parse(record.text) as object;
+  const parsed = record.parsed ?? (JSON.parse(record.text) as object);
 
   if (Array.isArray(body)) {
     for (const member of parsed as unknown[]) {
       body.push(member);
     }
-
-    return;
+  } else {
+    for (const key of Object.keys(parsed)) {
+      defineEntry(
+        body as Record<string, unknown>,
+        key,
+        (parsed as Record<string, unknown>)[key],
+      );
+    }
   }
 
-  for (const key of Object.keys(parsed)) {
-    Object.defineProperty(body, key, {
-      value: (parsed as Record<string, unknown>)[key],
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
-  }
+  recordByCopy.set(body, { text: record.text, isFilled: true });
 }
 
 /**

@@ -1078,10 +1078,10 @@ export class CookieJar {
    * `createdAt` that is not a finite number - a string, `NaN`, an object - would make
    * `createdAt + maxAge * 1000` come out `NaN` and the cookie just as immortal, and
    * `maxAge` wins over `expires`, so a sound `expires` beside a corrupt `maxAge` would
-   * not save it. `setCookie` refuses those the way it refuses a bad domain.
-   * A `null` `maxAge` or `createdAt` reads as absent, as a `null` `expires` does. A positive
-   * `maxAge` with no `createdAt` is refused here: nothing says when it started, and counting from the
-   * restore would bring back a cookie long expired.
+   * not save it. `setCookie` refuses those the way it refuses a bad domain. A `null`
+   * `maxAge` or `createdAt` reads as absent, as a `null` `expires` does. A positive
+   * `maxAge` with no `createdAt` is refused here: nothing says when it started, and
+   * counting from the restore would bring back a cookie long expired.
    *
    * An entry with a field that cannot be read at all - a getter that throws - is refused
    * the same way. A `Date` is read by its time, whatever `getTime` it carries.
@@ -1909,10 +1909,10 @@ export class CookieJar {
 
     // RFC 6265bis §5.7 "Leave Secure Cookies Alone": a non-Secure cookie from a
     // non-secure request cannot replace, shadow or evict a stored Secure cookie of the
-    // same name whose scope covers it, while one is stored. Checked before the expiry-driven deletions
-    // below on purpose - `Max-Age=0` over `http:` is otherwise a one-line eviction of
-    // the `https:` session, and a fresh one planted beside it would then be the only
-    // `session` cookie left to send.
+    // same name whose scope covers it, while one is stored. Checked before the
+    // expiry-driven deletions below on purpose - `Max-Age=0` over `http:` is otherwise a
+    // one-line eviction of the `https:` session, and a fresh one planted beside it would
+    // then be the only `session` cookie left to send.
     if (
       !isSecureRequest &&
       this.wouldShadowSecureCookie(parsed.name, domain, path)
@@ -1999,7 +1999,10 @@ export class CookieJar {
     );
   }
 
-  /** Whether a cookie for `domain` is kept for that host alone: a public suffix or an IP address. */
+  /**
+   * Whether a cookie for `domain` is kept for that host alone: a public suffix or an IP
+   * address.
+   */
   private isHostOnlyDomain(domain: string): boolean {
     return (
       this.isPublicSuffix(domain) || this.tryCanonicalIPLiteral(domain) !== null
@@ -2010,13 +2013,14 @@ export class CookieJar {
    * RFC 6265bis §4.1.3 cookie name prefixes, matched case-insensitively as browsers do.
    *
    * `__Secure-` requires the `Secure` attribute. `__Host-` requires `Secure`, no
-   * non-empty `Domain` attribute (so the cookie is host-only; an empty `Domain=` reads
-   * as absent) - or one naming the IP address the cookie came from, which keeps it
-   * host-only too (`isIPHostOnly`), as Chrome and Firefox take it - and `Path=/`. A cookie that claims
-   * a prefix without meeting its conditions is refused outright rather than stored with
-   * the guarantees the prefix promises to a server reading it back. The secure-scheme
-   * half of both prefixes is enforced by the `Secure` check in `storeParsed`; the
-   * attribute half is checked on `setCookie` as well, since it needs no URL.
+   * non-empty `Domain` attribute (so the cookie is host-only; an empty `Domain=` reads as
+   * absent) - or one naming the IP address the cookie came from, which keeps it host-only
+   * too (`isIPHostOnly`), as Chrome and Firefox take it - and `Path=/`. A cookie that
+   * claims a prefix without meeting its conditions is refused outright rather than stored
+   * with the guarantees the prefix promises to a server reading it back. The
+   * secure-scheme half of both prefixes is enforced by the `Secure` check in
+   * `storeParsed`; the attribute half is checked on `setCookie` as well, since it needs
+   * no URL.
    */
   private hasValidNamePrefix(
     parsed: ParsedCookie,

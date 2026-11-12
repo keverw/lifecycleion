@@ -354,7 +354,8 @@ export class RetryPolicy {
    *
    * @param {unknown} error The error that resulted from the last operation attempt. Can be omitted when `isQueryOnly` is `true`.
    * @param {boolean} isQueryOnly If true, the method only queries if a retry should be made without storing the error.
-   * @returns {RetryQueryResult} An object indicating whether a retry should be attempted, and the delay before the next attempt with and without its jitter.
+   * @returns {RetryQueryResult} An object indicating whether a retry should be attempted,
+   *   and the delay before the next attempt with and without its jitter.
    */
 
   public shouldRetry(

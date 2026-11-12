@@ -180,9 +180,9 @@ export function buildURL(
 ): string {
   let url: string;
 
-  // With a base, an http(s) URL skips the join only if it starts `scheme://`: the parser also reads a
-  // host from `http:evil.test` and ` http://evil.test`, spellings that pass a caller's check
-  // for `://`, a leading `//` or a leading `http`.
+  // With a base, an http(s) URL skips the join only if it starts `scheme://`: the parser
+  // also reads a host from `http:evil.test` and ` http://evil.test`, spellings that pass
+  // a caller's check for `://`, a leading `//` or a leading `http`.
   const absoluteHref =
     baseURL && !/^[a-z][a-z0-9+.-]*:\/\//i.test(path)
       ? null
@@ -354,15 +354,16 @@ export function stripURLCredentials(url: string): string {
 }
 
 /**
- * `url` with the userinfo of its authority cut out as the text reads, for a string the URL
- * parser refuses: everything after `//` (or `\\`, as the parser reads a special scheme's;
- * after a special scheme, any number of slashes, none included, as the parser reads
- * `https:u:p@host`) up to the last `@` before the authority ends at `/`, `\`, `?` or `#`. The `@` itself is
- * kept, so the host after it is read exactly as before and the string is still refused:
- * cut with it, `https://u:p@/evil.test/x` would become `https:///evil.test/x`, which the
- * parser reads as `https://evil.test/x`. Read without the tabs, newlines and edge
- * controls the parser drops, which a cut string is left without too. Unchanged when it has
- * no authority or no `@` in it, or, as a last guard, when the cut would parse.
+ * `url` with the userinfo of its authority cut out as the text reads, for a string the
+ * URL parser refuses: everything after `//` (or `\\`, as the parser reads a special
+ * scheme's; after a special scheme, any number of slashes, none included, as the parser
+ * reads `https:u:p@host`) up to the last `@` before the authority ends at `/`, `\`, `?`
+ * or `#`. The `@` itself is kept, so the host after it is read exactly as before and the
+ * string is still refused: cut with it, `https://u:p@/evil.test/x` would become
+ * `https:///evil.test/x`, which the parser reads as `https://evil.test/x`. Read without
+ * the tabs, newlines and edge controls the parser drops, which a cut string is left
+ * without too. Unchanged when it has no authority or no `@` in it, or, as a last guard,
+ * when the cut would parse.
  */
 function withoutTextualUserinfo(url: string): string {
   // Read as the parser reads it: without the tabs and newlines it removes anywhere, nor
@@ -663,7 +664,10 @@ export function getBrowserResolutionBase(): string | undefined {
   return findBrowserPage()?.href;
 }
 
-/** The page or worker {@link findBrowserPage} finds: its global, its `location`, and that location's `href`. */
+/**
+ * The page or worker {@link findBrowserPage} finds: its global, its `location`, and that
+ * location's `href`.
+ */
 export interface BrowserPage {
   scope: unknown;
   location: unknown;
@@ -1551,6 +1555,11 @@ export function extractHostname(url: string): string {
   }
 }
 
+/** A body's contents as `matchesFilter` reads them where nothing is parsed: the body. */
+function bodyAsItIs(body: Record<string, unknown>): Record<string, unknown> {
+  return body;
+}
+
 /**
  * Checks whether a dot-path key exists in a nested object.
  * Arrays are not traversed — only plain objects at each segment.
@@ -1659,7 +1668,9 @@ export function matchesFilterPhase(
  * - `bodyContainsKeys`: supports dot paths (e.g. `data.results`). Each segment in
  *   the path must resolve to a plain object for traversal to continue — the final
  *   value can be anything (array, string, null, etc). Array indexing is not supported.
- *   Skipped when `kind` is `'error'`.
+ *   Skipped when `kind` is `'error'`. A body that is no plain object matches none; one
+ *   that is has its contents read through `readBodyContents`, which answers the body
+ *   itself unless the caller passes its own.
  */
 export function matchesFilter(
   filter: {
@@ -1682,6 +1693,9 @@ export function matchesFilter(
     contentTypeHeader?: string;
   },
   kind: 'request' | 'response' | 'error',
+  readBodyContents: (
+    body: Record<string, unknown>,
+  ) => Record<string, unknown> = bodyAsItIs,
 ): boolean {
   if (filter.statusCodes && context.status !== undefined) {
     if (!filter.statusCodes.includes(context.status)) {
@@ -1765,23 +1779,26 @@ export function matchesFilter(
     }
   }
 
-  // Last, since it reads the body - which a request interceptor's filter may have to
-  // parse first (see `fillRequestBody`) - so a filter that cannot match on the rest
-  // never reads it.
+  // Last, since its keys are read through `readBodyContents` - which parses a request
+  // interceptor's JSON body copy (see `readRequestBodyContents`) - so a filter that cannot
+  // match on the rest never reads them.
   if (
     kind !== 'error' &&
     filter.bodyContainsKeys &&
     filter.bodyContainsKeys.length > 0
   ) {
+    const { body } = context;
+
     // A plain object, as documented: a typed array or a boxed string has index keys,
-    // so `'0'` would match every binary body.
-    if (!isPlainRecord(context.body)) {
+    // so `'0'` would match every binary body. Told before its contents are read, so an
+    // array is never parsed.
+    if (!isPlainRecord(body)) {
       return false;
     }
 
-    const body = context.body;
+    const contents = readBodyContents(body);
 
-    if (!filter.bodyContainsKeys.some((k) => hasNestedKey(body, k))) {
+    if (!filter.bodyContainsKeys.some((k) => hasNestedKey(contents, k))) {
       return false;
     }
   }

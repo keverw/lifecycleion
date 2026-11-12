@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
 import type { AdapterResponse } from './types';
@@ -431,4 +431,174 @@ test('every observer, in every phase, is handed a JSON rawBody as the data sent'
     { phase: 'response redirect', rawBody: { a: 1 } },
     { phase: 'response final', rawBody: { a: 1 } },
   ]);
+});
+
+test('a form body is copied for the observers only for an attempt an observer runs for, once for all of them', async () => {
+  const sent: unknown[] = [];
+  const root = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: (request) => {
+        sent.push(request.body);
+        return Promise.resolve({
+          status: sent.length < 3 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    },
+    retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 2 },
+  });
+  const sub = root.createSubClient();
+  const handed: { body: unknown; rawBody: unknown }[] = [];
+  root.addResponseObserver((_response, request) => {
+    handed.push({ body: request.body, rawBody: request.rawBody });
+  });
+  sub.addResponseObserver((_response, request) => {
+    handed.push({ body: request.body, rawBody: request.rawBody });
+  });
+  // Registered for every phase, but never matching: it runs for no attempt.
+  sub.addResponseObserver(() => {}, {
+    phases: ['retry', 'final'],
+    hosts: ['other.test'],
+  });
+  const form = new FormData();
+  form.append('field', 'value');
+  const builder = sub.put('https://api.example.com/x').body(form);
+  // Counted from here: the builder's own copy of the form is already taken.
+  const append = spyOn(FormData.prototype, 'append');
+  let appends: number;
+  let response;
+  try {
+    response = await builder.send();
+    appends = append.mock.calls.length;
+  } finally {
+    append.mockRestore();
+  }
+
+  expect(response.status).toBe(200);
+  expect(sent).toHaveLength(3);
+  // One for each attempt's adapter copy, and one for the observers of the final attempt:
+  // the two retried attempts had no observer run for them.
+  expect(appends).toBe(4);
+  expect(handed).toHaveLength(2);
+  const [first, second] = handed;
+  expect(first.body).toBeInstanceOf(FormData);
+  expect([...(first.body as FormData).entries()]).toEqual([['field', 'value']]);
+  expect(first.rawBody).toBe(first.body);
+  expect(second.body).toBe(first.body);
+  expect(first.body).not.toBe(sent[2]);
+});
+
+test('every observer, in every phase, is handed a bytes body as a copy of the bytes sent', async () => {
+  let calls = 0;
+  const sent: unknown[] = [];
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: (request) => {
+        calls++;
+        sent.push(request.body);
+        if (calls === 1) {
+          return Promise.reject(new Error('down'));
+        }
+
+        return Promise.resolve<AdapterResponse>(
+          calls === 2
+            ? { status: 503, headers: {}, body: null }
+            : calls === 3
+              ? {
+                  status: 307,
+                  headers: { location: 'https://api.example.com/next' },
+                  body: null,
+                }
+              : { status: 200, headers: {}, body: null },
+        );
+      },
+    },
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 3 },
+  });
+  const seen: { phase: string; bytes: number[]; isRawBody: boolean }[] = [];
+  client.addResponseObserver(
+    (_response, request, phase) => {
+      seen.push({
+        phase: `response ${phase.type}`,
+        bytes: [...(request.body as Uint8Array)],
+        isRawBody: request.rawBody === request.body,
+      });
+      // Redacted in place: no later attempt sends it.
+      (request.body as Uint8Array).fill(0);
+    },
+    { phases: ['retry', 'redirect', 'final'] },
+  );
+  client.addErrorObserver(
+    (_error, request, phase) => {
+      seen.push({
+        phase: `error ${phase.type}`,
+        bytes: [...(request.body as Uint8Array)],
+        isRawBody: request.rawBody === request.body,
+      });
+      (request.body as Uint8Array).fill(0);
+    },
+    { phases: ['retry', 'final'] },
+  );
+
+  const response = await client
+    .put('https://api.example.com/x')
+    .body(new Uint8Array([1, 2, 3]))
+    .send();
+
+  expect(response.status).toBe(200);
+  // Each attempt's observers are handed a copy of their own, which an earlier attempt's
+  // observer did not zero.
+  expect(seen).toEqual([
+    { phase: 'error retry', bytes: [1, 2, 3], isRawBody: true },
+    { phase: 'response retry', bytes: [1, 2, 3], isRawBody: true },
+    { phase: 'response redirect', bytes: [1, 2, 3], isRawBody: true },
+    { phase: 'response final', bytes: [1, 2, 3], isRawBody: true },
+  ]);
+  expect(sent).toEqual(
+    Array.from({ length: 4 }, () => new Uint8Array([1, 2, 3])),
+  );
+});
+
+test('an observer whose request copy cannot be built is reported and skipped, and send() still answers', async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+    },
+  });
+  const handed: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    handed.push(request.body);
+  });
+  const form = new FormData();
+  form.append('field', 'value');
+  const builder = client.put('https://api.example.com/x').body(form);
+  // The adapter's copy is the first append from here; the observers' copy the second.
+  let appends = 0;
+  const original: unknown = Reflect.get(FormData.prototype, 'append');
+  const append = spyOn(FormData.prototype, 'append').mockImplementation(
+    function (this: FormData, ...args: unknown[]) {
+      if (++appends === 2) {
+        throw new Error('copy failed');
+      }
+      Reflect.apply(original as (...a: unknown[]) => void, this, args);
+    },
+  );
+  const { reports, release } = captureErrorReports();
+  let response;
+  try {
+    response = await builder.send();
+  } finally {
+    append.mockRestore();
+    release();
+  }
+
+  expect(response.status).toBe(200);
+  expect(handed).toEqual([]);
+  expect(reports).toHaveLength(1);
+  expect(((reports[0] as Error).cause as Error).message).toBe('copy failed');
 });

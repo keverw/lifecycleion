@@ -9,7 +9,7 @@ import {
 } from './internal/callback-registry';
 import type { RegisteredCallback } from './internal/callback-registry';
 import { copyHeaderRecord } from './internal/header-utils';
-import { handedRawBody } from './internal/observed-raw-body';
+import { handedBodyValue } from './internal/observed-bodies';
 import type {
   ResponseObserverFilter,
   ErrorObserverFilter,
@@ -178,9 +178,10 @@ function readFilterContextOnce<Context>(read: () => Context): () => Context {
  * the next. `matches` is asked once per observer, against what was read before the first
  * ran (see `readFilterContextOnce`). A filter that throws is reported and its observer
  * skipped, and an observer that throws is reported without stopping the rest. Each
- * observer's arguments come from `argsFor`, so each is handed its own phase object. Once
- * `cancelSignal` has aborted no further observer runs: `send()` has stopped waiting on
- * the chain, and may have answered.
+ * observer's arguments come from `argsFor`, so each is handed its own phase object; an
+ * `argsFor` that throws is reported and that observer skipped. Once `cancelSignal` has
+ * aborted no further observer runs: `send()` has stopped waiting on the chain, and may
+ * have answered.
  */
 async function runObservers<Filter, Args extends unknown[]>(
   label: 'ResponseObserver' | 'ErrorObserver',
@@ -211,7 +212,18 @@ async function runObservers<Filter, Args extends unknown[]>(
       return;
     }
 
-    await safeHandleCallbackAndWait(label, fn, ...argsFor());
+    // Built here, for the first observer that runs: the request copy and the body values
+    // it is handed (see `handedAttemptRequest`). One that cannot be built is reported, as
+    // a filter that throws is, and its observer skipped.
+    let args: Args;
+    try {
+      args = argsFor();
+    } catch (buildError) {
+      reportCallbackError(label, buildError);
+      continue;
+    }
+
+    await safeHandleCallbackAndWait(label, fn, ...args);
   }
 }
 
@@ -268,9 +280,10 @@ export function runParentThenOwnErrorObservers(
  * too, so an observer's edit to it in place - redacting `requestURL` or a header - is seen
  * by the observers after it and by nothing the client goes on to read: the method the
  * next redirect hop is judged by, the request a cancelled retry wait is reported with.
- * The body and `rawBody` are the attempt's own (see `AttemptRequest`), a JSON `rawBody`
- * parsed back as the copy is taken (see `handedRawBody`). The copy is taken when the first
- * observer runs, so a phase no observer runs for copies and parses nothing.
+ * The body and `rawBody` are the attempt's own (see `AttemptRequest`), built as the copy is
+ * taken: a JSON `rawBody` parsed back, bytes or a form copied (see `handedBodyValue`). The
+ * copy is taken when the first observer runs, so a phase no observer runs for copies and
+ * parses nothing.
  *
  * The filters of both chains are matched against `readContext`, read before the first
  * observer of either runs (see `readFilterContextOnce`) from `request` - which no observer
@@ -317,8 +330,12 @@ function handedAttemptRequest(request: AttemptRequest): AttemptRequest {
     headers: copyHeaderRecord(request.headers),
   };
 
+  if ('body' in request) {
+    handed.body = handedBodyValue(request.body) as AttemptRequest['body'];
+  }
+
   if ('rawBody' in request) {
-    handed.rawBody = handedRawBody(request.rawBody);
+    handed.rawBody = handedBodyValue(request.rawBody);
   }
 
   return handed;

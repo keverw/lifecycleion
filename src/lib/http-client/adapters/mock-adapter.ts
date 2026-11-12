@@ -1504,7 +1504,10 @@ const NO_DEFAULT_BODY_METHODS: ReadonlySet<string> = new Set([
   'CONNECT',
 ]);
 
-/** Add `value` to the list under `key`, made once per key and defined as `defineEntry` defines it. */
+/**
+ * Add `value` to the list under `key`, made once per key and defined as `defineEntry`
+ * defines it.
+ */
 function appendEntry<T>(
   record: Record<string, T[]>,
   key: string,
