@@ -400,6 +400,17 @@ export class CookieJar {
   // Inner key: `cookieKey`'s JSON of [name, domain, path, hostOnly], for deduplication.
   private buckets: Map<string, Map<string, StoredCookie>> = new Map();
 
+  /**
+   * Each name a bucket's key sits under - the text after each dot in it - to the keys of
+   * the buckets under that name, so the sites below a name are found without a scan of
+   * the jar: `amazonaws.com` leads to `bucket.s3.amazonaws.com`, a site of its own behind
+   * the nested suffix `s3.amazonaws.com`. Holds a key for exactly as long as `buckets`
+   * does: written only where a bucket is created or deleted (`getOrCreateBucket`,
+   * `deleteBucket`, `clearBuckets`), which are the only places `buckets` gains or loses a
+   * key.
+   */
+  private bucketKeysUnder: Map<string, Set<string>> = new Map();
+
   /** Every cookie in `buckets`, for the jar-wide limit: each store reads it. */
   private cookieCount = 0;
 
@@ -917,7 +928,7 @@ export class CookieJar {
   ): number {
     if (args.length === 0) {
       const count = this.cookieCount;
-      this.buckets.clear();
+      this.clearBuckets();
       this.cookieCount = 0;
       this.earliestAccessTime = Infinity;
       return count;
@@ -966,7 +977,7 @@ export class CookieJar {
       // leaves `app.blogspot.com`, a site of its own behind `blogspot.com`.
       if (!isRemovedSuffixClear && !this.isPublicSuffix(site)) {
         const count = this.buckets.get(site)?.size ?? 0;
-        this.buckets.delete(site);
+        this.deleteBucket(site);
         this.cookieCount -= count;
         return count;
       }
@@ -976,13 +987,13 @@ export class CookieJar {
 
       // A suffix or bare name has no registrable part, so each site under it is a bucket
       // of its own - `clear('github.io', 'domain')` or `clear('localhost', 'domain')`
-      // clears them all.
-      for (const [key, bucket] of this.buckets) {
-        if (key === domain || key.endsWith(`.${domain}`)) {
-          count += bucket.size;
-          this.cookieCount -= bucket.size;
-          this.buckets.delete(key);
-        }
+      // clears them all: its own and those `bucketKeysUnder` files under it, taken as a
+      // list first, since deleting a bucket deletes its key from that index.
+      for (const key of [domain, ...(this.bucketKeysUnder.get(domain) ?? [])]) {
+        const size = this.buckets.get(key)?.size ?? 0;
+        count += size;
+        this.cookieCount -= size;
+        this.deleteBucket(key);
       }
 
       // A removed suffix whose removal joined it to a site above - `co.uk` with `uk`
@@ -1233,7 +1244,7 @@ export class CookieJar {
       prepared.push(cookie);
     }
 
-    this.buckets.clear();
+    this.clearBuckets();
     this.cookieCount = 0;
     this.earliestAccessTime = Infinity;
 
@@ -1693,8 +1704,36 @@ export class CookieJar {
 
   private pruneEmptyBucket(site: string): void {
     if (this.buckets.get(site)?.size === 0) {
-      this.buckets.delete(site);
+      this.deleteBucket(site);
     }
+  }
+
+  /** Deletes `site`'s bucket, and its key from `bucketKeysUnder`. */
+  private deleteBucket(site: string): void {
+    if (!this.buckets.delete(site)) {
+      return;
+    }
+
+    for (
+      let dot = site.indexOf('.');
+      dot !== -1;
+      dot = site.indexOf('.', dot + 1)
+    ) {
+      const parent = site.slice(dot + 1);
+      const keys = this.bucketKeysUnder.get(parent);
+
+      // The name's entry goes with its last key, so the index holds no name without a
+      // bucket under it.
+      if (keys?.delete(site) === true && keys.size === 0) {
+        this.bucketKeysUnder.delete(parent);
+      }
+    }
+  }
+
+  /** Deletes every bucket, and with them every entry of `bucketKeysUnder`. */
+  private clearBuckets(): void {
+    this.buckets.clear();
+    this.bucketKeysUnder.clear();
   }
 
   private deleteCookieByIdentity(
@@ -1761,6 +1800,24 @@ export class CookieJar {
     if (!bucket) {
       bucket = new Map();
       this.buckets.set(site, bucket);
+
+      // Under each name the key ends in after a dot: `site.endsWith(`.${name}`)` holds
+      // for exactly the names the key is filed under here.
+      for (
+        let dot = site.indexOf('.');
+        dot !== -1;
+        dot = site.indexOf('.', dot + 1)
+      ) {
+        const parent = site.slice(dot + 1);
+        let keys = this.bucketKeysUnder.get(parent);
+
+        if (!keys) {
+          keys = new Set();
+          this.bucketKeysUnder.set(parent, keys);
+        }
+
+        keys.add(site);
+      }
     }
 
     return bucket;
@@ -2064,42 +2121,63 @@ export class CookieJar {
     // A bucket's key is a suffix of every domain stored in it, so a stored domain on
     // either side of `domain` sits in a bucket whose key is on one side of it too, and
     // the other buckets hold nothing to check.
-    // Built once, not per bucket: the domain's own name and each parent name it ends
-    // in, and the suffix a name under it ends in.
-    const selfAndParents = new Set<string>([normalizedDomain]);
+    // Each is reached by its key, with no scan of the jar: the domain's own name and
+    // each parent name it ends in are looked up, and the keys under it are read from
+    // `bucketKeysUnder`.
+    const sites: string[] = [normalizedDomain];
     for (
       let dot = normalizedDomain.indexOf('.');
       dot !== -1;
       dot = normalizedDomain.indexOf('.', dot + 1)
     ) {
-      selfAndParents.add(normalizedDomain.slice(dot + 1));
+      sites.push(normalizedDomain.slice(dot + 1));
     }
-    const childSuffix = `.${normalizedDomain}`;
 
-    for (const [site, bucket] of this.buckets) {
-      if (!selfAndParents.has(site) && !site.endsWith(childSuffix)) {
+    for (const site of sites) {
+      if (this.holdsSecureCookieOver(site, name, preparedDomain, path, now)) {
+        return true;
+      }
+    }
+
+    for (const site of this.bucketKeysUnder.get(normalizedDomain) ?? []) {
+      if (this.holdsSecureCookieOver(site, name, preparedDomain, path, now)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Whether `site`'s bucket holds a live Secure cookie named `name` whose domain matches
+   * `preparedDomain` in either direction and whose path `path` path-matches. See
+   * {@link wouldShadowSecureCookie}.
+   */
+  private holdsSecureCookieOver(
+    site: string,
+    name: string,
+    preparedDomain: PreparedHost,
+    path: string,
+    now: number,
+  ): boolean {
+    for (const stored of this.buckets.get(site)?.values() ?? []) {
+      const { cookie } = stored;
+
+      if (
+        cookie.secure !== true ||
+        cookie.name !== name ||
+        this.isExpired(stored, now)
+      ) {
         continue;
       }
 
-      for (const stored of bucket.values()) {
-        const { cookie } = stored;
+      const storedPath = cookie.path ?? '/';
+      const isDomainMatch =
+        this.domainMatches(preparedDomain, stored.preparedDomain) ||
+        this.domainMatches(stored.preparedDomain, preparedDomain);
 
-        if (
-          cookie.secure !== true ||
-          cookie.name !== name ||
-          this.isExpired(stored, now)
-        ) {
-          continue;
-        }
-
-        const storedPath = cookie.path ?? '/';
-        const isDomainMatch =
-          this.domainMatches(preparedDomain, stored.preparedDomain) ||
-          this.domainMatches(stored.preparedDomain, preparedDomain);
-
-        if (isDomainMatch && this.pathMatches(path, storedPath)) {
-          return true;
-        }
+      if (isDomainMatch && this.pathMatches(path, storedPath)) {
+        return true;
       }
     }
 

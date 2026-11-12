@@ -4994,3 +4994,575 @@ describe('jar limits', () => {
     ]);
   });
 });
+
+describe('Leave Secure Cookies Alone reaches the sites on either side of a domain', () => {
+  interface ShadowInternals {
+    // A stored cookie always has its domain.
+    buckets: Map<
+      string,
+      Map<string, { cookie: Cookie & { domain: string }; expiresAt: number }>
+    >;
+    bucketKeysUnder: Map<string, Set<string>>;
+    wouldShadowSecureCookie: (
+      name: string,
+      domain: string,
+      path: string,
+    ) => boolean;
+  }
+
+  const internalsOf = (jar: CookieJar): ShadowInternals =>
+    jar as unknown as ShadowInternals;
+
+  const isIPText = (host: string): boolean =>
+    host.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(host);
+
+  // An IPv6 address is one host with its brackets or without them.
+  const unbracketed = (host: string): string =>
+    host.startsWith('[') ? host.slice(1, -1) : host;
+
+  // Domain-match for the lowercase ASCII hosts these tests use: the same host, or, for
+  // two names, one ending in a dot and the other.
+  const domainMatchesByText = (host: string, domain: string): boolean =>
+    unbracketed(host) === unbracketed(domain) ||
+    (!isIPText(host) && !isIPText(domain) && host.endsWith(`.${domain}`));
+
+  const pathMatchesByText = (path: string, cookiePath: string): boolean =>
+    cookiePath === '/' ||
+    path === cookiePath ||
+    (path.startsWith(cookiePath) &&
+      (cookiePath.endsWith('/') || path.charAt(cookiePath.length) === '/'));
+
+  /**
+   * The rule read off every stored cookie, whatever bucket holds it: a live Secure cookie
+   * of the name whose domain matches `domain` in either direction and whose path `path`
+   * path-matches. Returns the key of the bucket holding the first one, or `null`.
+   */
+  const shadowingSite = (
+    jar: CookieJar,
+    name: string,
+    domain: string,
+    path: string,
+  ): string | null => {
+    const now = Date.now();
+
+    for (const [site, bucket] of internalsOf(jar).buckets) {
+      for (const { cookie, expiresAt } of bucket.values()) {
+        if (
+          cookie.secure === true &&
+          cookie.name === name &&
+          now < expiresAt &&
+          (domainMatchesByText(domain, cookie.domain) ||
+            domainMatchesByText(cookie.domain, domain)) &&
+          pathMatchesByText(path, cookie.path ?? '/')
+        ) {
+          return site;
+        }
+      }
+    }
+
+    return null;
+  };
+
+  /** `bucketKeysUnder` as sorted entries, and the same built from the bucket keys. */
+  const indexEntries = (
+    jar: CookieJar,
+  ): {
+    held: Array<[string, string[]]>;
+    rebuilt: Array<[string, string[]]>;
+  } => {
+    const internals = internalsOf(jar);
+    const byName = (a: [string, string[]], b: [string, string[]]): number =>
+      a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+    const rebuilt = new Map<string, string[]>();
+
+    for (const site of internals.buckets.keys()) {
+      for (
+        let dot = site.indexOf('.');
+        dot !== -1;
+        dot = site.indexOf('.', dot + 1)
+      ) {
+        const parent = site.slice(dot + 1);
+        rebuilt.set(parent, [...(rebuilt.get(parent) ?? []), site]);
+      }
+    }
+
+    return {
+      held: Array.from(
+        internals.bucketKeysUnder,
+        ([parent, keys]): [string, string[]] => [parent, [...keys].sort()],
+      ).sort(byName),
+      rebuilt: Array.from(rebuilt, ([parent, keys]): [string, string[]] => [
+        parent,
+        keys.sort(),
+      ]).sort(byName),
+    };
+  };
+
+  test.each([
+    {
+      direction:
+        'a host-only plant on a domain over a Secure cookie of a site behind a nested suffix',
+      secureURL: 'https://bucket.s3.amazonaws.com/',
+      secureHeader: 'session=real; Secure',
+      plantURL: 'http://amazonaws.com/',
+      plantHeader: 'session=evil',
+      secureSite: 'bucket.s3.amazonaws.com',
+      plantSite: 'amazonaws.com',
+    },
+    {
+      direction:
+        'a Domain= plant on a domain over a Secure cookie of a site behind a nested suffix',
+      secureURL: 'https://bucket.s3.amazonaws.com/',
+      secureHeader: 'session=real; Secure',
+      plantURL: 'http://www.amazonaws.com/',
+      plantHeader: 'session=evil; Domain=amazonaws.com',
+      secureSite: 'bucket.s3.amazonaws.com',
+      plantSite: 'amazonaws.com',
+    },
+    {
+      direction:
+        'a plant on a site behind a nested suffix under a Secure cookie of the domain above',
+      secureURL: 'https://www.amazonaws.com/',
+      secureHeader: 'session=real; Secure; Domain=amazonaws.com',
+      plantURL: 'http://bucket.s3.amazonaws.com/',
+      plantHeader: 'session=evil',
+      secureSite: 'amazonaws.com',
+      plantSite: 'bucket.s3.amazonaws.com',
+    },
+    {
+      direction:
+        'a plant on a host under a site behind a nested suffix, two sites below the Secure cookie',
+      secureURL: 'https://amazonaws.com/',
+      secureHeader: 'session=real; Secure',
+      plantURL: 'http://deep.bucket.s3.amazonaws.com/',
+      plantHeader: 'session=evil',
+      secureSite: 'amazonaws.com',
+      plantSite: 'bucket.s3.amazonaws.com',
+    },
+    {
+      direction:
+        'a plant on a public suffix over a Secure cookie of a site under it',
+      secureURL: 'https://user.github.io/',
+      secureHeader: 'session=real; Secure',
+      plantURL: 'http://github.io/',
+      plantHeader: 'session=evil',
+      secureSite: 'user.github.io',
+      plantSite: 'github.io',
+    },
+    {
+      direction: 'a plant on a site under a Secure cookie of its public suffix',
+      secureURL: 'https://github.io/',
+      secureHeader: 'session=real; Secure',
+      plantURL: 'http://www.user.github.io/',
+      plantHeader: 'session=evil; Domain=user.github.io',
+      secureSite: 'github.io',
+      plantSite: 'user.github.io',
+    },
+  ])(
+    '$direction is refused',
+    ({
+      secureURL,
+      secureHeader,
+      plantURL,
+      plantHeader,
+      secureSite,
+      plantSite,
+    }) => {
+      const jar = new CookieJar();
+      jar.parseSetCookieHeader(secureHeader, secureURL);
+
+      // The two cookies are filed apart: the refusal crosses from one bucket to another.
+      expect(Array.from(internalsOf(jar).buckets.keys())).toEqual([secureSite]);
+      expect(secureSite).not.toBe(plantSite);
+
+      jar.parseSetCookieHeader(plantHeader, plantURL);
+
+      expect(jar.getAllCookies().map((c) => c.value)).toEqual(['real']);
+
+      // Stored once the Secure cookie is gone, in the other bucket.
+      jar.clear(secureSite, 'domain');
+      jar.parseSetCookieHeader(plantHeader, plantURL);
+
+      expect(jar.getAllCookies().map((c) => c.value)).toEqual(['evil']);
+      expect(Array.from(internalsOf(jar).buckets.keys())).toEqual([plantSite]);
+    },
+  );
+
+  test.each([
+    {
+      why: 'a sibling site behind the same nested suffix',
+      plantURL: 'http://other.s3.amazonaws.com/',
+      plantHeader: 'session=other',
+    },
+    {
+      why: 'a site behind another nested suffix of the same domain',
+      plantURL: 'http://t.compute-1.amazonaws.com/',
+      plantHeader: 'session=other',
+    },
+    {
+      why: 'a name that only ends in the same letters',
+      plantURL: 'http://xbucket.s3.amazonaws.com/',
+      plantHeader: 'session=other',
+    },
+    {
+      why: 'another name on the domain above',
+      plantURL: 'http://amazonaws.com/',
+      plantHeader: 'other=other',
+    },
+    {
+      why: 'a path the Secure cookie is not sent under',
+      plantURL: 'http://amazonaws.com/',
+      plantHeader: 'scoped=other; Path=/public',
+    },
+  ])('a plant is stored beside a Secure cookie for $why', (plant) => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader(
+      'session=real; Secure',
+      'https://bucket.s3.amazonaws.com/',
+    );
+    jar.parseSetCookieHeader(
+      'scoped=real; Secure; Path=/admin',
+      'https://bucket.s3.amazonaws.com/admin',
+    );
+
+    jar.parseSetCookieHeader(plant.plantHeader, plant.plantURL);
+
+    expect(
+      jar
+        .getAllCookies()
+        .map((c) => c.value)
+        .sort(),
+    ).toEqual(['other', 'real', 'real']);
+  });
+
+  test('a site under a domain is found for as long as its bucket lasts, and no longer', () => {
+    const jar = new CookieJar();
+    const start = Date.now();
+    setSystemTime(new Date(start));
+    const plant = (): number => {
+      jar.parseSetCookieHeader('session=evil', 'http://amazonaws.com/');
+      const stored = jar.getCookiesFor('http://amazonaws.com/').length;
+      jar.clear('amazonaws.com', 'hostname');
+      return stored;
+    };
+    const expectIndexTrue = (): void => {
+      const { held, rebuilt } = indexEntries(jar);
+      expect(held).toEqual(rebuilt);
+    };
+
+    jar.parseSetCookieHeader(
+      'session=one; Secure; Max-Age=10',
+      'https://a.s3.amazonaws.com/',
+    );
+    jar.parseSetCookieHeader(
+      'session=two; Secure',
+      'https://b.s3.amazonaws.com/',
+    );
+    expectIndexTrue();
+    expect(plant()).toBe(0);
+
+    // One of the two sites is removed whole: the other still refuses the plant.
+    jar.clear('b.s3.amazonaws.com', 'domain');
+    expectIndexTrue();
+    expect(plant()).toBe(0);
+
+    // The last one expires where it is stored, its bucket still held: no refusal.
+    setSystemTime(new Date(start + 11_000));
+    expect(internalsOf(jar).buckets.has('a.s3.amazonaws.com')).toBe(true);
+    expect(plant()).toBe(1);
+
+    expect(jar.clearExpiredCookies()).toBe(1);
+    expectIndexTrue();
+    expect(internalsOf(jar).bucketKeysUnder.size).toBe(0);
+
+    // Restored from JSON, the sites under the domain are found again.
+    jar.parseSetCookieHeader(
+      'session=three; Secure',
+      'https://c.s3.amazonaws.com/',
+    );
+    const restored = new CookieJar();
+    restored.fromJSON(JSON.parse(JSON.stringify(jar.toJSON())));
+    restored.parseSetCookieHeader('session=evil', 'http://amazonaws.com/');
+    expect(restored.getAllCookies().map((c) => c.value)).toEqual(['three']);
+    expect(indexEntries(restored).held).toEqual([
+      ['amazonaws.com', ['c.s3.amazonaws.com']],
+      ['com', ['c.s3.amazonaws.com']],
+      ['s3.amazonaws.com', ['c.s3.amazonaws.com']],
+    ]);
+
+    // Emptied, the jar holds no name to look under.
+    restored.clear();
+    expect(internalsOf(restored).bucketKeysUnder.size).toBe(0);
+    restored.parseSetCookieHeader('session=evil', 'http://amazonaws.com/');
+    expect(restored.getAllCookies().map((c) => c.value)).toEqual(['evil']);
+  });
+
+  const HOSTS = [
+    'com',
+    'amazonaws.com',
+    'www.amazonaws.com',
+    's3.amazonaws.com',
+    'a.s3.amazonaws.com',
+    'b.s3.amazonaws.com',
+    'x.a.s3.amazonaws.com',
+    't.compute-1.amazonaws.com',
+    'io',
+    'github.io',
+    'u1.github.io',
+    'u2.github.io',
+    'www.u1.github.io',
+    'example.com',
+    'app.example.com',
+    'deep.app.example.com',
+    'example.com.',
+    'app.example.com.',
+    'uk',
+    'co.uk',
+    'shop.co.uk',
+    'www.shop.co.uk',
+    'localhost',
+    'app.localhost',
+    'intranet',
+    '127.0.0.1',
+    '10.0.0.5',
+    '[::1]',
+  ];
+  const NAMES = ['session', 'id', '__Secure-token'];
+  const PATHS = ['/', '/a', '/a/b', '/a/'];
+  const REQUEST_PATHS = ['/', '/a/x', '/a/b/c', '/b'];
+
+  test.each([
+    { label: 'the default list', seed: 0x5eed01, publicSuffixes: undefined },
+    {
+      label: 'a nested suffix removed',
+      seed: 0x5eed02,
+      publicSuffixes: { remove: ['s3.amazonaws.com', 'github.io'] },
+    },
+    {
+      label: 'suffixes removed down to the top',
+      seed: 0x5eed03,
+      publicSuffixes: { remove: ['uk', 'co.uk', 'com'] },
+    },
+    {
+      label: 'suffixes added',
+      seed: 0x5eed04,
+      publicSuffixes: { add: ['app.example.com', 'www.amazonaws.com'] },
+    },
+  ])(
+    'over a seeded run of stores, removals, expiries and restores the answer is the one every stored cookie gives: $label',
+    ({ seed, publicSuffixes }) => {
+      // mulberry32: the same sequence on every run.
+      let state: number = seed;
+      const random = (): number => {
+        state = (state + 0x6d2b79f5) >>> 0;
+        let t = Math.imul(state ^ (state >>> 15), 1 | state);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+      const pick = <T>(list: readonly T[]): T =>
+        list[Math.floor(random() * list.length)];
+      const chance = (probability: number): boolean => random() < probability;
+      // A host, or a name above it: what a `Domain=` may name, and what it may not.
+      const nameAtOrAbove = (host: string): string => {
+        const labels = host.split('.');
+        return labels.slice(Math.floor(random() * labels.length)).join('.');
+      };
+
+      let now = Date.UTC(2026, 0, 1);
+      setSystemTime(new Date(now));
+
+      let jar = new CookieJar({ publicSuffixes });
+      const answers = (): {
+        allowed: number;
+        refusedBySelfOrParent: number;
+        refusedBySiteUnder: number;
+      } => ({ allowed: 0, refusedBySelfOrParent: 0, refusedBySiteUnder: 0 });
+      const tally = {
+        fromSetCookie: answers(),
+        askedDirectly: answers(),
+        restores: 0,
+        leftAsItWas: 0,
+      };
+
+      let step = 0;
+      let isStoring = false;
+
+      // Every answer is compared: those a `Set-Cookie` asks for, with the arguments it
+      // asks with, and those asked for directly after each step.
+      const watch = (watched: CookieJar): void => {
+        const internals = internalsOf(watched);
+        const check = internals.wouldShadowSecureCookie.bind(watched);
+
+        internals.wouldShadowSecureCookie = (name, domain, path) => {
+          const isRefused = check(name, domain, path);
+          const site = shadowingSite(watched, name, domain, path);
+
+          if (isRefused !== (site !== null)) {
+            throw new Error(
+              `step ${step}: the check for ${JSON.stringify([name, domain, path])} answered ${String(isRefused)}, the stored cookies say ${String(site !== null)}`,
+            );
+          }
+
+          const counted = isStoring ? tally.fromSetCookie : tally.askedDirectly;
+
+          if (site === null) {
+            counted.allowed++;
+          } else if (site.endsWith(`.${domain}`)) {
+            counted.refusedBySiteUnder++;
+          } else {
+            counted.refusedBySelfOrParent++;
+          }
+
+          return isRefused;
+        };
+      };
+
+      watch(jar);
+
+      for (; step < 1500; step++) {
+        const roll = random();
+        const host = pick(HOSTS);
+
+        if (roll < 0.5) {
+          const isSecureScheme = chance(0.45);
+          const name = pick(NAMES);
+          const domainAttribute = chance(0.4) ? nameAtOrAbove(host) : null;
+          const pathAttribute = chance(0.5) ? pick(PATHS) : null;
+          const requestPath = pick(REQUEST_PATHS);
+          const isSecureCookie = chance(isSecureScheme ? 0.7 : 0.1);
+          const header = [
+            `${name}=v${step}`,
+            ...(isSecureCookie ? ['Secure'] : []),
+            ...(domainAttribute === null ? [] : [`Domain=${domainAttribute}`]),
+            ...(pathAttribute === null ? [] : [`Path=${pathAttribute}`]),
+            ...(chance(0.3) ? [`Max-Age=${pick([0, 3, 20, 100])}`] : []),
+          ].join('; ');
+          const url = `${isSecureScheme ? 'https' : 'http'}://${host}${requestPath}`;
+          const isLoopback =
+            host === 'localhost' ||
+            host.endsWith('.localhost') ||
+            host === '127.0.0.1' ||
+            host === '[::1]';
+          // Through the public API alone: an insecure cookie over plain `http:` that a
+          // stored Secure cookie covers leaves the jar as it was.
+          const lastSlash = requestPath.lastIndexOf('/');
+          const isCovered =
+            !isSecureScheme &&
+            !isSecureCookie &&
+            !isLoopback &&
+            shadowingSite(
+              jar,
+              name,
+              domainAttribute ?? host,
+              pathAttribute ??
+                (lastSlash === 0 ? '/' : requestPath.slice(0, lastSlash)),
+            ) !== null;
+          const before = JSON.stringify(jar.toJSON());
+
+          isStoring = true;
+          jar.parseSetCookieHeader(header, url);
+          isStoring = false;
+
+          if (isCovered) {
+            tally.leftAsItWas++;
+            expect(JSON.stringify(jar.toJSON())).toBe(before);
+          }
+        } else if (roll < 0.62) {
+          jar.setCookie({
+            name: pick(NAMES),
+            value: `p${step}`,
+            domain: chance(0.3) ? nameAtOrAbove(host) : host,
+            path: pick(PATHS),
+            secure: chance(0.6),
+            hostOnly: chance(0.5),
+            ...(chance(0.3) ? { maxAge: pick([0, 3, 20, 100]) } : {}),
+          });
+        } else if (roll < 0.7) {
+          jar.clear(host, chance(0.5) ? 'hostname' : 'domain');
+        } else if (roll < 0.8) {
+          now += Math.floor(random() * 15_000);
+          setSystemTime(new Date(now));
+        } else if (roll < 0.85) {
+          jar.clearExpiredCookies();
+        } else if (roll < 0.91) {
+          // Removes the expired cookies of the sites it scans, leaving their buckets.
+          jar.getCookiesFor(`https://${host}${pick(REQUEST_PATHS)}`);
+        } else if (roll < 0.92) {
+          jar.clear();
+        } else if (roll < 0.96) {
+          jar.fromJSON(JSON.parse(JSON.stringify(jar.toJSON())));
+          tally.restores++;
+        } else {
+          const restored = new CookieJar({ publicSuffixes });
+          restored.fromJSON(JSON.parse(JSON.stringify(jar.toJSON())));
+          watch(restored);
+          jar = restored;
+          tally.restores++;
+        }
+
+        const { held, rebuilt } = indexEntries(jar);
+        expect(held).toEqual(rebuilt);
+
+        // The whole grid every tenth step: each step's `Set-Cookie` checks are compared
+        // as they are made, and the grid run after every step costs seconds.
+        if (step % 10 !== 0) {
+          continue;
+        }
+
+        const internals = internalsOf(jar);
+
+        for (const name of NAMES) {
+          for (const domain of HOSTS) {
+            for (const path of PATHS) {
+              internals.wouldShadowSecureCookie(name, domain, path);
+            }
+          }
+        }
+      }
+
+      // The run reached each kind of answer, a site under the domain included.
+      expect(tally.fromSetCookie.allowed).toBeGreaterThan(100);
+      expect(tally.fromSetCookie.refusedBySelfOrParent).toBeGreaterThan(10);
+      expect(tally.fromSetCookie.refusedBySiteUnder).toBeGreaterThan(3);
+      expect(tally.askedDirectly.allowed).toBeGreaterThan(10_000);
+      expect(tally.askedDirectly.refusedBySelfOrParent).toBeGreaterThan(2000);
+      expect(tally.askedDirectly.refusedBySiteUnder).toBeGreaterThan(500);
+      expect(tally.restores).toBeGreaterThan(50);
+      expect(tally.leftAsItWas).toBeGreaterThan(20);
+    },
+    60_000,
+  );
+
+  test('an insecure Set-Cookie into a jar of 100,000 sites is checked without a scan of them', () => {
+    const jar = new CookieJar();
+
+    for (let site = 0; site < 100_000; site++) {
+      jar.setCookie({
+        name: 'session',
+        value: 'real',
+        domain: `site${site}.test`,
+        secure: true,
+      });
+    }
+
+    expect(internalsOf(jar).buckets.size).toBe(100_000);
+
+    const startedAt = performance.now();
+
+    for (let plant = 0; plant < 1000; plant++) {
+      jar.parseSetCookieHeader('session=plain', `http://plant${plant}.test/`);
+      jar.parseSetCookieHeader('session=evil', `http://www.site${plant}.test/`);
+    }
+
+    const elapsedMS = performance.now() - startedAt;
+
+    // Each plant beside the sites is stored, and each over a site's Secure cookie refused.
+    expect(internalsOf(jar).buckets.size).toBe(101_000);
+    expect(
+      jar.getAllCookies().filter((cookie) => cookie.value === 'evil'),
+    ).toEqual([]);
+    // By lookup the 2000 checks take tens of milliseconds; scanning 100,000 buckets for
+    // each, seconds.
+    expect(elapsedMS).toBeLessThan(1000);
+  }, 60_000);
+});
