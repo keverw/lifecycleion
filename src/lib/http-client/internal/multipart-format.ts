@@ -10,17 +10,6 @@ import { isByteCount } from './progress';
 import { utf8ByteLength } from './utf8-length';
 
 /**
- * A string's UTF-8 byte length: Node's native count where there is a `Buffer` - a large
- * string field is counted on every send - and counted here where there is none, as in a
- * browser running MockAdapter. The two agree, a lone surrogate counted as U+FFFD's three
- * bytes by both.
- */
-const byteLength: (text: string) => number =
-  typeof Buffer === 'function'
-    ? (text) => Buffer.byteLength(text)
-    : utf8ByteLength;
-
-/**
  * Escape a field name or filename for its quoted Content-Disposition parameter, as the
  * WHATWG multipart/form-data encoding does and as `fetch` sends a `FormData` (undici,
  * Bun, browsers): `"`, CR and LF are percent-encoded, nothing is backslash-escaped, and
@@ -131,7 +120,7 @@ export function measureMultipartEntries(
     const fieldName = formatFieldName(name);
 
     // Every part starts with its own opening boundary line.
-    size += byteLength(`--${boundary}\r\n`);
+    size += utf8ByteLength(`--${boundary}\r\n`);
 
     if (typeof value === 'string') {
       // String part wire format:
@@ -141,7 +130,7 @@ export function measureMultipartEntries(
       //   trailing CRLF before the next boundary
       const partHead = formatStringPart(fieldName, value);
       partHeads.push(partHead);
-      size += byteLength(partHead);
+      size += utf8ByteLength(partHead);
     } else {
       // File/blob part wire format:
       //   Content-Disposition header (with filename)
@@ -151,7 +140,7 @@ export function measureMultipartEntries(
       //   trailing CRLF before the next boundary
       const partHead = formatFilePartHeaders(fieldName, value);
       partHeads.push(partHead);
-      size += byteLength(partHead);
+      size += utf8ByteLength(partHead);
       // Blob.size is already the exact byte length of the binary payload - for a real
       // `Blob`. A subclass's getter can answer anything, and a non-integer here would go
       // out as the `Content-Length`.
@@ -165,11 +154,11 @@ export function measureMultipartEntries(
 
       partSizes.push(partSize);
       size += partSize;
-      size += byteLength('\r\n');
+      size += utf8ByteLength('\r\n');
     }
   }
 
   // Final terminating boundary line — note the extra trailing `--`.
-  size += byteLength(`--${boundary}--\r\n`);
+  size += utf8ByteLength(`--${boundary}--\r\n`);
   return { totalSize: size, partSizes, partHeads };
 }

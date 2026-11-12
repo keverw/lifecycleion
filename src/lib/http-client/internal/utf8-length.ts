@@ -1,9 +1,19 @@
 /**
- * A string's UTF-8 byte length, counted rather than encoded, so a large body is not
- * copied to be measured. A lone surrogate counts as the three bytes of U+FFFD it is
- * encoded as.
+ * A string's UTF-8 byte length, measured rather than encoded, so a large body is not
+ * copied to be measured: Node's native count where there is a `Buffer` - a string body is
+ * measured on every send - and {@link countUTF8ByteLength} where there is none, as in a
+ * browser. The two agree, a lone surrogate counted as U+FFFD's three bytes by both.
  */
-export function utf8ByteLength(text: string): number {
+export const utf8ByteLength: (text: string) => number =
+  typeof Buffer === 'function'
+    ? (text) => Buffer.byteLength(text)
+    : countUTF8ByteLength;
+
+/**
+ * A string's UTF-8 byte length, counted by its UTF-16 units. A lone surrogate counts as
+ * the three bytes of U+FFFD it is encoded as.
+ */
+export function countUTF8ByteLength(text: string): number {
   let bytes = 0;
 
   for (let index = 0; index < text.length; index++) {

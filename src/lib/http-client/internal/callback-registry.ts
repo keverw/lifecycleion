@@ -7,21 +7,10 @@ import {
 import { MAX_PROTOTYPE_DEPTH } from '../../internal/prototype-depth';
 import { readCopiedIndex } from '../../internal/array-indices';
 import { isRealmRootPrototype } from './plain-record';
-import {
-  hasNonHTTPWhitespaceEdge,
-  trimHTTPWhitespace,
-} from '../../internal/ascii-text';
+import { trimHTTPWhitespace } from '../../internal/ascii-text';
 import { normalizeFilterMethods } from '../utils';
-import {
-  isGlobalHostPattern,
-  readHostPattern,
-} from '../../domain-utils/host-filter';
-import { validateConfigEntry } from '../../domain-utils/domain-utils';
-import {
-  isIPAddress,
-  normalizeDomain,
-  toAsciiDots,
-} from '../../domain-utils/helpers';
+import { readHostPattern } from '../../domain-utils/host-filter';
+import { validateHostFilterEntry } from '../../domain-utils/domain-utils';
 
 /**
  * Every list a filter can carry besides `methods`: the type each entry must have and, for
@@ -43,13 +32,10 @@ const FILTER_LISTS: Record<
   }
 > = {
   phases: { entryType: 'string' },
-  // Trimmed first, of HTTP whitespace, as the matcher trims an entry before reading it.
+  // By `matchesHostFilter`'s rules, which the client's `hosts` filters match by.
   hosts: {
     entryType: 'string',
-    check: (entry) =>
-      hasNonHTTPWhitespaceEdge(entry)
-        ? 'has a no-break space or other whitespace besides spaces, tabs, CRs and LFs at an end, so it can never match'
-        : describeUnmatchableHostPattern(trimHTTPWhitespace(entry)),
+    check: (entry) => validateHostFilterEntry(entry).info,
   },
   schemes: { entryType: 'string', allowed: ['http', 'https'] },
   bodyContainsKeys: { entryType: 'string' },
@@ -67,82 +53,6 @@ const FILTER_LISTS: Record<
     check: describeUnmatchableMediaTypePattern,
   },
 };
-
-/**
- * Why a host pattern can never match, by the matcher's own rules. It is compared with the
- * request URL's hostname alone, so a scheme, path or port is refused with that said.
- *
- * - An exact name is compared after the matcher's normalization, so it can match exactly
- *   when that normalization accepts it - single-label names (`backend`, `redis`) included.
- * - A wildcard pattern is read by the validator the matcher's wildcard rules come from:
- *   whole-label wildcards only, and never around an IP address: a hostname ending in a
- *   numeric label is one, and only `*` alone wildcards an IP. A public suffix or
- *   pseudo-TLD tail (`*.com`, `*.internal`), which that validator refuses for an
- *   allowlist, is matched (see `readHostPattern`).
- */
-function describeUnmatchableHostPattern(entry: string): string | undefined {
-  if (entry.includes('/')) {
-    return 'has a scheme or path; give the hostname alone';
-  }
-  if (/^[^:]*:\d*$/.test(entry) || /\]:/.test(entry)) {
-    return 'has a port; give the hostname alone';
-  }
-  if (!entry.includes('*')) {
-    const parsed = urlHostnameOf(entry);
-    // A guard for any name the URL parser reads differently from the matcher, which would
-    // be compared as written and so never equal a request's hostname. The matcher reads IP
-    // literals as the parser does - `2130706433` is `127.0.0.1` to both - so those match.
-    const normalizedEntry = normalizeDomain(entry);
-    if (
-      parsed !== undefined &&
-      normalizedEntry !== '' &&
-      normalizeDomain(parsed) !== normalizedEntry
-    ) {
-      return "is read by the URL parser as another hostname, which is what a request's hostname will be; give the form the URL parser reads";
-    }
-    return normalizedEntry === '' || parsed === undefined
-      ? "is not a hostname the matcher can read (it reads host names: letters, digits, '_' and inner hyphens), so it can never match"
-      : undefined;
-  }
-  if (isGlobalHostPattern(entry)) {
-    return undefined;
-  }
-  // Said plainly: the template that writes it (`*.${domain}`) lost its domain.
-  if (toAsciiDots(entry) === '*.') {
-    return "is a wildcard with an empty label after it, so it can never match; give '*' to match every host";
-  }
-  // A suffix tail is matched (see `readHostPattern`), so validated as one that is.
-  const result = validateConfigEntry(entry, 'domain', {
-    allowGlobalWildcard: true,
-    allowSuffixTails: true,
-  });
-  if (!result.valid) {
-    return `can never match (${result.info ?? 'invalid hostname pattern'}); give a hostname or a pattern such as '*.example.com'`;
-  }
-  // A hostname the pattern stands for, as the URL parser reads it: one ending in a
-  // number - decimal, hex or octal - is an IP address, or no hostname at all.
-  const sample = urlHostnameOf(
-    entry
-      .split('.')
-      .map((part) => (part === '*' || part === '**' ? 'a' : part))
-      .join('.'),
-  );
-  if (sample === undefined || isIPAddress(sample)) {
-    return "can never match: a wildcard does not match an IP address ('*' alone does)";
-  }
-  return undefined;
-}
-
-/** `host` as the URL parser reads it, or `undefined` when no URL can have it. */
-function urlHostnameOf(host: string): string | undefined {
-  const authority =
-    host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
-  try {
-    return new URL(`http://${authority}/`).hostname;
-  } catch {
-    return undefined;
-  }
-}
 
 /** A media-type pattern is `type/subtype`, `type/*` or `*\/*`; anything else matches nothing. */
 function describeUnmatchableMediaTypePattern(

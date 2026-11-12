@@ -20,6 +20,7 @@ Hardened helpers for normalizing and matching domains and origins used in CORS a
   - [matchesOriginList](#matchesoriginlist)
   - [matchesCORSCredentialsList](#matchescorscredentialslist)
   - [matchesHostFilter](#matcheshostfilter)
+  - [validateHostFilterEntry](#validatehostfilterentry)
   - [validateConfigEntry](#validateconfigentry)
   - [isIPAddress](#isipaddress)
   - [isIPv4](#isipv4)
@@ -59,6 +60,7 @@ import {
   matchesOriginList,
   matchesCORSCredentialsList,
   matchesHostFilter,
+  validateHostFilterEntry,
   validateConfigEntry,
   isIPAddress,
   isIPv4,
@@ -295,10 +297,24 @@ matchesHostFilter('10.0.0.1', ['*']); // true
 It reads patterns as `matchesDomainList` does - exact names after normalization, `*.` one label, `**.` any depth, neither the tail itself - with three differences:
 
 - A wildcard whose tail is a public suffix or internal pseudo-TLD (`*.internal`, `*.com`, `**.co.uk`) matches the hosts it names, where `matchesDomainList` refuses it. A host under an ICANN public suffix that lies beneath the tail is still never matched: it belongs to another registrant. So scope a credential to such a pattern only if every host under it should get the credential.
-- `*` alone matches any non-empty hostname, one the normalizer cannot read included, and a wildcard matches a host with a hyphen at a label's edge (`-edge.example.com`), which the URL parser produces.
-- An entry it can never match (`*.*`, a wildcard around an IP or numeric tail, an entry with whitespace other than spaces, tabs, CRs and LFs at an end) matches nothing rather than throwing. Validate entries at startup with `validateConfigEntry(entry, 'domain', { allowSuffixTails: true })`.
+- `*` alone matches any non-empty hostname, one the normalizer cannot read included. A host with a hyphen at a label's edge (`-edge.example.com`), which the URL parser produces, is matched by an exact entry for it, written as the URL parser writes it (`xn----rga.example.com`, not `-ñ.example.com`), and by a wildcard such as `*.example.com`.
+- An entry [`validateHostFilterEntry`](#validatehostfilterentry) refuses (`*.*`, a wildcard around an IP or numeric tail or over a Public Suffix List wildcard rule, a scheme or port, whitespace other than spaces, tabs, CRs and LFs at an end) matches nothing rather than throwing. Check entries with it at startup.
 
 A list that is not an array of strings throws a `TypeError`; a `hostname` that is not a string matches nothing. The patterns are read once per list and read again only when the list changes.
+
+### validateHostFilterEntry
+
+Checks whether a host filter entry can match any host by [`matchesHostFilter`](#matcheshostfilter)'s rules - the check the HTTP client runs on a `hosts` filter's entries when an interceptor or observer is added. Returns `{ valid: true }`, or `{ valid: false, info }`, where `info` says why, phrased to follow the entry (`` `'${entry}' ${info}` ``).
+
+```typescript
+validateHostFilterEntry('*.internal'); // { valid: true }
+validateHostFilterEntry('api.test:8080');
+// { valid: false, info: 'has a port; give the hostname alone' }
+validateHostFilterEntry('*.kawasaki.jp');
+// { valid: false, info: 'can never match (wildcard tail is under a public suffix wildcard rule, ...)' }
+```
+
+It refuses a scheme, path or port; an exact name the matcher cannot read, or one the URL parser reads as another hostname, which is what a request's hostname will be; a wildcard `validateConfigEntry(entry, 'domain', { allowSuffixTails: true })` refuses, `*.` (a template whose domain is unset), or one whose hosts would be IP addresses; and whitespace other than spaces, tabs, CRs and LFs at an end. A wildcard over a Public Suffix List wildcard rule (`*.kawasaki.jp`, `**.ck`) is refused because every label beneath its tail is a public suffix, another registrant's, so it would match only the rule's exceptions.
 
 ### validateConfigEntry
 
@@ -318,7 +334,7 @@ validateConfigEntry('*.com', 'domain');
 
 Options: `{ allowGlobalWildcard?: boolean; allowProtocolWildcard?: boolean; allowSuffixTails?: boolean }`. Defaults: `allowGlobalWildcard: false`, `allowProtocolWildcard: true`, `allowSuffixTails: false`.
 
-`allowSuffixTails` accepts a wildcard whose tail is a public suffix or an internal pseudo-TLD (`*.com`, `**.co.uk`, `*.internal`, `*.localhost`), which is refused by default. It is for a list that picks which hosts something applies to rather than one that grants them trust: entries for [`matchesHostFilter`](#matcheshostfilter), and the HTTP client's `hosts` filters, are validated with it. The other matchers in this module still refuse such a tail, so leave it off when validating entries for them.
+`allowSuffixTails` accepts a wildcard whose tail is a public suffix or an internal pseudo-TLD (`*.com`, `**.co.uk`, `*.internal`, `*.localhost`), which is refused by default. A tail under a Public Suffix List wildcard rule (`*.kawasaki.jp`) is refused either way. It is for a list that picks which hosts something applies to rather than one that grants them trust: [`validateHostFilterEntry`](#validatehostfilterentry) checks a wildcard with it. The other matchers in this module still refuse such a tail, so leave it off when validating entries for them.
 
 ```typescript
 validateConfigEntry('*.internal', 'domain', { allowSuffixTails: true });
@@ -609,7 +625,7 @@ const ok = matchesOriginList(
 - **Domain-only checks (no scheme)**: `matchesDomainList(domain, allowedDomains)`
   - Rejects origin-style entries, pre-validate with `validateConfigEntry(..., "domain")`
 - **Which of your own requests or hosts something applies to (routing, not trust)**: `matchesHostFilter(hostname, patterns)`
-  - Matches a suffix tail such as `*.internal`, pre-validate with `validateConfigEntry(..., "domain", { allowSuffixTails: true })`
+  - Matches a suffix tail such as `*.internal`, pre-validate with `validateHostFilterEntry`
 - **Low-level checks**: `matchesWildcardDomain`, `matchesWildcardOrigin`
   - For custom logic, prefer list helpers for most cases
 

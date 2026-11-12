@@ -17,6 +17,7 @@ import {
   matchesCompiledWildcard,
   lazyWildcardHostSuffix,
   isUnmatchableWildcardTail,
+  isSuffixWildcardRuleTail,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
   MAX_LABELS,
@@ -27,7 +28,9 @@ import { isNullish } from '../internal/is-nullish';
 import { copyArrayValue } from '../internal/array-copy';
 import {
   checkedHostFor,
+  isGlobalHostPattern,
   matchesReadHostPattern,
+  readExactHostName,
   readHostPattern,
   type HostPattern,
 } from './host-filter';
@@ -991,7 +994,9 @@ const hostFilterLists = new WeakMap<
  * requests or hosts something applies to, rather than whom to trust - by the rules the
  * HTTP client's `hosts` filters match by:
  *
- * - An exact name matches that host, after normalization (case, IDNA, a trailing dot).
+ * - An exact name matches that host, after normalization (case, IDNA, a trailing dot) -
+ *   one the URL parser reads with a hyphen at a label's edge (`-edge.example.com`)
+ *   included.
  * - `*.example.com` matches one label under the tail and `**.example.com` any depth;
  *   neither matches the tail itself. A tail that is a public suffix or pseudo-TLD is
  *   matched as written - `*.internal` matches `api.internal`, `**.co.uk` every host under
@@ -1000,10 +1005,10 @@ const hostFilterLists = new WeakMap<
  *   `evil.os.hedmark.no`, another registrant's.
  * - `*` alone matches any non-empty hostname, an IP address included; no other wildcard
  *   matches an IP address.
- * - A pattern that can never match - `*.*`, a wildcard around an IP or numeric tail, an
- *   entry with whitespace other than spaces, tabs, CRs and LFs at an end - matches
- *   nothing. Validate entries with
- *   `validateConfigEntry(entry, 'domain', { allowSuffixTails: true })`.
+ * - An entry {@link validateHostFilterEntry} refuses - `*.*`, a wildcard around an IP or
+ *   numeric tail, one over a Public Suffix List wildcard rule (`*.kawasaki.jp`), a scheme
+ *   or port, whitespace other than spaces, tabs, CRs and LFs at an end - matches nothing.
+ *   Check entries with it when they are configured, as the HTTP client checks a filter's.
  *
  * Pass a URL's `hostname`. Throws a `TypeError` for a list that is not an array of
  * strings; a `hostname` that is not a string matches nothing.
@@ -1026,6 +1031,107 @@ export function matchesHostFilter(
 
   const host = checkedHostFor(hostname);
   return kept.patterns.some((pattern) => matchesReadHostPattern(host, pattern));
+}
+
+/**
+ * Whether a host filter entry can match a host by {@link matchesHostFilter}'s rules, and
+ * if not, why - the check the HTTP client runs on a `hosts` filter's entries when it is
+ * added. `info` is phrased to follow the entry: `` `'${entry}' ${info}` ``. Refused:
+ *
+ * - a scheme, path or port: the filter is matched against a hostname alone;
+ * - an exact name the matcher cannot read, or one the URL parser reads as another
+ *   hostname, which is what a request's hostname will be;
+ * - a wildcard `validateConfigEntry(entry, 'domain', { allowSuffixTails: true })`
+ *   refuses, `*.` (a template whose domain is unset), or one whose hosts would be IP
+ *   addresses;
+ * - whitespace other than spaces, tabs, CRs and LFs at an end.
+ */
+export function validateHostFilterEntry(entry: string): {
+  valid: boolean;
+  info?: string;
+} {
+  if (typeof entry !== 'string') {
+    return { valid: false, info: 'is not a string' };
+  }
+
+  // Trimmed first, of HTTP whitespace, as the matcher trims an entry before reading it.
+  const info = hasNonHTTPWhitespaceEdge(entry)
+    ? 'has a no-break space or other whitespace besides spaces, tabs, CRs and LFs at an end, so it can never match'
+    : describeUnmatchableHostPattern(trimHTTPWhitespace(entry));
+
+  return info === undefined ? { valid: true } : { valid: false, info };
+}
+
+/** Why a trimmed host filter entry can never match, or `undefined` when it can. */
+function describeUnmatchableHostPattern(entry: string): string | undefined {
+  if (entry.includes('/')) {
+    return 'has a scheme or path; give the hostname alone';
+  }
+
+  if (/^[^:]*:\d*$/.test(entry) || /\]:/.test(entry)) {
+    return 'has a port; give the hostname alone';
+  }
+
+  if (!entry.includes('*')) {
+    const parsed = urlHostnameOf(entry);
+    // A guard for any name the URL parser reads differently from the matcher, which would
+    // be compared as written and so never equal a request's hostname. The matcher reads IP
+    // literals as the parser does - `2130706433` is `127.0.0.1` to both - so those match.
+    // A Unicode name the matcher cannot read in that spelling (`-ñ.example.com`) may be
+    // one it reads as the parser writes it (`xn----rga.example.com`): said so, too.
+    const name = readExactHostName(entry);
+    const parsedName = parsed === undefined ? '' : readExactHostName(parsed);
+    if (parsedName !== '' && parsedName !== name) {
+      return "is read by the URL parser as another hostname, which is what a request's hostname will be; give the form the URL parser reads";
+    }
+
+    return name === '' || parsed === undefined
+      ? "is not a hostname the matcher can read (it reads host names: letters, digits, '_' and hyphens), so it can never match"
+      : undefined;
+  }
+
+  if (isGlobalHostPattern(entry)) {
+    return undefined;
+  }
+
+  // Said plainly: the template that writes it (`*.${domain}`) lost its domain.
+  if (toAsciiDots(entry) === '*.') {
+    return "is a wildcard with an empty label after it, so it can never match; give '*' to match every host";
+  }
+
+  // A suffix tail is matched (see `readHostPattern`), so validated as one that is.
+  const result = validateConfigEntry(entry, 'domain', {
+    allowGlobalWildcard: true,
+    allowSuffixTails: true,
+  });
+  if (!result.valid) {
+    return `can never match (${result.info ?? 'invalid hostname pattern'}); give a hostname or a pattern such as '*.example.com'`;
+  }
+
+  // A hostname the pattern stands for, as the URL parser reads it: one ending in a
+  // number - decimal, hex or octal - is an IP address, or no hostname at all.
+  const sample = urlHostnameOf(
+    entry
+      .split('.')
+      .map((part) => (part === '*' || part === '**' ? 'a' : part))
+      .join('.'),
+  );
+  if (sample === undefined || isIPAddress(sample)) {
+    return "can never match: a wildcard does not match an IP address ('*' alone does)";
+  }
+
+  return undefined;
+}
+
+/** `host` as the URL parser reads it, or `undefined` when no URL can have it. */
+function urlHostnameOf(host: string): string | undefined {
+  const authority =
+    host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  try {
+    return new URL(`http://${authority}/`).hostname;
+  } catch {
+    return undefined;
+  }
 }
 
 function isAllowedExactHostname(normalizedHostname: string): boolean {
@@ -1070,7 +1176,8 @@ function isAllowedExactHostname(normalizedHostname: string): boolean {
  * - PSL tail guard also rejects pseudo-TLD suffix wildcards like `*.localhost`, unless
  *   `allowSuffixTails` is set: for a list that picks which of your own requests or
  *   hosts something applies to, rather than one that grants trust, a wildcard over a
- *   public suffix or pseudo-TLD (`*.internal`, `*.com`) is then valid.
+ *   public suffix or pseudo-TLD (`*.internal`, `*.com`) is then valid. A tail under a
+ *   Public Suffix List wildcard rule (`*.kawasaki.jp`) is refused either way.
  */
 export type WildcardKind = 'none' | 'global' | 'protocol' | 'subdomain';
 
@@ -1208,9 +1315,13 @@ export function validateConfigEntry(
       return 'wildcard has no fixed label after it (disallowed)';
     }
 
-    return opts.allowSuffixTails
-      ? 'wildcard tail targets an IP address (disallowed)'
-      : 'wildcard tail targets public suffix or IP (disallowed)';
+    if (!opts.allowSuffixTails) {
+      return 'wildcard tail targets public suffix or IP (disallowed)';
+    }
+
+    return isSuffixWildcardRuleTail(fixedTail)
+      ? 'wildcard tail is under a public suffix wildcard rule, so every label beneath it is a public suffix (disallowed)'
+      : 'wildcard tail targets an IP address (disallowed)';
   }
 
   // Helper: domain-wildcard structural checks (no URL chars, full labels, etc.)
@@ -2053,6 +2164,27 @@ export interface ParsedHost {
 }
 
 /**
+ * Whether `name` holds a forbidden domain code point of the URL standard (a C0 control,
+ * space, `#`, `%`, `/`, `:`, `<`, `>`, `?`, `@`, `[`, a backslash, `]`, `^`, `|`, DEL)
+ * or any other whitespace, which no hostname holds.
+ */
+function hasForbiddenDomainCodePoint(name: string): boolean {
+  for (let index = 0; index < name.length; index++) {
+    const code = name.charCodeAt(index);
+
+    if (
+      code <= 0x20 ||
+      code === 0x7f ||
+      '#%/:<>?@[\\]^|'.includes(name[index])
+    ) {
+      return true;
+    }
+  }
+
+  return /\s/.test(name);
+}
+
+/**
  * Parse Host header into domain and port components
  * Supports IPv6 brackets and handles port extraction with strict validation
  *
@@ -2071,8 +2203,9 @@ export interface ParsedHost {
  * - Port with colon: `[::1]:8080` → valid
  * - Any other characters: `[::1]garbage`, `[::1][::2]` → returns empty (malformed)
  *
- * A hostname that holds whitespace, a `%`, or a URL delimiter (`@`, `/`, `?`, `#`, `\\`,
- * `[`, `]`) is malformed too: `good.test@evil.test` → empty.
+ * A hostname that holds a forbidden domain code point of the URL standard - a C0 control,
+ * space, `#`, `%`, `/`, `:`, `<`, `>`, `?`, `@`, `[`, a backslash, `]`, `^`, `|`, DEL - or
+ * any other whitespace is malformed too: `good.test@evil.test` → empty.
  *
  * @param host - Host header value (hostname[:port] or [ipv6][:port])
  * @returns Object with domain (without brackets) and port (empty string if no port).
@@ -2094,27 +2227,6 @@ export interface ParsedHost {
  * parseHostHeader('[::1][::2]') // malformed
  * // => { domain: '', port: '' }
  */
-/**
- * Whether `name` holds a forbidden domain code point of the URL standard (a C0 control,
- * space, `#`, `%`, `/`, `:`, `<`, `>`, `?`, `@`, `[`, a backslash, `]`, `^`, `|`, DEL)
- * or any other whitespace, which no hostname holds.
- */
-function hasForbiddenDomainCodePoint(name: string): boolean {
-  for (let index = 0; index < name.length; index++) {
-    const code = name.charCodeAt(index);
-
-    if (
-      code <= 0x20 ||
-      code === 0x7f ||
-      '#%/:<>?@[\\]^|'.includes(name[index])
-    ) {
-      return true;
-    }
-  }
-
-  return /\s/.test(name);
-}
-
 export function parseHostHeader(host: string): ParsedHost {
   // A value that is not a string - a `Host` header that was never sent - is malformed.
   if (typeof host !== 'string') {

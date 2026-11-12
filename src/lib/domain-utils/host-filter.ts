@@ -8,6 +8,7 @@
  */
 
 import {
+  asciiLowercase,
   hasNonHTTPWhitespaceEdge,
   trimHTTPWhitespace,
 } from '../internal/ascii-text';
@@ -28,12 +29,12 @@ export type HostPattern =
    * pattern reads (`a!b.example.com`).
    */
   | { readonly kind: 'any' }
-  /** An exact name, normalized. */
+  /** An exact name, read by {@link readExactHostName}. */
   | { readonly kind: 'exact'; readonly name: string }
   | { readonly kind: 'wildcard'; readonly compiled: CompiledWildcardPattern }
   /**
    * A pattern that matches no host: `*.*`, a wildcard around an IP address or a numeric
-   * tail (`10.*.0.1`), a name the normalizer cannot read.
+   * tail (`10.*.0.1`), a name {@link readExactHostName} cannot read.
    */
   | { readonly kind: 'never' };
 
@@ -82,20 +83,30 @@ export function readHostPattern(pattern: string): HostPattern {
     return { kind: 'wildcard', compiled };
   }
 
-  const name = normalizeDomain(pattern);
+  const name = readExactHostName(pattern);
   return name === '' ? NO_HOST : { kind: 'exact', name };
 }
 
 /**
- * A request hostname the domain matcher refuses but the URL parser produced, read as the
- * parser wrote it, or `''`. The matcher holds a name to DNS's rule that no label starts or
- * ends with a hyphen; the URL parser does not, and a request goes to `-edge.example.com`,
- * so a wildcard such as `*.example.com` matches it as it matches its neighbours. Otherwise
- * held to what the matcher reads - letters, digits, `_` and hyphens, within DNS lengths -
- * and one trailing dot dropped, as the matcher drops it.
+ * A hostname as a host filter compares it - a request's, or an exact pattern's - or `''`
+ * for one it cannot read: normalized by the domain matcher (case, IDNA, a trailing dot),
+ * or, for a name the matcher refuses but the URL parser reads, as the parser writes it.
+ * The matcher holds a name to DNS's rule that no label starts or ends with a hyphen; the
+ * URL parser does not, and a request goes to `-edge.example.com`, so the exact pattern
+ * `-edge.example.com` matches it, as `*.example.com` does.
+ */
+export function readExactHostName(name: string): string {
+  return normalizeDomain(name) || readParsedHostname(trimHTTPWhitespace(name));
+}
+
+/**
+ * A name the domain matcher refuses, read as the URL parser writes it, or `''`: held to
+ * what the matcher reads - letters, digits, `_` and hyphens, within DNS lengths -
+ * lowercased, and one trailing dot dropped, as the matcher drops it.
  */
 function readParsedHostname(hostname: string): string {
-  const name = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
+  const lowercase = asciiLowercase(hostname);
+  const name = lowercase.endsWith('.') ? lowercase.slice(0, -1) : lowercase;
 
   return /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/.test(name) && checkDNSLength(name)
     ? name
@@ -114,8 +125,7 @@ export class CheckedHost {
   constructor(public readonly hostname: string) {}
 
   public get normalized(): string {
-    this.normalizedName ??=
-      normalizeDomain(this.hostname) || readParsedHostname(this.hostname);
+    this.normalizedName ??= readExactHostName(this.hostname);
     return this.normalizedName;
   }
 

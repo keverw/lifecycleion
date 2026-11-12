@@ -29,6 +29,12 @@ interface ArraySizing {
   readonly visiting: WeakSet<object>;
   /** Arrays already sized, so one met again counts as a reference to it. */
   readonly sized: WeakSet<object>;
+  /**
+   * {@link sized} in the order they were sized, so an array sized again from the start
+   * forgets the arrays its abandoned pass sized - each counted in a total that was thrown
+   * away - and counts them in full again.
+   */
+  readonly sizedOrder: object[];
 }
 
 /**
@@ -440,7 +446,11 @@ export class LRUCache<K, V> {
 
   private calculateSize(
     value: unknown,
-    sizing: ArraySizing = { visiting: new WeakSet(), sized: new WeakSet() },
+    sizing: ArraySizing = {
+      visiting: new WeakSet(),
+      sized: new WeakSet(),
+      sizedOrder: [],
+    },
     depth = 0,
   ): number {
     // Use custom size calculator if provided (cast to V for the callback)
@@ -523,6 +533,7 @@ export class LRUCache<K, V> {
         // `set()` to the next, its getters run up to a gap's worth of times before it is.
         let checkedPrototype = indexFreePrototype(items);
         let untilCheck = 1;
+        const sizedBefore = sizing.sizedOrder.length;
 
         for (let index = 0; index < length; index++) {
           let isOwn: boolean;
@@ -539,6 +550,10 @@ export class LRUCache<K, V> {
                 untilCheck = 1 + Math.floor(Math.random() * CHECK_GAP);
 
                 if (!Object.hasOwn(items, index)) {
+                  for (const nested of sizing.sizedOrder.splice(sizedBefore)) {
+                    sizing.sized.delete(nested);
+                  }
+
                   checkedPrototype = undefined;
                   estimatedSize = 40;
                   holes = 0;
@@ -626,6 +641,7 @@ export class LRUCache<K, V> {
       } finally {
         sizing.visiting.delete(value);
         sizing.sized.add(value);
+        sizing.sizedOrder.push(value);
       }
     } else if (typeof value === 'object') {
       try {

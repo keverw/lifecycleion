@@ -724,11 +724,8 @@ export function normalizeWildcardPattern(pattern: string): string {
 
 /**
  * Whether a wildcard pattern's fixed tail is one no wildcard may sit over: a pseudo-TLD,
- * a public suffix, or a tail under a Public Suffix List wildcard rule (`*.kawasaki.jp`,
- * `*.sch.uk`), where every label directly beneath it is itself a public suffix - so
- * `*.kawasaki.jp` would match the suffix `foo.kawasaki.jp` and the apex
- * `city.kawasaki.jp`.
- * Told by asking for the suffix of a made-up label under the tail.
+ * a public suffix, or a tail under a Public Suffix List wildcard rule (see
+ * {@link isUnderSuffixWildcardRule}).
  */
 function isSuffixLikeTail(tail: string): boolean {
   if (INTERNAL_PSEUDO_TLDS.has(tail)) {
@@ -740,6 +737,18 @@ function isSuffixLikeTail(tail: string): boolean {
     return true;
   }
 
+  return isUnderSuffixWildcardRule(tail);
+}
+
+/**
+ * Whether a tail sits under an ICANN Public Suffix List wildcard rule (`*.kawasaki.jp`,
+ * `*.ck`), where every label directly beneath it is itself a public suffix - so a wildcard
+ * over it would match the suffix `foo.kawasaki.jp` and the apex `city.kawasaki.jp`, or,
+ * as a suffix tail, no host but the rule's exceptions, since a host under a public suffix
+ * beneath the tail is never matched (see `matchesCompiledWildcard`). Told by asking for
+ * the suffix of a made-up label under the tail.
+ */
+function isUnderSuffixWildcardRule(tail: string): boolean {
   const probe = `lifecycleion-tail-probe.${tail}`;
   return getPublicSuffix(probe) === probe;
 }
@@ -750,7 +759,8 @@ function isSuffixLikeTail(tail: string): boolean {
  * written: for a filter that picks which of the caller's own requests a callback sees.
  * A host whose own ICANN public suffix lies beneath the tail - another registrant's,
  * such as `evil.os.hedmark.no` under `**.hedmark.no` - is still never matched, as the
- * pattern did not name that suffix.
+ * pattern did not name that suffix, and a tail under a Public Suffix List wildcard rule
+ * (`*.kawasaki.jp`), every label beneath which is such a suffix, is refused either way.
  */
 export interface WildcardMatchOptions {
   allowSuffixTails?: boolean;
@@ -760,9 +770,10 @@ export interface WildcardMatchOptions {
  * Whether a wildcard pattern's fixed tail - the labels after its last wildcard - leaves it
  * matching no host: there is none, it is an IP address, it ends in a numeric label (the
  * URL parser reads any host ending in one as IPv4, so a host under it is an address or no
- * URL's host at all), or it is suffix-like (a public suffix or pseudo-TLD: `*.com`,
- * `**.co.uk`, `*.local`), unless `allowSuffixTails` (see {@link WildcardMatchOptions}).
- * The one tail rule the matcher and the validators share.
+ * URL's host at all), or it sits under a Public Suffix List wildcard rule
+ * (`*.kawasaki.jp`) - and, unless `allowSuffixTails` (see {@link WildcardMatchOptions}),
+ * when it is suffix-like (a public suffix or pseudo-TLD: `*.com`, `**.co.uk`,
+ * `*.local`). The one tail rule the matcher and the validators share.
  */
 export function isUnmatchableWildcardTail(
   fixedTail: readonly string[],
@@ -777,8 +788,20 @@ export function isUnmatchableWildcardTail(
   return (
     isIPAddress(tail) ||
     endsInANumber(fixedTail.at(-1) ?? '') ||
-    (options.allowSuffixTails !== true && isSuffixLikeTail(tail))
+    (options.allowSuffixTails === true
+      ? isUnderSuffixWildcardRule(tail)
+      : isSuffixLikeTail(tail))
   );
+}
+
+/**
+ * Whether a wildcard tail is refused, under `allowSuffixTails`, for sitting under a
+ * Public Suffix List wildcard rule - for a validator to say so.
+ */
+export function isSuffixWildcardRuleTail(
+  fixedTail: readonly string[],
+): boolean {
+  return fixedTail.length > 0 && isUnderSuffixWildcardRule(fixedTail.join('.'));
 }
 
 /**
@@ -831,7 +854,8 @@ export function compileWildcardPattern(
   }
 
   // PSL/IP tail guard: this prevents patterns like "*.com" or "**.co.uk" from matching,
-  // unless `allowSuffixTails` accepts a suffix tail (an IP tail is refused either way).
+  // unless `allowSuffixTails` accepts a suffix tail (an IP tail, or one under a PSL
+  // wildcard rule, is refused either way).
   const { fixedTailStart, fixedTail } =
     extractFixedTailAfterLastWildcard(labels);
   if (isUnmatchableWildcardTail(fixedTail, options)) {

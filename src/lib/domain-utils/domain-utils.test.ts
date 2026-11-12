@@ -7,6 +7,7 @@ import {
   matchesWildcardOrigin,
   matchesDomainList,
   matchesHostFilter,
+  validateHostFilterEntry,
   matchesOriginList,
   matchesCORSCredentialsList,
   isIPAddress,
@@ -3425,6 +3426,11 @@ describe('domain-utils', () => {
       ['api.hedmark.no', ['**.hedmark.no'], true],
       ['API.Example.COM', ['api.example.com'], true],
       ['-edge.example.com', ['*.example.com'], true],
+      ['-Edge.example.com', ['*.example.com'], true],
+      ['-edge.example.com', ['-edge.example.com'], true],
+      ['-Edge.Example.com', ['-EDGE.example.com.'], true],
+      ['edge.example.com', ['-edge.example.com'], false],
+      ['foo.kawasaki.jp', ['*.kawasaki.jp'], false],
       ['10.0.0.1', ['*'], true],
       ['10.0.0.1', ['10.0.0.1'], true],
       ['10.0.0.1', ['*.0.0.1'], false],
@@ -3489,7 +3495,78 @@ describe('domain-utils', () => {
     });
   });
 
+  describe('validateHostFilterEntry', () => {
+    test.each([
+      '*.internal',
+      '*.com',
+      '**.co.uk',
+      '*',
+      ' * ',
+      'exact.test',
+      '-edge.example.com',
+      '*.foo.kawasaki.jp',
+      '10.0.0.1',
+    ])('%p can match', (entry) => {
+      expect(validateHostFilterEntry(entry)).toEqual({ valid: true });
+    });
+
+    test.each([
+      ['api.test:8080', 'has a port'],
+      ['https://api.test', 'has a scheme or path'],
+      ['*.kawasaki.jp', 'public suffix wildcard rule'],
+      ['**.ck', 'public suffix wildcard rule'],
+      ['10.*.0.1', 'can never match'],
+      ['*.example.1', 'can never match'],
+      ['*.', 'empty label'],
+      ['*.*', 'can never match'],
+      ['a!b.example.com', 'is not a hostname the matcher can read'],
+      ['-ñ.example.com', 'give the form the URL parser reads'],
+      ['\u00A0*', 'no-break space'],
+    ])('%p is refused: %s', (entry, info) => {
+      const result = validateHostFilterEntry(entry);
+      expect(result.valid).toBe(false);
+      expect(result.info).toContain(info);
+      expect(matchesHostFilter('a.example.com', [entry])).toBe(false);
+    });
+
+    test('refuses an entry that is not a string', () => {
+      expect(validateHostFilterEntry(42 as unknown as string)).toEqual({
+        valid: false,
+        info: 'is not a string',
+      });
+    });
+
+    test('refuses what a client refuses for a hosts filter, with the same reason', async () => {
+      const { HTTPClient } = await import('../http-client/http-client');
+      const { MockAdapter } =
+        await import('../http-client/adapters/mock-adapter');
+      const client = new HTTPClient({ adapter: new MockAdapter() });
+
+      for (const entry of ['api.test:8080', '*.kawasaki.jp', '*.']) {
+        expect(() =>
+          client.addRequestInterceptor((request) => request, {
+            hosts: [entry],
+          }),
+        ).toThrow(validateHostFilterEntry(entry).info);
+      }
+
+      expect(() =>
+        client.addRequestInterceptor((request) => request, {
+          hosts: ['-edge.example.com'],
+        }),
+      ).not.toThrow();
+    });
+  });
+
   describe('validateConfigEntry allowSuffixTails', () => {
+    test('refuses a tail under a Public Suffix List wildcard rule either way', () => {
+      for (const options of [{}, { allowSuffixTails: true }]) {
+        expect(
+          validateConfigEntry('*.kawasaki.jp', 'domain', options).valid,
+        ).toBe(false);
+      }
+    });
+
     test.each([
       ['*.internal', 'domain'],
       ['**.co.uk', 'domain'],

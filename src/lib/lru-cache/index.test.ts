@@ -1456,6 +1456,25 @@ describe('LRUCache', () => {
       expect(inheritedReads).toBeLessThanOrEqual(128);
     });
 
+    test('counts in full again the arrays a pass sized before it was caught and sized again', () => {
+      const inner = Array.from({ length: 1000 }, () => 'x'.repeat(10));
+      const value: unknown[] = [inner];
+      value.length = 2;
+      Object.setPrototypeOf(
+        value,
+        new Proxy(Object.create(Array.prototype) as object, {
+          has: () => true,
+        }),
+      );
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1_000_000 });
+
+      cache.set('a', value);
+
+      // 40 for each array and 20 bytes for each ten-character string, not 8 for an inner
+      // array already met.
+      expect(cache.byteSize).toBe(40 + 40 + 1000 * 20);
+    });
+
     test("neither reads nor walks the holes a Proxy prototype's has answers for", () => {
       let inheritedReads = 0;
       const prototype = new Proxy(Object.create(Array.prototype) as object, {

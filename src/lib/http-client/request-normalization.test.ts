@@ -49,7 +49,7 @@ import {
 } from './internal/header-utils';
 import { knownBodyByteLength } from './internal/progress';
 import { readBinaryByteLength } from '../internal/binary-view';
-import { utf8ByteLength } from './internal/utf8-length';
+import { countUTF8ByteLength, utf8ByteLength } from './internal/utf8-length';
 import { createResponseBodySource } from './internal/response-decoding';
 import {
   isIdentityContentEncoding,
@@ -9511,9 +9511,11 @@ test('a string body is measured as UTF-8 without being encoded', () => {
     '\uDC00',
     'x'.repeat(1000) + '€',
   ]) {
-    expect([text, utf8ByteLength(text)]).toEqual([
+    const encoded = new TextEncoder().encode(text).byteLength;
+    expect([text, utf8ByteLength(text), countUTF8ByteLength(text)]).toEqual([
       text,
-      new TextEncoder().encode(text).byteLength,
+      encoded,
+      encoded,
     ]);
   }
 });
