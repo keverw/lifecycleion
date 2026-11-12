@@ -1014,6 +1014,196 @@ describe('JSON body copies read by interceptors', () => {
     ]);
   });
 
+  /** A client whose adapter records each body sent and answers each status in turn. */
+  function recordingClient(statuses: number[] = [200]): {
+    client: HTTPClient;
+    sent: unknown[];
+  } {
+    const sent: unknown[] = [];
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: (request) => {
+          sent.push(request.body);
+          return Promise.resolve({
+            status: statuses[sent.length - 1] ?? 200,
+            headers: {},
+            body: null,
+          });
+        },
+      },
+      retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 2 },
+    });
+
+    return { client, sent };
+  }
+
+  /** Calls of `JSON.parse` and `JSON.stringify` while `run` runs. */
+  async function countJSON(
+    run: () => Promise<unknown>,
+  ): Promise<{ parses: number; stringifies: number }> {
+    const parse = spyOn(JSON, 'parse');
+    const stringify = spyOn(JSON, 'stringify');
+    try {
+      await run();
+      return {
+        parses: parse.mock.calls.length,
+        stringifies: stringify.mock.calls.length,
+      };
+    } finally {
+      parse.mockRestore();
+      stringify.mockRestore();
+    }
+  }
+
+  test('an interceptor that never reads the JSON body leaves it unparsed, sent as its text, in the initial and retry phases', async () => {
+    const { client, sent } = recordingClient([503, 200]);
+    const phases: string[] = [];
+    client.addRequestInterceptor(
+      (request, phase) => {
+        phases.push(phase.type);
+        request.headers.authorization = 'Bearer t';
+        return request;
+      },
+      { phases: ['initial', 'retry'] },
+    );
+    const builder = client
+      .put('https://api.example.com/x')
+      .json({ a: 1, nested: { b: 2 } });
+
+    const counts = await countJSON(() => builder.send());
+
+    expect(phases).toEqual(['initial', 'retry']);
+    expect(counts).toEqual({ parses: 0, stringifies: 0 });
+    expect(sent).toEqual([
+      '{"a":1,"nested":{"b":2}}',
+      '{"a":1,"nested":{"b":2}}',
+    ]);
+  });
+
+  test('an interceptor that reads the JSON body is handed its data, and an edit in place is sent', async () => {
+    const { client, sent } = recordingClient();
+    let descriptor: PropertyDescriptor | undefined;
+    client.addRequestInterceptor((request) => {
+      descriptor = Object.getOwnPropertyDescriptor(request, 'body');
+      const body = request.body as Record<string, unknown>;
+      expect(request.body).toBe(body);
+      body.a = 2;
+      return request;
+    });
+
+    await client.put('https://api.example.com/x').json({ a: 1 }).send();
+
+    expect(typeof descriptor?.get).toBe('function');
+    expect(descriptor?.enumerable).toBe(true);
+    expect(sent).toEqual(['{"a":2}']);
+  });
+
+  test('an interceptor that spreads the request is handed the body as its data', async () => {
+    const { client, sent } = recordingClient();
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      headers: { ...request.headers, authorization: 'Bearer t' },
+    }));
+    client.addRequestInterceptor((request) => {
+      expect(request.body).toEqual({ a: 1 });
+      return request;
+    });
+
+    await client.put('https://api.example.com/x').json({ a: 1 }).send();
+
+    expect(sent).toEqual(['{"a":1}']);
+  });
+
+  test('an interceptor that assigns the body sends the value assigned, never parsing the one it replaced', async () => {
+    const { client, sent } = recordingClient();
+    client.addRequestInterceptor((request) => {
+      request.body = { replaced: true };
+      return request;
+    });
+    const builder = client.put('https://api.example.com/x').json({ a: 1 });
+
+    const counts = await countJSON(() => builder.send());
+
+    expect(counts.parses).toBe(0);
+    expect(sent).toEqual(['{"replaced":true}']);
+  });
+
+  test('an interceptor that freezes the request it is handed can still read its body', async () => {
+    const { client, sent } = recordingClient();
+    client.addRequestInterceptor((request) => {
+      Object.freeze(request);
+      expect(request.body).toEqual({ a: 1 });
+      return request;
+    });
+
+    await client.put('https://api.example.com/x').json({ a: 1 }).send();
+
+    expect(sent).toEqual(['{"a":1}']);
+  });
+
+  test('an interceptor that reads the body after the chain has moved on reaches nothing sent', async () => {
+    const { client, sent } = recordingClient([503, 200]);
+    let kept: InterceptedRequest | undefined;
+    client.addRequestInterceptor(
+      (request) => {
+        kept = request;
+        return request;
+      },
+      { phases: ['initial'] },
+    );
+    client.addResponseObserver(
+      () => {
+        (kept?.body as Record<string, unknown>).a = 99;
+      },
+      { phases: ['retry'] },
+    );
+
+    await client.put('https://api.example.com/x').json({ a: 1 }).send();
+
+    // The observer reached the body the interceptor kept, which no attempt sends.
+    expect(kept?.body).toEqual({ a: 99 });
+    expect(sent).toEqual(['{"a":1}', '{"a":1}']);
+  });
+
+  test('an interceptor that never reads the JSON body leaves it unparsed in the redirect phase', async () => {
+    const sent: unknown[] = [];
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: (request) => {
+          sent.push(request.body);
+          return Promise.resolve<AdapterResponse>(
+            sent.length === 1
+              ? {
+                  status: 307,
+                  headers: { location: 'https://api.example.com/y' },
+                  body: null,
+                }
+              : { status: 200, headers: {}, body: null },
+          );
+        },
+      },
+      followRedirects: true,
+    });
+    const phases: string[] = [];
+    client.addRequestInterceptor(
+      (request, phase) => {
+        phases.push(phase.type);
+        request.headers['x-hop'] = phase.type;
+        return request;
+      },
+      { phases: ['initial', 'redirect'] },
+    );
+    const builder = client.put('https://api.example.com/x').json({ a: 1 });
+
+    const counts = await countJSON(() => builder.send());
+
+    expect(phases).toEqual(['initial', 'redirect']);
+    expect(counts).toEqual({ parses: 0, stringifies: 0 });
+    expect(sent).toEqual(['{"a":1}', '{"a":1}']);
+  });
+
   test('a retry interceptor whose bodyContainsKeys filter matches parses the body once a phase', async () => {
     const statuses = [503, 503, 200];
     const sent: unknown[] = [];

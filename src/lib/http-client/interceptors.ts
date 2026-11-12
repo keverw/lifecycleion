@@ -9,6 +9,7 @@ import { isPlainRecord } from './internal/plain-record';
 import { describeValue } from '../internal/describe-value';
 import { adoptPromise } from '../internal/adopt-promise';
 import {
+  isUnfilledRequestBody,
   readRequestBodyContents,
   releaseRequestBody,
 } from './internal/request-body-copy';
@@ -201,9 +202,7 @@ async function runInterceptors(
 
     onInterceptorCalled?.();
 
-    // Caller code may keep the body it is handed and change it in place, so a JSON copy
-    // the client took is no longer sent as the text it was read from.
-    releaseRequestBody(current.body);
+    const handed = handedRequest(current);
 
     let result: Awaited<ReturnType<RequestInterceptor>>;
     try {
@@ -215,7 +214,7 @@ async function runInterceptors(
           // The context too, its `redirectHistory` with it: one shared per chain would let
           // an interceptor that pushes to it or rewrites a field change what the next is
           // told.
-          fn(current, copyCallbackPhase(phase), {
+          fn(handed, copyCallbackPhase(phase), {
             ...context,
             redirectHistory: [...context.redirectHistory],
           }),
@@ -314,6 +313,89 @@ export function untilCancelled<T>(
 }
 
 /**
+ * What `handedRequest` keeps of a request it handed an interceptor with a lazy `body`: the
+ * accessor's own getter, and the body it answers - the JSON body copy, until it is read
+ * or replaced - and whether either has happened.
+ */
+interface LazyBody {
+  get: () => unknown;
+  body: unknown;
+  isTouched: boolean;
+}
+
+const lazyBodyByRequest = new WeakMap<object, LazyBody>();
+
+/**
+ * The request an interceptor's function is handed. A JSON body copy still sent as its text
+ * (see `isUnfilledRequestBody`) is handed behind a `body` accessor on a copy of the request:
+ * read, it is parsed back and released to the interceptor (see `releaseRequestBody`), to
+ * keep and change in place; assigned, the new value replaces it. An interceptor that never
+ * reads it - one that sets a header in place and returns the request - leaves it unparsed,
+ * and `snapshotInterceptedRequest` takes it as it is, so it is sent as its text, with no
+ * parse and no second serialization. Any other body is released and the request handed as
+ * it is.
+ */
+function handedRequest(request: InterceptedRequest): InterceptedRequest {
+  const { body } = request;
+
+  if (!isUnfilledRequestBody(body)) {
+    // Caller code may keep the body it is handed and change it in place, so a JSON copy
+    // the client took is no longer sent as the text it was read from.
+    releaseRequestBody(body);
+    return request;
+  }
+
+  const lazy: LazyBody = {
+    get: () => {
+      if (!lazy.isTouched) {
+        lazy.isTouched = true;
+        releaseRequestBody(lazy.body);
+      }
+
+      return lazy.body;
+    },
+    body,
+    isTouched: false,
+  };
+  const handed = { ...request };
+
+  // An accessor that stays one, so a request the interceptor froze is still read.
+  Object.defineProperty(handed, 'body', {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    __proto__: null,
+    get: lazy.get,
+    set: (value: unknown) => {
+      lazy.isTouched = true;
+      lazy.body = value;
+    },
+    enumerable: true,
+    configurable: true,
+  } as PropertyDescriptor);
+  lazyBodyByRequest.set(handed, lazy);
+
+  return handed;
+}
+
+/**
+ * A request's `body` as `snapshotInterceptedRequest` reads it: for a request `handedRequest`
+ * handed out whose `body` is still its own accessor and was neither read nor assigned, the
+ * JSON body copy itself, unreleased; for any other, `request.body`, read once.
+ */
+function interceptedBody(request: InterceptedRequest): unknown {
+  const lazy = lazyBodyByRequest.get(request);
+
+  if (
+    lazy !== undefined &&
+    !lazy.isTouched &&
+    Object.getOwnPropertyDescriptor(request, 'body')?.get === lazy.get
+  ) {
+    return lazy.body;
+  }
+
+  return request.body;
+}
+
+/**
  * Read a request an interceptor returned once, into a plain object the client owns: in the
  * chain, before the next interceptor reads it (see `runInterceptors`), and the chain's
  * result in each phase once the chain ends.
@@ -344,7 +426,8 @@ export function untilCancelled<T>(
 export function snapshotInterceptedRequest(
   request: InterceptedRequest,
 ): ResolvedRequest {
-  const { requestURL, method, headers, body } = request;
+  const { requestURL, method, headers } = request;
+  const body = interceptedBody(request);
 
   if (typeof requestURL !== 'string') {
     throw new TypeError(

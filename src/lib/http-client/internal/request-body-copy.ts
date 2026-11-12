@@ -9,10 +9,11 @@ import { defineEntry } from '../../internal/define-entry';
  * serializes to, its own `toJSON` wrapper's included, or `undefined` for one that
  * serializes to nothing; and whether it has been filled from that text. A copy not yet
  * filled is an empty object or array of the shape its text has (see `fillRequestBody`),
- * so a copy that is only ever sent - no interceptor function is handed it and no
- * `bodyContainsKeys` filter reads it - is never parsed back at all. `parsed` is its text
- * parsed for a filter that read it (see `readRequestBodyContents`), kept for the copy to
- * be filled with, so its text is parsed once however it is read.
+ * so a copy that is only ever sent - no interceptor reads it (see `handedRequest` in
+ * interceptors.ts) and no `bodyContainsKeys` filter reads it - is never parsed back at
+ * all. `parsed` is its text parsed for a filter that read it (see
+ * `readRequestBodyContents`), kept for the copy to be filled with, so its text is parsed
+ * once however it is read.
  */
 type CopyRecord =
   | {
@@ -23,11 +24,11 @@ type CopyRecord =
   | { readonly text: string | undefined; readonly isFilled: true };
 
 /**
- * The record of each JSON body copy no caller holds. One is forgotten as it is handed to
- * caller code, which may keep it and change it in place - an interceptor, or a builder's
- * own send function (see `releaseRequestBody`). Nothing else hands a request's body to
- * caller code: an attempt's observers are handed their own, parsed back from the text
- * sent.
+ * The record of each JSON body copy caller code has not been given. One is forgotten as
+ * caller code is given it, which may keep it and change it in place - an interceptor that
+ * reads its request's `body` (see `handedRequest` in interceptors.ts), or a builder's own
+ * send function (see `releaseRequestBody`). Nothing else gives a request's body to caller
+ * code: an attempt's observers are handed their own, parsed back from the text sent.
  */
 const recordByCopy = new WeakMap<object, CopyRecord>();
 
@@ -107,7 +108,7 @@ export function copyRequestBody(body: unknown): unknown {
 
 /**
  * The JSON text a JSON body copy serializes to, when it is one `copyRequestBody` returned
- * that no caller code has been handed (see `recordByCopy`), so it is sent - or copied
+ * that caller code has not been given (see `recordByCopy`), so it is sent - or copied
  * again - without being serialized a second time; `undefined` for any other value.
  */
 export function copiedJSONText(body: unknown): string | undefined {
@@ -117,7 +118,7 @@ export function copiedJSONText(body: unknown): string | undefined {
 }
 
 /**
- * Whether `body` is a JSON body copy, not yet handed to caller code, that serializes to
+ * Whether `body` is a JSON body copy, not yet given to caller code, that serializes to
  * nothing (a top-level `toJSON` that answers `undefined`). Read from the copy's own record
  * (see `recordByCopy`) rather than by serializing, so a value an interceptor returned -
  * whose `toJSON` may answer differently the next time - is never asked.
@@ -251,6 +252,18 @@ export function fillRequestBody(body: unknown): void {
   }
 
   recordByCopy.set(body, { text: record.text, isFilled: true });
+}
+
+/**
+ * Whether `body` is a JSON body copy `copyRequestBody` returned empty that has not been
+ * filled: one sent as its text, which nothing has read yet.
+ */
+export function isUnfilledRequestBody(body: unknown): boolean {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    recordByCopy.get(body)?.isFilled === false
+  );
 }
 
 /**

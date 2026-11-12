@@ -1815,8 +1815,8 @@ test('a request ended before dispatch builds no observer bodies when no observer
 
     expect(json.status).toBe(0);
     expect(multipart.status).toBe(0);
-    // Once, as the interceptor is handed the JSON body, filled from its text then.
-    expect(parse).toHaveBeenCalledTimes(1);
+    // None: the interceptor never reads the JSON body, so it is not parsed back.
+    expect(parse).toHaveBeenCalledTimes(0);
     expect(stringify).toHaveBeenCalledTimes(0);
     expect(entries).toHaveBeenCalledTimes(0);
   } finally {
