@@ -1466,8 +1466,8 @@ describe('matchesFilter', () => {
     ).toBe(false);
   });
 
-  test('methods — skipped without a method', () => {
-    expect(matchesFilter({ methods: ['POST'] }, {}, 'response')).toBe(true);
+  test('methods — matches nothing without a method', () => {
+    expect(matchesFilter({ methods: ['POST'] }, {}, 'response')).toBe(false);
   });
 
   test('contentTypes — matches included parsed content type', () => {
@@ -1540,9 +1540,9 @@ describe('matchesFilter', () => {
     ).toBe(false);
   });
 
-  test('hosts — skipped without a URL', () => {
+  test('hosts — matches nothing without a URL', () => {
     expect(matchesFilter({ hosts: ['api.example.com'] }, {}, 'response')).toBe(
-      true,
+      false,
     );
   });
 
@@ -1586,8 +1586,8 @@ describe('matchesFilter', () => {
     ).toBe(true);
   });
 
-  test('schemes — skipped without a URL', () => {
-    expect(matchesFilter({ schemes: ['https'] }, {}, 'response')).toBe(true);
+  test('schemes — matches nothing without a URL', () => {
+    expect(matchesFilter({ schemes: ['https'] }, {}, 'response')).toBe(false);
   });
 
   test('schemes — non-absolute requestURL is a non-match (no throw)', () => {

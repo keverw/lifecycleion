@@ -3430,6 +3430,8 @@ describe('domain-utils', () => {
       ['-edge.example.com', ['-edge.example.com'], true],
       ['-Edge.Example.com', ['-EDGE.example.com.'], true],
       ['edge.example.com', ['-edge.example.com'], false],
+      ['foo.1', ['foo.1'], false],
+      ['-a.0x1f', ['-a.0x1f'], false],
       ['foo.kawasaki.jp', ['*.kawasaki.jp'], false],
       ['10.0.0.1', ['*'], true],
       ['10.0.0.1', ['10.0.0.1'], true],
@@ -3520,6 +3522,8 @@ describe('domain-utils', () => {
       ['*.', 'empty label'],
       ['*.*', 'can never match'],
       ['a!b.example.com', 'is not a hostname the matcher can read'],
+      ['-a.0x1f', 'ends in a numeric label'],
+      ['foo.1', 'ends in a numeric label'],
       ['-ñ.example.com', 'give the form the URL parser reads'],
       ['\u00A0*', 'no-break space'],
     ])('%p is refused: %s', (entry, info) => {
@@ -3589,16 +3593,24 @@ describe('domain-utils', () => {
             .valid,
         ).toBe(false);
       }
-      // Named for what the tail is: none at all, or an IP address.
+      // Named for what the tail is: none at all, an IP address, or a name ending in a
+      // number.
       for (const allowSuffixTails of [false, true]) {
         expect(
           validateConfigEntry('api.*', 'domain', { allowSuffixTails }).info,
         ).toBe('wildcard has no fixed label after it (disallowed)');
       }
       expect(
-        validateConfigEntry('*.0.0.1', 'domain', { allowSuffixTails: true })
+        validateConfigEntry('*.10.0.0.1', 'domain', { allowSuffixTails: true })
           .info,
       ).toBe('wildcard tail targets an IP address (disallowed)');
+      for (const entry of ['*.0.0.1', '*.example.123']) {
+        expect(
+          validateConfigEntry(entry, 'domain', { allowSuffixTails: true }).info,
+        ).toBe(
+          'wildcard tail ends in a numeric label, so a host under it is an IP address or no URL host at all (disallowed)',
+        );
+      }
     });
 
     test('refuses a non-boolean value', () => {

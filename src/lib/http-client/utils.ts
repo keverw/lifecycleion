@@ -1639,21 +1639,23 @@ export function matchesFilterPhase(
  *
  * An interceptor's context always has a `requestURL` and a `method`: it is the request
  * the client built, or an earlier interceptor's result as `snapshotInterceptedRequest`
- * copied it, which refuses one without them. An observer's may lack either.
+ * copied it, which refuses one without them. An observer's is read before the first
+ * observer runs, from the request the client sent. A context without one matches no
+ * filter that names `methods`, `hosts` or `schemes`, so a scoped callback does not hear
+ * about a request it cannot place.
  *
  * - `statusCodes`: skipped if `context.status` is absent.
- * - `methods`: skipped if `context.method` is absent.
+ * - `methods`: a method that is not a string matches nothing.
  * - `hosts`: supports exact hostnames and wildcard patterns. `*.example.com` matches
  *   exactly one subdomain label; `**.example.com` matches any depth. Neither matches the
  *   apex — list it explicitly. A public suffix or pseudo-TLD tail is matched as written
  *   (`*.internal`, `*.com`), but never a host under a public suffix beneath the tail.
- *   `*` is a global wildcard that matches any hostname a URL can carry. Skipped if
- *   `context.requestURL` is absent.
+ *   `*` is a global wildcard that matches any hostname a URL can carry.
  * - `schemes`: `'http'` or `'https'`. `requestURL` is absolute whenever the
  *   request could be resolved before dispatch. For `MockAdapter`, path-only
  *   requests without a client `baseURL` are materialized as `http://localhost/...`;
  *   browser adapters fall back to `window.location`, and the Node adapter requires
- *   absolute URLs. Skipped only when `requestURL` is absent.
+ *   absolute URLs.
  * - `bodyContainsKeys`: supports dot paths (e.g. `data.results`). Each segment in
  *   the path must resolve to a plain object for traversal to continue — the final
  *   value can be anything (array, string, null, etc). Array indexing is not supported.
@@ -1687,13 +1689,12 @@ export function matchesFilter(
     }
   }
 
-  // Checked whenever the filter names methods and the context has one, an empty one
-  // included: `''` matches no method rather than skipping the filter.
-  if (filter.methods && context.method !== undefined) {
+  // Checked whenever the filter names methods: `''`, or no method at all, matches none
+  // rather than skipping the filter.
+  if (filter.methods) {
     // Compared as the request is sent: a `'post'` is `POST`. The filter's own entries
     // were normalized when it was registered. A method that is not a string matches
-    // nothing: an observer's request is shared with the observers before it, and one
-    // may have rewritten it.
+    // nothing.
     const candidate: unknown = context.method;
     if (
       typeof candidate !== 'string' ||
@@ -1741,9 +1742,9 @@ export function matchesFilter(
     }
   }
 
-  // Checked whenever the context has a URL, an empty one included, as `methods` is: a
-  // request whose URL could not be read (`''`) matches no host or scheme rather than
-  // skipping the filter, so a host-scoped observer does not hear about other hosts.
+  // Checked whenever the filter names hosts or schemes, as `methods` is: a request whose
+  // URL could not be read (`''`), or that has none, matches no host or scheme rather
+  // than skipping the filter, so a host-scoped observer does not hear about other hosts.
   // Parsed once for the host and scheme checks, and only when one of them reads it.
   const { requestURL } = context;
   let parsedRequestURL: URL | null | undefined;
@@ -1755,7 +1756,7 @@ export function matchesFilter(
     return parsedRequestURL;
   };
 
-  if (filter.hosts && requestURL !== undefined) {
+  if (filter.hosts) {
     const host = checkedHostFor(readRequestURL()?.hostname ?? '');
     const { hosts, hostPatterns } = filter;
 
@@ -1772,7 +1773,7 @@ export function matchesFilter(
     }
   }
 
-  if (filter.schemes && filter.schemes.length > 0 && requestURL !== undefined) {
+  if (filter.schemes && filter.schemes.length > 0) {
     const protocol = readRequestURL()?.protocol;
     const scheme =
       protocol === 'http:' ? 'http' : protocol === 'https:' ? 'https' : null;

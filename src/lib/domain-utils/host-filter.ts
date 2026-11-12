@@ -15,6 +15,7 @@ import {
 import {
   checkDNSLength,
   compileWildcardPattern,
+  endsInANumber,
   isIPAddress,
   lazyWildcardHostSuffix,
   matchesCompiledWildcard,
@@ -102,13 +103,17 @@ export function readExactHostName(name: string): string {
 /**
  * A name the domain matcher refuses, read as the URL parser writes it, or `''`: held to
  * what the matcher reads - letters, digits, `_` and hyphens, within DNS lengths -
- * lowercased, and one trailing dot dropped, as the matcher drops it.
+ * lowercased, and one trailing dot dropped, as the matcher drops it. Not one whose last
+ * label is a number (`foo.1`): the URL parser reads such a host as IPv4, so no URL
+ * carries it as a name.
  */
 function readParsedHostname(hostname: string): string {
   const lowercase = asciiLowercase(hostname);
   const name = lowercase.endsWith('.') ? lowercase.slice(0, -1) : lowercase;
 
-  return /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/.test(name) && checkDNSLength(name)
+  return /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/.test(name) &&
+    checkDNSLength(name) &&
+    !endsInANumber(name.slice(name.lastIndexOf('.') + 1))
     ? name
     : '';
 }

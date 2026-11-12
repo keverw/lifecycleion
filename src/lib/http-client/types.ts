@@ -986,8 +986,8 @@ interface PhaseFilter {
    * dispatch. `MockAdapter` path-only requests without a client `baseURL`
    * are materialized as `http://localhost/...`, browser adapters resolve
    * against `window.location`, and non-mock adapters still require absolute
-   * URLs at validation time. For an observer the scheme check is skipped when
-   * `requestURL` is absent. An interceptor is always handed one: an earlier
+   * URLs at validation time. A request without a `requestURL` matches no
+   * scheme. An interceptor is always handed one: an earlier
    * interceptor's result without it fails the request as `interceptor_error`.
    */
   schemes?: ('http' | 'https')[];

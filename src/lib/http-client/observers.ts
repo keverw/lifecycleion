@@ -49,27 +49,30 @@ export class ResponseObserverManager extends CallbackRegistry<
   public snapshot(): ResponseObserverChain {
     const observers = this.currentRegistrations();
 
-    return (response, request, phase, cancelSignal) =>
-      runObservers(
+    return async (response, request, phase, cancelSignal) => {
+      if (!reachesAny(observers, phase.type)) {
+        return;
+      }
+
+      const readContext = readFilterContext(() => ({
+        status: response.status,
+        method: request.method,
+        requestURL: request.requestURL,
+        body: response.body,
+        contentType: response.contentType,
+        contentTypeHeader: scalarHeader(response.headers, 'content-type'),
+      }));
+
+      await runObservers(
         'ResponseObserver',
         observers,
         cancelSignal,
         (filter) =>
           matchesFilterPhase(filter.phases, phase.type) &&
-          matchesFilter(
-            filter,
-            {
-              status: response.status,
-              method: request.method,
-              requestURL: request.requestURL,
-              body: response.body,
-              contentType: response.contentType,
-              contentTypeHeader: scalarHeader(response.headers, 'content-type'),
-            },
-            'response',
-          ),
+          matchesFilter(filter, readContext(), 'response'),
         () => [response, request, copyCallbackPhase(phase)],
       );
+    };
   }
 }
 
@@ -98,23 +101,26 @@ export class ErrorObserverManager extends CallbackRegistry<
   public snapshot(): ErrorObserverChain {
     const observers = this.currentRegistrations();
 
-    return (error, request, phase, cancelSignal) =>
-      runObservers(
+    return async (error, request, phase, cancelSignal) => {
+      if (!reachesAny(observers, phase.type)) {
+        return;
+      }
+
+      const readContext = readFilterContext(() => ({
+        method: request.method,
+        requestURL: request.requestURL,
+      }));
+
+      await runObservers(
         'ErrorObserver',
         observers,
         cancelSignal,
         (filter) =>
           matchesFilterPhase(filter.phases, phase.type) &&
-          matchesFilter(
-            filter,
-            {
-              method: request.method,
-              requestURL: request.requestURL,
-            },
-            'error',
-          ),
+          matchesFilter(filter, readContext(), 'error'),
         () => [error, request, copyCallbackPhase(phase)],
       );
+    };
   }
 }
 
@@ -125,11 +131,43 @@ export type ErrorObserverChain = (
   cancelSignal?: AbortSignal,
 ) => Promise<void>;
 
+/** Whether any of `observers` is registered for `phaseType`, so the chain reads anything. */
+function reachesAny<
+  Filter extends { phases?: ResponseObserverFilter['phases'] },
+>(
+  observers: ReadonlyArray<RegisteredCallback<unknown, Filter>>,
+  phaseType: ResponseObserverPhase['type'] | ErrorObserverPhase['type'],
+): boolean {
+  return observers.some(({ filter }) =>
+    matchesFilterPhase(filter.phases, phaseType),
+  );
+}
+
+/**
+ * What the filters are matched against, read once, before any observer runs: each
+ * observer is handed the same response and request, and one that rewrites them - its
+ * `requestURL`, its `method` - must not change which of the rest they reach. The body is
+ * read as a value: the keys `bodyContainsKeys` looks for are read from it by each filter
+ * that names them, as the body is when that filter is asked. Read through
+ * the returned function, which throws what the read threw, so each filter reports it and
+ * its observer is skipped, as a filter that throws is.
+ */
+function readFilterContext<Context>(read: () => Context): () => Context {
+  try {
+    const context = read();
+    return () => context;
+  } catch (error) {
+    return () => {
+      throw error;
+    };
+  }
+}
+
 /**
  * Run each observer whose filter matches, in registration order, waiting for each before
- * the next. `matches` is asked once per observer, so a filter target is read afresh for
- * every one; a filter that throws is reported and its observer skipped, and an observer
- * that throws is reported without stopping the rest. Each observer's arguments come from
+ * the next. `matches` is asked once per observer, against what the chain read before the
+ * first ran (see `readFilterContext`). A filter that throws is reported and its observer
+ * skipped, and an observer that throws is reported without stopping the rest. Each observer's arguments come from
  * `argsFor`, so each is handed its own phase object. Once `cancelSignal` has aborted no
  * further observer runs: `send()` has stopped waiting on the chain, and may have answered.
  */

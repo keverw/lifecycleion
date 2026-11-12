@@ -17,7 +17,8 @@ import {
   matchesCompiledWildcard,
   lazyWildcardHostSuffix,
   isUnmatchableWildcardTail,
-  isSuffixWildcardRuleTail,
+  readWildcardTailRefusal,
+  endsInANumber,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
   MAX_LABELS,
@@ -1085,6 +1086,10 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
       return "is read by the URL parser as another hostname, which is what a request's hostname will be; give the form the URL parser reads";
     }
 
+    if (name === '' && endsInANumber(entry.slice(entry.lastIndexOf('.') + 1))) {
+      return 'ends in a numeric label, which the URL parser reads as an IPv4 address, so no request has it as a hostname; give the address itself or a name';
+    }
+
     return name === '' || parsed === undefined
       ? "is not a hostname the matcher can read (it reads host names: letters, digits, '_' and hyphens), so it can never match"
       : undefined;
@@ -1303,25 +1308,30 @@ export function validateConfigEntry(
       normalized.split('.'),
     );
 
-    if (
-      !isUnmatchableWildcardTail(fixedTail, {
-        allowSuffixTails: opts.allowSuffixTails,
-      })
-    ) {
+    const refusal = readWildcardTailRefusal(fixedTail, {
+      allowSuffixTails: opts.allowSuffixTails,
+    });
+
+    if (refusal === undefined) {
       return undefined;
     }
 
-    if (fixedTail.length === 0) {
+    if (refusal === 'no-tail') {
       return 'wildcard has no fixed label after it (disallowed)';
     }
 
-    if (!opts.allowSuffixTails) {
+    if (!opts.allowSuffixTails || refusal === 'suffix') {
       return 'wildcard tail targets public suffix or IP (disallowed)';
     }
 
-    return isSuffixWildcardRuleTail(fixedTail)
-      ? 'wildcard tail is under a public suffix wildcard rule, so every label beneath it is a public suffix (disallowed)'
-      : 'wildcard tail targets an IP address (disallowed)';
+    switch (refusal) {
+      case 'suffix-wildcard-rule':
+        return 'wildcard tail is under a public suffix wildcard rule, so every label beneath it is a public suffix (disallowed)';
+      case 'numeric':
+        return 'wildcard tail ends in a numeric label, so a host under it is an IP address or no URL host at all (disallowed)';
+      case 'ip':
+        return 'wildcard tail targets an IP address (disallowed)';
+    }
   }
 
   // Helper: domain-wildcard structural checks (no URL chars, full labels, etc.)

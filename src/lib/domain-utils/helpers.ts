@@ -722,22 +722,14 @@ export function normalizeWildcardPattern(pattern: string): string {
   return normalizedLabels.join('.');
 }
 
-/**
- * Whether a wildcard pattern's fixed tail is one no wildcard may sit over: a pseudo-TLD,
- * a public suffix, or a tail under a Public Suffix List wildcard rule (see
- * {@link isUnderSuffixWildcardRule}).
- */
-function isSuffixLikeTail(tail: string): boolean {
+/** Whether a tail is itself a pseudo-TLD or a public suffix. */
+function isSuffixTail(tail: string): boolean {
   if (INTERNAL_PSEUDO_TLDS.has(tail)) {
     return true;
   }
 
   const ps = getPublicSuffix(tail);
-  if (ps && ps === tail) {
-    return true;
-  }
-
-  return isUnderSuffixWildcardRule(tail);
+  return ps !== null && ps === tail;
 }
 
 /**
@@ -766,42 +758,51 @@ export interface WildcardMatchOptions {
   allowSuffixTails?: boolean;
 }
 
+/** Why {@link readWildcardTailRefusal} refuses a tail. */
+export type WildcardTailRefusal =
+  'no-tail' | 'ip' | 'numeric' | 'suffix-wildcard-rule' | 'suffix';
+
 /**
- * Whether a wildcard pattern's fixed tail - the labels after its last wildcard - leaves it
- * matching no host: there is none, it is an IP address, it ends in a numeric label (the
- * URL parser reads any host ending in one as IPv4, so a host under it is an address or no
- * URL's host at all), or it sits under a Public Suffix List wildcard rule
- * (`*.kawasaki.jp`) - and, unless `allowSuffixTails` (see {@link WildcardMatchOptions}),
- * when it is suffix-like (a public suffix or pseudo-TLD: `*.com`, `**.co.uk`,
- * `*.local`). The one tail rule the matcher and the validators share.
+ * Why a wildcard pattern's fixed tail - the labels after its last wildcard - leaves it
+ * matching no host, or `undefined` when it does not: there is none (`no-tail`), it is an
+ * IP address (`ip`), it ends in a numeric label (`numeric`: the URL parser reads any host
+ * ending in one as IPv4, so a host under it is an address or no URL's host at all), it
+ * sits under a Public Suffix List wildcard rule (`suffix-wildcard-rule`: `*.kawasaki.jp`),
+ * or - unless `allowSuffixTails` (see {@link WildcardMatchOptions}) - it is a public
+ * suffix or pseudo-TLD (`suffix`: `*.com`, `**.co.uk`, `*.local`). The one tail rule the
+ * matcher and the validators share.
  */
-export function isUnmatchableWildcardTail(
+export function readWildcardTailRefusal(
   fixedTail: readonly string[],
   options: WildcardMatchOptions = {},
-): boolean {
+): WildcardTailRefusal | undefined {
   if (fixedTail.length === 0) {
-    return true; // require a concrete tail
+    return 'no-tail';
   }
 
   const tail = fixedTail.join('.');
 
-  return (
-    isIPAddress(tail) ||
-    endsInANumber(fixedTail.at(-1) ?? '') ||
-    (options.allowSuffixTails === true
-      ? isUnderSuffixWildcardRule(tail)
-      : isSuffixLikeTail(tail))
-  );
+  if (isIPAddress(tail)) {
+    return 'ip';
+  }
+
+  if (endsInANumber(fixedTail.at(-1) ?? '')) {
+    return 'numeric';
+  }
+
+  if (options.allowSuffixTails !== true && isSuffixTail(tail)) {
+    return 'suffix';
+  }
+
+  return isUnderSuffixWildcardRule(tail) ? 'suffix-wildcard-rule' : undefined;
 }
 
-/**
- * Whether a wildcard tail is refused, under `allowSuffixTails`, for sitting under a
- * Public Suffix List wildcard rule - for a validator to say so.
- */
-export function isSuffixWildcardRuleTail(
+/** Whether {@link readWildcardTailRefusal} refuses a tail. */
+export function isUnmatchableWildcardTail(
   fixedTail: readonly string[],
+  options: WildcardMatchOptions = {},
 ): boolean {
-  return fixedTail.length > 0 && isUnderSuffixWildcardRule(fixedTail.join('.'));
+  return readWildcardTailRefusal(fixedTail, options) !== undefined;
 }
 
 /**

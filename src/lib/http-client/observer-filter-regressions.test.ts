@@ -89,3 +89,88 @@ test('an error observer filter that throws preserves retries and the final adapt
     release();
   }
 }, 1000);
+
+test.each([
+  ['a rewritten', 'https://api.internal/', 'POST'],
+  ['no', undefined, undefined],
+] as const)(
+  'a response observer that leaves the request %s URL and method does not change which later observers run',
+  async (_label, requestURL, method) => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/x', () => ({ status: 200, body: { secret: 1 } }));
+    const client = new HTTPClient({ adapter });
+    const heard: string[] = [];
+    client.addResponseObserver((_response, request) => {
+      Object.assign(request, { requestURL, method });
+    });
+    client.addResponseObserver(
+      () => {
+        heard.push('hosts');
+      },
+      { hosts: ['api.internal'] },
+    );
+    client.addResponseObserver(
+      () => {
+        heard.push('schemes');
+      },
+      { schemes: ['https'] },
+    );
+    client.addResponseObserver(
+      () => {
+        heard.push('methods');
+      },
+      { methods: ['POST'] },
+    );
+    client.addResponseObserver(
+      () => {
+        heard.push('other.test');
+      },
+      { hosts: ['other.test'], methods: ['GET'] },
+    );
+
+    await client.get('http://other.test/x').send();
+
+    expect(heard).toEqual(['other.test']);
+  },
+);
+
+test.each([
+  ['a rewritten', 'https://api.internal/', 'POST'],
+  ['no', undefined, undefined],
+] as const)(
+  'an error observer that leaves the request %s URL and method does not change which later observers run',
+  async (_label, requestURL, method) => {
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () => Promise.reject(new Error('down')),
+      },
+    });
+    const heard: string[] = [];
+    client.addErrorObserver((_error, request) => {
+      Object.assign(request, { requestURL, method });
+    });
+    client.addErrorObserver(
+      () => {
+        heard.push('hosts');
+      },
+      { hosts: ['api.internal'] },
+    );
+    client.addErrorObserver(
+      () => {
+        heard.push('schemes');
+      },
+      { schemes: ['https'] },
+    );
+    client.addErrorObserver(
+      () => {
+        heard.push('other.test');
+      },
+      { hosts: ['other.test'], schemes: ['http'] },
+    );
+
+    await client.get('http://other.test/x').send();
+
+    expect(heard).toEqual(['other.test']);
+  },
+);
