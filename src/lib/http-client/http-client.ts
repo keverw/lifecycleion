@@ -35,7 +35,7 @@ import {
   cancelTrackedRequest,
 } from './request-tracker';
 import type { RequestInfo, TrackedRequest } from './request-tracker';
-import { HTTPRequestBuilder } from './http-request-builder';
+import { HTTPRequestBuilder, clientSendFn } from './http-request-builder';
 import {
   RequestInterceptorManager,
   isInterceptorCancel,
@@ -590,7 +590,7 @@ export class BaseHTTPClient {
     return new HTTPRequestBuilder<T>(
       normalizeStandardMethod(method),
       path,
-      (ctx) => this._execute(ctx),
+      clientSendFn((ctx) => this._execute(ctx)),
       options,
     );
   }

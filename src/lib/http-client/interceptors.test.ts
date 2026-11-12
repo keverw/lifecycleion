@@ -1,5 +1,6 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, spyOn } from 'bun:test';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
+import { HTTPClient } from './http-client';
 import type {
   InterceptedRequest,
   RequestPhase,
@@ -892,5 +893,78 @@ describe('filter fields polluted onto Object.prototype', () => {
     await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
 
     expect(calls).toEqual([]);
+  });
+});
+
+describe('JSON body copies read by interceptors', () => {
+  test('a client with no interceptor sends a JSON body without parsing it back', async () => {
+    const sent: unknown[] = [];
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: (request) => {
+          sent.push(request.body);
+          return Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'text/plain' },
+            body: new TextEncoder().encode('ok'),
+          });
+        },
+      },
+    });
+    const parse = spyOn(JSON, 'parse');
+    try {
+      const response = await client
+        .put('https://api.example.com/x')
+        .json({ a: 1, nested: { b: 2 } })
+        .send();
+
+      expect(response.status).toBe(200);
+      expect(parse).toHaveBeenCalledTimes(0);
+    } finally {
+      parse.mockRestore();
+    }
+    expect(sent).toEqual(['{"a":1,"nested":{"b":2}}']);
+  });
+
+  test('a bodyContainsKeys filter and the interceptors are handed the body as its data, in every phase', async () => {
+    let attempts = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            status: ++attempts === 1 ? 503 : 200,
+            headers: {},
+            body: null,
+          }),
+      },
+      retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 1 },
+    });
+    const handed: { phase: string; body: unknown }[] = [];
+    client.addRequestInterceptor(
+      (request, phase) => {
+        handed.push({ phase: phase.type, body: request.body });
+        return request;
+      },
+      { phases: ['initial', 'retry'], bodyContainsKeys: ['nested.b'] },
+    );
+    client.addRequestInterceptor(
+      () => {
+        throw new Error('must not be called');
+      },
+      { bodyContainsKeys: ['missing'] },
+    );
+
+    const response = await client
+      .put('https://api.example.com/x')
+      .json({ a: 1, nested: { b: [2] } })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(handed).toEqual([
+      { phase: 'initial', body: { a: 1, nested: { b: [2] } } },
+      { phase: 'retry', body: { a: 1, nested: { b: [2] } } },
+    ]);
   });
 });

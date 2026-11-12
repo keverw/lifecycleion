@@ -11,7 +11,7 @@ import {
   lowerCaseHeaderName,
 } from './internal/header-utils';
 import { isBlankText } from '../internal/ascii-text';
-import { copyRequestBody } from './internal/request-body-copy';
+import { copyRequestBody, fillRequestBody } from './internal/request-body-copy';
 import { isFormData } from './internal/form-entries';
 import {
   assertKnownFields,
@@ -83,6 +83,19 @@ const REQUEST_OPTION_FIELDS = fieldNames<HTTPRequestOptions>({
   onAttemptEnd: true,
   streamResponse: true,
 });
+
+/**
+ * The send functions an `HTTPClient` builds its builders with, which read a JSON body copy
+ * through its text (see `copyRequestBody`). Any other is caller code, handed the body
+ * filled (see `fillRequestBody`).
+ */
+const clientSendFns = new WeakSet<object>();
+
+/** Record `sendFn` as one an `HTTPClient` built; see `clientSendFns`. */
+export function clientSendFn<T>(sendFn: SendFn<T>): SendFn<T> {
+  clientSendFns.add(sendFn);
+  return sendFn;
+}
 
 /**
  * Fluent, single-use request builder. Returned by HTTPClient methods.
@@ -549,6 +562,10 @@ export class HTTPRequestBuilder<T = unknown> {
   }
 
   private async _sendRequest<U>(): Promise<HTTPResponse<U>> {
+    if (!clientSendFns.has(this._sendFn)) {
+      fillRequestBody(this._body);
+    }
+
     const pending = this._sendFn({
       method: this._method,
       path: this._path,

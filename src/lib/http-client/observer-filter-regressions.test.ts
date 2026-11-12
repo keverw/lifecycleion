@@ -370,9 +370,9 @@ test('a JSON rawBody is parsed back only for an attempt an observer runs for, on
 
   expect(response.status).toBe(200);
   expect(attempts).toBe(3);
-  // Once as `.json()` copies the body, and once for the final attempt: the two retried
-  // attempts had no observer run for them.
-  expect(parsedTexts.filter((source) => source === text)).toHaveLength(2);
+  // Once, for the final attempt: the body is sent as the text `.json()` serialized it
+  // to, and the two retried attempts had no observer run for them.
+  expect(parsedTexts.filter((source) => source === text)).toHaveLength(1);
   expect(rawBodies).toEqual([{ value: 1 }, { value: 1 }]);
   expect(rawBodies[0]).toBe(rawBodies[1]);
 });

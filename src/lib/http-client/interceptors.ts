@@ -8,7 +8,10 @@ import { normalizeStandardMethod } from './internal/http-method';
 import { isPlainRecord } from './internal/plain-record';
 import { describeValue } from '../internal/describe-value';
 import { adoptPromise } from '../internal/adopt-promise';
-import { releaseRequestBody } from './internal/request-body-copy';
+import {
+  fillRequestBody,
+  releaseRequestBody,
+} from './internal/request-body-copy';
 import {
   CallbackRegistry,
   copyCallbackPhase,
@@ -160,6 +163,11 @@ async function runInterceptors(
         throw error;
       }
       isCurrentUncopied = false;
+    }
+
+    // A JSON body copy is filled from its text only for a filter that reads its keys.
+    if (filter.bodyContainsKeys !== undefined) {
+      fillRequestBody(current.body);
     }
 
     if (

@@ -4,7 +4,7 @@ import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { filePartNameToSend, formEntries, isFormData } from './form-entries';
 
 /**
- * The text each JSON body copy was read back from - exactly the text it serializes to, its
+ * The text each JSON body copy is read back from - exactly the text it serializes to, its
  * own `toJSON` wrapper's included, or `undefined` for one that serializes to nothing - by
  * the copy. Only a copy no caller holds is here: one is forgotten as it is handed to an
  * interceptor (see `releaseRequestBody`), and nothing else hands a request's body to
@@ -14,6 +14,14 @@ import { filePartNameToSend, formEntries, isFormData } from './form-entries';
 const jsonTextByCopy = new WeakMap<object, string | undefined>();
 
 /**
+ * The JSON body copies not yet filled from their text (see `fillRequestBody`): each an
+ * empty object or array of the shape its text has, so a copy that is only ever sent - no
+ * interceptor function is handed it and no `bodyContainsKeys` filter reads it - is never
+ * parsed back at all.
+ */
+const unfilledCopies = new WeakSet<object>();
+
+/**
  * A request body as a value the client owns, which no caller holds: taken when a body is
  * handed over - to a builder's body setter, or as an interceptor's result - so a change
  * the caller makes afterwards reaches nothing the request sends or reports.
@@ -21,7 +29,8 @@ const jsonTextByCopy = new WeakMap<object, string | undefined>();
  * - A JSON body (a plain object or an array) is the data it serializes to, read back:
  *   serialized once, by `JSON.stringify` - so every nested `toJSON` is applied and what
  *   JSON reads from prototypes is honored, where a structural copy would lose them - and
- *   parsed back. A `Date` is its ISO string, a class instance a plain object, an
+ *   parsed back when its contents are first read (see `fillRequestBody`). Until then it
+ *   is an empty object or array, the shape its text has, sent as that text. A `Date` is its ISO string, a class instance a plain object, an
  *   `undefined` member dropped. A top-level `toJSON` that answers something other than an
  *   object or an array - `null`, a string, a number, nothing - reads back as that value,
  *   which is no JSON body: a string is sent as text, `null` as no body at all, and a
@@ -63,11 +72,16 @@ export function copyRequestBody(body: unknown): unknown {
       return copy;
     }
 
-    const parsed: unknown = JSON.parse(text);
-    const copy: object =
-      Array.isArray(parsed) || isPlainRecord(parsed)
-        ? parsed
-        : { toJSON: () => parsed };
+    // `JSON.stringify` writes no whitespace before a value, so the first character tells
+    // an object or an array from every other value.
+    let copy: object;
+    if (text.startsWith('{') || text.startsWith('[')) {
+      copy = text.startsWith('[') ? [] : {};
+      unfilledCopies.add(copy);
+    } else {
+      const parsed: unknown = JSON.parse(text);
+      copy = { toJSON: () => parsed };
+    }
 
     jsonTextByCopy.set(copy, text);
     return copy;
@@ -147,12 +161,48 @@ export function serializesToNothing(body: object): boolean {
 }
 
 /**
+ * Fill a JSON body copy `copyRequestBody` returned empty with the data its text parses
+ * to, in place, so it is the same object - the one the builder holds, the one an earlier
+ * filter read - once its contents are read: by an interceptor's `bodyContainsKeys`
+ * filter, and as it is handed to an interceptor. Any other value, a copy already filled
+ * among them, is left as it is. Each member is defined as the parsed data's own, so a
+ * `__proto__` key is a member, as `JSON.parse` makes it, not the copy's prototype.
+ */
+export function fillRequestBody(body: unknown): void {
+  if (typeof body !== 'object' || body === null || !unfilledCopies.has(body)) {
+    return;
+  }
+
+  unfilledCopies.delete(body);
+  const parsed = JSON.parse(jsonTextByCopy.get(body) as string) as object;
+
+  if (Array.isArray(body)) {
+    for (const member of parsed as unknown[]) {
+      body.push(member);
+    }
+
+    return;
+  }
+
+  for (const key of Object.keys(parsed)) {
+    Object.defineProperty(body, key, {
+      value: (parsed as Record<string, unknown>)[key],
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+}
+
+/**
  * Called as a request's body is handed to caller code - an interceptor - which may keep
- * it and change it in place: a copy's text no longer says what it serializes to, so it is
- * forgotten, and the copy is serialized from then on as any other value is.
+ * it and change it in place: the copy is filled (see `fillRequestBody`), and since its
+ * text no longer says what it serializes to, the text is forgotten, and the copy is
+ * serialized from then on as any other value is.
  */
 export function releaseRequestBody(body: unknown): void {
   if (typeof body === 'object' && body !== null) {
+    fillRequestBody(body);
     jsonTextByCopy.delete(body);
   }
 }
