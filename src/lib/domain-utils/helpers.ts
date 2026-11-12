@@ -539,6 +539,28 @@ function hasLabelLongerThan(host: string, max: number): boolean {
   return false;
 }
 
+/**
+ * The TR46 options every host is mapped to ASCII with - by the domain matchers, the
+ * `hosts` filters and the cookie jar - so all of them agree on which hosts normalize, and
+ * to what. They follow the WHATWG URL parser, which browsers use:
+ *
+ * - `checkHyphens` off: it would also refuse a `--` in a label's third and fourth
+ *   characters - `r3---sn-abc.googlevideo.com`, a real CDN host any URL carries.
+ * - `useSTD3ASCIIRules` off, so a label may carry `_`: the URL standard and DNS both allow
+ *   it (`a_b.example.com`, `my_service`), and browsers send such origins. It lets through
+ *   `!`, `*`, `$` and the rest as well, which each caller refuses itself.
+ * - Non-transitional processing, as modern browsers map (`ß` stays `ß`).
+ * - `verifyDNSLength` off: each caller checks the lengths itself (see `checkDNSLength`).
+ */
+export const HOST_TO_ASCII_OPTIONS = Object.freeze({
+  useSTD3ASCIIRules: false,
+  checkHyphens: false,
+  checkBidi: true,
+  checkJoiners: true,
+  transitionalProcessing: false,
+  verifyDNSLength: false,
+});
+
 function normalizeHostText(domain: string, isWholeHost: boolean): string {
   let trimmed = readTrimmedEntry(domain);
 
@@ -582,26 +604,10 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   const normalized = trimmed;
 
   try {
-    // Use TR46/IDNA processing for robust Unicode domain handling that mirrors browser behavior
-    // `checkHyphens` off, as the WHATWG URL parser has it: it would also refuse a `--` in
-    // a label's third and fourth characters - `r3---sn-abc.googlevideo.com`, a real CDN
-    // host any URL carries - so no pattern could match such a host. A label that starts
-    // or ends with a hyphen is still refused, below.
-    //
-    // `useSTD3ASCIIRules` off as well, as the parser has it, so a label may carry `_`:
-    // the URL standard and DNS both allow it (`a_b.example.com`, `my_service`), browsers
-    // send such origins, and the cookie jar and the client's host filter already accept
-    // them. Off, it also lets through `!`, `*`, `$` and the rest, which no host name uses
-    // and every pattern here would misread - so the ASCII result is held to letters,
+    // `HOST_TO_ASCII_OPTIONS` lets through `!`, `*`, `$` and the rest, which no host name
+    // uses and every pattern here would misread - so the ASCII result is held to letters,
     // digits, hyphens and `_` below.
-    const ascii = toASCII(normalized, {
-      useSTD3ASCIIRules: false,
-      checkHyphens: false,
-      checkBidi: true,
-      checkJoiners: true,
-      transitionalProcessing: false, // matches modern browser behavior (non-transitional)
-      verifyDNSLength: false, // we already do our own length checks
-    });
+    const ascii = toASCII(normalized, HOST_TO_ASCII_OPTIONS);
     if (!ascii) {
       throw new Error('TR46 processing failed');
     }

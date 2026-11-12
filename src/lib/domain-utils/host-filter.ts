@@ -108,14 +108,27 @@ export function readExactHostName(name: string): string {
  * carries it as a name.
  */
 function readParsedHostname(hostname: string): string {
-  const lowercase = asciiLowercase(hostname);
-  const name = lowercase.endsWith('.') ? lowercase.slice(0, -1) : lowercase;
+  const name = withoutTrailingDot(asciiLowercase(hostname));
 
   return /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/.test(name) &&
     checkDNSLength(name) &&
-    !endsInANumber(name.slice(name.lastIndexOf('.') + 1))
+    !endsInNumericLabel(name)
     ? name
     : '';
+}
+
+/**
+ * Whether `name`'s last label, one trailing dot aside, is a number (`foo.1`, `foo.0x1.`):
+ * the URL parser reads such a host as IPv4, so `readExactHostName` refuses it as a name.
+ */
+export function endsInNumericLabel(name: string): boolean {
+  const trimmed = withoutTrailingDot(trimHTTPWhitespace(name));
+
+  return endsInANumber(trimmed.slice(trimmed.lastIndexOf('.') + 1));
+}
+
+function withoutTrailingDot(name: string): string {
+  return name.endsWith('.') ? name.slice(0, -1) : name;
 }
 
 /**

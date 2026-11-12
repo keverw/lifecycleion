@@ -174,3 +174,152 @@ test.each([
     expect(heard).toEqual(['other.test']);
   },
 );
+
+test('a parent client observer that rewrites the request or the response does not change which sub-client response observers run', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200, body: { secret: 1 } }));
+  const root = new HTTPClient({ adapter });
+  const sub = root.createSubClient();
+  const heard: string[] = [];
+  root.addResponseObserver((response, request) => {
+    Object.assign(request, {
+      requestURL: 'https://secret.internal/x',
+      method: 'POST',
+    });
+    Object.assign(response, { status: 500, headers: undefined });
+  });
+  sub.addResponseObserver(
+    () => {
+      heard.push('secret.internal');
+    },
+    { hosts: ['secret.internal'] },
+  );
+  sub.addResponseObserver(
+    () => {
+      heard.push('methods POST');
+    },
+    { methods: ['POST'] },
+  );
+  sub.addResponseObserver(
+    () => {
+      heard.push('statusCodes 500');
+    },
+    { statusCodes: [500] },
+  );
+  sub.addResponseObserver(
+    () => {
+      heard.push('public.example.com');
+    },
+    { hosts: ['public.example.com'], methods: ['GET'], statusCodes: [200] },
+  );
+  sub.addResponseObserver(() => {
+    heard.push('unfiltered');
+  });
+  const { reports, release } = captureErrorReports();
+  try {
+    await sub.get('https://public.example.com/x').send();
+  } finally {
+    release();
+  }
+
+  expect(heard).toEqual(['public.example.com', 'unfiltered']);
+  expect(reports).toEqual([]);
+});
+
+test('a parent client observer that rewrites the request does not change which sub-client error observers run', async () => {
+  const root = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () => Promise.reject(new Error('down')),
+    },
+  });
+  const sub = root.createSubClient();
+  const heard: string[] = [];
+  root.addErrorObserver((_error, request) => {
+    Object.assign(request, {
+      requestURL: 'https://secret.internal/x',
+      method: 'POST',
+    });
+  });
+  sub.addErrorObserver(
+    () => {
+      heard.push('secret.internal');
+    },
+    { hosts: ['secret.internal'] },
+  );
+  sub.addErrorObserver(
+    () => {
+      heard.push('public.example.com');
+    },
+    { hosts: ['public.example.com'], schemes: ['https'] },
+  );
+
+  await sub.get('https://public.example.com/x').send();
+
+  expect(heard).toEqual(['public.example.com']);
+});
+
+test.each(['answered', 'thrown'] as const)(
+  'a retry-phase observer that rewrites the request in place does not change the %s attempt the cancelled request reports',
+  async (outcome) => {
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          outcome === 'answered'
+            ? Promise.resolve({ status: 503, headers: {}, body: null })
+            : Promise.reject(new Error('down')),
+      },
+      retryPolicy: { strategy: 'fixed', delayMS: 5000, maxRetryAttempts: 1 },
+    });
+    const redact = (request: { requestURL: string; method: string }) => {
+      request.requestURL = 'https://redacted.invalid/';
+      request.method = 'PATCH';
+    };
+    client.addResponseObserver(
+      (_response, request) => {
+        redact(request);
+      },
+      { phases: ['retry'] },
+    );
+    client.addErrorObserver(
+      (_error, request) => {
+        redact(request);
+      },
+      { phases: ['retry'] },
+    );
+    const finalHeard: { requestURL: string; method: string }[] = [];
+    client.addErrorObserver(
+      (_error, request) => {
+        finalHeard.push({
+          requestURL: request.requestURL,
+          method: request.method,
+        });
+      },
+      { hosts: ['api.example.com'], methods: ['GET'] },
+    );
+    const builder = client.get('https://api.example.com/x');
+    // Cancelled during the wait before the retry, after the retry-phase observers ran.
+    client.addResponseObserver(
+      () => {
+        setTimeout(() => builder.cancel(), 20);
+      },
+      { phases: ['retry'] },
+    );
+    client.addErrorObserver(
+      () => {
+        setTimeout(() => builder.cancel(), 20);
+      },
+      { phases: ['retry'] },
+    );
+
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.requestURL).toBe('https://api.example.com/x');
+    expect(builder.error?.requestURL).toBe('https://api.example.com/x');
+    expect(finalHeard).toEqual([
+      { requestURL: 'https://api.example.com/x', method: 'GET' },
+    ]);
+  },
+);

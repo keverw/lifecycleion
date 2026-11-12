@@ -2431,7 +2431,7 @@ describe('domain-utils', () => {
 
         expect(validateConfigEntry('*.*.com', 'origin')).toEqual({
           valid: false,
-          info: 'wildcard tail targets public suffix or IP (disallowed)',
+          info: 'wildcard tail targets a public suffix (disallowed)',
           wildcardKind: 'none',
         });
       });
@@ -3007,7 +3007,7 @@ describe('domain-utils', () => {
         const psl = validateConfigEntry('https://*.com', 'origin');
         expect(psl.valid).toBe(false);
         expect(psl.info).toBe(
-          'wildcard tail targets public suffix or IP (disallowed)',
+          'wildcard tail targets a public suffix (disallowed)',
         );
       });
 
@@ -3096,17 +3096,34 @@ describe('domain-utils', () => {
         expect(underscoreOrigin.info).toBe('invalid domain labels');
       });
 
+      it('names why a wildcard tail is refused, with or without allowSuffixTails', () => {
+        for (const allowSuffixTails of [false, true]) {
+          expect(
+            validateConfigEntry('*.example.123', 'domain', { allowSuffixTails })
+              .info,
+          ).toContain('ends in a numeric label');
+          expect(
+            validateConfigEntry('*.kawasaki.jp', 'domain', { allowSuffixTails })
+              .info,
+          ).toContain('public suffix wildcard rule');
+          expect(
+            validateConfigEntry('*.10.0.0.1', 'domain', { allowSuffixTails })
+              .info,
+          ).toBe('wildcard tail targets an IP address (disallowed)');
+        }
+      });
+
       it('applies domain rules to bare domains in origin context', () => {
         const ok = validateConfigEntry('*.localhost', 'origin');
         expect(ok.valid).toBe(false);
         expect(ok.info).toBe(
-          'wildcard tail targets public suffix or IP (disallowed)',
+          'wildcard tail targets a public suffix (disallowed)',
         );
 
         const bad = validateConfigEntry('*.127.0.0.1', 'origin');
         expect(bad.valid).toBe(false);
         expect(bad.info).toBe(
-          'wildcard tail targets public suffix or IP (disallowed)',
+          'wildcard tail targets an IP address (disallowed)',
         );
 
         const badWildcardScheme = validateConfigEntry(
@@ -3524,6 +3541,8 @@ describe('domain-utils', () => {
       ['a!b.example.com', 'is not a hostname the matcher can read'],
       ['-a.0x1f', 'ends in a numeric label'],
       ['foo.1', 'ends in a numeric label'],
+      ['foo.1.', 'ends in a numeric label'],
+      [' FOO.0X1 ', 'ends in a numeric label'],
       ['-ñ.example.com', 'give the form the URL parser reads'],
       ['\u00A0*', 'no-break space'],
     ])('%p is refused: %s', (entry, info) => {

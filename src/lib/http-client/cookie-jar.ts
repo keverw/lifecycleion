@@ -6,7 +6,11 @@ import {
 import { MAX_COOKIE_LIFETIME_SECONDS } from './consts';
 import { forEachOwnIndex, readCopiedIndex } from '../internal/array-indices';
 import { toASCII } from 'tr46';
-import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
+import {
+  HOST_TO_ASCII_OPTIONS,
+  checkDNSLength,
+  toAsciiDots,
+} from '../domain-utils/helpers';
 import { describeValue } from '../internal/describe-value';
 import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
@@ -1423,14 +1427,7 @@ export class CookieJar {
         // normalizes, as the URL parser does - `toLowerCase` makes a word-final `Σ` the
         // final sigma `ς`, another domain (see `normalizeHostText` in domain-utils).
         raw,
-        {
-          useSTD3ASCIIRules: false,
-          checkHyphens: false,
-          checkBidi: true,
-          checkJoiners: true,
-          transitionalProcessing: false,
-          verifyDNSLength: false,
-        },
+        HOST_TO_ASCII_OPTIONS,
       );
 
       // A dot mapping exposed at either end: a second trailing one (`example.com.` and a

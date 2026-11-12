@@ -154,3 +154,49 @@ test.each([307, 308])(
     expect(finalRawBody).toEqual({ value: 2, extra: 3 });
   },
 );
+
+test.each([
+  ['a GET answered 307 to POST', 'GET', 307, 'POST', true],
+  ['a bodiless POST answered 302 to GET', 'POST', 302, 'GET', false],
+] as const)(
+  'a redirect-phase observer that rewrites the method of %s does not change which body headers the hop keeps',
+  async (_label, method, status, rewrittenMethod, isKept) => {
+    const sent: AdapterRequest[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request): Promise<AdapterResponse> => {
+        sent.push(request);
+        return Promise.resolve<AdapterResponse>(
+          sent.length === 1
+            ? {
+                status,
+                headers: { location: 'https://example.com/next' },
+                body: null,
+              }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addResponseObserver(
+      (_response, request) => {
+        request.method = rewrittenMethod;
+      },
+      { phases: ['redirect'] },
+    );
+
+    const response = await client
+      .request(method, 'https://example.com/start')
+      .headers({
+        'content-type': 'application/json',
+        'content-language': 'en',
+      })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(sent).toHaveLength(2);
+    const hopHeaders = sent[1].headers;
+    expect(hopHeaders['content-type'] !== undefined).toBe(isKept);
+    expect(hopHeaders['content-language'] !== undefined).toBe(isKept);
+  },
+);

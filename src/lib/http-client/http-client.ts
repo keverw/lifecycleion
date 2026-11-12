@@ -46,7 +46,8 @@ import type { ResolvedRequest } from './interceptors';
 import {
   ResponseObserverManager,
   ErrorObserverManager,
-  runParentThenOwnObservers,
+  runParentThenOwnErrorObservers,
+  runParentThenOwnResponseObservers,
 } from './observers';
 import {
   assertSupportedAdapterRuntimeAndConfig,
@@ -1670,13 +1671,13 @@ export class BaseHTTPClient {
               redirectMethod = 'GET';
             }
 
-            // The URL this hop was sent to, read before any callback runs: the
-            // cross-origin checks below compare against it, and observers and
-            // interceptors are handed objects they could change.
+            // The URL this hop was sent to, which the cross-origin checks below compare
+            // against. Observers and interceptors are handed copies of the request, so
+            // nothing they do changes it.
             const hopFromURL = attemptResult.sentRequest.requestURL;
-            // Whether this hop keeps its body, decided now for the same reason. A 303 is a
-            // retrieval of another resource whatever the method (RFC 9110 15.4.4, curl):
-            // a `GET` that carried a body does not send it to the See Other target.
+            // Whether this hop keeps its body. A 303 is a retrieval of another resource
+            // whatever the method (RFC 9110 15.4.4, curl): a `GET` that carried a body
+            // does not send it to the See Other target.
             const isBodyDropped =
               redirectMethod !== attemptResult.sentRequest.method ||
               adapterResponse.status === 303;
@@ -5487,7 +5488,7 @@ export class BaseHTTPClient {
     cancelSignal?: AbortSignal,
   ): Promise<void> {
     return observedUntilCancelled(
-      runParentThenOwnObservers(
+      runParentThenOwnResponseObservers(
         this._parentClient?._responseObservers,
         this._responseObservers,
         response,
@@ -5506,7 +5507,7 @@ export class BaseHTTPClient {
     cancelSignal?: AbortSignal,
   ): Promise<void> {
     return observedUntilCancelled(
-      runParentThenOwnObservers(
+      runParentThenOwnErrorObservers(
         this._parentClient?._errorObservers,
         this._errorObservers,
         error,

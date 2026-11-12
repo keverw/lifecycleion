@@ -18,7 +18,6 @@ import {
   lazyWildcardHostSuffix,
   isUnmatchableWildcardTail,
   readWildcardTailRefusal,
-  endsInANumber,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
   MAX_LABELS,
@@ -29,6 +28,7 @@ import { isNullish } from '../internal/is-nullish';
 import { copyArrayValue } from '../internal/array-copy';
 import {
   checkedHostFor,
+  endsInNumericLabel,
   isGlobalHostPattern,
   matchesReadHostPattern,
   readExactHostName,
@@ -1086,7 +1086,7 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
       return "is read by the URL parser as another hostname, which is what a request's hostname will be; give the form the URL parser reads";
     }
 
-    if (name === '' && endsInANumber(entry.slice(entry.lastIndexOf('.') + 1))) {
+    if (name === '' && endsInNumericLabel(entry)) {
       return 'ends in a numeric label, which the URL parser reads as an IPv4 address, so no request has it as a hostname; give the address itself or a name';
     }
 
@@ -1320,8 +1320,8 @@ export function validateConfigEntry(
       return 'wildcard has no fixed label after it (disallowed)';
     }
 
-    if (!opts.allowSuffixTails || refusal === 'suffix') {
-      return 'wildcard tail targets public suffix or IP (disallowed)';
+    if (refusal === 'suffix') {
+      return 'wildcard tail targets a public suffix (disallowed)';
     }
 
     switch (refusal) {
