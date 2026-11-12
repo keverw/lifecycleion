@@ -998,7 +998,7 @@ Programmatic `setCookie()` and `fromJSON()` have no request scheme to check, but
 validate prefixes: `__Host-` requires `secure: true`, `hostOnly: true` (or a domain stored host-only
 whatever it says: a public suffix or an IP address), and a path of `/` - an absent or relative
 `path` is stored as `/`, as a `Set-Cookie` without one is.
-They also validate domains, expiry, and header framing, so cookies are not stored unchecked.
+They also validate domains, expiry, and header framing, so cookies are not stored unchecked. They do not apply the rule that keeps an insecure cookie from replacing or shadowing a Secure one: a cookie given without `secure: true` replaces a Secure cookie of the same name, domain and path, as the caller's own choice. A `Secure` cookie restored by `fromJSON()` keeps its flag, so response parsing protects it as above; restore only JSON a jar of yours wrote.
 
 **Cookie scoping uses the full Public Suffix List.** The jar refuses a `Domain=` that
 spans a public suffix, and both halves of the list count: the ICANN half (`com`,

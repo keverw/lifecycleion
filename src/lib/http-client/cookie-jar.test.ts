@@ -2281,8 +2281,9 @@ describe('CookieJar', () => {
     });
 
     test('a Secure cookie restored through fromJSON() is protected the same way', () => {
-      // `fromJSON` stores through `setCookie`, so a persisted jar comes back with the same
-      // guard a live one has.
+      // `fromJSON` keeps each cookie's `Secure` flag, so the response-parsing guard keeps
+      // an insecure cookie from replacing a restored Secure one, as it does for one the
+      // jar stored from a response.
       const persisted = new CookieJar();
       persisted.parseSetCookieHeader(
         'session=real; Secure',
