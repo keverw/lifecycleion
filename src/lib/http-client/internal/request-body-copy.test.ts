@@ -2,7 +2,6 @@ import { expect, spyOn, test } from 'bun:test';
 import {
   copiedJSONText,
   copyRequestBody,
-  fillRequestBody,
   readRequestBodyContents,
   releaseRequestBody,
   serializesToNothing,
@@ -102,7 +101,7 @@ test('a form is told by its own methods, not by inheriting from FormData.prototy
   }
 });
 
-test('a JSON body copy is sent as its text and parsed back only once its contents are read', () => {
+test('a JSON body copy is sent as its text and parsed back only once it is released', () => {
   const parse = spyOn(JSON, 'parse');
   try {
     const source = { a: 1, nested: { b: [2, 3] }, when: new Date(0) };
@@ -112,8 +111,8 @@ test('a JSON body copy is sent as its text and parsed back only once its content
     expect(copiedJSONText(copy)).toBe(JSON.stringify(source));
     expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
 
-    fillRequestBody(copy);
-    fillRequestBody(copy);
+    releaseRequestBody(copy);
+    releaseRequestBody(copy);
 
     expect(parse).toHaveBeenCalledTimes(1);
     expect(copy).toEqual({
@@ -121,8 +120,8 @@ test('a JSON body copy is sent as its text and parsed back only once its content
       nested: { b: [2, 3] },
       when: '1970-01-01T00:00:00.000Z',
     });
-    // Still sent as its text: filling it changed nothing it serializes to.
-    expect(copiedJSONText(copy)).toBe(JSON.stringify(source));
+    // Caller code may change it now, so its text no longer says what it sends.
+    expect(copiedJSONText(copy)).toBeUndefined();
   } finally {
     parse.mockRestore();
   }
@@ -134,7 +133,7 @@ test('a JSON array body copy is an array, filled in place', () => {
   expect(Array.isArray(copy)).toBe(true);
   expect(copy).toHaveLength(0);
 
-  fillRequestBody(copy);
+  releaseRequestBody(copy);
 
   expect(copy).toEqual([1, { a: 2 }, null]);
 });
@@ -144,7 +143,7 @@ test('a filled copy holds a __proto__ key as a member, in the order parsed', () 
     JSON.parse('{"z":1,"__proto__":{"polluted":true},"a":2}'),
   ) as Record<string, unknown>;
 
-  fillRequestBody(copy);
+  releaseRequestBody(copy);
 
   expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
   expect(Object.keys(copy)).toEqual(['z', '__proto__', 'a']);
@@ -166,18 +165,18 @@ test('releasing a copy fills it and forgets its text, and a copy of an unfilled 
   expect(first).toEqual({ a: 1 });
   expect(copiedJSONText(first)).toBeUndefined();
 
-  fillRequestBody(second);
+  releaseRequestBody(second);
 
   expect(second).toEqual({ a: 1 });
 });
 
-test('a fill whose parse throws leaves the copy unfilled with its text, so the next fill fills it', () => {
+test('a release whose parse throws leaves the copy unfilled with its text, so the next release fills it', () => {
   const copy = copyRequestBody({ a: 1 }) as Record<string, unknown>;
   const parse = spyOn(JSON, 'parse').mockImplementationOnce(() => {
     throw new RangeError('Maximum call stack size exceeded');
   });
   try {
-    expect(() => fillRequestBody(copy)).toThrow(RangeError);
+    expect(() => releaseRequestBody(copy)).toThrow(RangeError);
   } finally {
     parse.mockRestore();
   }
@@ -185,7 +184,7 @@ test('a fill whose parse throws leaves the copy unfilled with its text, so the n
   expect(copy).toEqual({});
   expect(copiedJSONText(copy)).toBe('{"a":1}');
 
-  fillRequestBody(copy);
+  releaseRequestBody(copy);
 
   expect(copy).toEqual({ a: 1 });
 });
@@ -205,14 +204,14 @@ test('the contents a filter reads are parsed once, and fill the copy or a copy t
     expect(kept).toEqual({});
 
     const handed = copyRequestBody(kept) as Record<string, unknown>;
-    fillRequestBody(handed);
+    releaseRequestBody(handed);
 
     expect(handed).toEqual({ a: 1, nested: { b: 2 } });
     expect(handed.nested).toBe(contents.nested);
     expect(parse).toHaveBeenCalledTimes(1);
 
     // The data passed to `handed`, so `kept` is filled from its text, sharing nothing.
-    fillRequestBody(kept);
+    releaseRequestBody(kept);
 
     expect(kept).toEqual({ a: 1, nested: { b: 2 } });
     expect(kept.nested).not.toBe(handed.nested);

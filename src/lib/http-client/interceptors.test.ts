@@ -1,6 +1,7 @@
 import { describe, test, expect, spyOn } from 'bun:test';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
 import { HTTPClient } from './http-client';
+import type { HTTPSubClient } from './http-client';
 import type {
   AdapterResponse,
   InterceptedRequest,
@@ -1127,6 +1128,120 @@ describe('JSON body copies read by interceptors', () => {
 
     expect(counts.parses).toBe(0);
     expect(sent).toEqual(['{"replaced":true}']);
+  });
+
+  test('the data a bodyContainsKeys filter parsed is not kept past its phase, whether the filter missed or matched', async () => {
+    const text = '{"a":1,"marker":"probe"}';
+    for (const key of ['missing', 'a']) {
+      const { client, sent } = recordingClient([503, 503, 200]);
+      client.addRequestInterceptor(
+        (request) => {
+          request.headers['x-seen'] = '1';
+          return request;
+        },
+        { phases: ['initial', 'retry'], bodyContainsKeys: [key] },
+      );
+      const parse = spyOn(JSON, 'parse');
+      let parses: number;
+      try {
+        await client
+          .put('https://api.example.com/x')
+          .json({ a: 1, marker: 'probe' })
+          .send();
+        parses = parse.mock.calls.filter(([source]) => source === text).length;
+      } finally {
+        parse.mockRestore();
+      }
+
+      // Once for each of the three phases: nothing a phase parsed is held for the next.
+      expect(parses).toBe(3);
+      expect(sent).toEqual([text, text, text]);
+    }
+  });
+
+  test.each<[string, (client: HTTPClient) => HTTPSubClient]>([
+    [
+      'two interceptors whose bodyContainsKeys filters match',
+      (client) => {
+        for (let i = 0; i < 2; i++) {
+          client.addRequestInterceptor(
+            (request) => {
+              request.headers[`x-${i}`] = '1';
+              return request;
+            },
+            { bodyContainsKeys: ['a'] },
+          );
+        }
+        return client;
+      },
+    ],
+    [
+      'a filtered interceptor and then one that reads the body',
+      (client) => {
+        client.addRequestInterceptor((request) => request, {
+          bodyContainsKeys: ['a'],
+        });
+        client.addRequestInterceptor((request) => {
+          (request.body as Record<string, unknown>).seen = true;
+          return request;
+        });
+        return client;
+      },
+    ],
+    [
+      "a parent's filter that misses and a sub-client's that matches",
+      (client) => {
+        client.addRequestInterceptor((request) => request, {
+          bodyContainsKeys: ['missing'],
+        });
+        const sub = client.createSubClient();
+        sub.addRequestInterceptor((request) => request, {
+          bodyContainsKeys: ['a'],
+        });
+        return sub;
+      },
+    ],
+  ])('%s parse the JSON body once between them', async (_label, register) => {
+    const text = '{"a":1,"marker":"probe"}';
+    const { client } = recordingClient();
+    const sender = register(client);
+    const parse = spyOn(JSON, 'parse');
+    let parses: number;
+    try {
+      const response = await sender
+        .put('https://api.example.com/x')
+        .json({ a: 1, marker: 'probe' })
+        .send();
+      expect(response.status).toBe(200);
+      parses = parse.mock.calls.filter(([source]) => source === text).length;
+    } finally {
+      parse.mockRestore();
+    }
+
+    expect(parses).toBe(1);
+  });
+
+  test('a first read of the body whose parse throws leaves it unread, so the next read is handed its data', async () => {
+    const { client, sent } = recordingClient();
+    const reads: unknown[] = [];
+    client.addRequestInterceptor((request) => {
+      const parse = spyOn(JSON, 'parse').mockImplementationOnce(() => {
+        throw new RangeError('Maximum call stack size exceeded');
+      });
+      try {
+        expect(() => request.body).toThrow(RangeError);
+      } finally {
+        parse.mockRestore();
+      }
+      reads.push(structuredClone(request.body));
+      (request.body as Record<string, unknown>).a = 2;
+      return request;
+    });
+
+    await client.put('https://api.example.com/x').json({ a: 1 }).send();
+
+    expect(reads).toEqual([{ a: 1 }]);
+    expect(sent).toEqual(['{"a":2}']);
   });
 
   test('an interceptor that freezes the request it is handed can still read its body', async () => {

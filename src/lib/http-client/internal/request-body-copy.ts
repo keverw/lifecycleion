@@ -8,12 +8,14 @@ import { defineEntry } from '../../internal/define-entry';
  * What the client knows of a JSON body copy it made (see `copyRequestBody`): the text it
  * serializes to, its own `toJSON` wrapper's included, or `undefined` for one that
  * serializes to nothing; and whether it has been filled from that text. A copy not yet
- * filled is an empty object or array of the shape its text has (see `fillRequestBody`),
+ * filled is an empty object or array of the shape its text has (see `releaseRequestBody`),
  * so a copy that is only ever sent - no interceptor reads it (see `handedRequest` in
  * interceptors.ts) and no `bodyContainsKeys` filter reads it - is never parsed back at
  * all. `parsed` is its text parsed for a filter that read it (see
- * `readRequestBodyContents`), kept for the copy to be filled with, so its text is parsed
- * once however it is read.
+ * `readRequestBodyContents`), kept for the copy - or a copy taken from it - to be filled
+ * with, so the filters and interceptors of a phase parse the text once between them; it
+ * is let go once the phase's interceptor chains have run (see `forgetParsedContents`), so
+ * a large body is not held twice for the rest of the request.
  */
 type CopyRecord =
   | {
@@ -40,7 +42,7 @@ const recordByCopy = new WeakMap<object, CopyRecord>();
  * - A JSON body (a plain object or an array) is the data it serializes to, read back:
  *   serialized once, by `JSON.stringify` - so every nested `toJSON` is applied and what
  *   JSON reads from prototypes is honored, where a structural copy would lose them - and
- *   parsed back when its contents are first read (see `fillRequestBody`). Until then it
+ *   parsed back when its contents are first read (see `releaseRequestBody`). Until then it
  *   is an empty object or array, the shape its text has, sent as that text. A `Date` is
  *   its ISO string, a class instance a plain object, an `undefined` member dropped. A
  *   top-level `toJSON` that answers something other than an object or an array - `null`,
@@ -180,7 +182,7 @@ export function serializesToNothing(body: object): boolean {
 /**
  * The data a JSON body - a plain object - holds, as an interceptor's `bodyContainsKeys`
  * filter reads it: for a copy `copyRequestBody` returned empty, its text parsed, the data
- * kept with its record for the copy to be filled with (see `fillRequestBody`) or for a
+ * kept with its record for the copy to be filled with (see `releaseRequestBody`) or for a
  * copy taken from it, so a body is parsed once however often it is read; any other body
  * as it is.
  */
@@ -202,6 +204,17 @@ export function readRequestBodyContents(
 }
 
 /**
+ * Let go of the data a filter parsed an unfilled JSON body copy's text to (see
+ * `readRequestBodyContents`), once the interceptor chains of the phase that parsed it
+ * have run. A copy read again, in a later phase, is parsed again.
+ */
+export function forgetParsedContents(body: unknown): void {
+  if (typeof body === 'object' && body !== null) {
+    takeParsedContents(body);
+  }
+}
+
+/**
  * The data a filter read an unfilled JSON body copy's text parsed to (see
  * `readRequestBodyContents`), taken from its record, so only one copy is ever filled with
  * it; `undefined` when there is none.
@@ -220,21 +233,14 @@ function takeParsedContents(body: object): object | undefined {
  * Fill a JSON body copy `copyRequestBody` returned empty with the data its text parses
  * to - or the data a filter read it as (see `readRequestBodyContents`) - in place, so it is
  * the same object, the one the builder holds, as it is handed to caller code (see
- * `releaseRequestBody`). Any other value, a copy already filled among them, is left as it
- * is. Recorded as filled once it is, so a parse that throws leaves it unfilled, its text
- * kept. Each member is defined as the parsed data's own, so a `__proto__` key is a member,
- * as `JSON.parse` makes it, not the copy's prototype.
+ * `releaseRequestBody`). Parsed before the copy is touched, so a parse that throws leaves
+ * it empty and its record as it was. Each member is defined as the parsed data's own, so a
+ * `__proto__` key is a member, as `JSON.parse` makes it, not the copy's prototype.
  */
-export function fillRequestBody(body: unknown): void {
-  if (typeof body !== 'object' || body === null) {
-    return;
-  }
-
-  const record = recordByCopy.get(body);
-  if (record === undefined || record.isFilled) {
-    return;
-  }
-
+function fillRequestBody(
+  body: object,
+  record: Extract<CopyRecord, { isFilled: false }>,
+): void {
   const parsed = record.parsed ?? (JSON.parse(record.text) as object);
 
   if (Array.isArray(body)) {
@@ -250,8 +256,6 @@ export function fillRequestBody(body: unknown): void {
       );
     }
   }
-
-  recordByCopy.set(body, { text: record.text, isFilled: true });
 }
 
 /**
@@ -267,16 +271,28 @@ export function isUnfilledRequestBody(body: unknown): boolean {
 }
 
 /**
- * Called as a request's body is handed to caller code - an interceptor, or a builder's own
- * send function - which may keep it and change it in place: the copy is filled (see
- * `fillRequestBody`), and since its text no longer says what it serializes to, its record
- * is forgotten, and the copy is serialized from then on as any other value is.
+ * Called as a request's body is handed to caller code - an interceptor that reads it, or a
+ * builder's own send function - which may keep it and change it in place: a copy still
+ * empty is filled (see `fillRequestBody`), and since its text no longer says what it
+ * serializes to, its record is forgotten, and the copy is serialized from then on as any
+ * other value is. A fill that throws leaves the record, and the copy still sent as its
+ * text. Any other value is left as it is.
  */
 export function releaseRequestBody(body: unknown): void {
-  if (typeof body === 'object' && body !== null) {
-    fillRequestBody(body);
-    recordByCopy.delete(body);
+  if (typeof body !== 'object' || body === null) {
+    return;
   }
+
+  const record = recordByCopy.get(body);
+  if (record === undefined) {
+    return;
+  }
+
+  if (!record.isFilled) {
+    fillRequestBody(body, record);
+  }
+
+  recordByCopy.delete(body);
 }
 
 /**

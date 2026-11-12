@@ -164,6 +164,8 @@ import {
   copiedJSONText,
   copyRequestBody,
   isCopySerializingToNothing,
+  forgetParsedContents,
+  isUnfilledRequestBody,
   serializesToNothing,
 } from './internal/request-body-copy';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
@@ -1165,8 +1167,8 @@ export class BaseHTTPClient {
         // no interceptor registered.
         let callerMethodRefusal: Error | undefined;
         // Read from the request the client built, of which the interceptors are handed a
-        // copy - its own fields and header record, the same body (see
-        // `handedRequestPreparer`).
+        // copy - its own fields and header record, the same body unless it is a JSON body
+        // still unread (see `handedRequestPreparer`).
         const callerMethod = interceptedRequest.method;
         const hasCallerBody = hasRequestBody(interceptedRequest.body);
         try {
@@ -1186,10 +1188,11 @@ export class BaseHTTPClient {
         // Left unset by a failure that a cancel made first turns into that cancel.
         let interceptResult: ResolvedRequest | InterceptorCancel | undefined;
         let initialRequestCandidate: InterceptedRequest = finalRequest;
-        // The interceptors are handed a copy of the request with its own header record and
-        // the same body (see `handedRequestPreparer`), so a cancel or a failure below
-        // reports `finalRequest` with the URL, method and headers the client built, and the
-        // body as an interceptor may have edited it in place.
+        // The interceptors are handed a copy of the request with its own header record and,
+        // but for a JSON body still unread, the same body (see `handedRequestPreparer`), so
+        // a cancel or a failure below reports `finalRequest` with the URL, method and
+        // headers the client built, and a bytes or form body as an interceptor may have
+        // edited it in place.
         const initialBodyCopy: HandedBodyCopy = {
           isTaken: false,
           didFail: false,
@@ -1806,12 +1809,19 @@ export class BaseHTTPClient {
             // Only the fields a request interceptor is handed in the other phases: the
             // attempt that answered carries its own (`rawBody`, `timeout`, the attempt
             // header for the attempt that is over), which are rebuilt for the next one.
+            // Built by the attempt for every answer `_isRedirectToFollow` reads as one; the
+            // headers it sent are never used in their place, since they carry those the
+            // adapter reports it added.
+            const redirectRequestHeaders = attemptResult.redirectRequestHeaders;
+            if (redirectRequestHeaders === undefined) {
+              throw new Error(
+                '[HTTPClient] internal error: a redirect to follow has no headers built for its next hop',
+              );
+            }
             const {
               [DEFAULT_REQUEST_ATTEMPT_HEADER]: _staleAttemptHeader,
               ...hopHeaders
-            } =
-              attemptResult.redirectRequestHeaders ??
-              attemptResult.sentRequest.headers;
+            } = redirectRequestHeaders;
             // A cookie jar that throws while building the target's `Cookie` header fails
             // the hop as the other between-hop failures do, naming the redirect it was
             // building: left to the outer catch, it would be reported as the previous
@@ -5245,47 +5255,58 @@ export class BaseHTTPClient {
     let didParentCallInterceptor = false;
     // Whether either chain called any interceptor's function this phase.
     let isBodyHandedOut = false;
+    // The bodies a filter of either chain parsed, let go of once both have run, so the
+    // phase's result - the body every later attempt sends - does not hold that data too.
+    const parsedBodies = new Set<object>();
 
-    if (parentChain) {
-      current = await parentChain(request, phase, chainContext, {
-        isCancelled,
-        cancelSignal,
-        onCopyFailure,
-        onInterceptorCalled: () => {
-          didParentCallInterceptor = true;
-          isBodyHandedOut = true;
-        },
-        ...(prepareRequest ? { prepareRequest } : {}),
-      });
+    try {
+      if (parentChain) {
+        current = await parentChain(request, phase, chainContext, {
+          isCancelled,
+          cancelSignal,
+          onCopyFailure,
+          parsedBodies,
+          onInterceptorCalled: () => {
+            didParentCallInterceptor = true;
+            isBodyHandedOut = true;
+          },
+          ...(prepareRequest ? { prepareRequest } : {}),
+        });
 
-      // A cancel that lands after the parent's chain answers is the chain's below to
-      // answer: it runs no interceptor once the request is cancelled.
-      if (isInterceptorCancel(current)) {
-        return { result: current, isIntercepted: true, isBodyHandedOut };
+        // A cancel that lands after the parent's chain answers is the chain's below to
+        // answer: it runs no interceptor once the request is cancelled.
+        if (isInterceptorCancel(current)) {
+          return { result: current, isIntercepted: true, isBodyHandedOut };
+        }
+      }
+
+      return {
+        // The parent's result is copied before an interceptor here reads it whenever one
+        // of the parent's interceptors was called, whatever it returned: one that
+        // redefined `requestURL` on the request it was handed and returned that same
+        // object handed back the request itself, which identity cannot tell from one no
+        // interceptor touched. With none called - every one filtered out, or registered
+        // for other phases - it is the request the client built, with nothing to copy.
+        result: await ownChain(current, phase, chainContext, {
+          isCancelled,
+          cancelSignal,
+          isInterceptorResult: didParentCallInterceptor,
+          onCopyFailure,
+          parsedBodies,
+          onInterceptorCalled: () => {
+            isBodyHandedOut = true;
+          },
+          ...(prepareRequest ? { prepareRequest } : {}),
+        }),
+        isIntercepted: true,
+        // Read once the chain has run, after the line above.
+        isBodyHandedOut,
+      };
+    } finally {
+      for (const body of parsedBodies) {
+        forgetParsedContents(body);
       }
     }
-
-    return {
-      // The parent's result is copied before an interceptor here reads it whenever one of
-      // the parent's interceptors was called, whatever it returned: one that redefined
-      // `requestURL` on the request it was handed and returned that same object handed
-      // back the request itself, which identity cannot tell from one no interceptor
-      // touched. With none called - every one filtered out, or registered for other
-      // phases - it is the request the client built, with nothing to copy.
-      result: await ownChain(current, phase, chainContext, {
-        isCancelled,
-        cancelSignal,
-        isInterceptorResult: didParentCallInterceptor,
-        onCopyFailure,
-        onInterceptorCalled: () => {
-          isBodyHandedOut = true;
-        },
-        ...(prepareRequest ? { prepareRequest } : {}),
-      }),
-      isIntercepted: true,
-      // Read once the chain has run, after the line above.
-      isBodyHandedOut,
-    };
   }
 
   /**
@@ -6830,11 +6851,13 @@ interface HandedBodyCopy extends BodyCopyOutcome {
  * the request the hop that answered was sent with - so an interceptor that edits it in
  * place, `request.headers.authorization = ...`, edits only the request it returns:
  *
- * - The initial phase copies the header record alone. Its body is the builder's copy,
- *   handed over as it is, since copying it again for every request an interceptor runs
- *   for would cost as much as the first copy - a large JSON body parsed again, an upload's
- *   bytes held a third time - so a request that ends in that phase is reported with an
- *   interceptor's in-place edit of its body.
+ * - The initial phase copies the header record, and a JSON body still unread - a new
+ *   empty copy over the same text, which costs no parse or serialization (see
+ *   `copyRequestBody`). Any other body is the builder's copy, handed over as it is, since
+ *   copying it again for every request an interceptor runs for would cost as much as the
+ *   first copy - an upload's bytes held a third time, a form's entries copied again - so a
+ *   request that ends in that phase is reported with an interceptor's in-place edit of
+ *   such a body.
  * - The redirect phase copies both.
  * - The retry phase copies the body alone: its header record is built for each retry (see
  *   `_withInternalRequestHeaders`), and nothing else holds it.
@@ -6857,7 +6880,7 @@ function handedRequestPreparer(
         request.headers as Record<string, string | string[]>,
       );
     }
-    if (copies.body) {
+    if (copies.body || isUnfilledRequestBody(request.body)) {
       try {
         prepared.body = copyRequestBody(request.body);
       } catch (error) {

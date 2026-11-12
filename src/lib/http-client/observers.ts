@@ -61,14 +61,19 @@ export class ResponseObserverManager extends CallbackRegistry<
         (filter) =>
           matchesFilterPhase(filter.phases, phase.type) &&
           matchesFilter(filter, readContext(), 'response'),
-        () => [response, handedRequest(), copyCallbackPhase(phase)],
+        () => {
+          const request = handedRequest();
+          return request === undefined
+            ? undefined
+            : [response, request, copyCallbackPhase(phase)];
+        },
       );
   }
 }
 
 type ResponseObserverChain = (
   response: HTTPResponse,
-  handedRequest: () => AttemptRequest,
+  handedRequest: () => AttemptRequest | undefined,
   phase: ResponseObserverPhase,
   cancelSignal: AbortSignal | undefined,
   readContext: () => ObserverFilterContext,
@@ -101,14 +106,19 @@ export class ErrorObserverManager extends CallbackRegistry<
         (filter) =>
           matchesFilterPhase(filter.phases, phase.type) &&
           matchesFilter(filter, readContext(), 'error'),
-        () => [error, handedRequest(), copyCallbackPhase(phase)],
+        () => {
+          const request = handedRequest();
+          return request === undefined
+            ? undefined
+            : [error, request, copyCallbackPhase(phase)];
+        },
       );
   }
 }
 
 type ErrorObserverChain = (
   error: HTTPClientError,
-  handedRequest: () => AttemptRequest,
+  handedRequest: () => AttemptRequest | undefined,
   phase: ErrorObserverPhase,
   cancelSignal: AbortSignal | undefined,
   readContext: () => ObserverFilterContext,
@@ -179,16 +189,17 @@ function readFilterContextOnce<Context>(read: () => Context): () => Context {
  * ran (see `readFilterContextOnce`). A filter that throws is reported and its observer
  * skipped, and an observer that throws is reported without stopping the rest. Each
  * observer's arguments come from `argsFor`, so each is handed its own phase object; an
- * `argsFor` that throws is reported and that observer skipped. Once `cancelSignal` has
- * aborted no further observer runs: `send()` has stopped waiting on the chain, and may
- * have answered.
+ * `argsFor` that answers nothing - the request the observers are handed could not be
+ * built, which `runParentThenOwn` reports - ends the chain, as no observer can be called.
+ * Once `cancelSignal` has aborted no further observer runs: `send()` has stopped waiting
+ * on the chain, and may have answered.
  */
 async function runObservers<Filter, Args extends unknown[]>(
   label: 'ResponseObserver' | 'ErrorObserver',
   observers: ReadonlyArray<RegisteredCallback<unknown, Filter>>,
   cancelSignal: AbortSignal | undefined,
   matches: (filter: Filter) => boolean,
-  argsFor: () => Args,
+  argsFor: () => Args | undefined,
 ): Promise<void> {
   for (const { fn, filter } of observers) {
     if (cancelSignal?.aborted) {
@@ -212,15 +223,11 @@ async function runObservers<Filter, Args extends unknown[]>(
       return;
     }
 
-    // Built here, for the first observer that runs: the request copy and the body values
-    // it is handed (see `handedAttemptRequest`). One that cannot be built is reported, as
-    // a filter that throws is, and its observer skipped.
-    let args: Args;
-    try {
-      args = argsFor();
-    } catch (buildError) {
-      reportCallbackError(label, buildError);
-      continue;
+    // Built for the first observer that runs: the request copy and the body values it is
+    // handed (see `handedAttemptRequest`).
+    const args = argsFor();
+    if (args === undefined) {
+      return;
     }
 
     await safeHandleCallbackAndWait(label, fn, ...args);
@@ -240,6 +247,7 @@ export function runParentThenOwnResponseObservers(
   cancelSignal?: AbortSignal,
 ): Promise<void> {
   return runParentThenOwn(
+    'ResponseObserver',
     parent,
     own,
     request,
@@ -262,6 +270,7 @@ export function runParentThenOwnErrorObservers(
   cancelSignal?: AbortSignal,
 ): Promise<void> {
   return runParentThenOwn(
+    'ErrorObserver',
     parent,
     own,
     request,
@@ -294,13 +303,14 @@ export function runParentThenOwnErrorObservers(
  * after it, a sub-client's included.
  */
 async function runParentThenOwn<Chain>(
+  label: 'ResponseObserver' | 'ErrorObserver',
   parent: { readonly isEmpty: boolean; snapshot(): Chain } | undefined,
   own: { readonly isEmpty: boolean; snapshot(): Chain },
   request: AttemptRequest,
   readContext: () => ObserverFilterContext,
   run: (
     chain: Chain,
-    handedRequest: () => AttemptRequest,
+    handedRequest: () => AttemptRequest | undefined,
     readContext: () => ObserverFilterContext,
   ) => Promise<void>,
 ): Promise<void> {
@@ -308,8 +318,22 @@ async function runParentThenOwn<Chain>(
     parent === undefined || parent.isEmpty ? undefined : parent.snapshot();
   const ownChain = own.isEmpty ? undefined : own.snapshot();
 
-  let handed: AttemptRequest | undefined;
-  const handedRequest = () => (handed ??= handedAttemptRequest(request));
+  // Built once, by the first observer of either chain to run, and kept whether it is built
+  // or fails: a copy that throws - bytes the adapter detached, say - is reported once, and
+  // no observer of either chain runs.
+  let handed: { request: AttemptRequest | undefined } | undefined;
+  const handedRequest = (): AttemptRequest | undefined => {
+    if (handed === undefined) {
+      try {
+        handed = { request: handedAttemptRequest(request) };
+      } catch (buildError) {
+        handed = { request: undefined };
+        reportCallbackError(label, buildError);
+      }
+    }
+
+    return handed.request;
+  };
 
   if (parentChain !== undefined) {
     await run(parentChain, handedRequest, readContext);

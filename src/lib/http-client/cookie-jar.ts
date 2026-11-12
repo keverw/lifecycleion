@@ -407,7 +407,9 @@ export class CookieJar {
    * the nested suffix `s3.amazonaws.com`. Holds a key for exactly as long as `buckets`
    * does: written only where a bucket is created or deleted (`getOrCreateBucket`,
    * `deleteBucket`, `clearBuckets`), which are the only places `buckets` gains or loses a
-   * key.
+   * key. Each key is filed under every name `namesAbove` gives for it, so the index holds
+   * one entry per dot of each key - 100,000 sites under `com` are 100,000 entries in one
+   * set.
    */
   private bucketKeysUnder: Map<string, Set<string>> = new Map();
 
@@ -1714,12 +1716,7 @@ export class CookieJar {
       return;
     }
 
-    for (
-      let dot = site.indexOf('.');
-      dot !== -1;
-      dot = site.indexOf('.', dot + 1)
-    ) {
-      const parent = site.slice(dot + 1);
+    for (const parent of namesAbove(site)) {
       const keys = this.bucketKeysUnder.get(parent);
 
       // The name's entry goes with its last key, so the index holds no name without a
@@ -1803,12 +1800,7 @@ export class CookieJar {
 
       // Under each name the key ends in after a dot: `site.endsWith(`.${name}`)` holds
       // for exactly the names the key is filed under here.
-      for (
-        let dot = site.indexOf('.');
-        dot !== -1;
-        dot = site.indexOf('.', dot + 1)
-      ) {
-        const parent = site.slice(dot + 1);
+      for (const parent of namesAbove(site)) {
         let keys = this.bucketKeysUnder.get(parent);
 
         if (!keys) {
@@ -2124,14 +2116,7 @@ export class CookieJar {
     // Each is reached by its key, with no scan of the jar: the domain's own name and
     // each parent name it ends in are looked up, and the keys under it are read from
     // `bucketKeysUnder`.
-    const sites: string[] = [normalizedDomain];
-    for (
-      let dot = normalizedDomain.indexOf('.');
-      dot !== -1;
-      dot = normalizedDomain.indexOf('.', dot + 1)
-    ) {
-      sites.push(normalizedDomain.slice(dot + 1));
-    }
+    const sites = [normalizedDomain, ...namesAbove(normalizedDomain)];
 
     for (const site of sites) {
       if (this.holdsSecureCookieOver(site, name, preparedDomain, path, now)) {
@@ -2416,4 +2401,23 @@ export class CookieJar {
       );
     }
   }
+}
+
+/**
+ * The text after each dot in `name`, nearest first: the names it sits under, which
+ * `CookieJar`'s `bucketKeysUnder` files a bucket key under and the Leave Secure Cookies
+ * Alone check looks up. `name.endsWith(`.${parent}`)` holds for exactly these.
+ */
+function namesAbove(name: string): string[] {
+  const names: string[] = [];
+
+  for (
+    let dot = name.indexOf('.');
+    dot !== -1;
+    dot = name.indexOf('.', dot + 1)
+  ) {
+    names.push(name.slice(dot + 1));
+  }
+
+  return names;
 }

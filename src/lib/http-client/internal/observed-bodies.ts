@@ -12,10 +12,16 @@ import { cloneBodyValue } from './request-body-copy';
  * reads it into. The copies of one attempt's request share the token, and so the one
  * value built for it, as an attempt's bytes or form `body` and `rawBody` share one token.
  */
-const pendingByToken = new WeakMap<
-  object,
-  { build: () => unknown; value?: unknown }
->();
+const pendingByToken = new WeakMap<object, Pending>();
+
+/**
+ * A token's value: still to be built, or built - and the build, holding the source body,
+ * let go - or the error building it threw, kept so it is thrown again, not built again.
+ */
+type Pending =
+  | { readonly build: () => unknown }
+  | { readonly value: unknown }
+  | { readonly error: unknown };
 
 /** A token for `build()`'s value; see `pendingByToken`. */
 function deferred(build: () => unknown): object {
@@ -42,9 +48,10 @@ export function deferredBodyCopy(body: Uint8Array | FormData): object {
 
 /**
  * The value an observer is handed for a `body` or `rawBody` as an attempt's request holds
- * it: the value a token stands for, built the first time it is asked for and kept, or the
- * value itself. Told by the token's own record, so a caller's value - a best-effort
- * snapshot's body, say - is never asked anything.
+ * it: the value a token stands for, built the first time it is asked for and kept - or
+ * the error the build threw, thrown again - or the value itself. Told by the token's own
+ * record, so a caller's value - a best-effort snapshot's body, say - is never asked
+ * anything.
  */
 export function handedBodyValue(value: unknown): unknown {
   if (typeof value !== 'object' || value === null) {
@@ -56,8 +63,19 @@ export function handedBodyValue(value: unknown): unknown {
     return value;
   }
 
-  if (!('value' in pending)) {
-    pending.value = pending.build();
+  if ('build' in pending) {
+    let built: Pending;
+    try {
+      built = { value: pending.build() };
+    } catch (error) {
+      built = { error };
+    }
+    pendingByToken.set(value, built);
+    return handedBodyValue(value);
+  }
+
+  if ('error' in pending) {
+    throw pending.error;
   }
 
   return pending.value;

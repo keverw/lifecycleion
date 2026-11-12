@@ -94,6 +94,14 @@ export interface InterceptorChainOptions {
    */
   onInterceptorCalled?: () => void;
   /**
+   * Collects each body a `bodyContainsKeys` filter parsed (see `readRequestBodyContents`),
+   * and each copy the phase's preparation took of one, so the phase can let go of the data
+   * parsed for them once both chains have run (see `forgetParsedContents`): kept until
+   * then, a body is parsed once however many filters and interceptors of the phase read it,
+   * a parent client's and a sub-client's alike.
+   */
+  parsedBodies?: Set<object>;
+  /**
    * Called once, as the first interceptor's function this phase calls is about to be
    * called - after its filter, which reads the request as it was handed over - and its
    * answer read in place of the request: the client hands each phase's interceptors a
@@ -125,8 +133,15 @@ async function runInterceptors(
     onCopyFailure,
     onInterceptorCalled,
     prepareRequest,
+    parsedBodies,
   }: InterceptorChainOptions,
 ): Promise<InterceptedRequest | InterceptorCancel> {
+  const readBodyContents = (
+    body: Record<string, unknown>,
+  ): Record<string, unknown> => {
+    parsedBodies?.add(body);
+    return readRequestBodyContents(body);
+  };
   let current = request;
   /** Whether `current` is an interceptor's result, not yet copied. */
   let isCurrentUncopied = isInterceptorResult;
@@ -178,7 +193,7 @@ async function runInterceptors(
           body: current.body,
         },
         'request',
-        readRequestBodyContents,
+        readBodyContents,
       )
     ) {
       continue;
@@ -191,6 +206,11 @@ async function runInterceptors(
     if (pendingPrepare !== undefined) {
       current = pendingPrepare(current);
       pendingPrepare = undefined;
+
+      // A copy of a body a filter parsed takes the data parsed for it.
+      if (typeof current.body === 'object' && current.body !== null) {
+        parsedBodies?.add(current.body);
+      }
     }
 
     // Asked again: the copy, the filter and the preparation above run caller code - a
@@ -347,9 +367,11 @@ function handedRequest(request: InterceptedRequest): InterceptedRequest {
 
   const lazy: LazyBody = {
     get: () => {
+      // Read once it is released: a parse that throws leaves it unread, so the next read
+      // parses it again rather than answering the empty copy.
       if (!lazy.isTouched) {
-        lazy.isTouched = true;
         releaseRequestBody(lazy.body);
+        lazy.isTouched = true;
       }
 
       return lazy.body;

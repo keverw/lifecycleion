@@ -563,26 +563,30 @@ test('every observer, in every phase, is handed a bytes body as a copy of the by
   );
 });
 
-test('an observer whose request copy cannot be built is reported and skipped, and send() still answers', async () => {
-  const client = new HTTPClient({
+test('a request copy for the observers that cannot be built is built once and reported once, for a parent and a sub-client', async () => {
+  const root = new HTTPClient({
     adapter: {
       getType: () => 'mock',
       send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
     },
   });
+  const sub = root.createSubClient();
   const handed: unknown[] = [];
-  client.addResponseObserver((_response, request) => {
-    handed.push(request.body);
-  });
+  for (const client of [root, root, sub, sub]) {
+    client.addResponseObserver((_response, request) => {
+      handed.push(request.body);
+    });
+  }
   const form = new FormData();
   form.append('field', 'value');
-  const builder = client.put('https://api.example.com/x').body(form);
-  // The adapter's copy is the first append from here; the observers' copy the second.
+  const builder = sub.put('https://api.example.com/x').body(form);
+  // The adapter's copy is the first append from here; every later one, the observers'
+  // copy, throws.
   let appends = 0;
   const original: unknown = Reflect.get(FormData.prototype, 'append');
   const append = spyOn(FormData.prototype, 'append').mockImplementation(
     function (this: FormData, ...args: unknown[]) {
-      if (++appends === 2) {
+      if (++appends >= 2) {
         throw new Error('copy failed');
       }
       Reflect.apply(original as (...a: unknown[]) => void, this, args);
@@ -599,6 +603,7 @@ test('an observer whose request copy cannot be built is reported and skipped, an
 
   expect(response.status).toBe(200);
   expect(handed).toEqual([]);
+  expect(appends).toBe(2);
   expect(reports).toHaveLength(1);
   expect(((reports[0] as Error).cause as Error).message).toBe('copy failed');
 });

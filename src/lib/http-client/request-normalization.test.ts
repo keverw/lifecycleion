@@ -3603,11 +3603,8 @@ test('an interceptor that edits the request in place and is then cancelled leave
     expect(observed).toHaveLength(1);
     expect(observed[0].requestURL).toBe(reportedURL);
     expect(observed[0].headers).not.toHaveProperty('authorization');
-    // The body is copied for the retry and redirect phases' interceptors, not the
-    // initial phase's, which are handed the builder's own.
-    expect(observed[0].rawBody).toEqual(
-      phase === 'initial' ? { a: 1, edited: true } : { a: 1 },
-    );
+    // A JSON body is copied for every phase's interceptors.
+    expect(observed[0].rawBody).toEqual({ a: 1 });
     // Nor did the edit reach the hop that answered, in the redirect phase.
     expect(sent.map((request) => 'authorization' in request.headers)).toEqual(
       phase === 'initial' ? [] : [false],
@@ -16184,9 +16181,9 @@ test('an interceptor that edits the body it is handed in place sends its edit, i
   ]);
 });
 
-test('a request an interceptor edits in place and then ends is reported with its edit', async () => {
-  // The initial phase hands its interceptors the builder's own body, so an edit made in
-  // place is in the request it reports.
+test('a request whose JSON body an interceptor edits in place and then ends is reported without its edit, and a result returned with it', async () => {
+  // The initial phase hands its interceptors a copy of a JSON body, so an edit made in
+  // place is not in the request it reports.
   for (const end of ['throw', 'cancel'] as const) {
     const { adapter, sent } = roundSeventyTwoBAdapter([]);
     const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
@@ -16205,7 +16202,7 @@ test('a request an interceptor edits in place and then ends is reported with its
     await client.post('/x').json({ a: 1 }).send();
 
     expect(sent).toEqual([]);
-    expect(reported).toEqual(['{"a":1,"edited":true}', { a: 1, edited: true }]);
+    expect(reported).toEqual(['{"a":1}', { a: 1 }]);
   }
 
   // Returned and then refused: the result is reported, its text read from the edited
