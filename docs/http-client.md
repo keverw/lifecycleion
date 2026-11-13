@@ -635,7 +635,7 @@ retry held to a cross-origin hop's own request, on the stripped request that is 
 hop's own body - see [Redirect Handling](#redirect-handling)). On Node, `FetchAdapter` refuses a `Transfer-Encoding`,
 `Keep-Alive`, `Upgrade` or `Expect` header, or a `Connection` other than `close` or `keep-alive`, before the upload
 starts, as Node's `fetch` refuses them. A request that breaks more than one of these rules is refused for its URL first, then its body type,
-headers, method and `GET`/`HEAD` body, by the client and by each adapter driven directly. An empty string, bytes or form is a body there; a JSON body whose
+headers, method and `GET`/`HEAD` body, by the client and by `FetchAdapter`, `XHRAdapter` and `NodeAdapter` driven directly; `MockAdapter` refuses a body first, and routes a URL that does not parse as written. An interceptor's `CONNECT` is refused once the chain ends, after its URL: one interceptor may hand it to the next, which can change it. An empty string, bytes or form is a body there; a JSON body whose
 `toJSON` answers `undefined` serializes to nothing, and goes out with none - an interceptor's is read
 once, when its copy is taken. Header entries are copied at that
 point: a single value is converted to a string, an array stays an array with each
@@ -1384,7 +1384,7 @@ XHRAdapter reports the total the runtime gives. A count that passes it - a compr
 
 ## Adapters
 
-Every built-in adapter, driven directly, refuses a `method` that is absent, empty or not an HTTP token (`GET /x`) as a non-retryable `adapter_error` before anything is sent, with a message that does not quote the method. `HTTPClient` refuses one before that, when the request is built.
+Every built-in adapter, driven directly, refuses a `method` that is absent, empty or not an HTTP token (`GET /x`) as a non-retryable `adapter_error` before anything is sent, with a message that does not quote the method. `HTTPClient` refuses one before that, when the request is built. Each also refuses a body other than a string, a `Uint8Array`, a `FormData` or none - an `ArrayBuffer`, a `Blob`, a `ReadableStream`, a plain object, a number - as a non-retryable `TypeError` in the same words (`FetchAdapter sends a string, Uint8Array or FormData body; serialize other bodies first`), before any upload progress is reported; `HTTPClient` serializes a plain object or array as JSON, and refuses the rest, before an adapter is handed it.
 
 ### FetchAdapter (Default)
 
@@ -1510,6 +1510,8 @@ interface NodeAdapterConfig {
   decompress?: boolean; // Default: true - decode gzip/deflate/br/zstd bodies and send Accept-Encoding. false hands bodies over as received. A non-boolean throws.
 }
 ```
+
+TLS material given as bytes is copied once, and the copy reused while your buffer still holds the same bytes; the copy is kept while your buffer is reachable, `mtls.key`'s too. Wiping a key buffer does not take the key out of memory either way: Node's and Bun's HTTPS agent keeps the key's text in the name of its connection pool.
 
 TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path - those the runtime reports as a certificate failure. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends. A server rejecting the client certificate may only close or reset the connection on some runtimes (Bun does for TLS 1.3), which is status `0` and retried as any transport failure is.
 

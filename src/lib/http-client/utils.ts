@@ -707,27 +707,44 @@ export function findBrowserPage(): BrowserPage | undefined {
 
 /**
  * What is wrong with `candidate` as a request method - completing "the method …" - or
- * `undefined` when nothing is. A method is a non-empty string of RFC 9110 token
- * characters; every adapter refuses anything else, but only at dispatch, where a
- * caller's typo reads as a failed send. Shared by `request()` and the interceptor
- * snapshot, so neither accepts what the other refuses.
+ * `undefined` when nothing is: a `CONNECT`, or what {@link describeMalformedHTTPMethod}
+ * refuses. Shared by `request()` and request filters; the interceptor phases check
+ * {@link describeMalformedHTTPMethod} as each result is copied, and a `CONNECT` once the
+ * chain's URL is checked (see `_assertRequestShapeIsSupported`).
  */
 export function describeInvalidHTTPMethod(
+  candidate: unknown,
+): string | undefined {
+  const malformed = describeMalformedHTTPMethod(candidate);
+  if (malformed !== undefined) {
+    return malformed;
+  }
+  // CONNECT asks for a tunnel rather than a response, which no adapter here handles:
+  // NodeAdapter would wait on it until the attempt timed out, or forever.
+  if (asciiUppercase(candidate as string) === 'CONNECT') {
+    return CONNECT_METHOD_PROBLEM;
+  }
+  return undefined;
+}
+
+/** What {@link describeInvalidHTTPMethod} says of a `CONNECT`. */
+export const CONNECT_METHOD_PROBLEM =
+  'is CONNECT, which opens a tunnel and is not supported';
+
+/**
+ * What is wrong with `candidate` as the name of a method, as
+ * {@link describeInvalidHTTPMethod} words it, or `undefined` when nothing is. A method is
+ * a non-empty string of RFC 9110 token characters; every adapter refuses anything else,
+ * but only at dispatch, where a caller's typo reads as a failed send. The interceptor
+ * snapshot's rule: a `CONNECT` is a method name, refused once the chain's URL is checked.
+ */
+export function describeMalformedHTTPMethod(
   candidate: unknown,
 ): string | undefined {
   if (typeof candidate !== 'string') {
     return `is not a string (got ${describeValue(candidate)})`;
   }
-  const tokenProblem = describeNonTokenMethod(candidate);
-  if (tokenProblem !== undefined) {
-    return tokenProblem;
-  }
-  // CONNECT asks for a tunnel rather than a response, which no adapter here handles:
-  // NodeAdapter would wait on it until the attempt timed out, or forever.
-  if (asciiUppercase(candidate) === 'CONNECT') {
-    return 'is CONNECT, which opens a tunnel and is not supported';
-  }
-  return undefined;
+  return describeNonTokenMethod(candidate);
 }
 
 /**

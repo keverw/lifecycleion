@@ -29,6 +29,7 @@ import {
   markNonRetryableAdapterError,
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
+  unsendableBodyRefusal,
 } from '../internal/adapter-error';
 import {
   isSignalAborted,
@@ -73,7 +74,6 @@ import {
   isRequestBodyBytes,
   normalizeAdapterResponseHeaders,
   parseContentType,
-  UNSUPPORTED_REQUEST_BODY_MESSAGE,
 } from '../utils';
 import type {
   HTTPAdapter,
@@ -356,29 +356,13 @@ export class MockAdapter implements HTTPAdapter {
       method,
       maxResponseBytes,
     } = readAdapterRequestFields(request);
-    // A body that claims to be a form by its prototype chain but holds no form's state - a
-    // `Proxy` over one, an object that only inherits from `FormData.prototype` - is refused
-    // as NodeAdapter refuses it, rather than reaching the route as the value itself.
-    if (!isFormData(body) && inheritsFromFormData(body)) {
-      const refusal = new TypeError(UNSUPPORTED_REQUEST_BODY_MESSAGE);
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
-    }
-    // Any other body no adapter writes - an `ArrayBuffer`, a `Blob`, a plain object -
-    // refused as NodeAdapter refuses it, rather than reaching the route as it is: a test
-    // driving the adapter directly would otherwise pass here and fail against a server.
-    // `HTTPClient` serializes or refuses such a body before any adapter is handed it.
-    if (
-      !isNullish(body) &&
-      typeof body !== 'string' &&
-      !isRequestBodyBytes(body) &&
-      !isFormData(body)
-    ) {
-      const refusal = new TypeError(
-        'MockAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
-      );
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
+    // A body no adapter writes - an `ArrayBuffer`, a `Blob`, a plain object, a `Proxy` over
+    // a form - refused as every adapter refuses it, rather than reaching the route as it
+    // is: a test driving the adapter directly would otherwise pass here and fail against
+    // a server.
+    const bodyRefusal = unsendableBodyRefusal('MockAdapter', body);
+    if (bodyRefusal !== undefined) {
+      throw bodyRefusal;
     }
     // Names lowercased, as a Node server receives them, so a request driven straight at
     // the adapter with `Content-Type` is read like one the client sent.
@@ -1413,15 +1397,6 @@ function appendCookieAttribute(
 ): void {
   if (value !== undefined && value !== '') {
     parts.push(`${name}=${value}`);
-  }
-}
-
-/** Whether `value`'s prototype chain holds `FormData.prototype`; a chain that throws holds none. */
-function inheritsFromFormData(value: unknown): boolean {
-  try {
-    return value instanceof FormData;
-  } catch {
-    return false;
   }
 }
 

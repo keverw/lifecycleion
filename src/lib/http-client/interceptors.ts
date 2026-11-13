@@ -1,5 +1,5 @@
 import {
-  describeInvalidHTTPMethod,
+  describeMalformedHTTPMethod,
   matchesFilter,
   matchesFilterPhase,
   mergeHeaders,
@@ -486,9 +486,11 @@ function interceptedBody(request: InterceptedRequest): unknown {
  * uppercased (see `normalizeStandardMethod`), so a `post` is the `POST` the retry and
  * redirect rules check for; any other method is kept as given.
  * Throws on a `requestURL` that is not a string, a `method` that is not a method name
- * (see `describeInvalidHTTPMethod`), or `headers` that is not a plain object (an array, a
- * `Headers` or a `Map` is refused), and on any read or conversion that throws; each phase
- * reports that as the interceptor's failure.
+ * (see `describeMalformedHTTPMethod`), or `headers` that is not a plain object (an array,
+ * a `Headers` or a `Map` is refused), and on any read or conversion that throws; each
+ * phase reports that as the interceptor's failure. A `CONNECT` is a method name: handed
+ * to the next interceptor as any other, and refused once the chain's URL is checked, as
+ * FetchAdapter, XHRAdapter and NodeAdapter refuse a request's URL before its method.
  */
 export function snapshotInterceptedRequest(
   request: InterceptedRequest,
@@ -502,7 +504,7 @@ export function snapshotInterceptedRequest(
     );
   }
 
-  const methodProblem = describeInvalidHTTPMethod(method);
+  const methodProblem = describeMalformedHTTPMethod(method);
 
   if (methodProblem !== undefined) {
     throw new TypeError(

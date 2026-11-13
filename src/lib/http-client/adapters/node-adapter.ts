@@ -16,6 +16,7 @@ import {
   connectRefusal,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
+  unsendableBodyRefusal,
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
 import { isPlainRecord } from '../internal/plain-record';
@@ -546,8 +547,9 @@ export class NodeAdapter implements HTTPAdapter {
     dropBodilessContentLength(request);
 
     // An unusable URL is refused first, then a body this adapter cannot send, then a
-    // refused header and the method: the order `HTTPClient` checks them in, as every
-    // adapter does.
+    // refused header and the method: the order `HTTPClient` checks them in, as FetchAdapter
+    // and XHRAdapter do. MockAdapter, which routes a URL that does not parse as written,
+    // refuses a body first.
     //
     // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
     // URL fails the same way on every attempt. In its own words, without the parser's
@@ -589,18 +591,11 @@ export class NodeAdapter implements HTTPAdapter {
     // the request is created, so a request refused before it is sent reports no upload
     // start and opens no connection, as in FetchAdapter and XHRAdapter. Read once, by
     // both the branch that opens the upload's outcome and the one that writes the body.
-    const classifiedBody = classifyRequestBody(request.body);
-    if (
-      classifiedBody === undefined &&
-      request.body !== undefined &&
-      request.body !== null
-    ) {
-      const refusal = new TypeError(
-        'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
-      );
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
+    const bodyRefusal = unsendableBodyRefusal('NodeAdapter', request.body);
+    if (bodyRefusal !== undefined) {
+      throw bodyRefusal;
     }
+    const classifiedBody = classifyRequestBody(request.body);
 
     // This adapter frames every body itself with a `Content-Length`. A caller's
     // `Transfer-Encoding` would go out beside it - both on one message, which RFC 9112
@@ -5214,7 +5209,10 @@ function describeTLSMaterial(value: unknown, where = ''): string {
 /**
  * The copy each byte-form TLS value was last handed to TLS as, by the value: reused while
  * the value still holds the same bytes - a compare, not an allocation and a copy, on each
- * request - and taken again once the caller has changed them in place.
+ * request - and taken again once the caller has changed them in place. Held as long as
+ * the caller's value is, an `mtls.key`'s too: the runtime's HTTPS agent keeps the key's
+ * text in the name of its connection pool anyway, so a copy per request would not take
+ * it out of memory.
  */
 const ownedTLSBytes = new WeakMap<object, Buffer>();
 

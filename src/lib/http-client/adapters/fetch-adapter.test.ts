@@ -547,17 +547,27 @@ describe('FetchAdapter', () => {
       { connection: ['close', 'close'] },
       { Connection: 'close', connection: 'close' },
     ];
+    const named = [
+      'a Transfer-Encoding header',
+      'a Keep-Alive header',
+      'an Upgrade header',
+      'an Expect header',
+      ...Array.from(
+        { length: 3 },
+        () => 'a Connection header other than close or keep-alive',
+      ),
+    ];
 
     const versions = process.versions as Record<string, string | undefined>;
     const bunVersion = versions.bun;
     delete versions.bun;
     try {
-      for (const headers of refused) {
+      for (const [index, headers] of refused.entries()) {
         const { refusal, uploads } = await sendWith(headers);
 
         expect(refusal?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
-        expect(String(refusal?.message)).toContain(
-          'on Node: its fetch refuses one',
+        expect(String(refusal?.message)).toBe(
+          `[FetchAdapter] Cannot send a request with ${named[index]} on Node: its fetch refuses one.`,
         );
         expect(uploads).toEqual([]);
       }
@@ -571,7 +581,12 @@ describe('FetchAdapter', () => {
       }
       expect(calls).toBe(2);
     } finally {
-      versions.bun = bunVersion;
+      // Put back as it was: an own `bun: undefined` would read as present to `in`.
+      if (bunVersion === undefined) {
+        delete versions.bun;
+      } else {
+        versions.bun = bunVersion;
+      }
     }
 
     for (const headers of refused) {

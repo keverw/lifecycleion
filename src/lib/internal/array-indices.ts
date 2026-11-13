@@ -32,6 +32,9 @@ export function isMostlyHoles(holes: number, entries: number): boolean {
  * listing an entry about 550 ns, so a walk by index is cheaper down to about one entry in
  * a hundred; half of {@link SPARSE_RUN_PER_ENTRY} keeps a half or a third full array on
  * the walk, with room for {@link FILL_SAMPLES} samples to tell it apart from a sparser one.
+ * A `Proxy` over an array answers with its target's prototype and is walked at this ratio
+ * too, one `has` trap call a step: no portable check tells a `Proxy` apart without
+ * running its traps, and the walk is still bounded by its length, as a dense one's is.
  */
 export const WALKED_HOLES_PER_ENTRY = 32;
 

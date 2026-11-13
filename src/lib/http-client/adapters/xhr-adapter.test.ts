@@ -1159,7 +1159,7 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('a send the XHR refuses is non-retryable and takes its abort listener off the signal', async () => {
+  test('a send the XHR refuses is non-retryable and takes its abort listener off the signal, and a body refused first adds none', async () => {
     let added = 0;
     let removed = 0;
     const signal = {
@@ -1195,11 +1195,8 @@ describe('XHRAdapter', () => {
       expect(added).toBe(1);
       expect(removed).toBe(1);
 
-      // A body the XHR cannot convert - a `toString` that throws - fails the same way.
-      FakeXHR.prototype.send = (body?: XMLHttpRequestBodyInit | null) => {
-        // eslint-disable-next-line @typescript-eslint/no-base-to-string -- converted as a real XHR converts it
-        String(body);
-      };
+      // A body this adapter does not send - one the XHR would convert, by a `toString`
+      // that throws - is refused before the listener goes on, so there is none to take off.
       const unconvertible = await new XHRAdapter()
         .send({
           requestURL: 'https://api.test/x',
@@ -1218,7 +1215,11 @@ describe('XHRAdapter', () => {
         );
 
       expect(unconvertible?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
-      expect(removed).toBe(2);
+      expect(unconvertible?.message).toBe(
+        'XHRAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+      );
+      expect(added).toBe(1);
+      expect(removed).toBe(1);
     } finally {
       FakeXHR.prototype.send = originalSend;
     }
@@ -3969,38 +3970,6 @@ describe('XHRAdapter - upload listeners', () => {
       { loaded: 5, progress: 1 },
     ]);
   });
-
-  test("a Blob body's size is read once, deciding the listeners and its final upload event", async () => {
-    for (const size of [0, 7]) {
-      let reads = 0;
-      const body = new (class extends Blob {
-        public override get size(): number {
-          reads++;
-          return size;
-        }
-      })();
-      const uploads: Array<{ loaded: number; progress: number }> = [];
-      const promise = new XHRAdapter().send({
-        requestURL: 'https://api.test/data',
-        method: 'POST',
-        headers: {},
-        // A Blob reaches an adapter driven directly, as XHR sends one natively.
-        body: body as unknown as AdapterRequest['body'],
-        onUploadProgress: (event) => {
-          uploads.push({ loaded: event.loaded, progress: event.progress });
-        },
-      });
-
-      expect(uploadListenerCount(lastXHR)).toBe(size === 0 ? 0 : 2);
-
-      lastXHR.status = 204;
-      lastXHR.simulateLoad();
-      await promise;
-
-      expect(reads).toBe(1);
-      expect(uploads.at(-1)).toEqual({ loaded: size, progress: 1 });
-    }
-  });
 });
 
 describe('XHRAdapter - upload listeners without onUploadProgress', () => {
@@ -4029,28 +3998,6 @@ describe('XHRAdapter - upload listeners without onUploadProgress', () => {
     lastXHR.status = 204;
     lastXHR.simulateLoad();
     await promise;
-  });
-
-  test("a request without onUploadProgress never reads its Blob body's size", async () => {
-    let reads = 0;
-    const body = new (class extends Blob {
-      public override get size(): number {
-        reads++;
-        return 7;
-      }
-    })();
-    const promise = new XHRAdapter().send({
-      requestURL: 'https://api.test/data',
-      method: 'POST',
-      headers: {},
-      // A Blob reaches an adapter driven directly, as XHR sends one natively.
-      body: body as unknown as AdapterRequest['body'],
-    });
-
-    lastXHR.status = 204;
-    lastXHR.simulateLoad();
-    expect((await promise).status).toBe(204);
-    expect(reads).toBe(0);
   });
 
   test('a request without onUploadProgress never reads an upload that throws', async () => {
@@ -4523,15 +4470,8 @@ test('a refused answer still ends the upload with its final event', async () => 
   expect(uploads).toEqual([0, 1]);
 });
 
-test('a cancel from a getter read before the send ends the send as the abort when abort() throws', async () => {
+test('a cancel from the 0% upload callback ends the send as the abort when abort() throws', async () => {
   const controller = new AbortController();
-  const blob = new Blob(['abc']);
-  Object.defineProperty(blob, 'size', {
-    get() {
-      controller.abort();
-      return 3;
-    },
-  });
   const realAbort = Object.getOwnPropertyDescriptor(FakeXHR.prototype, 'abort');
   FakeXHR.prototype.abort = () => {
     throw new Error('abort refused');
@@ -4543,10 +4483,11 @@ test('a cancel from a getter read before the send ends the send as the abort whe
         requestURL: 'https://local.test/data',
         method: 'POST',
         headers: {},
-        // A `Blob` from a caller driving the adapter directly, which sizes it.
-        body: blob as unknown as AdapterRequest['body'],
+        body: 'abc',
         signal: controller.signal,
-        onUploadProgress: () => {},
+        onUploadProgress: () => {
+          controller.abort();
+        },
       })
       .catch((error: unknown) => error)) as Error;
 
@@ -5090,55 +5031,23 @@ describe('XHRAdapter - shims, early cancels and odd sizes', () => {
     expect(response.streamErrorCode).toBe('response_too_large');
   });
 
-  test('a request cancelled by a getter read before it goes out reports no upload start', async () => {
-    const controller = new AbortController();
-    const uploads: number[] = [];
-    const blob = new Blob(['abc']);
-    Object.defineProperty(blob, 'size', {
-      get() {
-        controller.abort();
-        return 3;
-      },
-    });
-
-    const outcome = (await new XHRAdapter()
-      .send({
-        requestURL: 'https://api.test/data',
-        method: 'POST',
-        headers: {},
-        body: blob as unknown as AdapterRequest['body'],
-        signal: controller.signal,
-        onUploadProgress: (event) => {
-          uploads.push(event.progress);
-        },
-      })
-      .catch((error: unknown) => error)) as Error;
-
-    expect(outcome.name).toBe('AbortError');
-    expect(uploads).toEqual([]);
-  });
-
   test('a signal that reads aborted without telling its listeners gets no upload start', async () => {
     const uploads: number[] = [];
+    // Aborted as the listener goes on, without calling it.
     const signal = {
       aborted: false,
-      addEventListener() {},
+      addEventListener() {
+        signal.aborted = true;
+      },
       removeEventListener() {},
     };
-    const blob = new Blob(['abc']);
-    Object.defineProperty(blob, 'size', {
-      get() {
-        signal.aborted = true;
-        return 3;
-      },
-    });
 
     const outcome = (await new XHRAdapter()
       .send({
         requestURL: 'https://api.test/data',
         method: 'POST',
         headers: {},
-        body: blob as unknown as AdapterRequest['body'],
+        body: 'abc',
         signal: signal as unknown as AbortSignal,
         onUploadProgress: (event) => {
           uploads.push(event.progress);

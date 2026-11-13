@@ -19,6 +19,7 @@ import {
   makeAbortError,
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
+  unsendableBodyRefusal,
 } from '../internal/adapter-error';
 import {
   isSignalAborted,
@@ -104,8 +105,8 @@ export class XHRAdapter implements HTTPAdapter {
     // worker's `location` - with credentials withheld for another origin than the initial
     // URL's, and that one absolute URL is what is opened, what `compareResponseURL`
     // compares `responseURL` with, and what a `Location` resolves against. One that does
-    // not resolve, or is not http(s), is refused first, as every adapter refuses it, as
-    // the non-retryable error it is (see `resolveBrowserDispatchURL`): whether an answer
+    // not resolve, or is not http(s), is refused first, as FetchAdapter and NodeAdapter
+    // refuse it, as the non-retryable error it is (see `resolveBrowserDispatchURL`): whether an answer
     // came from where the request was sent cannot be told without an absolute URL to
     // compare `responseURL` with, and XHR would open a `file:` or `data:` URL where the
     // runtime loads one.
@@ -116,6 +117,13 @@ export class XHRAdapter implements HTTPAdapter {
     );
     if (typeof answeredURL !== 'string') {
       throw answeredURL;
+    }
+
+    // XHR sends a plain object as `[object Object]` and a number as its text: refused, as
+    // every adapter refuses a body it does not send.
+    const bodyRefusal = unsendableBodyRefusal('XHRAdapter', requestBody);
+    if (bodyRefusal !== undefined) {
+      throw bodyRefusal;
     }
 
     const upperMethod = asciiUppercase(method);
@@ -260,8 +268,8 @@ export class XHRAdapter implements HTTPAdapter {
         return;
       }
 
-      // Both read by the abort listener, so declared before it is added: a caller's getter
-      // read before the send (a `Blob`'s `size`) may abort the signal at once.
+      // Both read by the abort listener, so declared before it is added: a signal of the
+      // caller's may call it as it is added.
       //
       // Set as `load` starts, which answers whatever a progress callback then cancels.
       let didLoad = false;
@@ -401,8 +409,8 @@ export class XHRAdapter implements HTTPAdapter {
             return;
           }
 
-          // Not sent yet - a caller's getter read while the request is prepared (a `Blob`'s
-          // `size`), or the 0% upload callback, cancelled it: answered here, and never sent.
+          // Not sent yet - the 0% upload callback, or the caller's code while the request
+          // was prepared, cancelled it: answered here, and never sent.
           if (!didSend) {
             reject(makeAbortError());
             return;
@@ -463,9 +471,8 @@ export class XHRAdapter implements HTTPAdapter {
       let uploadedBytes = 0;
       let uploadTotalBytes = 0;
 
-      // The size of a body that is not text, read once, so a value of the caller's (a
-      // `Blob`'s `size`) is read at most once: `0` for none or an empty one, `undefined`
-      // where it cannot be known up front (a `FormData`). Text with any characters is at
+      // The size of a body that is not text, read once: `0` for none or an empty one,
+      // `undefined` where it cannot be known up front (a `FormData`). Text with any characters is at
       // least a byte, so it is measured only by the final upload event, and only when the
       // browser reported nothing. Only when upload progress was asked for: nothing else
       // reads it.

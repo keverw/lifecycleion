@@ -12434,7 +12434,7 @@ test('a header string passed where a header object belongs is not written into t
 
 test("a parent whose interceptors are not called in a phase leaves the sub-client's chain the request uncopied", async () => {
   // A copy is taken through `snapshotInterceptedRequest`, which checks the method with
-  // `describeInvalidHTTPMethod`: counted from the moment the request is sent, nothing
+  // `describeMalformedHTTPMethod`: counted from the moment the request is sent, nothing
   // else calls it before the sub-client's interceptor runs.
   const adapter: HTTPAdapter = {
     getType: () => 'node',
@@ -12447,7 +12447,7 @@ test("a parent whose interceptors are not called in a phase leaves the sub-clien
     registerOnParent(parent);
     const child = parent.createSubClient();
     let copies = -1;
-    const methodCheck = spyOn(httpUtils, 'describeInvalidHTTPMethod');
+    const methodCheck = spyOn(httpUtils, 'describeMalformedHTTPMethod');
     try {
       child.addRequestInterceptor((request) => {
         copies = methodCheck.mock.calls.length;

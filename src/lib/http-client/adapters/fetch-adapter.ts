@@ -18,6 +18,7 @@ import {
   markResponseStreamAbort,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
+  unsendableBodyRefusal,
 } from '../internal/adapter-error';
 import {
   extractFetchHeaders,
@@ -112,6 +113,14 @@ export class FetchAdapter implements HTTPAdapter {
 
     if (typeof dispatchedURL !== 'string') {
       throw dispatchedURL;
+    }
+
+    // `fetch` sends a plain object as `[object Object]` and a number as its text, and on
+    // Node fails a `ReadableStream` on every attempt as a network error: refused, as every
+    // adapter refuses a body it does not send.
+    const bodyRefusal = unsendableBodyRefusal('FetchAdapter', body);
+    if (bodyRefusal !== undefined) {
+      throw bodyRefusal;
     }
 
     // Refused before the method, as `HTTPClient` and the other adapters check a request's
@@ -889,13 +898,13 @@ function isFetchDispatchRefusal(error: Error): boolean {
 /**
  * Request headers Node's `fetch` (undici) refuses whatever their value, when it
  * dispatches: it frames and keeps connections itself, switches no protocols and waits for
- * no `100 Continue`.
+ * no `100 Continue`. By lowercase name, each to what a refusal calls it.
  */
-const NODE_FETCH_REFUSED_HEADERS: ReadonlySet<string> = new Set([
-  'transfer-encoding',
-  'keep-alive',
-  'upgrade',
-  'expect',
+const NODE_FETCH_REFUSED_HEADERS: ReadonlyMap<string, string> = new Map([
+  ['transfer-encoding', 'a Transfer-Encoding header'],
+  ['keep-alive', 'a Keep-Alive header'],
+  ['upgrade', 'an Upgrade header'],
+  ['expect', 'an Expect header'],
 ]);
 
 /**
@@ -923,8 +932,9 @@ function nodeFetchRefusedHeader(
   for (const [name, value] of Object.entries(headers)) {
     const lowerName = asciiLowercase(name);
 
-    if (NODE_FETCH_REFUSED_HEADERS.has(lowerName)) {
-      return `a ${lowerName} header`;
+    const refused = NODE_FETCH_REFUSED_HEADERS.get(lowerName);
+    if (refused !== undefined) {
+      return refused;
     }
 
     if (lowerName === 'connection') {
@@ -939,7 +949,7 @@ function nodeFetchRefusedHeader(
 
   return connection.length === 0 || text === 'close' || text === 'keep-alive'
     ? undefined
-    : 'a connection header other than close or keep-alive';
+    : 'a Connection header other than close or keep-alive';
 }
 
 /** Whether `fetch` is Node's own: Node, not Bun or Deno, which say they are Node too. */

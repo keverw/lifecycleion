@@ -1,9 +1,13 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
+import http from 'node:http';
+import https from 'node:https';
 import { FetchAdapter } from '../adapters/fetch-adapter';
 import { MockAdapter } from '../adapters/mock-adapter';
 import { NodeAdapter } from '../adapters/node-adapter';
 import { XHRAdapter } from '../adapters/xhr-adapter';
+import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
 import { HTTPClient } from '../http-client';
+import type { AdapterRequest, AdapterResponse, HTTPAdapter } from '../types';
 import {
   bodyOnBodilessMethodMessage,
   forbiddenMethodMessage,
@@ -77,6 +81,7 @@ test('every adapter driven directly refuses an unusable URL before its body, hea
         { method: 'TRACE' },
         { method: 'CONNECT' },
         { method: 'GET', body: 'x' },
+        { method: 'POST', body: { a: 1 } },
       ]) {
         refusals.push(
           await refusalOf(
@@ -84,7 +89,7 @@ test('every adapter driven directly refuses an unusable URL before its body, hea
               requestURL: 'ftp://api.example.com/x',
               headers: {},
               ...request,
-            }),
+            } as AdapterRequest),
           ),
         );
       }
@@ -112,10 +117,10 @@ test('every adapter driven directly refuses an unusable URL before its body, hea
   }
 
   expect(refusals).toEqual([
-    ...Array.from({ length: 3 }, () =>
+    ...Array.from({ length: 4 }, () =>
       expect.stringContaining('FetchAdapter sends http: and https: URLs only'),
     ),
-    ...Array.from({ length: 3 }, () =>
+    ...Array.from({ length: 4 }, () =>
       expect.stringContaining('XHRAdapter sends http: and https: URLs only'),
     ),
     ...Array.from({ length: 3 }, () =>
@@ -240,5 +245,202 @@ test("a retry interceptor's unusable URL is refused before the method it set", a
     );
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('every adapter driven directly refuses a body it does not send, in the same words, before its transport and the upload event', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalXHR = globalThis.XMLHttpRequest;
+  const httpSpy = spyOn(http, 'request');
+  const httpsSpy = spyOn(https, 'request');
+  let transportCalls = 0;
+  globalThis.fetch = (() => {
+    transportCalls++;
+    return Promise.resolve(new Response('ok'));
+  }) as unknown as typeof fetch;
+  (globalThis as Record<string, unknown>).XMLHttpRequest = class {
+    constructor() {
+      transportCalls++;
+    }
+  };
+  const mock = new MockAdapter();
+  mock.routes.post('/x', () => {
+    transportCalls++;
+    return { status: 200 };
+  });
+  const outcomes: Array<{ message: string; isNonRetryable: unknown }> = [];
+  const uploads: unknown[] = [];
+
+  try {
+    for (const adapter of [
+      new FetchAdapter(),
+      new XHRAdapter(),
+      new NodeAdapter(),
+      mock,
+    ] as HTTPAdapter[]) {
+      for (const body of [
+        { a: 1 },
+        42,
+        [1, 2],
+        new ReadableStream(),
+        new ArrayBuffer(1),
+        new Blob(['x']),
+        Object.create(FormData.prototype) as unknown,
+      ]) {
+        // A CONNECT and a refused header too, so the body is the first thing refused.
+        const refusal = await adapter
+          .send({
+            requestURL: 'https://api.example.com/x',
+            method: 'CONNECT',
+            headers: { 'transfer-encoding': 'chunked' },
+            body: body as AdapterRequest['body'],
+            onUploadProgress: (event) => {
+              uploads.push(event);
+            },
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error as TypeError & Record<string, unknown>,
+          );
+        expect(refusal).toBeInstanceOf(TypeError);
+        outcomes.push({
+          message: String(refusal?.message).replace(/^\w+Adapter /, ''),
+          isNonRetryable: refusal?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG],
+        });
+      }
+    }
+
+    expect(transportCalls).toBe(0);
+    expect(httpSpy).not.toHaveBeenCalled();
+    expect(httpsSpy).not.toHaveBeenCalled();
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.XMLHttpRequest = originalXHR;
+    httpSpy.mockRestore();
+    httpsSpy.mockRestore();
+  }
+
+  expect(uploads).toEqual([]);
+  expect(outcomes).toEqual(
+    Array.from({ length: 28 }, () => ({
+      message:
+        'sends a string, Uint8Array or FormData body; serialize other bodies first',
+      isNonRetryable: true,
+    })),
+  );
+});
+
+test("an interceptor's unusable URL is refused before its CONNECT, in every phase", async () => {
+  const causes: Array<string | undefined> = [];
+  const methodsSent: string[] = [];
+
+  for (const phase of ['initial', 'redirect', 'retry'] as const) {
+    let calls = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request) => {
+        methodsSent.push(request.method);
+        calls++;
+        return Promise.resolve<AdapterResponse>(
+          calls > 1
+            ? { status: 200, headers: {}, body: null }
+            : phase === 'redirect'
+              ? {
+                  status: 302,
+                  headers: { location: 'https://api.example.com/next' },
+                  body: null,
+                }
+              : { status: 503, headers: {}, body: null },
+        );
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        method: 'CONNECT',
+        requestURL: 'ftp://api.example.com/x',
+      }),
+      { phases: [phase] },
+    );
+    const builder = client.get('https://api.example.com/x');
+    await builder.send();
+
+    expect(builder.error?.code).toBe('interceptor_error');
+    causes.push(builder.error?.cause?.message);
+  }
+
+  expect(causes).toEqual(
+    Array.from({ length: 3 }, () =>
+      expect.stringContaining('Interceptor rewrote requestURL'),
+    ),
+  );
+  expect(methodsSent).toEqual(['GET', 'GET']);
+});
+
+test("an interceptor's CONNECT is handed to the next as a method name, and refused only if the chain ends on it", async () => {
+  const sent: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request) => {
+      sent.push(request.method);
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter });
+  const seen: string[] = [];
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    method: 'CONNECT',
+  }));
+  client.addRequestInterceptor((request) => {
+    seen.push(request.method);
+    return { ...request, method: 'POST' };
+  });
+  await client.get('https://api.example.com/x').send();
+
+  const refusing = new HTTPClient({ adapter });
+  refusing.addRequestInterceptor((request) => ({
+    ...request,
+    method: 'connect',
+  }));
+  const builder = refusing.get('https://api.example.com/x');
+  await builder.send();
+
+  expect(seen).toEqual(['CONNECT']);
+  expect(sent).toEqual(['POST']);
+  expect(builder.error?.code).toBe('interceptor_error');
+  expect(builder.error?.cause?.message).toBe(
+    '[HTTPClient] Interceptor returned a request whose method is CONNECT, which opens a tunnel and is not supported.',
+  );
+});
+
+test("FetchAdapter on Node refuses a body it does not send before a header Node's fetch refuses", async () => {
+  const versions = process.versions as Record<string, string | undefined>;
+  const bunVersion = versions.bun;
+  delete versions.bun;
+  try {
+    const refusal = await refusalOf(
+      new FetchAdapter().send({
+        requestURL: 'https://api.example.com/x',
+        method: 'POST',
+        headers: { expect: '100-continue' },
+        body: { a: 1 } as never,
+      }),
+    );
+
+    expect(refusal).toBe(
+      'FetchAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+    );
+  } finally {
+    if (bunVersion === undefined) {
+      delete versions.bun;
+    } else {
+      versions.bun = bunVersion;
+    }
   }
 });

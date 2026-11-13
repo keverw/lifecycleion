@@ -8,6 +8,8 @@ import {
 } from '../consts';
 import { isErrorValue } from '../../to-error';
 import { readUnknownMember } from '../../internal/read-member';
+import { isUint8ArrayValue } from '../../internal/binary-view';
+import { isFormData } from './form-entries';
 
 /**
  * A non-retryable adapter error for a failure that may be the caller's own error - one a
@@ -135,6 +137,36 @@ export function isAbortError(error: unknown): error is Error {
 export function connectRefusal(adapterName: string): TypeError {
   const refusal = new TypeError(
     `${adapterName} does not open tunnels; a CONNECT request is not supported`,
+  );
+  markNonRetryableAdapterError(refusal);
+  return refusal;
+}
+
+/**
+ * The refusal of a request body `adapterName` does not send, or `undefined` for one it
+ * does: none, a string, a `Uint8Array` (another realm's included) or a `FormData`.
+ * Anything else - an `ArrayBuffer`, a `Blob`, a `ReadableStream`, a plain object, a
+ * number, a `Proxy` over a form, an object that only inherits from `FormData.prototype` -
+ * would go out as no body, as its `String()` text, or fail on every attempt, so every
+ * adapter refuses it in these words. `HTTPClient` serializes or refuses such a body before
+ * an adapter is handed it; this is an adapter driven directly. Non-retryable.
+ */
+export function unsendableBodyRefusal(
+  adapterName: string,
+  body: unknown,
+): TypeError | undefined {
+  if (
+    body === undefined ||
+    body === null ||
+    typeof body === 'string' ||
+    isUint8ArrayValue(body) ||
+    isFormData(body)
+  ) {
+    return undefined;
+  }
+
+  const refusal = new TypeError(
+    `${adapterName} sends a string, Uint8Array or FormData body; serialize other bodies first`,
   );
   markNonRetryableAdapterError(refusal);
   return refusal;

@@ -1,6 +1,7 @@
 import { normalizeStandardMethod } from './internal/http-method';
 import {
   asciiLowercase,
+  asciiUppercase,
   isBlankText,
   trimEndWhere,
 } from '../internal/ascii-text';
@@ -65,6 +66,7 @@ import {
   mergeHeaders,
   normalizeMergedHeaderValue,
   describeInvalidHTTPMethod,
+  CONNECT_METHOD_PROBLEM,
   isRequestBodyBytes,
   normalizeAdapterResponseHeaders,
   isAdapterHeaderValue,
@@ -5687,6 +5689,13 @@ export class BaseHTTPClient {
       (adapterType === 'fetch' || adapterType === 'xhr')
     ) {
       assertNoBrowserRestrictedHeaders(request.headers, adapterName);
+    }
+    // A caller's own `CONNECT` is refused when the request is made (see `request()`); this
+    // is an interceptor's, refused after its URL, as the network adapters refuse one.
+    if (asciiUppercase(request.method) === 'CONNECT') {
+      throw new TypeError(
+        `[HTTPClient] Interceptor returned a request whose method ${CONNECT_METHOD_PROBLEM}.`,
+      );
     }
     // Refused here, as the method-override headers that tunnel them are: `fetch` refuses
     // these methods on every runtime (the Fetch Standard forbids them), and XHR in a
