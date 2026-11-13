@@ -11,18 +11,10 @@ import { defineEntry } from '../../internal/define-entry';
  * filled is an empty object or array of the shape its text has (see `releaseRequestBody`),
  * so a copy that is only ever sent - no interceptor reads it (see `handedRequest` in
  * interceptors.ts) and no `bodyContainsKeys` filter reads it - is never parsed back at
- * all. `parsed` is its text parsed for a filter that read it (see
- * `readRequestBodyContents`), kept for the copy - or a copy taken from it - to be filled
- * with, so the filters and interceptors of a phase parse the text once between them; it
- * is let go once the phase's interceptor chains have run (see `forgetParsedContents`), so
- * a large body is not held twice for the rest of the request.
+ * all.
  */
 type CopyRecord =
-  | {
-      readonly text: string;
-      readonly isFilled: false;
-      readonly parsed?: object;
-    }
+  | { readonly text: string; readonly isFilled: false }
   | { readonly text: string | undefined; readonly isFilled: true };
 
 /**
@@ -75,12 +67,8 @@ export function copyRequestBody(body: unknown): unknown {
   }
 
   if (Array.isArray(body) || isPlainRecord(body)) {
-    // A copy of a copy is read back from the text it was read from, and takes the data
-    // that text was parsed to for a filter, if any (see `readRequestBodyContents`): the
-    // copy it is taken from is the one no caller is handed, so the data passes to the
-    // new copy, and the one it was taken from parses its text again if it is filled.
+    // A copy of a copy is read back from the text it was read from.
     const text = jsonTextOf(body);
-    const parsed = takeParsedContents(body);
 
     // A top-level `toJSON` that answers `undefined` serializes to nothing.
     if (text === undefined) {
@@ -94,7 +82,7 @@ export function copyRequestBody(body: unknown): unknown {
     const first = text[0];
     if (first === '{' || first === '[') {
       const copy = first === '[' ? [] : {};
-      recordByCopy.set(copy, { text, isFilled: false, parsed });
+      recordByCopy.set(copy, { text, isFilled: false });
       return copy;
     }
 
@@ -182,67 +170,43 @@ export function serializesToNothing(body: object): boolean {
 /**
  * The data a JSON body - a plain object - holds, as an interceptor's `bodyContainsKeys`
  * filter reads it: for a copy `copyRequestBody` returned empty, its text parsed, the data
- * kept with its record for the copy to be filled with (see `releaseRequestBody`) or for a
- * copy taken from it, so a body is parsed once however often it is read; any other body
- * as it is.
+ * kept in `parsedByCopy` - one phase's (see `InterceptorChainOptions.parsedContents`) - so
+ * a body is parsed once however often the phase reads it, and the data is let go with the
+ * phase; any other body as it is.
  */
 export function readRequestBodyContents(
   body: Record<string, unknown>,
+  parsedByCopy: Map<unknown, object>,
 ): Record<string, unknown> {
   const record = recordByCopy.get(body);
   if (record === undefined || record.isFilled) {
     return body;
   }
 
-  if (record.parsed !== undefined) {
-    return record.parsed as Record<string, unknown>;
+  const kept = parsedByCopy.get(body);
+  if (kept !== undefined) {
+    return kept as Record<string, unknown>;
   }
 
   const parsed = JSON.parse(record.text) as Record<string, unknown>;
-  recordByCopy.set(body, { text: record.text, isFilled: false, parsed });
+  parsedByCopy.set(body, parsed);
   return parsed;
 }
 
 /**
- * Let go of the data a filter parsed an unfilled JSON body copy's text to (see
- * `readRequestBodyContents`), once the interceptor chains of the phase that parsed it
- * have run. A copy read again, in a later phase, is parsed again.
- */
-export function forgetParsedContents(body: unknown): void {
-  if (typeof body === 'object' && body !== null) {
-    takeParsedContents(body);
-  }
-}
-
-/**
- * The data a filter read an unfilled JSON body copy's text parsed to (see
- * `readRequestBodyContents`), taken from its record, so only one copy is ever filled with
- * it; `undefined` when there is none.
- */
-function takeParsedContents(body: object): object | undefined {
-  const record = recordByCopy.get(body);
-  if (record === undefined || record.isFilled || record.parsed === undefined) {
-    return undefined;
-  }
-
-  recordByCopy.set(body, { text: record.text, isFilled: false });
-  return record.parsed;
-}
-
-/**
  * Fill a JSON body copy `copyRequestBody` returned empty with the data its text parses
- * to - or the data a filter read it as (see `readRequestBodyContents`) - in place, so it is
- * the same object, the one the builder holds, as it is handed to caller code (see
- * `releaseRequestBody`). Parsed before the copy is touched, so a parse that throws leaves
- * it empty and its record as it was. Each member is defined as the parsed data's own, so a
- * `__proto__` key is a member, as `JSON.parse` makes it, not the copy's prototype.
+ * to - or `parsed`, the data a filter read it as (see `readRequestBodyContents`) - in
+ * place, so it is the same object, the one the builder holds, as it is handed to caller
+ * code (see `releaseRequestBody`). Parsed before the copy is touched, so a parse that
+ * throws leaves it empty and its record as it was. Each member is defined as the parsed
+ * data's own, so a `__proto__` key is a member, as `JSON.parse` makes it, not the copy's
+ * prototype.
  */
 function fillRequestBody(
   body: object,
   record: Extract<CopyRecord, { isFilled: false }>,
+  parsed: object = JSON.parse(record.text) as object,
 ): void {
-  const parsed = record.parsed ?? (JSON.parse(record.text) as object);
-
   if (Array.isArray(body)) {
     for (const member of parsed as unknown[]) {
       body.push(member);
@@ -275,10 +239,12 @@ export function isUnfilledRequestBody(body: unknown): boolean {
  * builder's own send function - which may keep it and change it in place: a copy still
  * empty is filled (see `fillRequestBody`), and since its text no longer says what it
  * serializes to, its record is forgotten, and the copy is serialized from then on as any
- * other value is. A fill that throws leaves the record, and the copy still sent as its
- * text. Any other value is left as it is.
+ * other value is. `parsed`, the data a filter read the copy as, fills it in place of a
+ * parse: handed over by one copy at most, so no two share nested objects. A fill that
+ * throws leaves the record, and the copy still sent as its text. Any other value is left
+ * as it is.
  */
-export function releaseRequestBody(body: unknown): void {
+export function releaseRequestBody(body: unknown, parsed?: object): void {
   if (typeof body !== 'object' || body === null) {
     return;
   }
@@ -289,7 +255,7 @@ export function releaseRequestBody(body: unknown): void {
   }
 
   if (!record.isFilled) {
-    fillRequestBody(body, record);
+    fillRequestBody(body, record, parsed);
   }
 
   recordByCopy.delete(body);

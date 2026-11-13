@@ -189,42 +189,39 @@ test('a release whose parse throws leaves the copy unfilled with its text, so th
   expect(copy).toEqual({ a: 1 });
 });
 
-test('the contents a filter reads are parsed once, and fill the copy or a copy taken from it', () => {
+test('the contents a filter reads are parsed once into the map it is handed, and fill the copy when it is released with them', () => {
   const parse = spyOn(JSON, 'parse');
   try {
-    const kept = copyRequestBody({ a: 1, nested: { b: 2 } }) as Record<
+    const parsedByCopy = new Map<unknown, object>();
+    const copy = copyRequestBody({ a: 1, nested: { b: 2 } }) as Record<
       string,
       unknown
     >;
-    const contents = readRequestBodyContents(kept);
+    const contents = readRequestBodyContents(copy, parsedByCopy);
 
     expect(contents).toEqual({ a: 1, nested: { b: 2 } });
-    expect(readRequestBodyContents(kept)).toBe(contents);
+    expect(readRequestBodyContents(copy, parsedByCopy)).toBe(contents);
+    expect(parsedByCopy.get(copy)).toBe(contents);
     // The copy itself is left as it was, an empty object sent as its text.
-    expect(kept).toEqual({});
+    expect(copy).toEqual({});
+    expect(copiedJSONText(copy)).toBe('{"a":1,"nested":{"b":2}}');
 
-    const handed = copyRequestBody(kept) as Record<string, unknown>;
-    releaseRequestBody(handed);
+    releaseRequestBody(copy, contents);
 
-    expect(handed).toEqual({ a: 1, nested: { b: 2 } });
-    expect(handed.nested).toBe(contents.nested);
+    expect(copy).toEqual({ a: 1, nested: { b: 2 } });
+    expect(copy.nested).toBe(contents.nested);
     expect(parse).toHaveBeenCalledTimes(1);
-
-    // The data passed to `handed`, so `kept` is filled from its text, sharing nothing.
-    releaseRequestBody(kept);
-
-    expect(kept).toEqual({ a: 1, nested: { b: 2 } });
-    expect(kept.nested).not.toBe(handed.nested);
-    expect(parse).toHaveBeenCalledTimes(2);
   } finally {
     parse.mockRestore();
   }
 });
 
-test('a body that is no copy is read by a filter as it is', () => {
+test('a body that is no copy is read by a filter as it is, and nothing is kept for it', () => {
+  const parsedByCopy = new Map<unknown, object>();
   const body = { a: 1 };
 
-  expect(readRequestBodyContents(body)).toBe(body);
+  expect(readRequestBodyContents(body, parsedByCopy)).toBe(body);
+  expect(parsedByCopy.size).toBe(0);
 });
 
 test('a top-level toJSON that answers a value other than an object or array is still a wrapper answering it', () => {

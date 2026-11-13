@@ -1185,9 +1185,7 @@ export type AttemptRequest = Omit<
    * The body as serialized for the adapter: a JSON body's string, or the string given. A
    * `Uint8Array` or `FormData` body is a copy of the one sent - the same copy as
    * `rawBody` - so changing it in place leaves what is written alone; it is taken from the
-   * attempt's own body when the attempt's first observer runs. Present only when a
-   * response or error observer is registered on the client or its parent as the attempt
-   * is dispatched; absent otherwise, with `rawBody`.
+   * attempt's own body when the attempt's first observer runs.
    */
   body?: string | Uint8Array | FormData | null;
   /**

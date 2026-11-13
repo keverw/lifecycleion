@@ -38,12 +38,13 @@ export function markBuiltInNetworkAdapter(
  * for its own `send` - and be handed the request's bytes uncopied, which reaches only its
  * own author's requests: one that changes or transfers them changes what the next attempt
  * and a `307`/`308` replay send, and what the attempt's observers are handed, whose copy
- * is taken from those bytes when the first of them runs (see `deferredBodyCopy`) - or
- * fails, for bytes it transferred, and is reported once. Read through the receiver, as
- * `send` is, so an object that reaches a built-in adapter's mark and `send` through its
- * prototype - an `Object.create(nodeAdapter)`, a `Proxy` around one - counts as that
- * adapter: what it sends is the built-in's `send`, on the caller's own request. Read
- * through a guarded accessor: a mark whose getter throws is no mark.
+ * is taken from those bytes when the first of them runs (see `deferredBodyCopy`) - or,
+ * for bytes it transferred, fails, which is reported once, and the observers are handed
+ * the request with a `body` of `null`. Read through the receiver, as `send` is, so an
+ * object that reaches a built-in adapter's mark and `send` through its prototype - an
+ * `Object.create(nodeAdapter)`, a `Proxy` around one - counts as that adapter: what it
+ * sends is the built-in's `send`, on the caller's own request. Read through a guarded
+ * accessor: a mark whose getter throws is no mark.
  */
 export function isBuiltInNetworkSend(adapter: object, send: unknown): boolean {
   return (

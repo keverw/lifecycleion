@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
+import { deepClone } from '../deep-clone';
+import { LRUCache } from '../lru-cache';
 import { runInNewContext } from 'node:vm';
 import {
   forEachOwnIndex,
@@ -191,5 +193,124 @@ describe('forEachOwnIndex', () => {
     });
 
     expect(visited).toEqual([0, SPARSE_RUN * 3]);
+  });
+});
+
+describe('an array that opens with a run of holes', () => {
+  const walkers: [string, (array: unknown[]) => void][] = [
+    [
+      'forEachOwnIndex',
+      (array) => {
+        forEachOwnIndex(array, array.length, () => undefined);
+      },
+    ],
+    ['deepClone', (array) => void deepClone(array)],
+    [
+      "LRUCache's size estimate",
+      (array) => {
+        new LRUCache(1, { maxSize: Number.MAX_SAFE_INTEGER }).set('k', array);
+      },
+    ],
+  ];
+
+  /** Calls of `Object.getOwnPropertyNames` on `array` while `run` walks it. */
+  function listings(array: unknown[], run: (array: unknown[]) => void): number {
+    const list = spyOn(Object, 'getOwnPropertyNames');
+    try {
+      run(array);
+      return list.mock.calls.filter(([target]) => target === array).length;
+    } finally {
+      list.mockRestore();
+    }
+  }
+
+  test.each(walkers)(
+    'and is full after it is walked by index by %s, its keys never listed',
+    (_label, run) => {
+      const array: number[] = [];
+      array.length = 70_000;
+      for (let index = 70_000; index < 270_000; index++) {
+        array[index] = index;
+      }
+
+      expect(listings(array, run)).toBe(0);
+    },
+  );
+
+  test.each(walkers)(
+    'and holds little after it is read by its own keys by %s',
+    (_label, run) => {
+      const array: number[] = [];
+      array.length = 270_000;
+      for (let index = 70_000; index < 270_000; index += 1000) {
+        array[index] = index;
+      }
+
+      expect(listings(array, run)).toBe(1);
+    },
+  );
+});
+
+describe('an array whose few entries sit where a walk samples it', () => {
+  /**
+   * An array of `length` whose entries are planted where a walk that took a fresh sample
+   * at each run of {@link SPARSE_RUN} holes would sample it, so that each sample would
+   * read the rest as mostly full.
+   */
+  function plantedAtSamples(length: number): number[] {
+    const array: number[] = [];
+    array.length = length;
+    let holes = 0;
+    let entries = 0;
+
+    for (let index = 0; index < length; index++) {
+      if (Object.hasOwn(array, index)) {
+        entries++;
+        continue;
+      }
+
+      if (++holes > SPARSE_RUN && holes > entries) {
+        const start = index + 1;
+        const span = length - start;
+        if (span < 64) {
+          break;
+        }
+        for (let sample = 0; sample < 33; sample++) {
+          array[start + Math.floor((span * sample) / 64)] = 1;
+        }
+        holes = 0;
+        entries = 0;
+      }
+    }
+
+    return array;
+  }
+
+  test.each<[string, (array: unknown[]) => void]>([
+    [
+      'forEachOwnIndex',
+      (array) => {
+        forEachOwnIndex(array, array.length, () => undefined);
+      },
+    ],
+    ['deepClone', (array) => void deepClone(array)],
+  ])('is walked by %s at most a run past its first sample', (_label, run) => {
+    const array = plantedAtSamples(1 << 22);
+    let reads = 0;
+    const counted = new Proxy(array, {
+      has: (target, key) => {
+        reads++;
+        return Reflect.has(target, key);
+      },
+      getOwnPropertyDescriptor: (target, key) => {
+        reads++;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+
+    run(counted);
+
+    // Two runs of holes, each index read at most twice, and the planted entries listed.
+    expect(reads).toBeLessThan(5 * SPARSE_RUN);
   });
 });

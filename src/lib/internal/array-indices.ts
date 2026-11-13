@@ -23,6 +23,81 @@ export function isMostlyHoles(holes: number, entries: number): boolean {
   return holes > SPARSE_RUN && holes > entries * SPARSE_RUN_PER_ENTRY;
 }
 
+/** How many indices `isMostlyFilledFrom` samples. */
+const FILL_SAMPLES = 64;
+
+/**
+ * Where a walk stood when it first went on by index past enough holes (see
+ * {@link walksOnByIndex}): its holes and entries then.
+ */
+export interface FillCheckpoint {
+  readonly holes: number;
+  readonly entries: number;
+}
+
+/**
+ * Asked each time a walk of `source` by index has met enough holes to read the rest by its
+ * own keys - at `start`, with `holes` and `entries` met so far, counted over the whole
+ * walk - whether it goes on by index instead: the checkpoint to go on with, or `undefined`
+ * to list the keys. The first time, it goes on when the rest is mostly full (see
+ * {@link isMostlyFilledFrom}), so an array that opens with a run of holes and is full
+ * after it is not listed and sorted a string for every entry it holds. After that, while
+ * the walk has met no more than {@link SPARSE_RUN} holes since that first time - the rest
+ * of the run the samples skipped - or more entries than holes: the samples are taken
+ * once, so an array whose few entries sit where they fall is walked at most one run
+ * further than it would have been, and a walk that goes on beyond that costs no more than
+ * the entries it finds. Throws as `Object.hasOwn` throws on `source`.
+ */
+export function walksOnByIndex(
+  source: object,
+  start: number,
+  length: number,
+  holes: number,
+  entries: number,
+  checkpoint: FillCheckpoint | undefined,
+): FillCheckpoint | undefined {
+  if (checkpoint === undefined) {
+    return isMostlyFilledFrom(source, start, length)
+      ? { holes, entries }
+      : undefined;
+  }
+
+  const holesSince = holes - checkpoint.holes;
+
+  return holesSince <= SPARSE_RUN || entries - checkpoint.entries > holesSince
+    ? checkpoint
+    : undefined;
+}
+
+/**
+ * Whether the indices of `source` from `start` up to `length` are mostly held as its own,
+ * judged from {@link FILL_SAMPLES} spread evenly across them, each told by `Object.hasOwn`
+ * (see {@link walksOnByIndex}). Throws as `Object.hasOwn` throws on it.
+ */
+function isMostlyFilledFrom(
+  source: object,
+  start: number,
+  length: number,
+): boolean {
+  const span = length - start;
+
+  if (span < FILL_SAMPLES) {
+    return false;
+  }
+
+  let held = 0;
+
+  for (let sample = 0; sample < FILL_SAMPLES; sample++) {
+    if (
+      Object.hasOwn(source, start + Math.floor((span * sample) / FILL_SAMPLES))
+    ) {
+      held++;
+    }
+  }
+
+  return held * 2 > FILL_SAMPLES;
+}
+
 /**
  * Whether `array` holds `index` as its own, for a walk that reads each entry as it goes:
  * told by `in` while its prototype, read now, is this realm's `Array.prototype` -
@@ -128,7 +203,8 @@ export function indexFreePrototype(array: object): object | null | undefined {
  * nor is a hole a `Proxy`'s `has` answers for - so a sparse array's length is not walked.
  * As each hole walked costs an `Object.hasOwn`, about what listing and checking an entry
  * does, that is past {@link SPARSE_RUN} holes once they outnumber the entries, not
- * {@link isMostlyHoles}' many times as many.
+ * {@link isMostlyHoles}' many times as many - unless the walk goes on by index (see
+ * {@link walksOnByIndex}).
  */
 export function forEachOwnIndex(
   source: unknown[],
@@ -137,6 +213,7 @@ export function forEachOwnIndex(
 ): void {
   let holes = 0;
   let entries = 0;
+  let checkpoint: FillCheckpoint | undefined;
 
   for (let index = 0; index < length; index++) {
     if (holdsCopiedIndex(source, index)) {
@@ -146,6 +223,18 @@ export function forEachOwnIndex(
     }
 
     if (++holes > SPARSE_RUN && holes > entries) {
+      checkpoint = walksOnByIndex(
+        source,
+        index + 1,
+        length,
+        holes,
+        entries,
+        checkpoint,
+      );
+      if (checkpoint !== undefined) {
+        continue;
+      }
+
       for (const at of indicesFrom(source, index + 1, length)) {
         if (Object.hasOwn(source, at)) {
           visit(at);

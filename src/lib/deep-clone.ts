@@ -14,8 +14,10 @@ import {
   holdsOwnIndex,
   indicesFrom,
   isMostlyHoles,
+  walksOnByIndex,
   readCopiedIndex,
 } from './internal/array-indices';
+import type { FillCheckpoint } from './internal/array-indices';
 import {
   lengthenArrayCopy,
   MAX_COPIED_ARRAY_LENGTH,
@@ -515,17 +517,20 @@ class ObjectFrame implements Frame {
  * `Symbol.iterator` - so one that grows while it is read is not followed. Each index it
  * holds as its own is copied, so a hole stays a hole, one emptied before its turn
  * included. Each is told by {@link holdsOwnIndex}, so a prototype swapped in during the
- * walk fills no hole after it; a `Proxy` array's own `has` trap is answered as it answers.
- * Past enough holes the rest is read by its own keys (see {@link isMostlyHoles}), listed
- * once there, so an index an entry fills after that is not read. Then the named entries: a
- * match result's and `arrayKeys`' - the others are not listed, which would cost a dense
- * array many times its clone.
+ * walk fills no hole after it; a `Proxy` array's own `has` trap is answered as it
+ * answers. Past enough holes the rest is read by its own keys (see {@link isMostlyHoles}),
+ * unless the walk goes on by index (see {@link walksOnByIndex}), listed once there, so an
+ * index an entry fills after that is not read. Then the named entries: a match result's
+ * and `arrayKeys`' - the others are not listed, which would cost a dense array many times
+ * its clone.
  */
 class ArrayFrame implements Frame {
   private readonly length: number;
   private index = 0;
   private holes = 0;
   private entries = 0;
+  /** Where the walk went on by index past enough holes; see `walksOnByIndex`. */
+  private checkpoint: FillCheckpoint | undefined;
   /** The indices left past enough holes, read by the array's own keys. */
   private tail: number[] | undefined;
   private tailPosition = 0;
@@ -568,6 +573,18 @@ class ArrayFrame implements Frame {
         }
 
         if (isMostlyHoles(++holes, entries)) {
+          this.checkpoint = walksOnByIndex(
+            source,
+            index,
+            length,
+            holes,
+            entries,
+            this.checkpoint,
+          );
+          if (this.checkpoint !== undefined) {
+            continue;
+          }
+
           this.tail = indicesFrom(source, index, length);
           break;
         }

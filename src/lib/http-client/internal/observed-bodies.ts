@@ -1,4 +1,5 @@
 import { cloneBodyValue } from './request-body-copy';
+import { once } from './once';
 
 /**
  * The parts of an attempt's body its observers are handed but that cost something to
@@ -12,21 +13,16 @@ import { cloneBodyValue } from './request-body-copy';
  * reads it into. The copies of one attempt's request share the token, and so the one
  * value built for it, as an attempt's bytes or form `body` and `rawBody` share one token.
  */
-const pendingByToken = new WeakMap<object, Pending>();
+const pendingByToken = new WeakMap<object, () => unknown>();
 
 /**
- * A token's value: still to be built, or built - and the build, holding the source body,
- * let go - or the error building it threw, kept so it is thrown again, not built again.
+ * A token for `build()`'s value, built once (see `once`): its value kept - and the build,
+ * holding the source body, let go - or the error it threw, thrown again rather than built
+ * again. See `pendingByToken`.
  */
-type Pending =
-  | { readonly build: () => unknown }
-  | { readonly value: unknown }
-  | { readonly error: unknown };
-
-/** A token for `build()`'s value; see `pendingByToken`. */
 function deferred(build: () => unknown): object {
   const token = Object.freeze({});
-  pendingByToken.set(token, { build });
+  pendingByToken.set(token, once(build));
   return token;
 }
 
@@ -63,20 +59,5 @@ export function handedBodyValue(value: unknown): unknown {
     return value;
   }
 
-  if ('build' in pending) {
-    let built: Pending;
-    try {
-      built = { value: pending.build() };
-    } catch (error) {
-      built = { error };
-    }
-    pendingByToken.set(value, built);
-    return handedBodyValue(value);
-  }
-
-  if ('error' in pending) {
-    throw pending.error;
-  }
-
-  return pending.value;
+  return pending();
 }

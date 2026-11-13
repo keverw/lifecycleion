@@ -2116,9 +2116,19 @@ export class CookieJar {
     // Each is reached by its key, with no scan of the jar: the domain's own name and
     // each parent name it ends in are looked up, and the keys under it are read from
     // `bucketKeysUnder`.
-    const sites = [normalizedDomain, ...namesAbove(normalizedDomain)];
+    if (
+      this.holdsSecureCookieOver(
+        normalizedDomain,
+        name,
+        preparedDomain,
+        path,
+        now,
+      )
+    ) {
+      return true;
+    }
 
-    for (const site of sites) {
+    for (const site of namesAbove(normalizedDomain)) {
       if (this.holdsSecureCookieOver(site, name, preparedDomain, path, now)) {
         return true;
       }

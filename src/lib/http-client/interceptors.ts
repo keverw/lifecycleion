@@ -94,13 +94,13 @@ export interface InterceptorChainOptions {
    */
   onInterceptorCalled?: () => void;
   /**
-   * Collects each body a `bodyContainsKeys` filter parsed (see `readRequestBodyContents`),
-   * and each copy the phase's preparation took of one, so the phase can let go of the data
-   * parsed for them once both chains have run (see `forgetParsedContents`): kept until
-   * then, a body is parsed once however many filters and interceptors of the phase read it,
-   * a parent client's and a sub-client's alike.
+   * The data each JSON body copy a `bodyContainsKeys` filter read was parsed to (see
+   * `readRequestBodyContents`), shared by the phase's chains - a parent client's and a
+   * sub-client's - so the body is parsed once however many of their filters and
+   * interceptors read it, and let go with the phase: nothing else holds it. A chain run
+   * without one keeps its own.
    */
-  parsedBodies?: Set<object>;
+  parsedContents?: Map<unknown, object>;
   /**
    * Called once, as the first interceptor's function this phase calls is about to be
    * called - after its filter, which reads the request as it was handed over - and its
@@ -133,15 +133,12 @@ async function runInterceptors(
     onCopyFailure,
     onInterceptorCalled,
     prepareRequest,
-    parsedBodies,
+    parsedContents = new Map<unknown, object>(),
   }: InterceptorChainOptions,
 ): Promise<InterceptedRequest | InterceptorCancel> {
   const readBodyContents = (
     body: Record<string, unknown>,
-  ): Record<string, unknown> => {
-    parsedBodies?.add(body);
-    return readRequestBodyContents(body);
-  };
+  ): Record<string, unknown> => readRequestBodyContents(body, parsedContents);
   let current = request;
   /** Whether `current` is an interceptor's result, not yet copied. */
   let isCurrentUncopied = isInterceptorResult;
@@ -204,12 +201,16 @@ async function runInterceptors(
     // function, the first that can touch the request. Later filters read what it
     // returns.
     if (pendingPrepare !== undefined) {
+      const { body: unprepared } = current;
       current = pendingPrepare(current);
       pendingPrepare = undefined;
 
-      // A copy of a body a filter parsed takes the data parsed for it.
-      if (typeof current.body === 'object' && current.body !== null) {
-        parsedBodies?.add(current.body);
+      // A copy of a body a filter parsed takes the data parsed for it, which only one copy
+      // is ever filled with.
+      const parsed = parsedContents.get(unprepared);
+      if (parsed !== undefined && current.body !== unprepared) {
+        parsedContents.delete(unprepared);
+        parsedContents.set(current.body, parsed);
       }
     }
 
@@ -222,7 +223,7 @@ async function runInterceptors(
 
     onInterceptorCalled?.();
 
-    const handed = handedRequest(current);
+    const handed = handedRequest(current, parsedContents);
 
     let result: Awaited<ReturnType<RequestInterceptor>>;
     try {
@@ -249,6 +250,8 @@ async function runInterceptors(
         break;
       }
       throw error;
+    } finally {
+      keepUnreadContents(handed, parsedContents);
     }
 
     // A cancel made while the interceptor ran ends the chain before its result is read:
@@ -335,12 +338,14 @@ export function untilCancelled<T>(
 /**
  * What `handedRequest` keeps of a request it handed an interceptor with a lazy `body`: the
  * accessor's own getter, and the body it answers - the JSON body copy, until it is read
- * or replaced - and whether either has happened.
+ * or replaced - and whether either has happened; and, while the interceptor runs, the
+ * data a filter parsed the copy to, which a read fills it with.
  */
 interface LazyBody {
   get: () => unknown;
   body: unknown;
   isTouched: boolean;
+  parsed: object | undefined;
 }
 
 const lazyBodyByRequest = new WeakMap<object, LazyBody>();
@@ -352,10 +357,15 @@ const lazyBodyByRequest = new WeakMap<object, LazyBody>();
  * keep and change in place; assigned, the new value replaces it. An interceptor that never
  * reads it - one that sets a header in place and returns the request - leaves it unparsed,
  * and `snapshotInterceptedRequest` takes it as it is, so it is sent as its text, with no
- * parse and no second serialization. Any other body is released and the request handed as
- * it is.
+ * parse and no second serialization. The data a filter parsed the copy to is taken from
+ * `parsedContents` for the read to fill it with, and put back by `keepUnreadContents` once
+ * the interceptor has run if it was not read. Any other body is released and the request
+ * handed as it is.
  */
-function handedRequest(request: InterceptedRequest): InterceptedRequest {
+function handedRequest(
+  request: InterceptedRequest,
+  parsedContents: Map<unknown, object>,
+): InterceptedRequest {
   const { body } = request;
 
   if (!isUnfilledRequestBody(body)) {
@@ -370,15 +380,18 @@ function handedRequest(request: InterceptedRequest): InterceptedRequest {
       // Read once it is released: a parse that throws leaves it unread, so the next read
       // parses it again rather than answering the empty copy.
       if (!lazy.isTouched) {
-        releaseRequestBody(lazy.body);
+        releaseRequestBody(lazy.body, lazy.parsed);
         lazy.isTouched = true;
+        lazy.parsed = undefined;
       }
 
       return lazy.body;
     },
     body,
     isTouched: false,
+    parsed: parsedContents.get(body),
   };
+  parsedContents.delete(body);
   const handed = { ...request };
 
   // An accessor that stays one, so a request the interceptor froze is still read.
@@ -389,6 +402,7 @@ function handedRequest(request: InterceptedRequest): InterceptedRequest {
     set: (value: unknown) => {
       lazy.isTouched = true;
       lazy.body = value;
+      lazy.parsed = undefined;
     },
     enumerable: true,
     configurable: true,
@@ -396,6 +410,24 @@ function handedRequest(request: InterceptedRequest): InterceptedRequest {
   lazyBodyByRequest.set(handed, lazy);
 
   return handed;
+}
+
+/**
+ * Once an interceptor `handedRequest` handed `request` to has run: the data a filter parsed
+ * its body to, if the interceptor neither read nor assigned the body, goes back into
+ * `parsedContents`, for the phase's later filters and interceptors; the handed request,
+ * which the interceptor may keep, holds none of it.
+ */
+function keepUnreadContents(
+  request: InterceptedRequest,
+  parsedContents: Map<unknown, object>,
+): void {
+  const lazy = lazyBodyByRequest.get(request);
+
+  if (lazy?.parsed !== undefined) {
+    parsedContents.set(lazy.body, lazy.parsed);
+    lazy.parsed = undefined;
+  }
 }
 
 /**

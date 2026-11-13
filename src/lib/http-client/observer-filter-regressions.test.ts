@@ -563,7 +563,7 @@ test('every observer, in every phase, is handed a bytes body as a copy of the by
   );
 });
 
-test('a request copy for the observers that cannot be built is built once and reported once, for a parent and a sub-client', async () => {
+test('a request body for the observers that cannot be built is built once and reported once, and every observer is handed the request without it', async () => {
   const root = new HTTPClient({
     adapter: {
       getType: () => 'mock',
@@ -574,7 +574,7 @@ test('a request copy for the observers that cannot be built is built once and re
   const handed: unknown[] = [];
   for (const client of [root, root, sub, sub]) {
     client.addResponseObserver((_response, request) => {
-      handed.push(request.body);
+      handed.push([request.body, request.rawBody, request.method]);
     });
   }
   const form = new FormData();
@@ -602,8 +602,63 @@ test('a request copy for the observers that cannot be built is built once and re
   }
 
   expect(response.status).toBe(200);
-  expect(handed).toEqual([]);
+  expect(handed).toEqual(
+    Array.from({ length: 4 }, () => [null, undefined, 'PUT']),
+  );
   expect(appends).toBe(2);
   expect(reports).toHaveLength(1);
   expect(((reports[0] as Error).cause as Error).message).toBe('copy failed');
 });
+
+test.each<[string, () => unknown, (rawBody: unknown) => unknown]>([
+  ['a JSON body', () => ({ a: 1 }), (rawBody) => rawBody],
+  [
+    'a bytes body',
+    () => new Uint8Array([1, 2]),
+    (rawBody) => [...(rawBody as Uint8Array)],
+  ],
+  [
+    'a form body',
+    () => {
+      const form = new FormData();
+      form.append('field', 'value');
+      return form;
+    },
+    (rawBody) => [...(rawBody as FormData).entries()],
+  ],
+])(
+  'an observer registered while the attempt is under way is handed %s',
+  async (_label, makeBody, read) => {
+    let answer: (() => void) | undefined;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          new Promise((resolve) => {
+            answer = () => {
+              resolve({ status: 200, headers: {}, body: null });
+            };
+          }),
+      },
+    });
+    const seen: { hasBody: boolean; rawBody: unknown }[] = [];
+    const pending = client
+      .put('https://api.example.com/x')
+      .body(makeBody())
+      .send();
+
+    // Registered once the attempt has reached the adapter.
+    for (let tick = 0; answer === undefined && tick < 100; tick++) {
+      await Promise.resolve();
+    }
+    expect(answer).toBeDefined();
+    client.addResponseObserver((_response, request) => {
+      seen.push({ hasBody: 'body' in request, rawBody: read(request.rawBody) });
+    });
+    answer?.();
+    const response = await pending;
+
+    expect(response.status).toBe(200);
+    expect(seen).toEqual([{ hasBody: true, rawBody: read(makeBody()) }]);
+  },
+);

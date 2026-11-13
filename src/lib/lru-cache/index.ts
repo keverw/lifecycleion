@@ -5,7 +5,9 @@ import {
   indexFreePrototype,
   indicesFrom,
   isMostlyHoles,
+  walksOnByIndex,
 } from '../internal/array-indices';
+import type { FillCheckpoint } from '../internal/array-indices';
 
 /**
  * The index below which every entry `in` reports held on an Array subclass's or another
@@ -539,6 +541,7 @@ export class LRUCache<K, V> {
         let estimatedSize = 40;
         let holes = 0;
         let entries = 0;
+        let checkpoint: FillCheckpoint | undefined;
         let sparseFrom: number | undefined;
         // As `deepClone`'s walk tells an index held - `in` on this realm's
         // `Array.prototype`, `Object.hasOwn` otherwise, which costs hundreds of times as
@@ -578,6 +581,7 @@ export class LRUCache<K, V> {
                   estimatedSize = 40;
                   holes = 0;
                   entries = 0;
+                  checkpoint = undefined;
                   index = -1;
                   continue;
                 }
@@ -593,6 +597,24 @@ export class LRUCache<K, V> {
             // Enough holes, as `deepClone` counts them: the rest by the array's own index
             // keys.
             if (isMostlyHoles(++holes, entries)) {
+              // See `walksOnByIndex`.
+              try {
+                checkpoint = walksOnByIndex(
+                  items,
+                  index + 1,
+                  length,
+                  holes,
+                  entries,
+                  checkpoint,
+                );
+              } catch {
+                return estimatedSize + 1000;
+              }
+
+              if (checkpoint !== undefined) {
+                continue;
+              }
+
               sparseFrom = index + 1;
               break;
             }
