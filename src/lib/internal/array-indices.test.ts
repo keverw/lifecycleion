@@ -238,6 +238,30 @@ describe('an array that opens with a run of holes', () => {
   );
 
   test.each(walkers)(
+    'of any length, or with one between its full stretches, is walked by index by %s',
+    (_label, run) => {
+      // 300,000 holes, more than a sample's run of grace after the first.
+      const prefixed: number[] = [];
+      prefixed.length = 300_000;
+      for (let index = 300_000; index < 2_300_000; index++) {
+        prefixed[index] = index;
+      }
+
+      const gapped: number[] = [];
+      for (let index = 0; index < 100_000; index++) {
+        gapped[index] = index;
+      }
+      gapped.length = 400_000;
+      for (let index = 400_000; index < 2_400_000; index++) {
+        gapped[index] = index;
+      }
+
+      expect(listings(prefixed, run)).toBe(0);
+      expect(listings(gapped, run)).toBe(0);
+    },
+  );
+
+  test.each(walkers)(
     'and holds little after it is read by its own keys by %s',
     (_label, run) => {
       const array: number[] = [];
@@ -253,9 +277,9 @@ describe('an array that opens with a run of holes', () => {
 
 describe('an array whose few entries sit where a walk samples it', () => {
   /**
-   * An array of `length` whose entries are planted where a walk that took a fresh sample
-   * at each run of {@link SPARSE_RUN} holes would sample it, so that each sample would
-   * read the rest as mostly full.
+   * An array of `length` whose entries are planted where a walk sampling at even spacing
+   * at each run of {@link SPARSE_RUN} holes would sample it, so that each such sample
+   * would read the rest as mostly full.
    */
   function plantedAtSamples(length: number): number[] {
     const array: number[] = [];
@@ -294,7 +318,7 @@ describe('an array whose few entries sit where a walk samples it', () => {
       },
     ],
     ['deepClone', (array) => void deepClone(array)],
-  ])('is walked by %s at most a run past its first sample', (_label, run) => {
+  ])('is listed by %s within two runs of holes', (_label, run) => {
     const array = plantedAtSamples(1 << 22);
     let reads = 0;
     const counted = new Proxy(array, {
@@ -310,7 +334,8 @@ describe('an array whose few entries sit where a walk samples it', () => {
 
     run(counted);
 
-    // Two runs of holes, each index read at most twice, and the planted entries listed.
+    // Its samples fall at random, so the planted entries do not pass them: two runs of
+    // holes at most, each index read at most twice, and the planted entries listed.
     expect(reads).toBeLessThan(5 * SPARSE_RUN);
   });
 });

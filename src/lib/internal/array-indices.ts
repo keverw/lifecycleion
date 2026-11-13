@@ -27,7 +27,7 @@ export function isMostlyHoles(holes: number, entries: number): boolean {
 const FILL_SAMPLES = 64;
 
 /**
- * Where a walk stood when it first went on by index past enough holes (see
+ * Where a walk stood when it last went on by index past enough holes (see
  * {@link walksOnByIndex}): its holes and entries then.
  */
 export interface FillCheckpoint {
@@ -39,14 +39,14 @@ export interface FillCheckpoint {
  * Asked each time a walk of `source` by index has met enough holes to read the rest by its
  * own keys - at `start`, with `holes` and `entries` met so far, counted over the whole
  * walk - whether it goes on by index instead: the checkpoint to go on with, or `undefined`
- * to list the keys. The first time, it goes on when the rest is mostly full (see
- * {@link isMostlyFilledFrom}), so an array that opens with a run of holes and is full
- * after it is not listed and sorted a string for every entry it holds. After that, while
- * the walk has met no more than {@link SPARSE_RUN} holes since that first time - the rest
- * of the run the samples skipped - or more entries than holes: the samples are taken
- * once, so an array whose few entries sit where they fall is walked at most one run
- * further than it would have been, and a walk that goes on beyond that costs no more than
- * the entries it finds. Throws as `Object.hasOwn` throws on `source`.
+ * to list the keys. It goes on when the rest is mostly full (see
+ * {@link isMostlyFilledFrom}), so an array with a run of holes - at its start, or between
+ * full stretches - however long, is not listed and sorted a string for every entry it
+ * holds; and from then on while the walk has met no more than {@link SPARSE_RUN} holes
+ * since - the rest of the run the samples skipped - or more entries than holes, after
+ * which the rest is sampled again. The samples fall at random, so an array cannot be
+ * built to pass them: one that does is mostly full, and is walked for about what its
+ * entries cost. Throws as `Object.hasOwn` throws on `source`.
  */
 export function walksOnByIndex(
   source: object,
@@ -56,22 +56,22 @@ export function walksOnByIndex(
   entries: number,
   checkpoint: FillCheckpoint | undefined,
 ): FillCheckpoint | undefined {
-  if (checkpoint === undefined) {
-    return isMostlyFilledFrom(source, start, length)
-      ? { holes, entries }
-      : undefined;
+  if (checkpoint !== undefined) {
+    const holesSince = holes - checkpoint.holes;
+
+    if (holesSince <= SPARSE_RUN || entries - checkpoint.entries > holesSince) {
+      return checkpoint;
+    }
   }
 
-  const holesSince = holes - checkpoint.holes;
-
-  return holesSince <= SPARSE_RUN || entries - checkpoint.entries > holesSince
-    ? checkpoint
+  return isMostlyFilledFrom(source, start, length)
+    ? { holes, entries }
     : undefined;
 }
 
 /**
  * Whether the indices of `source` from `start` up to `length` are mostly held as its own,
- * judged from {@link FILL_SAMPLES} spread evenly across them, each told by `Object.hasOwn`
+ * judged from {@link FILL_SAMPLES} of them picked at random, each told by `Object.hasOwn`
  * (see {@link walksOnByIndex}). Throws as `Object.hasOwn` throws on it.
  */
 function isMostlyFilledFrom(
@@ -88,9 +88,7 @@ function isMostlyFilledFrom(
   let held = 0;
 
   for (let sample = 0; sample < FILL_SAMPLES; sample++) {
-    if (
-      Object.hasOwn(source, start + Math.floor((span * sample) / FILL_SAMPLES))
-    ) {
+    if (Object.hasOwn(source, start + Math.floor(Math.random() * span))) {
       held++;
     }
   }
