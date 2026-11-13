@@ -1,6 +1,6 @@
 # Plan: one sparse-array walk that a leading gap cannot push onto key listing
 
-Status: not started. Do it on PR #35's branch, or a new branch after it merges. It changes how fast some arrays are read, not what is read, so it needs a changelog line only for the speed.
+Status: partly done in PR #34. Step 3 is in: a walk past enough holes samples the rest at random - each index held only when `in` and `Object.hasOwn` both say so - and samples again after each further run of holes (`walksOnByIndex` in `src/lib/internal/array-indices.ts`), so the gap-then-dense shape below is walked by index. Steps 1 and 2 are not started; do them on a new branch after PR #35 merges. It changes how fast some arrays are read, not what is read, so it needs a changelog line only for the speed.
 
 ## What it is now
 
