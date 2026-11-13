@@ -481,7 +481,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(fetchCalls).toBe(0);
     expect(res.isFailed).toBe(true);
     expect(builder.error?.code).toBe('request_setup_error');
-    expect(builder.error?.cause?.message).toMatch(/browsers refuse/);
+    expect(builder.error?.cause?.message).toMatch(/Fetch Standard forbids/);
   });
 
   test('browser-restricted header from interceptor becomes interceptor_error', async () => {

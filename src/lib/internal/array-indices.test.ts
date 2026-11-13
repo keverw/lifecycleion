@@ -261,6 +261,54 @@ describe('an array that opens with a run of holes', () => {
     },
   );
 
+  // A walk that tells a hole for a step goes on through a half or a third full rest, which
+  // listing would cost many times as much; `forEachOwnIndex` pays about a listed entry's
+  // cost for each hole, so either way costs it about the same there.
+  test.each(walkers.slice(1))(
+    'and is a half or a third full after it is walked by index by %s',
+    (_label, run) => {
+      for (const step of [2, 3]) {
+        const array: number[] = [];
+        array.length = 70_000;
+        for (let index = 70_000; index < 1_070_000; index += step) {
+          array[index] = index;
+        }
+
+        expect(listings(array, run)).toBe(0);
+      }
+    },
+  );
+
+  test.each(walkers)(
+    'and holds one entry in 100 after it is read by its own keys by %s',
+    (_label, run) => {
+      const array: number[] = [];
+      array.length = 70_000;
+      for (let index = 70_000; index < 1_070_000; index += 100) {
+        array[index] = index;
+      }
+
+      expect(listings(array, run)).toBe(1);
+    },
+  );
+
+  // An Array subclass whose prototype holds an index is told hole by hole by
+  // `Object.hasOwn`, about what listing an entry costs, by every walk.
+  test.each(walkers)(
+    'and holds one entry in ten, told by Object.hasOwn, after it is read by its own keys by %s',
+    (_label, run) => {
+      class Sub extends Array<number> {}
+      Object.defineProperty(Sub.prototype, '5000000', { value: 0 });
+      const array = new Sub();
+      array.length = 70_000;
+      for (let index = 70_000; index < 1_070_000; index += 10) {
+        array[index] = index;
+      }
+
+      expect(listings(array, run)).toBe(1);
+    },
+  );
+
   test.each(walkers)(
     'and holds little after it is read by its own keys by %s',
     (_label, run) => {
@@ -277,11 +325,11 @@ describe('an array that opens with a run of holes', () => {
 
 describe('an array whose few entries sit where a walk samples it', () => {
   /**
-   * An array of `length` whose entries are planted where a walk sampling at even spacing
-   * at each run of {@link SPARSE_RUN} holes would sample it, so that each such sample
-   * would read the rest as mostly full.
+   * An array of `length` whose entries are planted where a walk taking 128 samples at even
+   * spacing at each run of {@link SPARSE_RUN} holes would take them: `planted` of those
+   * places, enough that such samples would read the rest as full enough to walk on.
    */
-  function plantedAtSamples(length: number): number[] {
+  function plantedAtSamples(length: number, planted: number): number[] {
     const array: number[] = [];
     array.length = length;
     let holes = 0;
@@ -296,11 +344,11 @@ describe('an array whose few entries sit where a walk samples it', () => {
       if (++holes > SPARSE_RUN && holes > entries) {
         const start = index + 1;
         const span = length - start;
-        if (span < 64) {
+        if (span < 128) {
           break;
         }
-        for (let sample = 0; sample < 33; sample++) {
-          array[start + Math.floor((span * sample) / 64)] = 1;
+        for (let sample = 0; sample < planted; sample++) {
+          array[start + Math.floor((span * sample) / 128)] = 1;
         }
         holes = 0;
         entries = 0;
@@ -310,16 +358,26 @@ describe('an array whose few entries sit where a walk samples it', () => {
     return array;
   }
 
-  test.each<[string, (array: unknown[]) => void]>([
+  // More than one in two samples held for `forEachOwnIndex`, which goes on through one
+  // hole per entry; more than one in 33 for the walks that go on through 32.
+  test.each<[string, number, (array: unknown[]) => void]>([
     [
       'forEachOwnIndex',
+      65,
       (array) => {
         forEachOwnIndex(array, array.length, () => undefined);
       },
     ],
-    ['deepClone', (array) => void deepClone(array)],
-  ])('is listed by %s within two runs of holes', (_label, run) => {
-    const array = plantedAtSamples(1 << 22);
+    ['deepClone', 4, (array) => void deepClone(array)],
+    [
+      "LRUCache's size estimate",
+      4,
+      (array) => {
+        new LRUCache(1, { maxSize: Number.MAX_SAFE_INTEGER }).set('k', array);
+      },
+    ],
+  ])('is listed by %s within two runs of holes', (_label, planted, run) => {
+    const array = plantedAtSamples(1 << 22, planted);
     let reads = 0;
     const counted = new Proxy(array, {
       has: (target, key) => {

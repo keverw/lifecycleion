@@ -1558,6 +1558,50 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('driven directly in a browser, a TRACE or TRACK is refused in the words the client uses', async () => {
+    const browserGlobals = globalThis as {
+      window?: unknown;
+      document?: unknown;
+    };
+    browserGlobals.window = globalThis;
+    browserGlobals.document = {};
+    try {
+      for (const method of ['TRACE', 'track']) {
+        lastXHR = undefined as unknown as typeof lastXHR;
+        const outcome = await new XHRAdapter()
+          .send({ requestURL: 'https://api.test/echo', method, headers: {} })
+          .then(
+            () => undefined,
+            (error: unknown) => error as Record<PropertyKey, unknown>,
+          );
+        const client = new HTTPClient({ adapter: new XHRAdapter() });
+        const builder = client.request(method, 'https://api.test/echo');
+        await builder.send();
+
+        expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+        expect(outcome?.message).toBe(builder.error?.cause?.message);
+        expect(String(outcome?.message)).toContain('Fetch Standard forbids');
+        expect(lastXHR).toBeUndefined();
+      }
+    } finally {
+      delete browserGlobals.window;
+      delete browserGlobals.document;
+    }
+  });
+
+  test('outside a browser an XHR TRACE is opened', async () => {
+    const sending = new XHRAdapter().send({
+      requestURL: 'https://api.test/echo',
+      method: 'TRACE',
+      headers: {},
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lastXHR.openArgs?.method).toBe('TRACE');
+    lastXHR.status = 200;
+    lastXHR.simulateLoad();
+    expect((await sending).status).toBe(200);
+  });
+
   test('outside a browser an XHR GET with a body is sent', async () => {
     const client = new HTTPClient({
       adapter: new XHRAdapter(),

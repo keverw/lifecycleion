@@ -5124,17 +5124,13 @@ function readClientCertificate(
     ['cert', cert],
     ['key', key],
   ] as Array<['cert' | 'key', unknown]>) {
-    const isText = typeof value === 'string';
     if (!isTLSMaterial(value)) {
       throw optionRefusal(
         `NodeAdapter mtls.${field} must be PEM text or bytes (got ${describeTLSMaterial(value)})`,
       );
     }
-    if (
-      isText
-        ? isBlankText(value)
-        : (readBinaryByteLength(value as object) ?? 0) === 0
-    ) {
+    // Blank text here; empty bytes are refused by `tlsMaterial`, in the same words.
+    if (typeof value === 'string' && isBlankText(value)) {
       throw optionRefusal(`NodeAdapter mtls.${field} is empty`);
     }
     material[field] = tlsMaterial(value as TLSMaterial, `mtls.${field}`);

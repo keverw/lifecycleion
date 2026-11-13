@@ -624,7 +624,8 @@ transport: Node's `http`, which `NodeAdapter` uses on Node and Bun alike, upperc
 `fetch` uppercases a method it knows (`purge` goes out as `PURGE`) and would send one it does not know as `GET` - `FetchAdapter` refuses a
 request whose method the runtime's `fetch` would change, its case included, as a non-retryable `adapter_error` rather than sending it, so use `NodeAdapter` for a custom method on Bun. `CONNECT` is refused on every adapter (it opens a tunnel), and
 `TRACE` and `TRACK` are refused before dispatch through `FetchAdapter`, and through
-`XHRAdapter` in a browser, since those refuse them. A `GET` or `HEAD` with a body is
+`XHRAdapter` in a browser, since the Fetch Standard forbids them; each of those adapters,
+driven directly, refuses them in the same words. A `GET` or `HEAD` with a body is
 refused before dispatch through `FetchAdapter`, and through `XHRAdapter` in a browser,
 since `fetch` refuses one and a browser's `XMLHttpRequest` silently sends it without the
 body (an XHR outside a browser - React Native, a shim - may send it, and is let through); use

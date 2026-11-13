@@ -23,8 +23,20 @@ export function isMostlyHoles(holes: number, entries: number): boolean {
   return holes > SPARSE_RUN && holes > entries * SPARSE_RUN_PER_ENTRY;
 }
 
+/**
+ * How many holes per entry a walk that tells a hole by `in`, for about one step -
+ * `deepClone`'s and `LRUCache`'s, while the array's prototype lets them - goes on through
+ * by index past a run of holes, rather than listing the rest of the array by its keys
+ * (see {@link walksOnByIndex}); one that tells a hole by `Object.hasOwn` pays about what
+ * listing an entry costs, and goes on through one. A step costs about 5 ns and
+ * listing an entry about 550 ns, so a walk by index is cheaper down to about one entry in
+ * a hundred; half of {@link SPARSE_RUN_PER_ENTRY} keeps a half or a third full array on
+ * the walk, with room for {@link FILL_SAMPLES} samples to tell it apart from a sparser one.
+ */
+export const WALKED_HOLES_PER_ENTRY = 32;
+
 /** How many indices `isMostlyFilledFrom` samples. */
-const FILL_SAMPLES = 64;
+const FILL_SAMPLES = 128;
 
 /**
  * Where a walk stood when it last went on by index past enough holes (see
@@ -39,18 +51,22 @@ export interface FillCheckpoint {
  * Asked each time a walk of `source` by index has met enough holes to read the rest by its
  * own keys - at `start`, with `holes` and `entries` met so far, counted over the whole
  * walk - whether it goes on by index instead: the checkpoint to go on with, or `undefined`
- * to list the keys. It goes on when the rest is mostly full (see
+ * to list the keys. `holesPerEntry` is how many holes the walk is worth going through for
+ * each entry it reads - {@link WALKED_HOLES_PER_ENTRY} for one that tells a hole by `in`,
+ * 1 for one that pays an `Object.hasOwn`, about what listing an entry costs. It goes on when the rest
+ * holds more than one entry in `holesPerEntry + 1` indices (see
  * {@link isMostlyFilledFrom}), so an array with a run of holes - at its start, or between
  * full stretches - however long, is not listed and sorted a string for every entry it
  * holds; and from then on while the walk has met no more than {@link SPARSE_RUN} holes
- * since - the rest of the run the samples skipped - or more entries than holes, after
- * which the rest is sampled again. The samples fall at random, so an array cannot be
- * built to pass them and be walked its whole length: one that does holds mostly entries
- * by every walk's own test, and is walked for about what they cost. A `Proxy` whose traps
- * claim every index is walked as full, as it would be without the samples. Which way the
- * rest is read can differ from one walk to the next; for an array that nothing changes
- * during the walk, and whose `has` and `getOwnPropertyDescriptor` traps agree, what
- * either way visits is the same. Throws as `in` or `Object.hasOwn` throws on `source`.
+ * since - the rest of the run the samples skipped - or more than one entry for each
+ * `holesPerEntry` of them, after which the rest is sampled again. The samples fall at
+ * random, so an array cannot be built to pass them and be walked its whole length: one
+ * that does holds about that share of entries by every walk's own test, and is walked for about
+ * `holesPerEntry` steps an entry. A `Proxy` whose traps claim every index is walked
+ * as full, as it would be without the samples. Which way the rest is read can differ
+ * from one walk to the next; for an array that nothing changes during the walk, and
+ * whose `has` and `getOwnPropertyDescriptor` traps agree, what either way visits is the
+ * same. Throws as `in` or `Object.hasOwn` throws on `source`.
  */
 export function walksOnByIndex(
   source: object,
@@ -59,23 +75,28 @@ export function walksOnByIndex(
   holes: number,
   entries: number,
   checkpoint: FillCheckpoint | undefined,
+  holesPerEntry: number,
 ): FillCheckpoint | undefined {
   if (checkpoint !== undefined) {
     const holesSince = holes - checkpoint.holes;
 
-    if (holesSince <= SPARSE_RUN || entries - checkpoint.entries > holesSince) {
+    if (
+      holesSince <= SPARSE_RUN ||
+      (entries - checkpoint.entries) * holesPerEntry > holesSince
+    ) {
       return checkpoint;
     }
   }
 
-  return isMostlyFilledFrom(source, start, length)
+  return isMostlyFilledFrom(source, start, length, holesPerEntry)
     ? { holes, entries }
     : undefined;
 }
 
 /**
- * Whether the indices of `source` from `start` up to `length` are mostly held, judged from
- * {@link FILL_SAMPLES} of them picked at random (see {@link walksOnByIndex}). Each is held
+ * Whether the indices of `source` from `start` up to `length` hold more than one entry in
+ * `holesPerEntry + 1`, judged from {@link FILL_SAMPLES} of them picked at random (see
+ * {@link walksOnByIndex}). Each is held
  * only when `in` and `Object.hasOwn` both say so, which every walk's own test then says
  * too - `holdsOwnIndex`, `holdsCopiedIndex`, and `LRUCache`'s read by `in` - so neither a
  * `Proxy` whose `has` and `getOwnPropertyDescriptor` disagree, nor a prototype that
@@ -86,6 +107,7 @@ function isMostlyFilledFrom(
   source: object,
   start: number,
   length: number,
+  holesPerEntry: number,
 ): boolean {
   const span = length - start;
 
@@ -103,7 +125,7 @@ function isMostlyFilledFrom(
     }
   }
 
-  return held * 2 > FILL_SAMPLES;
+  return held * (holesPerEntry + 1) > FILL_SAMPLES;
 }
 
 /**
@@ -212,7 +234,8 @@ export function indexFreePrototype(array: object): object | null | undefined {
  * As each hole walked costs an `Object.hasOwn`, about what listing and checking an entry
  * does, that is past {@link SPARSE_RUN} holes once they outnumber the entries, not
  * {@link isMostlyHoles}' many times as many - unless the walk goes on by index (see
- * {@link walksOnByIndex}).
+ * {@link walksOnByIndex}), which it does through about one hole per entry, for the same
+ * reason.
  */
 export function forEachOwnIndex(
   source: unknown[],
@@ -238,6 +261,7 @@ export function forEachOwnIndex(
         holes,
         entries,
         checkpoint,
+        1,
       );
       if (checkpoint !== undefined) {
         continue;

@@ -1,5 +1,4 @@
 import {
-  BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES,
   BROWSER_METHOD_OVERRIDE_HEADER_NAMES,
   BROWSER_RESTRICTED_HEADERS,
   BROWSER_RESTRICTED_HEADER_PREFIXES,
@@ -8,6 +7,7 @@ import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
 import { isFormData } from './form-entries';
 import { isHTTPToken } from './http-token';
+import { isForbiddenBrowserMethod } from './method-refusal';
 import {
   copyArrayValue,
   MAX_COPIED_ARRAY_LENGTH,
@@ -227,9 +227,7 @@ export function isBrowserRestrictedHeader(
   // method lowercased in ASCII only, as a browser compares it: `TRAC\u212A`
   // (KELVIN SIGN) is not `track`, and neither is `"TRACK"`.
   if (BROWSER_METHOD_OVERRIDE_HEADER_NAMES.has(lowerKey) && value) {
-    return splitHeaderValues(value).some((method) =>
-      BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(asciiLowercase(method)),
-    );
+    return splitHeaderValues(value).some(isForbiddenBrowserMethod);
   }
 
   return false;

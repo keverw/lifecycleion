@@ -6,6 +6,7 @@ import {
   indicesFrom,
   isMostlyHoles,
   walksOnByIndex,
+  WALKED_HOLES_PER_ENTRY,
 } from '../internal/array-indices';
 import type { FillCheckpoint } from '../internal/array-indices';
 
@@ -599,6 +600,9 @@ export class LRUCache<K, V> {
             if (isMostlyHoles(++holes, entries)) {
               // See `walksOnByIndex`.
               try {
+                // A hole is told by `in` on the checked prototype, and by
+                // `holdsOwnIndex` - `in` for this realm's arrays alone - otherwise.
+                const prototype = Reflect.getPrototypeOf(items);
                 checkpoint = walksOnByIndex(
                   items,
                   index + 1,
@@ -606,6 +610,11 @@ export class LRUCache<K, V> {
                   holes,
                   entries,
                   checkpoint,
+                  prototype === Array.prototype ||
+                    (checkedPrototype !== undefined &&
+                      prototype === checkedPrototype)
+                    ? WALKED_HOLES_PER_ENTRY
+                    : 1,
                 );
               } catch {
                 return estimatedSize + 1000;

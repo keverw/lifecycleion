@@ -9,7 +9,7 @@ import { asciiLowercase, asciiUppercase } from '../../internal/ascii-text';
  * its error.
  */
 
-/** Whether `method` is one `fetch` and browsers refuse: CONNECT, TRACE or TRACK. */
+/** Whether `method` is one the Fetch Standard forbids: CONNECT, TRACE or TRACK. */
 export function isForbiddenBrowserMethod(method: string): boolean {
   return BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(asciiLowercase(method));
 }
@@ -19,7 +19,7 @@ export function forbiddenMethodMessage(
   adapterName: string,
   method: string,
 ): string {
-  return `[${adapterName}] Cannot send a ${method} request: fetch and browsers refuse the CONNECT, TRACE and TRACK methods.`;
+  return `[${adapterName}] Cannot send a ${method} request: the Fetch Standard forbids the CONNECT, TRACE and TRACK methods, so ${adapterName} does not send them.`;
 }
 
 /** Whether `method` is GET or HEAD, which `fetch` refuses and XHR sends without a body. */

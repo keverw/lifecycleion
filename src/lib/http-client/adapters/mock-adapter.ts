@@ -1703,9 +1703,12 @@ function hasHeader(
   });
 }
 
+/** The message of every abort MockAdapter throws. */
+const MOCK_ABORT_MESSAGE = 'The operation was aborted.';
+
 class InternalMockAbortError extends Error {
   constructor() {
-    super('The operation was aborted.');
+    super(MOCK_ABORT_MESSAGE);
     this.name = 'AbortError';
   }
 }
@@ -1729,9 +1732,6 @@ function isInternalAbortError(error: unknown): error is InternalMockAbortError {
     return false;
   }
 }
-
-/** The message of every abort MockAdapter throws. */
-const MOCK_ABORT_MESSAGE = 'The operation was aborted.';
 
 function throwAbortError(): never {
   throw makeAbortError(MOCK_ABORT_MESSAGE);

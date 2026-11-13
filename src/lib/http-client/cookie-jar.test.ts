@@ -5604,6 +5604,32 @@ test('a domain is mapped to ASCII once for a Set-Cookie and not again for the ne
   });
 });
 
+test('a domain used often stays mapped while many others pass through', () => {
+  const jar = new CookieJar();
+  const mapped = spyOn(tr46Module, 'toASCII');
+  try {
+    jar.setCookie({ name: 'a', value: '1', domain: 'often.example' });
+    for (let index = 0; index < 200; index++) {
+      jar.setCookie({
+        name: 'b',
+        value: '1',
+        domain: `site${String(index)}.example`,
+      });
+      jar.setCookie({ name: 'a', value: '1', domain: 'often.example' });
+    }
+    const oftenMappings = mapped.mock.calls.filter(
+      ([name]) => name === 'often.example',
+    );
+
+    expect(oftenMappings).toHaveLength(1);
+    expect(
+      (Reflect.get(jar, 'normalizedDomains') as Map<string, string>).size,
+    ).toBe(64);
+  } finally {
+    mapped.mockRestore();
+  }
+});
+
 test('a name longer than any domain is normalized but not kept', () => {
   const jar = new CookieJar();
   const kept = (): number =>

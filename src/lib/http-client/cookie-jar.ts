@@ -410,8 +410,9 @@ export class CookieJar {
   private buckets: Map<string, Map<string, StoredCookie>> = new Map();
   /**
    * The names {@link normalizeStoredDomain} normalized lately, with their normal form: a
-   * pure answer, kept for at most {@link MAX_NORMALIZED_DOMAINS} names and then dropped
-   * all at once, so names a caller supplies cannot grow it.
+   * pure answer, kept for at most {@link MAX_NORMALIZED_DOMAINS} names, least recently
+   * used first in the map's order, the first one dropped to make room for another - so
+   * names a caller supplies cannot grow it, and a name used often stays.
    */
   private readonly normalizedDomains = new Map<string, string>();
 
@@ -1436,6 +1437,9 @@ export class CookieJar {
   private normalizeStoredDomain(domain: string): string {
     const known = this.normalizedDomains.get(domain);
     if (known !== undefined) {
+      // Moved to the end, as the most recently used.
+      this.normalizedDomains.delete(domain);
+      this.normalizedDomains.set(domain, known);
       return known;
     }
 
@@ -1448,7 +1452,10 @@ export class CookieJar {
     }
 
     if (this.normalizedDomains.size >= MAX_NORMALIZED_DOMAINS) {
-      this.normalizedDomains.clear();
+      for (const leastRecent of this.normalizedDomains.keys()) {
+        this.normalizedDomains.delete(leastRecent);
+        break;
+      }
     }
     this.normalizedDomains.set(domain, normalized);
 

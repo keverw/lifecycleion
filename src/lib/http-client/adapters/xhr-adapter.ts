@@ -37,7 +37,9 @@ import { isArrayBufferLike } from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 import {
   bodyOnBodilessMethodMessage,
+  forbiddenMethodMessage,
   isBodilessMethod,
+  isForbiddenBrowserMethod,
 } from '../internal/method-refusal';
 import { readUnknownMember } from '../../internal/read-member';
 import { isLoopbackHost } from '../internal/loopback-host';
@@ -101,6 +103,15 @@ export class XHRAdapter implements HTTPAdapter {
     const upperMethod = asciiUppercase(method);
     if (upperMethod === 'CONNECT') {
       throw connectRefusal('XHRAdapter');
+    }
+
+    // A browser's XHR refuses a TRACE or TRACK at `open`, on every attempt: refused here,
+    // in the words `HTTPClient` and FetchAdapter use. In a browser only, as the client
+    // refuses one: a non-browser XHR (React Native, a shim) may send it.
+    if (isForbiddenBrowserMethod(upperMethod) && isBrowserEnvironment()) {
+      const refusal = new Error(forbiddenMethodMessage('XHRAdapter', method));
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
     }
 
     // A browser's XHR drops a GET or HEAD body - the XHR standard sends those bodiless - so

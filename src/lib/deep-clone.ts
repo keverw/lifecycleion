@@ -15,6 +15,7 @@ import {
   indicesFrom,
   isMostlyHoles,
   walksOnByIndex,
+  WALKED_HOLES_PER_ENTRY,
   readCopiedIndex,
 } from './internal/array-indices';
 import type { FillCheckpoint } from './internal/array-indices';
@@ -580,6 +581,10 @@ class ArrayFrame implements Frame {
             holes,
             entries,
             this.checkpoint,
+            // `holdsOwnIndex` tells a hole by `in` for this realm's arrays alone.
+            Reflect.getPrototypeOf(source) === Array.prototype
+              ? WALKED_HOLES_PER_ENTRY
+              : 1,
           );
           if (this.checkpoint !== undefined) {
             continue;

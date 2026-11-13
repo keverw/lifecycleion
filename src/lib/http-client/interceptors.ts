@@ -143,7 +143,10 @@ async function runInterceptors(
   /** Whether `current` is an interceptor's result, not yet copied. */
   let isCurrentUncopied = isInterceptorResult;
   let filterContext:
-    | { request: unknown; context: Parameters<typeof matchesFilter>[1] }
+    | {
+        request: InterceptedRequest;
+        context: Parameters<typeof matchesFilter>[1];
+      }
     | undefined;
   /** `prepareRequest` while it is still to be called. */
   let pendingPrepare = prepareRequest;
@@ -182,7 +185,10 @@ async function runInterceptors(
     }
 
     // One context while the request is the same one, so the filters before the next
-    // interceptor that returns another share its URL's parse (see `matchesFilter`).
+    // interceptor that returns another share its URL's parse (see `matchesFilter`). Its
+    // fields are read once, which holds because a context never outlives an interceptor
+    // call: whatever an interceptor returns, `current` itself changed in place included,
+    // is copied into a new object before the next filter reads it.
     if (filterContext?.request !== current) {
       filterContext = {
         request: current,
