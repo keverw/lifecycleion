@@ -86,6 +86,7 @@ import type {
 import { isErrorValue } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { readUnknownMember } from '../../internal/read-member';
+import { isStatusCode } from '../internal/status-code';
 import {
   isTimeoutValidationError,
   resolveTimeoutMS,
@@ -756,13 +757,7 @@ export class MockAdapter implements HTTPAdapter {
                 'MockAdapter route transportError',
               );
               const value: unknown = options.status;
-              if (
-                value !== undefined &&
-                (typeof value !== 'number' ||
-                  !Number.isInteger(value) ||
-                  value < 0 ||
-                  value > 999)
-              ) {
+              if (value !== undefined && !isStatusCode(value, 0)) {
                 throw new TypeError(
                   `MockAdapter route returned transportError status ${typeof value === 'number' ? String(value) : typeof value}; it is an integer from 0 to 999`,
                 );
@@ -881,7 +876,7 @@ export class MockAdapter implements HTTPAdapter {
     // `transportError` for a network failure.
     asRouteMistake(() => {
       const { status } = mockResponse;
-      if (!Number.isInteger(status) || status < 100 || status > 999) {
+      if (!isStatusCode(status, 100)) {
         throw new TypeError(
           `MockAdapter route returned status ${typeof status === 'number' ? String(status) : typeof status}; a response status is an integer from 100 to 999 (use transportError for a network failure)`,
         );

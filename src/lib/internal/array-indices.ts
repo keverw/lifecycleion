@@ -45,8 +45,12 @@ export interface FillCheckpoint {
  * holds; and from then on while the walk has met no more than {@link SPARSE_RUN} holes
  * since - the rest of the run the samples skipped - or more entries than holes, after
  * which the rest is sampled again. The samples fall at random, so an array cannot be
- * built to pass them: one that does is mostly full, and is walked for about what its
- * entries cost. Throws as `Object.hasOwn` throws on `source`.
+ * built to pass them and be walked its whole length: one that does holds mostly entries
+ * by every walk's own test, and is walked for about what they cost. A `Proxy` whose traps
+ * claim every index is walked as full, as it would be without the samples. Which way the
+ * rest is read can differ from one walk to the next; for an array that nothing changes
+ * during the walk, and whose `has` and `getOwnPropertyDescriptor` traps agree, what
+ * either way visits is the same. Throws as `in` or `Object.hasOwn` throws on `source`.
  */
 export function walksOnByIndex(
   source: object,
@@ -70,9 +74,13 @@ export function walksOnByIndex(
 }
 
 /**
- * Whether the indices of `source` from `start` up to `length` are mostly held as its own,
- * judged from {@link FILL_SAMPLES} of them picked at random, each told by `Object.hasOwn`
- * (see {@link walksOnByIndex}). Throws as `Object.hasOwn` throws on it.
+ * Whether the indices of `source` from `start` up to `length` are mostly held, judged from
+ * {@link FILL_SAMPLES} of them picked at random (see {@link walksOnByIndex}). Each is held
+ * only when `in` and `Object.hasOwn` both say so, which every walk's own test then says
+ * too - `holdsOwnIndex`, `holdsCopiedIndex`, and `LRUCache`'s read by `in` - so neither a
+ * `Proxy` whose `has` and `getOwnPropertyDescriptor` disagree, nor a prototype that
+ * answers `in` for the indices sampled, passes them with an array a walk reads as holes.
+ * Throws as either throws on `source`.
  */
 function isMostlyFilledFrom(
   source: object,
@@ -88,7 +96,9 @@ function isMostlyFilledFrom(
   let held = 0;
 
   for (let sample = 0; sample < FILL_SAMPLES; sample++) {
-    if (Object.hasOwn(source, start + Math.floor(Math.random() * span))) {
+    const index = start + Math.floor(Math.random() * span);
+
+    if (index in source && Object.hasOwn(source, index)) {
       held++;
     }
   }

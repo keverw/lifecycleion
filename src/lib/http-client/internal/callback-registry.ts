@@ -7,6 +7,7 @@ import {
 import { MAX_PROTOTYPE_DEPTH } from '../../internal/prototype-depth';
 import { readCopiedIndex } from '../../internal/array-indices';
 import { isRealmRootPrototype } from './plain-record';
+import { isStatusCode } from './status-code';
 import { trimHTTPWhitespace } from '../../internal/ascii-text';
 import { normalizeFilterMethods } from '../utils';
 import { readHostPattern } from '../../domain-utils/host-filter';
@@ -43,7 +44,7 @@ const FILTER_LISTS: Record<
     entryType: 'number',
     // An answer's status is an integer from 0 to 999; no other number is one.
     checkNumber: (entry) =>
-      Number.isInteger(entry) && entry >= 0 && entry <= 999
+      isStatusCode(entry, 0)
         ? undefined
         : 'is not an integer status from 0 to 999',
   },

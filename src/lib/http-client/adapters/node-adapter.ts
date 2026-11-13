@@ -487,11 +487,18 @@ export class NodeAdapter implements HTTPAdapter {
     if (config.crl !== undefined) {
       normalizeCRL(config.crl, this);
     }
-    assertTrustAnchors(copyArrayValue(config.ca, 'NodeAdapter ca'), 'ca');
+    const anchorCheck = startTrustAnchorCheck(this);
+    assertTrustAnchors(
+      copyArrayValue(config.ca, 'NodeAdapter ca'),
+      'ca',
+      anchorCheck,
+    );
     assertTrustAnchors(
       copyArrayValue(config.mtls?.ca, 'NodeAdapter mtls.ca'),
       'mtls.ca',
+      anchorCheck,
     );
+    endTrustAnchorCheck(anchorCheck);
 
     // Held to their types here and again as each request reads them (see
     // `assertBooleanOption`, `assertSocketPath`, `assertServername` and
@@ -748,8 +755,10 @@ export class NodeAdapter implements HTTPAdapter {
       const mtlsCA = copyTrustList(mtls?.ca, 'NodeAdapter mtls.ca');
       const servername = this._config.servername;
       assertServername(servername);
-      assertTrustAnchors(trustedCA, 'ca');
-      assertTrustAnchors(mtlsCA, 'mtls.ca');
+      const anchorCheck = startTrustAnchorCheck(this);
+      assertTrustAnchors(trustedCA, 'ca', anchorCheck);
+      assertTrustAnchors(mtlsCA, 'mtls.ca', anchorCheck);
+      endTrustAnchorCheck(anchorCheck);
       // `mtls.ca` adds to `ca` rather than replacing it, so a client that trusts a partner
       // CA through `ca` keeps it when it also configures mTLS.
       // Each as TLS takes it (see `tlsMaterial`), named by the option it came from.
@@ -759,13 +768,13 @@ export class NodeAdapter implements HTTPAdapter {
           : Array.isArray(trustedCA)
             ? trustedCA
             : [trustedCA]
-        ).map((anchor) => tlsMaterial(anchor, 'ca')),
+        ).map((anchor) => tlsMaterial(anchor, 'ca', anchorCheck)),
         ...(mtlsCA === undefined
           ? []
           : Array.isArray(mtlsCA)
             ? mtlsCA
             : [mtlsCA]
-        ).map((anchor) => tlsMaterial(anchor, 'mtls.ca')),
+        ).map((anchor) => tlsMaterial(anchor, 'mtls.ca', anchorCheck)),
       ];
       if (ownAnchors.length > 0) {
         httpsOptions.ca = ownAnchors.length === 1 ? ownAnchors[0] : ownAnchors;
@@ -5173,12 +5182,14 @@ function trustAnchorByteSize(entry: object): number | undefined {
  * `Bun.file()` as well. A list inside the list, a number or any other object is not one.
  *
  * A `Bun.file()` is a `Blob` no different by type from one made in memory, which Bun's TLS
- * refuses, so a blob is asked of Bun's TLS itself: one it cannot build a context from - a
- * `new Blob([pem])`, a `File`, a file that holds no certificate - is not one. Nor is one
- * opened from a file descriptor, which names no path: it is read for each request (see
- * `tlsMaterial`), and a descriptor cannot be read again from its start.
+ * refuses, so a blob is asked of Bun's TLS itself the first time it is seen: one it cannot
+ * build a context from - a `new Blob([pem])` even with a `name` set, a `File`, a file that
+ * holds no certificate - is not one. Nor is one opened from a file descriptor, which
+ * names no path: it is read for each request (see `tlsMaterial`), and a descriptor cannot
+ * be read again from its start. Each request then reads the file and checks its bytes
+ * (see `isBlobTrustAnchor`).
  */
-function isTrustAnchor(entry: unknown): boolean {
+function isTrustAnchor(entry: unknown, check: TrustAnchorCheck): boolean {
   if (typeof entry === 'string') {
     return true;
   }
@@ -5195,29 +5206,140 @@ function isTrustAnchor(entry: unknown): boolean {
     return true;
   }
 
-  if (
-    typeof Blob !== 'function' ||
-    !(entry instanceof Blob) ||
-    typeof blobPath(entry) !== 'string'
-  ) {
-    return false;
+  const path =
+    typeof Blob === 'function' && entry instanceof Blob
+      ? blobPath(entry)
+      : undefined;
+
+  return path !== undefined && isBlobTrustAnchor(entry as Blob, path, check);
+}
+
+/** Bun's answer for the bytes a `Bun.file()` trust anchor held when it was checked. */
+interface BlobAnchorAnswer {
+  readonly bytes: Buffer;
+  readonly isAnchor: boolean;
+}
+
+/**
+ * The answers of each adapter's last check of its trust anchors (see `TrustAnchorCheck`),
+ * by the path of each `Bun.file()` it read: so a file whose bytes have not changed is not
+ * asked of Bun again, and only the files the last check read are kept.
+ */
+const lastBlobAnchorAnswers = new WeakMap<
+  object,
+  ReadonlyMap<string, BlobAnchorAnswer>
+>();
+
+/**
+ * The blobs Bun's TLS has taken as a trust anchor, once each: a blob is a `Bun.file()` or
+ * it is not for good, and Bun's TLS is the one that tells.
+ */
+const bunFileAnchors = new WeakSet<Blob>();
+
+/**
+ * One check of an adapter's `ca` and `mtls.ca` (see `assertTrustAnchors`): Bun's answers
+ * for the files it read, kept for the adapter once the check ends (see
+ * `endTrustAnchorCheck`), and the bytes each `Bun.file()` read as - the bytes checked,
+ * which `tlsMaterial` hands TLS.
+ */
+interface TrustAnchorCheck {
+  readonly owner: object;
+  readonly answers: Map<string, BlobAnchorAnswer>;
+  readonly bytesByBlob: Map<Blob, Buffer>;
+}
+
+function startTrustAnchorCheck(owner: object): TrustAnchorCheck {
+  return { owner, answers: new Map(), bytesByBlob: new Map() };
+}
+
+/** Keeps a check's answers for its adapter, in place of the last check's. */
+function endTrustAnchorCheck(check: TrustAnchorCheck): void {
+  lastBlobAnchorAnswers.set(check.owner, check.answers);
+}
+
+/**
+ * Whether the `Bun.file()` `blob` at `path` is a trust anchor (see `isTrustAnchor`). The
+ * file is read on every check, and its bytes asked of Bun's TLS only when they differ from
+ * those it answered for on the adapter's last check: building a context parses every
+ * certificate in the file - about 2 ms for a 320 KB bundle - where reading and comparing
+ * it costs a small part of that. The bytes read are the ones `tlsMaterial` hands TLS on
+ * this request, so what was checked is what is sent. A file that cannot be read is not
+ * one.
+ */
+function isBlobTrustAnchor(
+  blob: Blob,
+  path: string,
+  check: TrustAnchorCheck,
+): boolean {
+  if (!bunFileAnchors.has(blob)) {
+    try {
+      tls.createSecureContext({ ca: blob as unknown as string });
+    } catch {
+      return false;
+    }
+    bunFileAnchors.add(blob);
   }
 
+  let bytes: Buffer;
   try {
-    tls.createSecureContext({ ca: entry as unknown as string });
-    return true;
+    bytes = readFileSync(path);
   } catch {
     return false;
   }
+
+  const known =
+    check.answers.get(path) ??
+    lastBlobAnchorAnswers.get(check.owner)?.get(path);
+  let isAnchor: boolean;
+
+  if (known !== undefined && bytes.equals(known.bytes)) {
+    isAnchor = known.isAnchor;
+  } else {
+    try {
+      tls.createSecureContext({ ca: bytes });
+      isAnchor = true;
+    } catch {
+      isAnchor = false;
+    }
+  }
+
+  check.answers.set(path, { bytes, isAnchor });
+  if (isAnchor) {
+    check.bytesByBlob.set(blob, bytes);
+  }
+
+  return isAnchor;
 }
 
-/** A `Bun.file()`'s path, or `undefined` for a blob that names none (one made in memory). */
-function blobPath(blob: Blob): string | undefined {
-  const name: unknown = Reflect.get(blob, 'name');
-  return typeof name === 'string' &&
-    !(typeof File === 'function' && blob instanceof File)
-    ? name
+/** `Blob.prototype`'s own `name` getter, which Bun declares: a `Bun.file()`'s path. */
+const BLOB_NAME: ((this: Blob) => unknown) | undefined =
+  typeof Blob === 'function'
+    ? // eslint-disable-next-line @typescript-eslint/unbound-method -- called on the value below
+      Object.getOwnPropertyDescriptor(Blob.prototype, 'name')?.get
     : undefined;
+
+/**
+ * A `Bun.file()`'s path, or `undefined` for a blob that names none (one made in memory):
+ * read through `Blob.prototype`'s own getter, so an own `name` - a getter that answers
+ * one path to a check and another to the read - is not believed, and a `Proxy` names
+ * none.
+ */
+function blobPath(blob: Blob): string | undefined {
+  if (typeof File === 'function' && blob instanceof File) {
+    return undefined;
+  }
+
+  let name: unknown;
+  try {
+    name =
+      BLOB_NAME === undefined
+        ? Reflect.get(blob, 'name')
+        : Reflect.apply(BLOB_NAME, blob, []);
+  } catch {
+    return undefined;
+  }
+
+  return typeof name === 'string' ? name : undefined;
 }
 
 /**
@@ -5228,11 +5350,13 @@ function blobPath(blob: Blob): string | undefined {
  * reads as the same `[object ...]` whatever it holds: passed on as they are, a connection
  * one adapter opened trusting one CA, or presenting one client certificate, would be
  * reused by another adapter configured with different ones. A `Buffer` reads as its
- * bytes.
+ * bytes. A `ca` or `mtls.ca` file is handed over as the bytes `check` read and checked
+ * (see `isBlobTrustAnchor`), not read again.
  */
 function tlsMaterial(
   value: string | Buffer | object,
   name: string,
+  check?: TrustAnchorCheck,
 ): string | Buffer {
   if (typeof value === 'string') {
     return value;
@@ -5244,6 +5368,14 @@ function tlsMaterial(
 
   if (arrayBufferKindOf(value) === 'ArrayBuffer') {
     return copyToOwnMemory(new Uint8Array(value as ArrayBuffer));
+  }
+
+  const checked =
+    typeof Blob === 'function' && value instanceof Blob
+      ? check?.bytesByBlob.get(value)
+      : undefined;
+  if (checked !== undefined) {
+    return checked;
   }
 
   const path =
@@ -5273,7 +5405,11 @@ function tlsMaterial(
  * refuse one that is not a trust anchor or a list of them (see {@link isTrustAnchor}),
  * which would build the adapter and fail every HTTPS request.
  */
-function assertTrustAnchors(value: unknown, name: string): void {
+function assertTrustAnchors(
+  value: unknown,
+  name: string,
+  check: TrustAnchorCheck,
+): void {
   if (value === undefined) {
     return;
   }
@@ -5303,7 +5439,7 @@ function assertTrustAnchors(value: unknown, name: string): void {
   }
 
   // A list's entries each one anchor, never a list of their own (`[loadPems()]`).
-  const isWrong = (entry: unknown): boolean => !isTrustAnchor(entry);
+  const isWrong = (entry: unknown): boolean => !isTrustAnchor(entry, check);
   const isList = Array.isArray(value);
   const list: unknown[] = isList ? (value as unknown[]) : [value];
   const index = list.findIndex(isWrong);

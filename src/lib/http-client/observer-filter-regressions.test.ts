@@ -3,6 +3,7 @@ import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
 import type { AdapterResponse } from './types';
 import { captureErrorReports } from './test-helpers/capture-error-reports';
+import * as bodyCopyModule from './internal/request-body-copy';
 import {
   THROWING_FILTER_HOST,
   makeMarkedFiltersThrow,
@@ -608,6 +609,111 @@ test('a request body for the observers that cannot be built is built once and re
   expect(appends).toBe(2);
   expect(reports).toHaveLength(1);
   expect(((reports[0] as Error).cause as Error).message).toBe('copy failed');
+});
+
+test('a request body for the observers that cannot be built is reported once for the attempt, in the retry phase and the final phase alike', async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () => Promise.resolve({ status: 503, headers: {}, body: null }),
+    },
+    retryPolicy: { strategy: 'fixed', delayMS: 5000, maxRetryAttempts: 1 },
+  });
+  const handed: unknown[] = [];
+  const form = new FormData();
+  form.append('field', 'value');
+  const builder = client.put('https://api.example.com/x').body(form);
+  // Cancelled during the wait before the retry, after the retry-phase observer ran, so
+  // the final-phase error observer is handed the same attempt's request.
+  client.addResponseObserver(
+    (_response, request) => {
+      handed.push(['retry', request.body]);
+      setTimeout(() => builder.cancel(), 20);
+    },
+    { phases: ['retry'] },
+  );
+  client.addErrorObserver((_error, request) => {
+    handed.push(['final', request.body]);
+  });
+  // The adapter's copy is the first append from here; every later one, the observers'
+  // copy, throws.
+  let appends = 0;
+  const original: unknown = Reflect.get(FormData.prototype, 'append');
+  const append = spyOn(FormData.prototype, 'append').mockImplementation(
+    function (this: FormData, ...args: unknown[]) {
+      if (++appends >= 2) {
+        throw new Error('copy failed');
+      }
+      Reflect.apply(original as (...a: unknown[]) => void, this, args);
+    },
+  );
+  const { reports, release } = captureErrorReports();
+  let response;
+  try {
+    response = await builder.send();
+  } finally {
+    append.mockRestore();
+    release();
+  }
+
+  expect(response.isCancelled).toBe(true);
+  expect(handed).toEqual([
+    ['retry', null],
+    ['final', null],
+  ]);
+  expect(reports).toHaveLength(1);
+  expect(((reports[0] as Error).cause as Error).message).toBe('copy failed');
+});
+
+test('a request body for the observers that cannot be built is reported again for a later attempt', async () => {
+  let isObserving = false;
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () => {
+        isObserving = true;
+        return Promise.resolve({ status: 503, headers: {}, body: null });
+      },
+    },
+    retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 1 },
+  });
+  // The next attempt's adapter copy is taken after the retry-phase interceptors run.
+  client.addRequestInterceptor(
+    (request) => {
+      isObserving = false;
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+  const handed: unknown[] = [];
+  client.addResponseObserver(
+    (_response, request) => {
+      handed.push(request.body);
+    },
+    { phases: ['retry', 'final'] },
+  );
+  const original = bodyCopyModule.cloneBodyValue;
+  const copies = spyOn(bodyCopyModule, 'cloneBodyValue').mockImplementation(
+    (body) => {
+      if (isObserving) {
+        throw new Error('copy failed');
+      }
+      return original(body);
+    },
+  );
+  const { reports, release } = captureErrorReports();
+  try {
+    await client
+      .put('https://api.example.com/x')
+      .body(new Uint8Array([1, 2]))
+      .send();
+  } finally {
+    copies.mockRestore();
+    release();
+  }
+
+  expect(handed).toEqual([null, null]);
+  expect(reports).toHaveLength(2);
 });
 
 test.each<[string, () => unknown, (rawBody: unknown) => unknown]>([

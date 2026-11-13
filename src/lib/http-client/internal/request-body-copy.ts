@@ -3,6 +3,7 @@ import { isPlainRecord } from './plain-record';
 import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { filePartNameToSend, formEntries, isFormData } from './form-entries';
 import { defineEntry } from '../../internal/define-entry';
+import { plainBytesView } from '../../internal/binary-view';
 
 /**
  * What the client knows of a JSON body copy it made (see `copyRequestBody`): the text it
@@ -301,6 +302,44 @@ function copyFormData(form: FormData): FormData {
   }
 
   return cloned;
+}
+
+/**
+ * Whether `left` and `right` hold the same bytes, each read through the intrinsic
+ * getters (see `plainBytesView`), so an own `byteLength` or `buffer` on either is not
+ * believed. One over a detached buffer holds none that can be read, and is not the same.
+ * Compares without copying either.
+ */
+export function holdsSameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  let leftBytes: Uint8Array;
+  let rightBytes: Uint8Array;
+  try {
+    leftBytes = plainBytesView(left);
+    rightBytes = plainBytesView(right);
+  } catch {
+    return false;
+  }
+
+  if (leftBytes.byteLength !== rightBytes.byteLength) {
+    return false;
+  }
+
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(
+      leftBytes.buffer,
+      leftBytes.byteOffset,
+      leftBytes.byteLength,
+    ).equals(rightBytes);
+  }
+
+  let index = 0;
+  for (const byte of leftBytes) {
+    if (byte !== rightBytes[index++]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**

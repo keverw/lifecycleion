@@ -339,3 +339,154 @@ describe('an array whose few entries sit where a walk samples it', () => {
     expect(reads).toBeLessThan(5 * SPARSE_RUN);
   });
 });
+
+describe('a walk that samples the rest of an array', () => {
+  test.each<[string, (array: unknown[]) => void]>([
+    ['deepClone', (array) => void deepClone(array)],
+    [
+      "LRUCache's size estimate",
+      (array) => {
+        new LRUCache(1, { maxSize: Number.MAX_SAFE_INTEGER }).set('k', array);
+      },
+    ],
+  ])(
+    'samples it so that %s lists a Proxy whose has hides what its descriptors claim',
+    (_label, run) => {
+      let has = 0;
+      let listed = 0;
+      const target: unknown[] = [];
+      target.length = 300_000;
+      const isIndex = (key: string | symbol) =>
+        typeof key === 'string' && /^\d+$/.test(key);
+      const disagreeing = new Proxy(target, {
+        has: (array, key) => {
+          if (isIndex(key)) {
+            has++;
+            return false;
+          }
+          return Reflect.has(array, key);
+        },
+        getOwnPropertyDescriptor: (array, key) =>
+          isIndex(key)
+            ? { value: 1, writable: true, enumerable: true, configurable: true }
+            : Reflect.getOwnPropertyDescriptor(array, key),
+        ownKeys: (array) => {
+          listed++;
+          return Reflect.ownKeys(array);
+        },
+      });
+
+      run(disagreeing);
+
+      expect(has).toBeLessThan(SPARSE_RUN + 1000);
+      expect(listed).toBeGreaterThan(0);
+    },
+  );
+
+  test.each<[string, (array: unknown[]) => void]>([
+    [
+      'forEachOwnIndex',
+      (array) => {
+        forEachOwnIndex(array, array.length, () => undefined);
+      },
+    ],
+    ['deepClone', (array) => void deepClone(array)],
+    [
+      "LRUCache's size estimate",
+      (array) => {
+        new LRUCache(1, { maxSize: Number.MAX_SAFE_INTEGER }).set('k', array);
+      },
+    ],
+  ])(
+    'lists by %s an array whose Proxy prototype answers in for the indices sampled, not those walked',
+    (_label, run) => {
+      let has = 0;
+      let last = -1;
+      // Answers `in` for any index but the next one a walk in order reads - so for the
+      // samples - and lists no index of its own, so it passes as a prototype that fills
+      // none.
+      const prototype = new Proxy(Object.create(Array.prototype) as object, {
+        has: (target, key) => {
+          if (typeof key === 'string' && /^\d+$/.test(key)) {
+            has++;
+            const index = Number(key);
+            if (index === last + 1) {
+              last = index;
+              return false;
+            }
+            return true;
+          }
+          return Reflect.has(target, key);
+        },
+      });
+      const array: unknown[] = [];
+      array.length = 2_000_000;
+      Object.setPrototypeOf(array, prototype);
+
+      run(array);
+
+      expect(has).toBeLessThan(SPARSE_RUN + 1000);
+    },
+  );
+
+  test.each<[string, (array: unknown[]) => unknown]>([
+    [
+      'forEachOwnIndex',
+      (array) => {
+        const visited: number[] = [];
+        forEachOwnIndex(array, array.length, (index) => visited.push(index));
+        return visited;
+      },
+    ],
+    [
+      'deepClone',
+      (array) => {
+        const copy = deepClone(array);
+        return [copy.length, Object.keys(copy), Object.values(copy)];
+      },
+    ],
+    [
+      "LRUCache's size estimate",
+      (array) => {
+        const cache = new LRUCache(1, { maxSize: Number.MAX_SAFE_INTEGER });
+        cache.set('k', array);
+        return cache.byteSize;
+      },
+    ],
+  ])(
+    'reads the same entries by %s whichever way the samples send it',
+    (_label, read) => {
+      // 70,000 holes, then a stretch with every other index held and its last held, so a
+      // sample at the end finds it full and one at the start finds it empty.
+      const array: number[] = [];
+      array.length = 170_000;
+      for (let index = 70_000; index < 170_000; index += 2) {
+        array[index] = index;
+      }
+      array[169_999] = 169_999;
+
+      /** What `read` returns, and how often it listed `array`, with samples at `at`. */
+      function readWithSamplesAt(at: number): [unknown, number] {
+        const random = spyOn(Math, 'random').mockImplementation(() => at);
+        const list = spyOn(Object, 'getOwnPropertyNames');
+        try {
+          const result = read(array);
+          return [
+            result,
+            list.mock.calls.filter(([of]) => of === array).length,
+          ];
+        } finally {
+          list.mockRestore();
+          random.mockRestore();
+        }
+      }
+
+      const [byIndex, listedByIndex] = readWithSamplesAt(1 - Number.EPSILON);
+      const [byKeys, listedByKeys] = readWithSamplesAt(0);
+
+      expect(listedByIndex).toBe(0);
+      expect(listedByKeys).toBe(1);
+      expect(byIndex).toEqual(byKeys);
+    },
+  );
+});

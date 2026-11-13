@@ -1,7 +1,8 @@
-import { expect, spyOn, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import {
   copiedJSONText,
   copyRequestBody,
+  holdsSameBytes,
   readRequestBodyContents,
   releaseRequestBody,
   serializesToNothing,
@@ -231,4 +232,36 @@ test('a top-level toJSON that answers a value other than an object or array is s
 
   expect(copy.toJSON()).toBe('text');
   expect(copiedJSONText(copy)).toBe('"text"');
+});
+
+describe('holdsSameBytes', () => {
+  test('compares the bytes held, not an own byteLength, and a detached view holds none', () => {
+    const left = new Uint8Array([1, 2, 3]);
+    const right = new Uint8Array([1, 2, 3]);
+    expect(holdsSameBytes(left, right)).toBe(true);
+    expect(holdsSameBytes(left, new Uint8Array([1, 2, 4]))).toBe(false);
+
+    const shortened = new Uint8Array([1, 2, 3, 4]);
+    Object.defineProperty(shortened, 'byteLength', { value: 3 });
+    expect(holdsSameBytes(left, shortened)).toBe(false);
+
+    const detached = new Uint8Array([1, 2, 3]);
+    structuredClone(detached.buffer, { transfer: [detached.buffer] });
+    expect(holdsSameBytes(left, detached)).toBe(false);
+  });
+
+  test('compares by index where there is no Buffer', () => {
+    const buffer = globalThis.Buffer;
+    Reflect.deleteProperty(globalThis, 'Buffer');
+    try {
+      expect(
+        holdsSameBytes(new Uint8Array([5, 6]), new Uint8Array([5, 6])),
+      ).toBe(true);
+      expect(
+        holdsSameBytes(new Uint8Array([5, 6]), new Uint8Array([5, 7])),
+      ).toBe(false);
+    } finally {
+      globalThis.Buffer = buffer;
+    }
+  });
 });

@@ -53,6 +53,7 @@ import {
   deferredBodyCopy,
   deferredJSONRawBody,
 } from './internal/observed-bodies';
+import type { HeldAttemptRequest } from './internal/observed-bodies';
 import {
   assertSupportedAdapterRuntimeAndConfig,
   assertSupportedRequestBody,
@@ -163,10 +164,12 @@ import {
   cloneBodyValue,
   copiedJSONText,
   copyRequestBody,
+  holdsSameBytes,
   isCopySerializingToNothing,
   isUnfilledRequestBody,
   serializesToNothing,
 } from './internal/request-body-copy';
+import { isStatusCode } from './internal/status-code';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
 import { listenForUploadSourceWait } from './internal/upload-source-wait';
 import { listenForStreamFailureSettled } from './internal/stream-failure-settled';
@@ -1075,7 +1078,7 @@ export class BaseHTTPClient {
        * the request between hops. The paths that end before the redirect loop build
        * their own snapshot and return, so none is built up front.
        */
-      let observerRequest: AttemptRequest;
+      let observerRequest: HeldAttemptRequest;
       let errorCode: HTTPClientError['code'] | undefined;
       let adapterCause: Error | undefined;
       let errorMessage: string | undefined;
@@ -2633,7 +2636,7 @@ export class BaseHTTPClient {
     cookieJar?: CookieJar | null;
   }): Promise<{
     adapterResponse: AdapterResponse | null;
-    sentRequest: AttemptRequest;
+    sentRequest: HeldAttemptRequest;
     /**
      * Set when the hop's first attempt ended before it was dispatched - cancelled from
      * `onAttemptStart`, a cookie jar that threw building its `Cookie` header: a redirect
@@ -2866,7 +2869,7 @@ export class BaseHTTPClient {
       // say has finished.
       const endForUnsettledUpload = (
         wait: Exclude<UploadSettleWait, 'settled'>,
-        reported: AttemptRequest,
+        reported: HeldAttemptRequest,
       ) => {
         const signalReason =
           wait === 'cancelled'
@@ -3221,7 +3224,7 @@ export class BaseHTTPClient {
         }, timeout);
       }
 
-      let sentRequest: AttemptRequest;
+      let sentRequest: HeldAttemptRequest;
       // The body handed to the adapter: the client's own, not the observers' `body`.
       let sentBody: AttemptRequest['body'];
       // What the snapshot of a failed setup may reuse: the bodies once built, or
@@ -3287,7 +3290,7 @@ export class BaseHTTPClient {
       const onUploadProgress = options.onUploadProgress;
       const onDownloadProgress = options.onDownloadProgress;
 
-      let observedSentRequest: AttemptRequest = sentRequest;
+      let observedSentRequest: HeldAttemptRequest = sentRequest;
       let responseUploadOutcome: Promise<Error | undefined> | undefined;
       // Set once `send()` resolves. The server has answered by then, so a throw from
       // reading or normalizing that answer (a getter, a header value whose conversion
@@ -3400,12 +3403,7 @@ export class BaseHTTPClient {
                   }
                   didCallStreamFactory = true;
                   const announcedStatus = readUnknownMember(args[0], 'status');
-                  if (
-                    typeof announcedStatus === 'number' &&
-                    Number.isInteger(announcedStatus) &&
-                    announcedStatus >= 100 &&
-                    announcedStatus <= 999
-                  ) {
+                  if (isStatusCode(announcedStatus, 100)) {
                     streamFactoryStatus = announcedStatus;
                   }
                   // Read on the way to the caller's factory, where a throw would replace
@@ -3674,12 +3672,7 @@ export class BaseHTTPClient {
         // Refused as the adapter's malformed answer - the answered request's non-retryable
         // adapter_error - rather than delivered as a success with no real status.
         const candidateStatus: unknown = adapterResponse.status;
-        if (
-          typeof candidateStatus !== 'number' ||
-          !Number.isInteger(candidateStatus) ||
-          candidateStatus < 0 ||
-          candidateStatus > 999
-        ) {
+        if (!isStatusCode(candidateStatus, 0)) {
           throw new TypeError(
             `HTTPClient adapter answered with an invalid status (got ${typeof candidateStatus === 'number' ? String(candidateStatus) : typeof candidateStatus})`,
           );
@@ -4234,7 +4227,7 @@ export class BaseHTTPClient {
 
         // The attempt ended by a cancel: reported to `onAttemptEnd` with the status `send()`
         // resolved with, if it had, and to the caller with its reason.
-        const endCancelled = (reported: AttemptRequest) => {
+        const endCancelled = (reported: HeldAttemptRequest) => {
           emitAttemptEnd({
             willRetry: false,
             status: answeredStatus,
@@ -4824,7 +4817,7 @@ export class BaseHTTPClient {
    * `Content-Type` inference, already normalized (a `ResolvedRequest`) and only read here.
    */
   private _redirectRequestHeaders(
-    sentRequest: AttemptRequest,
+    sentRequest: HeldAttemptRequest,
     attemptRequest: ResolvedRequest,
   ): Record<string, string | string[]> {
     const headers = copyHeaderRecord(sentRequest.headers);
@@ -5355,7 +5348,7 @@ export class BaseHTTPClient {
       attemptNumber?: number;
       cookieJar?: CookieJar | null;
     },
-  ): AttemptRequest {
+  ): HeldAttemptRequest {
     const { requestID, timeout, maxResponseBytes, attemptNumber, cookieJar } =
       params;
 
@@ -5428,7 +5421,7 @@ export class BaseHTTPClient {
       reportedURL?: string;
     } = {},
     knownBodies?: AttemptBodies | 'unbuildable',
-  ): AttemptRequest {
+  ): HeldAttemptRequest {
     // Best-effort snapshot for observers when a request fails before any adapter
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
     // Jar cookies and the attempt header (x-local-client-request-attempt) are not added
@@ -5543,7 +5536,7 @@ export class BaseHTTPClient {
 
   private _runResponseObservers(
     response: HTTPResponse,
-    request: AttemptRequest,
+    request: HeldAttemptRequest,
     phase: ResponseObserverPhase,
     cancelSignal?: AbortSignal,
   ): Promise<void> {
@@ -5562,7 +5555,7 @@ export class BaseHTTPClient {
 
   private _runErrorObservers(
     error: HTTPClientError,
-    request: AttemptRequest,
+    request: HeldAttemptRequest,
     phase: ErrorObserverPhase,
     cancelSignal?: AbortSignal,
   ): Promise<void> {
@@ -5812,7 +5805,7 @@ type AttemptBodies = {
   observed: ObservedBodies;
 };
 
-type ObservedBodies = Pick<AttemptRequest, 'body' | 'rawBody'>;
+type ObservedBodies = Pick<HeldAttemptRequest, 'body' | 'rawBody'>;
 
 /**
  * Read one string field of a caller-supplied request for a best-effort snapshot, through
@@ -5937,9 +5930,10 @@ function buildAttemptBodies(
   if (isRequestBodyBytes(body) || isFormData(body)) {
     // The token stands in for the copy until an observer is handed it (see
     // `handedBodyValue`).
-    const copy = (
-      observers === 'deferred' ? deferredBodyCopy(body) : cloneBodyValue(body)
-    ) as typeof body;
+    const copy =
+      observers === 'deferred'
+        ? deferredBodyCopy(body)
+        : (cloneBodyValue(body) as typeof body);
     observed = { body: copy, rawBody: copy };
   } else {
     // A string, or nothing: `rawBody` is the request's body as it is, `undefined`
@@ -6061,10 +6055,10 @@ function isBodyDecodeFailure(response: AdapterResponse): boolean {
  * see the same merged headers as on a successful `AdapterResponse`.
  */
 function sentRequestForObservedAdapterError(
-  sentRequest: AttemptRequest,
+  sentRequest: HeldAttemptRequest,
   error: unknown,
-  observedAfterAdapterResolve: AttemptRequest,
-): AttemptRequest {
+  observedAfterAdapterResolve: HeldAttemptRequest,
+): HeldAttemptRequest {
   const eff = getEffectiveRequestHeadersFromError(error);
 
   if (!eff) {
@@ -6174,12 +6168,7 @@ function getResponseStreamAbortInfo(
   const status = readUnknownMember(err, STREAM_ABORT_STATUS_KEY);
 
   // Held to the rule a resolved answer's status is: an integer from 0 to 999.
-  if (
-    typeof status !== 'number' ||
-    !Number.isInteger(status) ||
-    status < 0 ||
-    status > 999
-  ) {
+  if (!isStatusCode(status, 0)) {
     return undefined;
   }
 
@@ -6816,9 +6805,13 @@ function isDot(code: number): boolean {
   return code === 0x2e;
 }
 
-/** Whether a phase's copy of a body failed; see `copyChainResultBody`. */
+/**
+ * Whether a phase's copy of a body failed, and the bytes it handed its interceptors with
+ * the client's own they were copied from; see `copyChainResultBody`.
+ */
 interface BodyCopyOutcome {
   didFail: boolean;
+  handedBytes?: { readonly own: Uint8Array; readonly handed: Uint8Array };
 }
 
 /**
@@ -6874,6 +6867,13 @@ function handedRequestPreparer(
         copy.didFail = true;
         throw error;
       }
+
+      if (isRequestBodyBytes(request.body)) {
+        copy.handedBytes = {
+          own: request.body,
+          handed: prepared.body as Uint8Array,
+        };
+      }
     }
     return prepared;
   };
@@ -6900,6 +6900,18 @@ function copyChainResultBody(
   request: ResolvedRequest,
   outcome: BodyCopyOutcome,
 ): ResolvedRequest {
+  // Bytes handed back as they were handed out are sent as the client's own they were
+  // copied from, which no interceptor holds, rather than copied a second time: an
+  // upload's bytes are held twice in the phase, not three times.
+  const { handedBytes } = outcome;
+  if (
+    handedBytes !== undefined &&
+    request.body === handedBytes.handed &&
+    holdsSameBytes(handedBytes.handed, handedBytes.own)
+  ) {
+    return { ...request, body: handedBytes.own };
+  }
+
   let body: unknown;
   try {
     body = copyRequestBody(request.body);

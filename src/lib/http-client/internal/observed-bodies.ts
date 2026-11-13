@@ -1,5 +1,6 @@
 import { cloneBodyValue } from './request-body-copy';
 import { once } from './once';
+import type { AttemptRequest } from '../types';
 
 /**
  * The parts of an attempt's body its observers are handed but that cost something to
@@ -15,19 +16,40 @@ import { once } from './once';
  */
 const pendingByToken = new WeakMap<object, () => unknown>();
 
+declare const pendingBodyBrand: unique symbol;
+
+/** A token standing in for a body value; see `pendingByToken`. */
+export interface PendingBody {
+  readonly [pendingBodyBrand]: true;
+}
+
+/**
+ * An attempt's request as the client holds it, whose `body` and `rawBody` may be tokens
+ * (see `pendingByToken`): handed to an observer only as the copy `handedBodyValue` reads
+ * them into, so one passed where caller code is handed an `AttemptRequest` does not type
+ * check - for `body`; `rawBody` is typed `unknown` either way.
+ */
+export type HeldAttemptRequest = Omit<AttemptRequest, 'body' | 'rawBody'> & {
+  body?: AttemptRequest['body'] | PendingBody;
+  rawBody?: unknown;
+};
+
+/** The tokens whose build failure has been reported; see `isBuildFailureUnreported`. */
+const reportedFailures = new WeakSet<object>();
+
 /**
  * A token for `build()`'s value, built once (see `once`): its value kept - and the build,
  * holding the source body, let go - or the error it threw, thrown again rather than built
  * again. See `pendingByToken`.
  */
-function deferred(build: () => unknown): object {
+function deferred(build: () => unknown): PendingBody {
   const token = Object.freeze({});
   pendingByToken.set(token, once(build));
-  return token;
+  return token as PendingBody;
 }
 
 /** A token for the value `text` parses to; see `pendingByToken`. */
-export function deferredJSONRawBody(text: string): object {
+export function deferredJSONRawBody(text: string): PendingBody {
   return deferred(() => JSON.parse(text) as unknown);
 }
 
@@ -38,7 +60,7 @@ export function deferredJSONRawBody(text: string): object {
  * it is called (see `adapterRequestBody`) - so the copy taken when an observer is first
  * handed it is the body sent.
  */
-export function deferredBodyCopy(body: Uint8Array | FormData): object {
+export function deferredBodyCopy(body: Uint8Array | FormData): PendingBody {
   return deferred(() => cloneBodyValue(body));
 }
 
@@ -60,4 +82,40 @@ export function handedBodyValue(value: unknown): unknown {
   }
 
   return pending();
+}
+
+/**
+ * Whether the failure to build one of `values` - the `body` and `rawBody` of an attempt's
+ * request, as `handedBodyValue` was asked for them - is yet to be reported, marking each
+ * failed token reported: the copies of one attempt's request share its tokens, so a
+ * failure is reported once for the attempt, whichever phases hand its request out. A
+ * failure no token holds is always reported.
+ */
+export function isBuildFailureUnreported(values: readonly unknown[]): boolean {
+  let failedTokens = 0;
+  let isUnreported = false;
+
+  for (const value of values) {
+    const pending =
+      typeof value === 'object' && value !== null
+        ? pendingByToken.get(value)
+        : undefined;
+
+    if (pending === undefined) {
+      continue;
+    }
+
+    try {
+      pending();
+    } catch {
+      failedTokens++;
+
+      if (!reportedFailures.has(value as object)) {
+        reportedFailures.add(value as object);
+        isUnreported = true;
+      }
+    }
+  }
+
+  return isUnreported || failedTokens === 0;
 }

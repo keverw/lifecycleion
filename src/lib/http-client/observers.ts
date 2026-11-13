@@ -9,7 +9,11 @@ import {
 } from './internal/callback-registry';
 import type { RegisteredCallback } from './internal/callback-registry';
 import { copyHeaderRecord } from './internal/header-utils';
-import { handedBodyValue } from './internal/observed-bodies';
+import {
+  handedBodyValue,
+  isBuildFailureUnreported,
+} from './internal/observed-bodies';
+import type { HeldAttemptRequest } from './internal/observed-bodies';
 import { once } from './internal/once';
 import type {
   ResponseObserverFilter,
@@ -118,12 +122,22 @@ type ErrorObserverChain = (
 /** What an observer's filter is matched against; see `matchesFilter`. */
 type ObserverFilterContext = Parameters<typeof matchesFilter>[1];
 
-/** A response observer's filter context; see `readFilterContextOnce`. */
+/**
+ * What the filters are matched against, read the first time a filter asks for it - by
+ * the first observer registered for the phase, so before any observer has run - and
+ * kept (see `once`): each observer is handed the same response and request, and one that
+ * rewrites them - its `requestURL`, its `method` - must not change which of the rest they
+ * reach. A chain with no observer for the phase reads nothing. The body is read as a
+ * value: the keys `bodyContainsKeys` looks for are read from it by each filter that names
+ * them, as the body is when that filter is asked. A read that throws is kept as well and
+ * thrown to each filter that asks, so each reports it and its observer is skipped, as a
+ * filter that throws is. This one is a response observer's.
+ */
 function readResponseFilterContext(
   response: HTTPResponse,
-  request: AttemptRequest,
+  request: HeldAttemptRequest,
 ): () => ObserverFilterContext {
-  return readFilterContextOnce(() => ({
+  return once(() => ({
     status: response.status,
     method: request.method,
     requestURL: request.requestURL,
@@ -133,35 +147,23 @@ function readResponseFilterContext(
   }));
 }
 
-/** An error observer's filter context; see `readFilterContextOnce`. */
+/**
+ * An error observer's filter context, read as a response observer's is; see
+ * `readResponseFilterContext`.
+ */
 function readErrorFilterContext(
-  request: AttemptRequest,
+  request: HeldAttemptRequest,
 ): () => ObserverFilterContext {
-  return readFilterContextOnce(() => ({
+  return once(() => ({
     method: request.method,
     requestURL: request.requestURL,
   }));
 }
 
 /**
- * What the filters are matched against, read the first time a filter asks for it - by
- * the first observer registered for the phase, so before any observer has run - and
- * kept: each observer is handed the same response and request, and one that rewrites
- * them - its `requestURL`, its `method` - must not change which of the rest they reach. A
- * chain with no observer for the phase reads nothing. The body is read as a value: the
- * keys `bodyContainsKeys` looks for are read from it by each filter that names them, as
- * the body is when that filter is asked. A read that throws is kept as well and thrown to
- * each filter that asks, so each reports it and its observer is skipped, as a filter that
- * throws is.
- */
-function readFilterContextOnce<Context>(read: () => Context): () => Context {
-  return once(read);
-}
-
-/**
  * Run each observer whose filter matches, in registration order, waiting for each before
  * the next. `matches` is asked once per observer, against what was read before the first
- * ran (see `readFilterContextOnce`). A filter that throws is reported and its observer
+ * ran (see `readResponseFilterContext`). A filter that throws is reported and its observer
  * skipped, and an observer that throws is reported without stopping the rest. Each
  * observer's arguments come from `argsFor`, so each is handed its own phase object. Once
  * `cancelSignal` has aborted no further observer runs: `send()` has stopped waiting on
@@ -208,7 +210,7 @@ export function runParentThenOwnResponseObservers(
   parent: ResponseObserverManager | undefined,
   own: ResponseObserverManager,
   response: HTTPResponse,
-  request: AttemptRequest,
+  request: HeldAttemptRequest,
   phase: ResponseObserverPhase,
   cancelSignal?: AbortSignal,
 ): Promise<void> {
@@ -231,7 +233,7 @@ export function runParentThenOwnErrorObservers(
   parent: ErrorObserverManager | undefined,
   own: ErrorObserverManager,
   error: HTTPClientError,
-  request: AttemptRequest,
+  request: HeldAttemptRequest,
   phase: ErrorObserverPhase,
   cancelSignal?: AbortSignal,
 ): Promise<void> {
@@ -261,7 +263,7 @@ export function runParentThenOwnErrorObservers(
  * parses nothing.
  *
  * The filters of both chains are matched against `readContext`, read before the first
- * observer of either runs (see `readFilterContextOnce`) from `request` - which no observer
+ * observer of either runs (see `readResponseFilterContext`) from `request` - which no observer
  * is handed - and the response or error, so a parent's observer that rewrites the
  * request, or the response's status, content type or body, does not change which of the
  * client's own run. A `bodyContainsKeys` filter reads the keys of that body when it is
@@ -272,7 +274,7 @@ async function runParentThenOwn<Chain>(
   label: 'ResponseObserver' | 'ErrorObserver',
   parent: { readonly isEmpty: boolean; snapshot(): Chain } | undefined,
   own: { readonly isEmpty: boolean; snapshot(): Chain },
-  request: AttemptRequest,
+  request: HeldAttemptRequest,
   readContext: () => ObserverFilterContext,
   run: (
     chain: Chain,
@@ -285,15 +287,17 @@ async function runParentThenOwn<Chain>(
   const ownChain = own.isEmpty ? undefined : own.snapshot();
 
   // Built once, by the first observer of either chain to run. A body that cannot be built -
-  // bytes the adapter detached, say - is reported once, and the observers are handed the
-  // request without it (see `bodilessAttemptRequest`), so each still hears of the response
-  // or error.
+  // bytes the adapter detached, say - is reported once for the attempt, whichever phases
+  // hand its request out (see `isBuildFailureUnreported`), and the observers are handed
+  // the request without it, so each still hears of the response or error.
   const handedRequest = once((): AttemptRequest => {
     try {
-      return handedAttemptRequest(request);
+      return attemptRequestCopy(request, 'built');
     } catch (buildError) {
-      reportCallbackError(label, buildError);
-      return bodilessAttemptRequest(request);
+      if (isBuildFailureUnreported([request.body, request.rawBody])) {
+        reportCallbackError(label, buildError);
+      }
+      return attemptRequestCopy(request, 'none');
     }
   });
 
@@ -307,43 +311,32 @@ async function runParentThenOwn<Chain>(
 }
 
 /**
- * The copy of an attempt's request its observers are handed when its body could not be
- * built: as `handedAttemptRequest` makes it, but with a `body` of `null` and no `rawBody`,
- * as a request whose body an interceptor returned could not be built is reported.
- */
-function bodilessAttemptRequest(request: AttemptRequest): AttemptRequest {
-  const handed: AttemptRequest = {
-    ...request,
-    headers: copyHeaderRecord(request.headers),
-  };
-
-  if ('body' in request) {
-    handed.body = null;
-  }
-
-  if ('rawBody' in request) {
-    handed.rawBody = undefined;
-  }
-
-  return handed;
-}
-
-/**
  * The copy of an attempt's request its observers are handed; see `runParentThenOwn`. The
  * request is the client's own, built from its records, so copying it reads no caller code.
+ * With `bodies` `'built'` its body and `rawBody` are built (see `handedBodyValue`); with
+ * `'none'` - its body could not be built - the copy has a `body` of `null` and a `rawBody`
+ * of `undefined`, as a request whose body an interceptor returned could not be built is
+ * reported.
  */
-function handedAttemptRequest(request: AttemptRequest): AttemptRequest {
+function attemptRequestCopy(
+  request: HeldAttemptRequest,
+  bodies: 'built' | 'none',
+): AttemptRequest {
+  const { body, rawBody, ...fields } = request;
   const handed: AttemptRequest = {
-    ...request,
+    ...fields,
     headers: copyHeaderRecord(request.headers),
   };
 
   if ('body' in request) {
-    handed.body = handedBodyValue(request.body) as AttemptRequest['body'];
+    handed.body =
+      bodies === 'built'
+        ? (handedBodyValue(body) as AttemptRequest['body'])
+        : null;
   }
 
   if ('rawBody' in request) {
-    handed.rawBody = handedBodyValue(request.rawBody);
+    handed.rawBody = bodies === 'built' ? handedBodyValue(rawBody) : undefined;
   }
 
   return handed;

@@ -31,6 +31,7 @@ import {
 } from './utils';
 import { readHostPattern } from '../domain-utils/host-filter';
 import * as httpUtils from './utils';
+import * as bodyCopyModule from './internal/request-body-copy';
 import {
   ADAPTER_ERROR_CARRIER_KEY,
   DEFAULT_MAX_RESPONSE_BYTES,
@@ -17840,4 +17841,127 @@ test("a mock route's streamError and transportError are held to their types", as
     expect(builder.error?.code).toBe('adapter_error');
     expect(builder.attemptCount).toBe(1);
   }
+});
+
+describe('a bytes body handed to a retry- or redirect-phase interceptor', () => {
+  test.each(['retry', 'redirect'] as const)(
+    'is copied once in the %s phase when it comes back as it was handed, and sent as changed when changed',
+    async (phase) => {
+      const sent: number[][] = [];
+      let sends = 0;
+      const client = new HTTPClient({
+        adapter: {
+          getType: () => 'mock',
+          send: (request) => {
+            sent.push([...(request.body as Uint8Array)]);
+            sends++;
+            if (sends > 1) {
+              return Promise.resolve({ status: 200, headers: {}, body: null });
+            }
+            return Promise.resolve(
+              phase === 'retry'
+                ? { status: 503, headers: {}, body: null }
+                : { status: 307, headers: { location: '/next' }, body: null },
+            );
+          },
+        },
+        retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 1 },
+        followRedirects: true,
+      });
+      let shouldChangeBytes = false;
+      client.addRequestInterceptor(
+        (request) => {
+          request.headers['x-phase'] = phase;
+          if (shouldChangeBytes) {
+            (request.body as Uint8Array)[0] = 9;
+          }
+          return request;
+        },
+        { phases: [phase] },
+      );
+      const copies = spyOn(bodyCopyModule, 'copyRequestBody');
+
+      try {
+        await client
+          .put('https://api.example.com/x')
+          .body(new Uint8Array([1, 2, 3]))
+          .send();
+        const unchangedCopies = copies.mock.calls.filter(
+          ([body]) => body instanceof Uint8Array,
+        ).length;
+        copies.mockClear();
+        sends = 0;
+        shouldChangeBytes = true;
+        await client
+          .put('https://api.example.com/x')
+          .body(new Uint8Array([1, 2, 3]))
+          .send();
+        const changedCopies = copies.mock.calls.filter(
+          ([body]) => body instanceof Uint8Array,
+        ).length;
+
+        // The builder's copy, then the phase's copy handed out; changed, it is copied
+        // again from what came back.
+        expect(unchangedCopies).toBe(2);
+        expect(changedCopies).toBe(3);
+        expect(sent).toEqual([
+          [1, 2, 3],
+          [1, 2, 3],
+          [1, 2, 3],
+          [9, 2, 3],
+        ]);
+      } finally {
+        copies.mockRestore();
+      }
+    },
+  );
+
+  test('kept by the interceptor and changed after it is handed back, it reaches no 307 replay', async () => {
+    const sent: number[][] = [];
+    const answers: AdapterResponse[] = [
+      { status: 503, headers: {}, body: null },
+      { status: 307, headers: { location: '/next' }, body: null },
+      { status: 200, headers: {}, body: null },
+    ];
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: (request) => {
+          sent.push([...(request.body as Uint8Array)]);
+          return Promise.resolve(answers[sent.length - 1]);
+        },
+      },
+      retryPolicy: { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 1 },
+      followRedirects: true,
+    });
+    let kept: Uint8Array | undefined;
+    client.addRequestInterceptor(
+      (request) => {
+        kept = request.body as Uint8Array;
+        return request;
+      },
+      { phases: ['retry'] },
+    );
+    client.addResponseObserver(
+      () => {
+        if (kept !== undefined) {
+          kept[0] = 9;
+        }
+      },
+      { phases: ['redirect'] },
+    );
+
+    const response = await client
+      .put('https://api.example.com/x')
+      .body(new Uint8Array([1, 2, 3]))
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(kept?.[0]).toBe(9);
+    expect(sent).toEqual([
+      [1, 2, 3],
+      [1, 2, 3],
+      [1, 2, 3],
+    ]);
+  });
 });

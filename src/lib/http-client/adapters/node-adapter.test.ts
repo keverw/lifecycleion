@@ -12903,6 +12903,162 @@ describe('NodeAdapter - unsupported bodies and per-request option reads', () => 
     }
   });
 
+  test('a Bun.file() ca is asked of TLS once while its bytes stay the same, and again once they change', async () => {
+    const { caCert } = getRevocationFixtures();
+    const caPath = path.join(
+      os.tmpdir(),
+      `anchor-cache-${String(process.pid)}-${String(Date.now())}.pem`,
+    );
+    fs.writeFileSync(caPath, caCert);
+    const captured: https.RequestOptions[] = [];
+    const request = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured.push(options);
+
+      return failingRequest();
+    }) as unknown as typeof https.request);
+    const contexts = spyOn(tls, 'createSecureContext');
+    const send = (adapter: NodeAdapter) =>
+      adapter.send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+      });
+
+    try {
+      const adapter = new NodeAdapter({ ca: Bun.file(caPath) } as never);
+      await send(adapter);
+      await send(adapter);
+      // Its kind and its bytes checked at construction, then answered from what that
+      // check kept.
+      expect(contexts).toHaveBeenCalledTimes(2);
+
+      // The same certificate twice is another file's worth of bytes, checked again and
+      // sent as it now reads.
+      fs.writeFileSync(caPath, caCert + caCert);
+      await send(adapter);
+      expect(contexts).toHaveBeenCalledTimes(3);
+      expect(String(captured[2].ca)).toBe(caCert + caCert);
+
+      // Emptied of certificates: refused, not answered from the last check.
+      fs.writeFileSync(caPath, 'no certificate here');
+      let refusal: unknown;
+      try {
+        await send(adapter);
+      } catch (error) {
+        refusal = error;
+      }
+      expect((refusal as Error).message).toMatch(
+        /a blob that is not a Bun\.file\(\) of a certificate/,
+      );
+      expect(captured).toHaveLength(3);
+      expect(captured.map((options) => String(options.ca))).toEqual([
+        caCert,
+        caCert,
+        caCert + caCert,
+      ]);
+    } finally {
+      contexts.mockRestore();
+      request.mockRestore();
+      fs.rmSync(caPath, { force: true });
+    }
+  });
+
+  test('a blob made in memory is no trust anchor even named for a certificate file, and an own name is not believed', async () => {
+    const { caCert } = getRevocationFixtures();
+    const caPath = path.join(
+      os.tmpdir(),
+      `anchor-named-${String(process.pid)}-${String(Date.now())}.pem`,
+    );
+    fs.writeFileSync(caPath, caCert);
+    const captured: https.RequestOptions[] = [];
+    const request = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured.push(options);
+
+      return failingRequest();
+    }) as unknown as typeof https.request);
+
+    try {
+      const named = new Blob(['not a certificate']);
+      Reflect.set(named, 'name', caPath);
+      expect(() => new NodeAdapter({ ca: named } as never)).toThrow(
+        /a blob that is not a Bun\.file\(\) of a certificate/,
+      );
+
+      // An own `name` getter on a real file, answering another path on each read: the
+      // file's own path is the one read and sent.
+      const file = Bun.file(caPath);
+      let reads = 0;
+      Object.defineProperty(file, 'name', {
+        get: () => (++reads === 1 ? caPath : '/nonexistent/other.pem'),
+      });
+      await new NodeAdapter({ ca: file } as never).send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+      });
+      expect(reads).toBe(0);
+      expect(String(captured[0].ca)).toBe(caCert);
+    } finally {
+      request.mockRestore();
+      fs.rmSync(caPath, { force: true });
+    }
+  });
+
+  test('every Bun.file() ca of a long list is asked of TLS once, and one that cannot be read is refused', async () => {
+    const { caCert } = getRevocationFixtures();
+    const paths = Array.from({ length: 20 }, (_, index) =>
+      path.join(
+        os.tmpdir(),
+        `anchor-list-${String(process.pid)}-${String(Date.now())}-${String(index)}.pem`,
+      ),
+    );
+    for (const filePath of paths) {
+      fs.writeFileSync(filePath, caCert);
+    }
+    const request = spyOn(https, 'request').mockImplementation(((
+      _options: https.RequestOptions,
+    ) => failingRequest()) as unknown as typeof https.request);
+    const contexts = spyOn(tls, 'createSecureContext');
+    const send = (adapter: NodeAdapter) =>
+      adapter.send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+      });
+
+    try {
+      const adapter = new NodeAdapter({
+        ca: paths.map((filePath) => Bun.file(filePath)),
+      } as never);
+      // Each file's kind, then its bytes, at construction.
+      expect(contexts).toHaveBeenCalledTimes(40);
+      await send(adapter);
+      await send(adapter);
+      expect(contexts).toHaveBeenCalledTimes(40);
+
+      fs.rmSync(paths[7]);
+      let refusal: unknown;
+      try {
+        await send(adapter);
+      } catch (error) {
+        refusal = error;
+      }
+      expect((refusal as Error).message).toMatch(
+        /a blob that is not a Bun\.file\(\) of a certificate/,
+      );
+    } finally {
+      contexts.mockRestore();
+      request.mockRestore();
+      for (const filePath of paths) {
+        fs.rmSync(filePath, { force: true });
+      }
+    }
+  });
+
   test('a ca set later that is no trust store is refused on the request that reads it', async () => {
     const config: NodeAdapterConfig = {};
     const adapter = new NodeAdapter(config);

@@ -4,6 +4,8 @@ import {
   deferredJSONRawBody,
   handedBodyValue,
 } from './observed-bodies';
+import type { HeldAttemptRequest } from './observed-bodies';
+import type { AttemptRequest } from '../types';
 
 test('a token is built once, the first time it is asked for, and answers that value after', () => {
   const parse = spyOn(JSON, 'parse');
@@ -45,4 +47,18 @@ test('a value that is no token is answered as it is', () => {
   expect(handedBodyValue(bytes)).toBe(bytes);
   expect(handedBodyValue('text')).toBe('text');
   expect(handedBodyValue(null)).toBeNull();
+});
+
+test('a request holding a token is not an AttemptRequest to the type checker', () => {
+  const held: HeldAttemptRequest = {
+    requestURL: 'https://api.example.com/x',
+    method: 'PUT',
+    headers: {},
+    body: deferredBodyCopy(new Uint8Array([1])),
+  };
+  // @ts-expect-error - a token in `body` must be read into a copy before caller code is
+  // handed the request.
+  const leaked: AttemptRequest = held;
+
+  expect(leaked.body).not.toBeInstanceOf(Uint8Array);
 });
