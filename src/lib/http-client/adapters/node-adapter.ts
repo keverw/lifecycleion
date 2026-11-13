@@ -545,6 +545,63 @@ export class NodeAdapter implements HTTPAdapter {
     }
     dropBodilessContentLength(request);
 
+    // An unusable URL is refused first, then a body this adapter cannot send, then a
+    // refused header and the method: the order `HTTPClient` checks them in, as every
+    // adapter does.
+    //
+    // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
+    // URL fails the same way on every attempt. In its own words, without the parser's
+    // error, which carries the whole URL as its `input` - userinfo and query with it.
+    let parsedURL: URL;
+    try {
+      parsedURL = new URL(request.requestURL);
+    } catch {
+      throw nonRetryableAdapterErrorFrom(
+        new TypeError('NodeAdapter request URL is not a valid absolute URL'),
+      );
+    }
+
+    // Refused, not sent: any other scheme would go out as plaintext HTTP - a `wss://` URL
+    // to port 80, its userinfo as Basic auth. `HTTPClient` checks this first; a caller
+    // driving the adapter directly does not.
+    if (parsedURL.protocol !== 'http:' && parsedURL.protocol !== 'https:') {
+      throw nonRetryableAdapterErrorFrom(
+        new TypeError(
+          `NodeAdapter sends http: and https: URLs only (got ${parsedURL.protocol})`,
+        ),
+      );
+    }
+
+    // `urlToHttpOptions` percent-decodes the userinfo, and a malformed escape
+    // (`a%E0:b@`) throws a `URIError` that reads the same on every attempt: tagged
+    // non-retryable, as the other setup throws are, rather than retried.
+    let urlOptions: ReturnType<typeof urlToHttpOptions>;
+    try {
+      urlOptions = urlToHttpOptions(parsedURL);
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+
+    // Refused rather than dropped: anything else - an `ArrayBuffer`, a `Blob`, a plain
+    // object, a `Proxy` over a `FormData` - would go out as no body at all, and the
+    // request would succeed without it. `HTTPClient` serializes bodies first; this is the
+    // adapter called directly. Here, before the config is read, the 0% upload event and
+    // the request is created, so a request refused before it is sent reports no upload
+    // start and opens no connection, as in FetchAdapter and XHRAdapter. Read once, by
+    // both the branch that opens the upload's outcome and the one that writes the body.
+    const classifiedBody = classifyRequestBody(request.body);
+    if (
+      classifiedBody === undefined &&
+      request.body !== undefined &&
+      request.body !== null
+    ) {
+      const refusal = new TypeError(
+        'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
+
     // This adapter frames every body itself with a `Content-Length`. A caller's
     // `Transfer-Encoding` would go out beside it - both on one message, which RFC 9112
     // 6.1 forbids a sender to do: strict servers answer 400, and a lenient proxy chain
@@ -586,39 +643,6 @@ export class NodeAdapter implements HTTPAdapter {
     const isDecompressing = decompressOption !== false;
     const socketPath = this._config.socketPath;
     assertSocketPath(socketPath);
-
-    // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
-    // URL fails the same way on every attempt. In its own words, without the parser's
-    // error, which carries the whole URL as its `input` - userinfo and query with it.
-    let parsedURL: URL;
-    try {
-      parsedURL = new URL(request.requestURL);
-    } catch {
-      throw nonRetryableAdapterErrorFrom(
-        new TypeError('NodeAdapter request URL is not a valid absolute URL'),
-      );
-    }
-
-    // Refused, not sent: any other scheme would go out as plaintext HTTP - a `wss://` URL
-    // to port 80, its userinfo as Basic auth. `HTTPClient` checks this first; a caller
-    // driving the adapter directly does not.
-    if (parsedURL.protocol !== 'http:' && parsedURL.protocol !== 'https:') {
-      throw nonRetryableAdapterErrorFrom(
-        new TypeError(
-          `NodeAdapter sends http: and https: URLs only (got ${parsedURL.protocol})`,
-        ),
-      );
-    }
-
-    // `urlToHttpOptions` percent-decodes the userinfo, and a malformed escape
-    // (`a%E0:b@`) throws a `URIError` that reads the same on every attempt: tagged
-    // non-retryable, as the other setup throws are, rather than retried.
-    let urlOptions: ReturnType<typeof urlToHttpOptions>;
-    try {
-      urlOptions = urlToHttpOptions(parsedURL);
-    } catch (error) {
-      throw nonRetryableAdapterErrorFrom(error);
-    }
 
     const isHTTPS = parsedURL.protocol === 'https:';
     const httpModule = isHTTPS ? https : http;
@@ -1654,22 +1678,8 @@ export class NodeAdapter implements HTTPAdapter {
         // it and whatever throws before they run. The condition mirrors the write branches
         // at the end of this executor; the `else` there is the genuinely bodiless request,
         // which has no upload to report and correctly carries no field.
-        const classifiedBody = classifyRequestBody(request.body);
         if (classifiedBody !== undefined) {
           openBodyOutcome();
-        } else if (request.body !== undefined && request.body !== null) {
-          // Refused rather than dropped: anything else - an `ArrayBuffer`, a `Blob`, a
-          // plain object, a `Proxy` over a `FormData` - would go out as no body at all,
-          // and the request would succeed without it. `HTTPClient` serializes bodies
-          // first; this is the adapter called directly. Here, before the 0% upload event
-          // and before the request is created, so a request refused before it is sent
-          // reports no upload start and opens no connection, as in FetchAdapter and
-          // XHRAdapter.
-          const refusal = new TypeError(
-            'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
-          );
-          markNonRetryableAdapterError(refusal);
-          throw refusal;
         }
 
         /**

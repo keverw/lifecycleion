@@ -100,6 +100,24 @@ export class XHRAdapter implements HTTPAdapter {
       requestURL,
       initialURL,
     } = readAdapterRequestFields(request);
+    // Resolved once, as the browser resolves it - against the document's base URL, or the
+    // worker's `location` - with credentials withheld for another origin than the initial
+    // URL's, and that one absolute URL is what is opened, what `compareResponseURL`
+    // compares `responseURL` with, and what a `Location` resolves against. One that does
+    // not resolve, or is not http(s), is refused first, as every adapter refuses it, as
+    // the non-retryable error it is (see `resolveBrowserDispatchURL`): whether an answer
+    // came from where the request was sent cannot be told without an absolute URL to
+    // compare `responseURL` with, and XHR would open a `file:` or `data:` URL where the
+    // runtime loads one.
+    const answeredURL = resolveBrowserDispatchURL(
+      requestURL,
+      initialURL,
+      'XHRAdapter',
+    );
+    if (typeof answeredURL !== 'string') {
+      throw answeredURL;
+    }
+
     const upperMethod = asciiUppercase(method);
     if (upperMethod === 'CONNECT') {
       throw connectRefusal('XHRAdapter');
@@ -131,18 +149,6 @@ export class XHRAdapter implements HTTPAdapter {
       markNonRetryableAdapterError(refusal);
       throw refusal;
     }
-
-    // Resolved once, as the browser resolves it - against the document's base URL, or the
-    // worker's `location` - with credentials withheld for another origin than the initial
-    // URL's, and that one absolute URL is what is opened, what `compareResponseURL`
-    // compares `responseURL` with, and what a `Location` resolves against. One that does
-    // not resolve, or is not http(s), is the non-retryable error it is refused with below
-    // (see `resolveBrowserDispatchURL`).
-    const answeredURL = resolveBrowserDispatchURL(
-      requestURL,
-      initialURL,
-      'XHRAdapter',
-    );
 
     /** Takes the abort listener off the signal; set once it is on. */
     let removeAbortListener = (): void => {};
@@ -191,15 +197,6 @@ export class XHRAdapter implements HTTPAdapter {
         // On a carrier: the throw may be the caller's own, from a method or header value.
         reject(nonRetryableAdapterErrorFrom(error));
       };
-
-      // Refused as NodeAdapter refuses a URL it cannot parse or of another scheme:
-      // whether an answer came from where the request was sent cannot be told without an
-      // absolute URL to compare `responseURL` with, and XHR would open a `file:` or
-      // `data:` URL where the runtime loads one.
-      if (typeof answeredURL !== 'string') {
-        refuse(answeredURL);
-        return;
-      }
 
       const xhr = new XMLHttpRequest();
 

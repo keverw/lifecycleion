@@ -632,7 +632,10 @@ body (an XHR outside a browser - React Native, a shim - may send it, and is let 
 `NodeAdapter` to send it, or an interceptor to rewrite it (these method checks run on the
 interceptors' result, with its body as the client's copy of it, the one that is sent; on a
 retry held to a cross-origin hop's own request, on the stripped request that is sent, with the
-hop's own body - see [Redirect Handling](#redirect-handling)). An empty string, bytes or form is a body there; a JSON body whose
+hop's own body - see [Redirect Handling](#redirect-handling)). On Node, `FetchAdapter` refuses a `Transfer-Encoding`,
+`Keep-Alive`, `Upgrade` or `Expect` header, or a `Connection` other than `close` or `keep-alive`, before the upload
+starts, as Node's `fetch` refuses them. A request that breaks more than one of these rules is refused for its URL first, then its body type,
+headers, method and `GET`/`HEAD` body, by the client and by each adapter driven directly. An empty string, bytes or form is a body there; a JSON body whose
 `toJSON` answers `undefined` serializes to nothing, and goes out with none - an interceptor's is read
 once, when its copy is taken. Header entries are copied at that
 point: a single value is converted to a string, an array stays an array with each

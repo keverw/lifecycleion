@@ -6,7 +6,8 @@ import { asciiLowercase, asciiUppercase } from '../../internal/ascii-text';
  * cannot send as asked, worded once: the client refuses one up front, before an
  * attempt, and an adapter driven directly refuses it again. Each caller decides when a
  * rule applies - the adapter, the runtime, whether the body is one - and how it marks
- * its error.
+ * its error. A `CONNECT` the client refuses as an invalid method, before this, and an
+ * adapter by `connectRefusal`.
  */
 
 /** Whether `method` is one the Fetch Standard forbids: CONNECT, TRACE or TRACK. */

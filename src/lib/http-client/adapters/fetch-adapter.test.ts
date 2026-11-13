@@ -514,6 +514,72 @@ describe('FetchAdapter', () => {
     expect(response.errorCause).toBe(failure);
   });
 
+  test('on Node, a header its fetch refuses is refused before the upload starts, and not on Bun', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response('ok'));
+    };
+    const sendWith = (headers: Record<string, string | string[]>) => {
+      const uploads: unknown[] = [];
+      return new FetchAdapter()
+        .send({
+          requestURL: 'http://example.test/',
+          method: 'POST',
+          headers,
+          body: 'x',
+          onUploadProgress: (event) => uploads.push(event),
+        })
+        .then(
+          () => ({ refusal: undefined, uploads }),
+          (error: unknown) => ({
+            refusal: error as Record<PropertyKey, unknown>,
+            uploads,
+          }),
+        );
+    };
+    const refused: Array<Record<string, string | string[]>> = [
+      { 'Transfer-Encoding': 'chunked' },
+      { 'keep-alive': 'timeout=5' },
+      { upgrade: 'websocket' },
+      { expect: '100-continue' },
+      { connection: 'upgrade' },
+      { connection: ['close', 'close'] },
+      { Connection: 'close', connection: 'close' },
+    ];
+
+    const versions = process.versions as Record<string, string | undefined>;
+    const bunVersion = versions.bun;
+    delete versions.bun;
+    try {
+      for (const headers of refused) {
+        const { refusal, uploads } = await sendWith(headers);
+
+        expect(refusal?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+        expect(String(refusal?.message)).toContain(
+          'on Node: its fetch refuses one',
+        );
+        expect(uploads).toEqual([]);
+      }
+      expect(calls).toBe(0);
+
+      for (const headers of [
+        { connection: ' Close ' },
+        { Connection: 'keep-alive' },
+      ] as Array<Record<string, string>>) {
+        expect((await sendWith(headers)).refusal).toBeUndefined();
+      }
+      expect(calls).toBe(2);
+    } finally {
+      versions.bun = bunVersion;
+    }
+
+    for (const headers of refused) {
+      expect((await sendWith(headers)).refusal).toBeUndefined();
+    }
+    expect(calls).toBe(2 + refused.length);
+  });
+
   test.each(['CONNECT', 'connect', 'TRACE', 'trace', 'TRACK'])(
     'a %s is refused as non-retryable before it is fetched',
     async (method) => {

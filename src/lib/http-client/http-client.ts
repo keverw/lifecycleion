@@ -1242,12 +1242,14 @@ export class BaseHTTPClient {
 
           if (!isInterceptorCancel(interceptResult)) {
             initialRequestCandidate = interceptResult;
-            // The checks that do not read the body first, so a body the client cannot
-            // send, a header or a method is the interceptor's failure before the body
-            // is copied; the GET and HEAD rule once it is (see `copyChainResultBody`).
-            this._assertRequestShapeIsSupported(interceptResult);
+            // The URL first, as it is checked before the interceptors and by every
+            // adapter; then the checks that do not read the body, so a body the client
+            // cannot send, a header or a method is the interceptor's failure before the
+            // body is copied; the GET and HEAD rule once it is (see
+            // `copyChainResultBody`).
             initialRequestURL = interceptResult.requestURL;
             this._assertInterceptorResolvedURL(initialRequestURL);
+            this._assertRequestShapeIsSupported(interceptResult);
             if (initialRun.isBodyHandedOut) {
               interceptResult = this._copyChainResultBody(
                 interceptResult,
@@ -1934,8 +1936,9 @@ export class BaseHTTPClient {
                 failedRedirectRequest = redirectIntercept;
               }
               if (!isInterceptorCancel(redirectIntercept)) {
-                // The GET and HEAD rule once the copy is taken; see the initial phase's.
-                this._assertRequestShapeIsSupported(redirectIntercept);
+                // In the initial phase's order, the GET and HEAD rule once the copy is
+                // taken; see there. Only a `Location` that arrived unusable and is left so
+                // is not checked first: it is answered below, after the shape.
                 redirectInterceptURL = redirectIntercept.requestURL;
 
                 // Skipped when the `Location` arrived unusable and is still unusable: the
@@ -1949,6 +1952,7 @@ export class BaseHTTPClient {
                 ) {
                   this._assertInterceptorResolvedURL(redirectInterceptURL);
                 }
+                this._assertRequestShapeIsSupported(redirectIntercept);
 
                 // The hop's body for every attempt and replay; see `copyChainResultBody`.
                 if (isRedirectBodyHandedOut) {
@@ -3063,10 +3067,10 @@ export class BaseHTTPClient {
 
           if (!isInterceptorCancel(retryIntercept)) {
             failedRetryRequest = retryIntercept;
-            // The GET and HEAD rule once the copy is taken; see the initial phase's in
-            // `_execute`.
-            this._assertRequestShapeIsSupported(retryIntercept);
+            // In the initial phase's order, the GET and HEAD rule once the copy is
+            // taken; see there, in `_execute`.
             this._assertInterceptorResolvedURL(retryIntercept.requestURL);
+            this._assertRequestShapeIsSupported(retryIntercept);
             isRetryHeld =
               retryRun.isIntercepted && isHeldToHop(retryIntercept.requestURL);
             // The attempt's body, and a `307`/`308` replay's; see `copyChainResultBody`.
