@@ -418,29 +418,3 @@ test("an interceptor's CONNECT is handed to the next as a method name, and refus
     '[HTTPClient] Interceptor returned a request whose method is CONNECT, which opens a tunnel and is not supported.',
   );
 });
-
-test("FetchAdapter on Node refuses a body it does not send before a header Node's fetch refuses", async () => {
-  const versions = process.versions as Record<string, string | undefined>;
-  const bunVersion = versions.bun;
-  delete versions.bun;
-  try {
-    const refusal = await refusalOf(
-      new FetchAdapter().send({
-        requestURL: 'https://api.example.com/x',
-        method: 'POST',
-        headers: { expect: '100-continue' },
-        body: { a: 1 } as never,
-      }),
-    );
-
-    expect(refusal).toBe(
-      'FetchAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
-    );
-  } finally {
-    if (bunVersion === undefined) {
-      delete versions.bun;
-    } else {
-      versions.bun = bunVersion;
-    }
-  }
-});

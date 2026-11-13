@@ -23,7 +23,6 @@ import {
 import {
   extractFetchHeaders,
   derivedRedirectFields,
-  isBrowserEnvironment,
   resolveBrowserDispatchURL,
 } from '../utils';
 import {
@@ -59,11 +58,7 @@ import {
   readBinaryByteLength,
   isUint8ArrayValue,
 } from '../../internal/binary-view';
-import {
-  asciiLowercase,
-  asciiUppercase,
-  trimHTTPWhitespace,
-} from '../../internal/ascii-text';
+import { asciiLowercase, asciiUppercase } from '../../internal/ascii-text';
 import {
   bodyOnBodilessMethodMessage,
   forbiddenMethodMessage,
@@ -121,19 +116,6 @@ export class FetchAdapter implements HTTPAdapter {
     const bodyRefusal = unsendableBodyRefusal('FetchAdapter', body);
     if (bodyRefusal !== undefined) {
       throw bodyRefusal;
-    }
-
-    // Refused before the method, as `HTTPClient` and the other adapters check a request's
-    // headers before its method; and here, before the 0% upload event, rather than left
-    // to Node's `fetch`, which refuses one only once it dispatches (see
-    // `nodeFetchRefusedHeader`).
-    const refusedHeader = nodeFetchRefusedHeader(headers);
-    if (refusedHeader !== undefined) {
-      const refusal = new TypeError(
-        `[FetchAdapter] Cannot send a request with ${refusedHeader} on Node: its fetch refuses one.`,
-      );
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
     }
 
     // The Fetch Standard forbids these, but Bun's `fetch` sends a `CONNECT` or `TRACE`, so
@@ -248,10 +230,12 @@ export class FetchAdapter implements HTTPAdapter {
       const normalizedError = normalizeError(error);
 
       // A request Node's undici refuses at dispatch rather than at `new Request` - a
-      // fetch-blocked port, or a header `nodeFetchRefusedHeader` does not know of - is
-      // refused the same way on every attempt, so it fails once as the non-retryable `adapter_error`
-      // it is, as the `new Request` refusals above do, rather than as a network error
-      // retried to no end with nothing sent.
+      // `transfer-encoding`, `keep-alive`, `expect` or `upgrade` header, a `connection`
+      // other than `close` or `keep-alive`, a fetch-blocked port - is refused the same way
+      // on every attempt, so it fails once as the non-retryable `adapter_error` it is, as
+      // the `new Request` refusals above do, rather than as a network error retried to no
+      // end with nothing sent. Told by undici's error code, not by header name, so a header
+      // a later Node refuses is caught too, and one it stops refusing is sent.
       if (isFetchDispatchRefusal(normalizedError)) {
         throw nonRetryableAdapterErrorFrom(normalizedError);
       }
@@ -879,8 +863,9 @@ function isSignalRefusal(
 
 /**
  * Whether `fetch` failed because the runtime refused to dispatch the request at all:
- * undici's invalid-argument and not-supported refusals (a `keep-alive`, `expect`,
- * `transfer-encoding` or `upgrade` header), and the Fetch standard's blocked ports. Read
+ * undici's invalid-argument and not-supported refusals (a `transfer-encoding`,
+ * `keep-alive`, `expect` or `upgrade` header, a `connection` other than `close` or
+ * `keep-alive`), and the Fetch standard's blocked ports. Read
  * off the `cause` Node hangs them on, guardedly; a browser's opaque `TypeError` is none.
  */
 function isFetchDispatchRefusal(error: Error): boolean {
@@ -892,78 +877,6 @@ function isFetchDispatchRefusal(error: Error): boolean {
     code === 'UND_ERR_INVALID_ARG' ||
     code === 'UND_ERR_NOT_SUPPORTED' ||
     (typeof message === 'string' && asciiLowercase(message) === 'bad port')
-  );
-}
-
-/**
- * Request headers Node's `fetch` (undici) refuses whatever their value, when it
- * dispatches: it frames and keeps connections itself, switches no protocols and waits for
- * no `100 Continue`. By lowercase name, each to what a refusal calls it.
- */
-const NODE_FETCH_REFUSED_HEADERS: ReadonlyMap<string, string> = new Map([
-  ['transfer-encoding', 'a Transfer-Encoding header'],
-  ['keep-alive', 'a Keep-Alive header'],
-  ['upgrade', 'an Upgrade header'],
-  ['expect', 'an Expect header'],
-]);
-
-/**
- * What a refusal names of a header in `headers` that Node's `fetch` refuses - one of
- * {@link NODE_FETCH_REFUSED_HEADERS}, or a `Connection` other than `close` or
- * `keep-alive` - or `undefined`, and always `undefined` on any other runtime: Bun's
- * `fetch` sends them, and a browser's drops them (`HTTPClient` refuses them there). Node
- * refuses one only when it dispatches, after the 0% upload event, which a request refused
- * before anything is sent does not report on the other adapters. Its `fetch` refusing
- * one there anyway is still read as the refusal it is (see `isFetchDispatchRefusal`).
- *
- * Asked of the runtime, not of `fetch`: on Node a stubbed or polyfilled `fetch` is
- * refused these too, as Node's own would refuse them.
- */
-function nodeFetchRefusedHeader(
-  headers: Record<string, string | string[]>,
-): string | undefined {
-  if (!isNodeFetchRuntime()) {
-    return undefined;
-  }
-
-  /** Every `Connection` value, whatever the case of its name, as `fetch` merges them. */
-  const connection: string[] = [];
-
-  for (const [name, value] of Object.entries(headers)) {
-    const lowerName = asciiLowercase(name);
-
-    const refused = NODE_FETCH_REFUSED_HEADERS.get(lowerName);
-    if (refused !== undefined) {
-      return refused;
-    }
-
-    if (lowerName === 'connection') {
-      connection.push(...(Array.isArray(value) ? value : [value]));
-    }
-  }
-
-  // As `fetch` hands it on: each value trimmed, the values joined.
-  const text = asciiLowercase(
-    connection.map((part) => trimHTTPWhitespace(part)).join(', '),
-  );
-
-  return connection.length === 0 || text === 'close' || text === 'keep-alive'
-    ? undefined
-    : 'a Connection header other than close or keep-alive';
-}
-
-/** Whether `fetch` is Node's own: Node, not Bun or Deno, which say they are Node too. */
-function isNodeFetchRuntime(): boolean {
-  const versions = readUnknownMember(
-    readUnknownMember(globalThis, 'process'),
-    'versions',
-  );
-
-  return (
-    typeof readUnknownMember(versions, 'node') === 'string' &&
-    readUnknownMember(versions, 'bun') === undefined &&
-    readUnknownMember(versions, 'deno') === undefined &&
-    !isBrowserEnvironment()
   );
 }
 

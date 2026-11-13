@@ -48,8 +48,8 @@ export function guardProgressCallback(
 
 /**
  * The byte size of a request body as the browser adapters can know it without reading it:
- * `0` for no body, the encoded length of a string, a binary body's `byteLength`, a `Blob`'s
- * `size`, and `undefined` when it cannot be known up front (a `FormData`). Their
+ * `0` for no body, the encoded length of a string, a binary body's `byteLength`, and
+ * `undefined` when it cannot be known up front (a `FormData`). Their
  * terminal upload event reports it, so `loaded` / `total` mean bytes, as on NodeAdapter,
  * rather than a stand-in `1`.
  */
@@ -69,24 +69,7 @@ export function knownBodyByteLength(body: unknown): number | undefined {
   // Bytes by their internal slot, as the response limit measures them: a buffer of any
   // kind, from any realm, at its real size rather than the one it reports.
   const byteLength = readBinaryByteLength(body);
-  if (byteLength !== null) {
-    return byteLength;
-  }
-
-  // Guarded: the body is the caller's, and a Proxy whose `getPrototypeOf` throws would
-  // make this `instanceof` check throw from inside an XHR event listener - an uncaught
-  // exception on the global channel rather than a size that cannot be known.
-  try {
-    if (typeof Blob !== 'undefined' && body instanceof Blob) {
-      // A subclass's own `size` may report anything: only a byte count is one.
-      const size: unknown = body.size;
-      return isByteCount(size) ? size : undefined;
-    }
-  } catch {
-    // Unknowable, as for a body of another kind.
-  }
-
-  return undefined;
+  return byteLength ?? undefined;
 }
 
 /** Whether `value` is a count of bytes: a safe, non-negative integer. */

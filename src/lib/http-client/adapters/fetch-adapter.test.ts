@@ -514,86 +514,41 @@ describe('FetchAdapter', () => {
     expect(response.errorCause).toBe(failure);
   });
 
-  test('on Node, a header its fetch refuses is refused before the upload starts, and not on Bun', async () => {
-    let calls = 0;
-    (globalThis as any).fetch = () => {
-      calls++;
-      return Promise.resolve(new Response('ok'));
-    };
-    const sendWith = (headers: Record<string, string | string[]>) => {
-      const uploads: unknown[] = [];
-      return new FetchAdapter()
-        .send({
-          requestURL: 'http://example.test/',
-          method: 'POST',
-          headers,
-          body: 'x',
-          onUploadProgress: (event) => uploads.push(event),
-        })
-        .then(
-          () => ({ refusal: undefined, uploads }),
-          (error: unknown) => ({
-            refusal: error as Record<PropertyKey, unknown>,
-            uploads,
+  test.each([
+    ['UND_ERR_NOT_SUPPORTED', 'expect header not supported'],
+    ['UND_ERR_INVALID_ARG', 'invalid transfer-encoding header'],
+    ['UND_ERR_INVALID_ARG', 'invalid connection header'],
+    [undefined, 'bad port'],
+  ])(
+    "a request Node's fetch refuses at dispatch (%s: %s) fails once as non-retryable",
+    async (code, message) => {
+      let calls = 0;
+      // As Node 25's undici rejects one: a `TypeError` with the refusal on its `cause`.
+      (globalThis as any).fetch = () => {
+        calls++;
+        return Promise.reject(
+          new TypeError('fetch failed', {
+            cause: Object.assign(new Error(message), { code }),
           }),
         );
-    };
-    const refused: Array<Record<string, string | string[]>> = [
-      { 'Transfer-Encoding': 'chunked' },
-      { 'keep-alive': 'timeout=5' },
-      { upgrade: 'websocket' },
-      { expect: '100-continue' },
-      { connection: 'upgrade' },
-      { connection: ['close', 'close'] },
-      { Connection: 'close', connection: 'close' },
-    ];
-    const named = [
-      'a Transfer-Encoding header',
-      'a Keep-Alive header',
-      'an Upgrade header',
-      'an Expect header',
-      ...Array.from(
-        { length: 3 },
-        () => 'a Connection header other than close or keep-alive',
-      ),
-    ];
+      };
 
-    const versions = process.versions as Record<string, string | undefined>;
-    const bunVersion = versions.bun;
-    delete versions.bun;
-    try {
-      for (const [index, headers] of refused.entries()) {
-        const { refusal, uploads } = await sendWith(headers);
-
-        expect(refusal?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
-        expect(String(refusal?.message)).toBe(
-          `[FetchAdapter] Cannot send a request with ${named[index]} on Node: its fetch refuses one.`,
+      const outcome = await new FetchAdapter()
+        .send({
+          requestURL: 'http://example.test/',
+          method: 'PUT',
+          headers: {},
+          body: 'x',
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
         );
-        expect(uploads).toEqual([]);
-      }
-      expect(calls).toBe(0);
 
-      for (const headers of [
-        { connection: ' Close ' },
-        { Connection: 'keep-alive' },
-      ] as Array<Record<string, string>>) {
-        expect((await sendWith(headers)).refusal).toBeUndefined();
-      }
-      expect(calls).toBe(2);
-    } finally {
-      // Put back as it was: an own `bun: undefined` would read as present to `in`.
-      if (bunVersion === undefined) {
-        delete versions.bun;
-      } else {
-        versions.bun = bunVersion;
-      }
-    }
-
-    for (const headers of refused) {
-      expect((await sendWith(headers)).refusal).toBeUndefined();
-    }
-    expect(calls).toBe(2 + refused.length);
-  });
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(calls).toBe(1);
+    },
+  );
 
   test.each(['CONNECT', 'connect', 'TRACE', 'trace', 'TRACK'])(
     'a %s is refused as non-retryable before it is fetched',

@@ -148,22 +148,8 @@ describe('byteProgressEvent', () => {
 });
 
 describe('knownBodyByteLength', () => {
-  test.each([
-    ['a string', '12'],
-    ['NaN', Number.NaN],
-    ['a negative', -1],
-    ['a fraction', 1.5],
-  ])('a Blob whose size reports %s has no known length', (_label, size) => {
-    class OddBlob extends Blob {
-      public override get size(): number {
-        return size as number;
-      }
-    }
-
-    expect(knownBodyByteLength(new OddBlob(['abc']))).toBeUndefined();
-  });
-
-  test('a Blob reports its size', () => {
-    expect(knownBodyByteLength(new Blob(['abc']))).toBe(3);
+  test('a body it does not size up front has no known length', () => {
+    expect(knownBodyByteLength(new FormData())).toBeUndefined();
+    expect(knownBodyByteLength(new Blob(['abc']))).toBeUndefined();
   });
 });
