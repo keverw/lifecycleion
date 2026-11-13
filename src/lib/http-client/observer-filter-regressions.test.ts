@@ -665,6 +665,38 @@ test('a request body for the observers that cannot be built is reported once for
   expect(((reports[0] as Error).cause as Error).message).toBe('copy failed');
 });
 
+test("a JSON rawBody that cannot be parsed back leaves the observers the body's text", async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+    },
+  });
+  const handed: unknown[] = [];
+  for (let index = 0; index < 2; index++) {
+    client.addResponseObserver((_response, request) => {
+      handed.push([request.body, request.rawBody]);
+    });
+  }
+  // Nothing else parses the body: no interceptor reads it.
+  const parse = spyOn(JSON, 'parse').mockImplementation(() => {
+    throw new RangeError('engine limit');
+  });
+  const { reports, release } = captureErrorReports();
+  try {
+    await client.put('https://api.example.com/x').json({ a: 1 }).send();
+  } finally {
+    parse.mockRestore();
+    release();
+  }
+
+  expect(handed).toEqual([
+    ['{"a":1}', undefined],
+    ['{"a":1}', undefined],
+  ]);
+  expect(reports).toHaveLength(1);
+});
+
 test('a request body for the observers that cannot be built is reported again for a later attempt', async () => {
   let isObserving = false;
   const client = new HTTPClient({

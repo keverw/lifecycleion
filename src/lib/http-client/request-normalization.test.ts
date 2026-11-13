@@ -1225,41 +1225,87 @@ test('a misspelled config or request option is refused rather than read as absen
   expect(() => new NodeAdapter({ ca: new Map() } as never)).toThrow(
     'NodeAdapter ca must be PEM text or bytes, or a list of them (got object)',
   );
-  // An empty buffer or blob holds no certificate, as an empty view does.
-  for (const empty of [
-    new ArrayBuffer(0),
-    new Blob([]),
-    ['pem', new ArrayBuffer(0)],
-  ]) {
-    expect(() => new NodeAdapter({ ca: empty } as never)).toThrow(
+  // An empty buffer holds no certificate, as an empty view does.
+  for (const empty of [new ArrayBuffer(0), ['pem', new ArrayBuffer(0)]]) {
+    expect(() => new NodeAdapter({ ca: empty })).toThrow(
       'NodeAdapter ca holds no certificate',
     );
   }
-  // What Bun takes as a CA - an `ArrayBuffer`, a `Bun.file()` of a certificate - is let
-  // through; a blob made in memory, a `File` or a `String` object, which Bun's TLS
-  // refuses, is not.
+  // Bytes of every kind are let through, on Node and Bun alike; a blob - a `Bun.file()`
+  // among them - is read by the caller first, and refused.
+  expect(
+    () =>
+      new NodeAdapter({
+        ca: [
+          new ArrayBuffer(4),
+          new DataView(new ArrayBuffer(4)),
+          Buffer.from('pem'),
+        ],
+        mtls: {
+          cert: new ArrayBuffer(4),
+          key: new DataView(new ArrayBuffer(4)),
+        },
+      }),
+  ).not.toThrow();
+  expect(
+    () =>
+      new NodeAdapter({
+        ca: [new SharedArrayBuffer(4), 'pem'],
+        mtls: { cert: new SharedArrayBuffer(4), key: 'pem' },
+      }),
+  ).not.toThrow();
+  // A refusal is told in the adapter's words, whatever a Proxy's traps do.
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  expect(
+    () =>
+      new NodeAdapter({ mtls: { cert: revoked.proxy, key: 'pem' } } as never),
+  ).toThrow('NodeAdapter mtls.cert must be PEM text or bytes (got object)');
+  expect(
+    () =>
+      new NodeAdapter({
+        ca: [
+          'pem',
+          new Proxy(
+            {},
+            {
+              getPrototypeOf: () => {
+                throw new Error('trap ran');
+              },
+            },
+          ),
+        ],
+      } as never),
+  ).toThrow(
+    'NodeAdapter ca must be PEM text or bytes, or a list of them (got object in the list)',
+  );
+  expect(
+    () => new NodeAdapter({ ca: ['pem', new Blob(['pem'])] } as never),
+  ).toThrow(
+    'NodeAdapter ca must be PEM text or bytes, or a list of them (got a Blob in the list; read it first and pass its PEM text or bytes)',
+  );
   const caPath = join(
     tmpdir(),
     `ca-${String(process.pid)}-${String(Date.now())}.pem`,
   );
   writeFileSync(caPath, getRevocationFixtures().caCert);
   try {
-    expect(
-      () =>
-        new NodeAdapter({
-          ca: [new ArrayBuffer(4), Bun.file(caPath), Buffer.from('pem')],
-        } as never),
-    ).not.toThrow();
+    for (const blob of [
+      Bun.file(caPath),
+      new Blob([getRevocationFixtures().caCert]),
+      new File([getRevocationFixtures().caCert], 'ca.pem'),
+    ]) {
+      expect(() => new NodeAdapter({ ca: blob } as never)).toThrow(
+        'NodeAdapter ca must be PEM text or bytes, or a list of them (got a Blob; read it first and pass its PEM text or bytes)',
+      );
+      expect(
+        () => new NodeAdapter({ mtls: { cert: blob, key: 'pem' } } as never),
+      ).toThrow(
+        'NodeAdapter mtls.cert must be PEM text or bytes (got a Blob; read it first and pass its PEM text or bytes)',
+      );
+    }
   } finally {
     rmSync(caPath, { force: true });
-  }
-  for (const notOnBun of [
-    new Blob([getRevocationFixtures().caCert]),
-    new File([getRevocationFixtures().caCert], 'ca.pem'),
-  ]) {
-    expect(() => new NodeAdapter({ ca: notOnBun } as never)).toThrow(
-      'NodeAdapter ca must be PEM text or bytes, or a list of them (got a blob that is not a Bun.file() of a certificate opened by its path)',
-    );
   }
   expect(
     // eslint-disable-next-line unicorn/new-for-builtins

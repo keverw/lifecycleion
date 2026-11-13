@@ -875,7 +875,9 @@ export class MockAdapter implements HTTPAdapter {
     // 999 - is the route's mistake, not retried. `0` is not a status: use
     // `transportError` for a network failure.
     asRouteMistake(() => {
-      const { status } = mockResponse;
+      // Read as `unknown`: a route's answer is the caller's, typed or not, and the check
+      // narrows what it refuses.
+      const status: unknown = mockResponse.status;
       if (!isStatusCode(status, 100)) {
         throw new TypeError(
           `MockAdapter route returned status ${typeof status === 'number' ? String(status) : typeof status}; a response status is an integer from 100 to 999 (use transportError for a network failure)`,

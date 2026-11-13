@@ -10,8 +10,8 @@ import {
 import type { RegisteredCallback } from './internal/callback-registry';
 import { copyHeaderRecord } from './internal/header-utils';
 import {
+  claimBuildFailureReport,
   handedBodyValue,
-  isBuildFailureUnreported,
 } from './internal/observed-bodies';
 import type { HeldAttemptRequest } from './internal/observed-bodies';
 import { once } from './internal/once';
@@ -286,20 +286,8 @@ async function runParentThenOwn<Chain>(
     parent === undefined || parent.isEmpty ? undefined : parent.snapshot();
   const ownChain = own.isEmpty ? undefined : own.snapshot();
 
-  // Built once, by the first observer of either chain to run. A body that cannot be built -
-  // bytes the adapter detached, say - is reported once for the attempt, whichever phases
-  // hand its request out (see `isBuildFailureUnreported`), and the observers are handed
-  // the request without it, so each still hears of the response or error.
-  const handedRequest = once((): AttemptRequest => {
-    try {
-      return attemptRequestCopy(request, 'built');
-    } catch (buildError) {
-      if (isBuildFailureUnreported([request.body, request.rawBody])) {
-        reportCallbackError(label, buildError);
-      }
-      return attemptRequestCopy(request, 'none');
-    }
-  });
+  // Built once, by the first observer of either chain to run (see `attemptRequestCopy`).
+  const handedRequest = once(() => attemptRequestCopy(request, label));
 
   if (parentChain !== undefined) {
     await run(parentChain, handedRequest, readContext);
@@ -313,30 +301,40 @@ async function runParentThenOwn<Chain>(
 /**
  * The copy of an attempt's request its observers are handed; see `runParentThenOwn`. The
  * request is the client's own, built from its records, so copying it reads no caller code.
- * With `bodies` `'built'` its body and `rawBody` are built (see `handedBodyValue`); with
- * `'none'` - its body could not be built - the copy has a `body` of `null` and a `rawBody`
- * of `undefined`, as a request whose body an interceptor returned could not be built is
- * reported.
+ * Its `body` and `rawBody` are built each on its own (see `handedBodyValue`): one that
+ * cannot be built - bytes the adapter detached, a `rawBody` that does not parse back - is
+ * reported under `label` once for the attempt, whichever phases hand its request out (see
+ * `claimBuildFailureReport`), and handed as a `body` of `null` or a `rawBody` of
+ * `undefined`, as a request whose body an interceptor returned could not be built is
+ * reported; the other is handed as built, so a JSON body's text survives a `rawBody` that
+ * failed, and each observer still hears of the response or error.
  */
 function attemptRequestCopy(
   request: HeldAttemptRequest,
-  bodies: 'built' | 'none',
+  label: 'ResponseObserver' | 'ErrorObserver',
 ): AttemptRequest {
   const { body, rawBody, ...fields } = request;
   const handed: AttemptRequest = {
     ...fields,
     headers: copyHeaderRecord(request.headers),
   };
+  const built = (value: unknown, fallback: null | undefined): unknown => {
+    try {
+      return handedBodyValue(value);
+    } catch (buildError) {
+      if (claimBuildFailureReport(value)) {
+        reportCallbackError(label, buildError);
+      }
+      return fallback;
+    }
+  };
 
   if ('body' in request) {
-    handed.body =
-      bodies === 'built'
-        ? (handedBodyValue(body) as AttemptRequest['body'])
-        : null;
+    handed.body = built(body, null) as AttemptRequest['body'];
   }
 
   if ('rawBody' in request) {
-    handed.rawBody = bodies === 'built' ? handedBodyValue(rawBody) : undefined;
+    handed.rawBody = built(rawBody, undefined);
   }
 
   return handed;

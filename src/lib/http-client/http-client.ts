@@ -5488,7 +5488,8 @@ export class BaseHTTPClient {
     } else if (this._hasAttemptRequestObservers()) {
       // Built only with an observer registered as the request ends, since building reads
       // a value an interceptor returned - its `toJSON`, its getters - which nothing else
-      // reads for a request that was never sent.
+      // reads for a request that was never sent. An observer registered after this point
+      // is handed the snapshot without them, as the docs say.
       const rawBody = readUnknownMember(request, 'body');
 
       // A body the dispatch path already failed to build is not validated and cloned a

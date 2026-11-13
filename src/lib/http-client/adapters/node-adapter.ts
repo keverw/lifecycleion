@@ -19,7 +19,6 @@ import {
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
 import { isPlainRecord } from '../internal/plain-record';
-import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { byteProgressEvent, completeProgressEvent } from '../internal/progress';
 import {
   isSignalAborted,
@@ -33,8 +32,6 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
 import { urlToHttpOptions } from 'node:url';
-import { readFileSync } from 'node:fs';
-import { types } from 'node:util';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -320,6 +317,14 @@ function reportUnclaimedWritableError(error: unknown): void {
 }
 
 /**
+ * PEM text, or its bytes: a `Buffer`, any other typed array, a `DataView`, or an
+ * `ArrayBuffer` (shared or not), each handed to TLS as a `Buffer` of its own. A `Blob`,
+ * a `Bun.file()` among them, is read by the caller first.
+ */
+export type TLSMaterial =
+  string | ArrayBufferView | ArrayBuffer | SharedArrayBuffer;
+
+/**
  * The absorber currently attached to a writable, if any.
  *
  * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
@@ -366,20 +371,21 @@ export interface NodeAdapterConfig {
    * failure is. `mtls.ca` adds to `ca`.
    */
   mtls?: {
-    cert: string | Buffer;
-    key: string | Buffer;
+    cert: TLSMaterial;
+    key: TLSMaterial;
     /** The passphrase an encrypted `key` is decrypted with. */
     passphrase?: string;
-    ca?: string | Buffer | Array<string | Buffer>;
+    ca?: TLSMaterial | TLSMaterial[];
   };
 
   /**
    * Trusted CA certificate(s) for verifying the server's TLS certificate.
    * Use this when connecting to internal services that use a private CA not
-   * in the system trust store. Accepts PEM string, Buffer, or an array of
-   * either. Does not require a client certificate — use `mtls` for that.
+   * in the system trust store. Accepts PEM text or its bytes (see
+   * {@link TLSMaterial}), or an array of them. Does not require a client
+   * certificate — use `mtls` for that.
    */
-  ca?: string | Buffer | Array<string | Buffer>;
+  ca?: TLSMaterial | TLSMaterial[];
 
   /**
    * TLS server name (SNI) to send in the handshake and verify the server
@@ -487,18 +493,11 @@ export class NodeAdapter implements HTTPAdapter {
     if (config.crl !== undefined) {
       normalizeCRL(config.crl, this);
     }
-    const anchorCheck = startTrustAnchorCheck(this);
-    assertTrustAnchors(
-      copyArrayValue(config.ca, 'NodeAdapter ca'),
-      'ca',
-      anchorCheck,
-    );
+    assertTrustAnchors(copyArrayValue(config.ca, 'NodeAdapter ca'), 'ca');
     assertTrustAnchors(
       copyArrayValue(config.mtls?.ca, 'NodeAdapter mtls.ca'),
       'mtls.ca',
-      anchorCheck,
     );
-    endTrustAnchorCheck(anchorCheck);
 
     // Held to their types here and again as each request reads them (see
     // `assertBooleanOption`, `assertSocketPath`, `assertServername` and
@@ -755,10 +754,8 @@ export class NodeAdapter implements HTTPAdapter {
       const mtlsCA = copyTrustList(mtls?.ca, 'NodeAdapter mtls.ca');
       const servername = this._config.servername;
       assertServername(servername);
-      const anchorCheck = startTrustAnchorCheck(this);
-      assertTrustAnchors(trustedCA, 'ca', anchorCheck);
-      assertTrustAnchors(mtlsCA, 'mtls.ca', anchorCheck);
-      endTrustAnchorCheck(anchorCheck);
+      assertTrustAnchors(trustedCA, 'ca');
+      assertTrustAnchors(mtlsCA, 'mtls.ca');
       // `mtls.ca` adds to `ca` rather than replacing it, so a client that trusts a partner
       // CA through `ca` keeps it when it also configures mTLS.
       // Each as TLS takes it (see `tlsMaterial`), named by the option it came from.
@@ -768,13 +765,13 @@ export class NodeAdapter implements HTTPAdapter {
           : Array.isArray(trustedCA)
             ? trustedCA
             : [trustedCA]
-        ).map((anchor) => tlsMaterial(anchor, 'ca', anchorCheck)),
+        ).map((anchor) => tlsMaterial(anchor, 'ca')),
         ...(mtlsCA === undefined
           ? []
           : Array.isArray(mtlsCA)
             ? mtlsCA
             : [mtlsCA]
-        ).map((anchor) => tlsMaterial(anchor, 'mtls.ca', anchorCheck)),
+        ).map((anchor) => tlsMaterial(anchor, 'mtls.ca')),
       ];
       if (ownAnchors.length > 0) {
         httpsOptions.ca = ownAnchors.length === 1 ? ownAnchors[0] : ownAnchors;
@@ -5120,14 +5117,15 @@ function readClientCertificate(
     ['key', key],
   ] as Array<[string, unknown]>) {
     const isText = typeof value === 'string';
-    const isBytes = ArrayBuffer.isView(value);
-    if (!isText && !isBytes) {
+    if (!isTLSMaterial(value)) {
       throw optionRefusal(
-        `NodeAdapter mtls.${field} must be PEM text or bytes (got ${describeValue(value)})`,
+        `NodeAdapter mtls.${field} must be PEM text or bytes (got ${describeTLSMaterial(value)})`,
       );
     }
     if (
-      isText ? isBlankText(value) : (readBinaryByteLength(value) ?? 0) === 0
+      isText
+        ? isBlankText(value)
+        : (readBinaryByteLength(value as object) ?? 0) === 0
     ) {
       throw optionRefusal(`NodeAdapter mtls.${field} is empty`);
     }
@@ -5151,212 +5149,61 @@ function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
 
-/** `Blob.prototype`'s `size` getter, to measure a blob without asking it. */
-const BLOB_SIZE: ((this: Blob) => number) | undefined =
-  typeof Blob === 'function'
-    ? // eslint-disable-next-line @typescript-eslint/unbound-method -- called on the value below
-      Object.getOwnPropertyDescriptor(Blob.prototype, 'size')?.get
-    : undefined;
-
 /**
- * A trust anchor's size in bytes, through the intrinsic getters - a view's, a buffer's
- * (another realm's too) or a blob's (`Bun.file()`) - so a subclass's own `byteLength` or
- * `size` cannot claim bytes it does not hold; `undefined` for anything else.
+ * Whether `entry` is TLS material this adapter takes for `ca`, `mtls.ca`, `mtls.cert` or
+ * `mtls.key`: PEM text, or its bytes - a typed array, a `DataView` or an `ArrayBuffer`,
+ * shared or not, each handed to TLS as a `Buffer` of its own (see `tlsMaterial`), so on
+ * Node and Bun alike. A list inside the list, a number, a blob - a `Bun.file()` among them, which
+ * the caller reads first - or any other object is not.
  */
-function trustAnchorByteSize(entry: object): number | undefined {
-  const byteLength = readBinaryByteLength(entry);
-  if (byteLength !== null) {
-    return byteLength;
-  }
-
-  if (BLOB_SIZE !== undefined && entry instanceof Blob) {
-    return Reflect.apply(BLOB_SIZE, entry, []);
-  }
-
-  return undefined;
+function isTLSMaterial(entry: unknown): boolean {
+  return (
+    typeof entry === 'string' ||
+    ArrayBuffer.isView(entry) ||
+    (typeof entry === 'object' &&
+      entry !== null &&
+      arrayBufferKindOf(entry) !== undefined)
+  );
 }
 
 /**
- * Whether `entry` is one trust anchor the runtime's TLS takes: PEM text or bytes - a view
- * over them, though Bun refuses a `DataView` - and on Bun an `ArrayBuffer` or a
- * `Bun.file()` as well. A list inside the list, a number or any other object is not one.
- *
- * A `Bun.file()` is a `Blob` no different by type from one made in memory, which Bun's TLS
- * refuses, so a blob is asked of Bun's TLS itself the first time it is seen: one it cannot
- * build a context from - a `new Blob([pem])` even with a `name` set, a `File`, a file that
- * holds no certificate - is not one. Nor is one opened from a file descriptor, which
- * names no path: it is read for each request (see `tlsMaterial`), and a descriptor cannot
- * be read again from its start. Each request then reads the file and checks its bytes
- * (see `isBlobTrustAnchor`).
+ * What a refusal of TLS material says it got (see `isTLSMaterial`), `where` it sat - `''`,
+ * or `' in the list'` - with a blob told apart. Read without running the value's own code
+ * where it can be: a `Proxy` whose traps throw, or a revoked one, is described as
+ * `describeValue` describes it rather than replacing the refusal with its own error.
  */
-function isTrustAnchor(entry: unknown, check: TrustAnchorCheck): boolean {
-  if (typeof entry === 'string') {
-    return true;
-  }
-
-  if (ArrayBuffer.isView(entry)) {
-    return !(isBunRuntime && types.isDataView(entry));
-  }
-
-  if (!isBunRuntime || typeof entry !== 'object' || entry === null) {
-    return false;
-  }
-
-  if (arrayBufferKindOf(entry) === 'ArrayBuffer') {
-    return true;
-  }
-
-  const path =
-    typeof Blob === 'function' && entry instanceof Blob
-      ? blobPath(entry)
-      : undefined;
-
-  return path !== undefined && isBlobTrustAnchor(entry as Blob, path, check);
-}
-
-/** Bun's answer for the bytes a `Bun.file()` trust anchor held when it was checked. */
-interface BlobAnchorAnswer {
-  readonly bytes: Buffer;
-  readonly isAnchor: boolean;
-}
-
-/**
- * The answers of each adapter's last check of its trust anchors (see `TrustAnchorCheck`),
- * by the path of each `Bun.file()` it read: so a file whose bytes have not changed is not
- * asked of Bun again, and only the files the last check read are kept.
- */
-const lastBlobAnchorAnswers = new WeakMap<
-  object,
-  ReadonlyMap<string, BlobAnchorAnswer>
->();
-
-/**
- * The blobs Bun's TLS has taken as a trust anchor, once each: a blob is a `Bun.file()` or
- * it is not for good, and Bun's TLS is the one that tells.
- */
-const bunFileAnchors = new WeakSet<Blob>();
-
-/**
- * One check of an adapter's `ca` and `mtls.ca` (see `assertTrustAnchors`): Bun's answers
- * for the files it read, kept for the adapter once the check ends (see
- * `endTrustAnchorCheck`), and the bytes each `Bun.file()` read as - the bytes checked,
- * which `tlsMaterial` hands TLS.
- */
-interface TrustAnchorCheck {
-  readonly owner: object;
-  readonly answers: Map<string, BlobAnchorAnswer>;
-  readonly bytesByBlob: Map<Blob, Buffer>;
-}
-
-function startTrustAnchorCheck(owner: object): TrustAnchorCheck {
-  return { owner, answers: new Map(), bytesByBlob: new Map() };
-}
-
-/** Keeps a check's answers for its adapter, in place of the last check's. */
-function endTrustAnchorCheck(check: TrustAnchorCheck): void {
-  lastBlobAnchorAnswers.set(check.owner, check.answers);
-}
-
-/**
- * Whether the `Bun.file()` `blob` at `path` is a trust anchor (see `isTrustAnchor`). The
- * file is read on every check, and its bytes asked of Bun's TLS only when they differ from
- * those it answered for on the adapter's last check: building a context parses every
- * certificate in the file - about 2 ms for a 320 KB bundle - where reading and comparing
- * it costs a small part of that. The bytes read are the ones `tlsMaterial` hands TLS on
- * this request, so what was checked is what is sent. A file that cannot be read is not
- * one.
- */
-function isBlobTrustAnchor(
-  blob: Blob,
-  path: string,
-  check: TrustAnchorCheck,
-): boolean {
-  if (!bunFileAnchors.has(blob)) {
-    try {
-      tls.createSecureContext({ ca: blob as unknown as string });
-    } catch {
-      return false;
-    }
-    bunFileAnchors.add(blob);
-  }
-
-  let bytes: Buffer;
+function describeTLSMaterial(value: unknown, where = ''): string {
   try {
-    bytes = readFileSync(path);
-  } catch {
-    return false;
-  }
-
-  const known =
-    check.answers.get(path) ??
-    lastBlobAnchorAnswers.get(check.owner)?.get(path);
-  let isAnchor: boolean;
-
-  if (known !== undefined && bytes.equals(known.bytes)) {
-    isAnchor = known.isAnchor;
-  } else {
-    try {
-      tls.createSecureContext({ ca: bytes });
-      isAnchor = true;
-    } catch {
-      isAnchor = false;
+    if (Array.isArray(value)) {
+      return `an array${where}`;
     }
-  }
 
-  check.answers.set(path, { bytes, isAnchor });
-  if (isAnchor) {
-    check.bytesByBlob.set(blob, bytes);
-  }
+    if (isPlainRecord(value)) {
+      return `a plain object${where}`;
+    }
 
-  return isAnchor;
-}
-
-/** `Blob.prototype`'s own `name` getter, which Bun declares: a `Bun.file()`'s path. */
-const BLOB_NAME: ((this: Blob) => unknown) | undefined =
-  typeof Blob === 'function'
-    ? // eslint-disable-next-line @typescript-eslint/unbound-method -- called on the value below
-      Object.getOwnPropertyDescriptor(Blob.prototype, 'name')?.get
-    : undefined;
-
-/**
- * A `Bun.file()`'s path, or `undefined` for a blob that names none (one made in memory):
- * read through `Blob.prototype`'s own getter, so an own `name` - a getter that answers
- * one path to a check and another to the read - is not believed, and a `Proxy` names
- * none.
- */
-function blobPath(blob: Blob): string | undefined {
-  if (typeof File === 'function' && blob instanceof File) {
-    return undefined;
-  }
-
-  let name: unknown;
-  try {
-    name =
-      BLOB_NAME === undefined
-        ? Reflect.get(blob, 'name')
-        : Reflect.apply(BLOB_NAME, blob, []);
+    if (typeof Blob === 'function' && value instanceof Blob) {
+      return `a Blob${where}; read it first and pass its PEM text or bytes`;
+    }
   } catch {
-    return undefined;
+    // Described by its type alone.
   }
 
-  return typeof name === 'string' ? name : undefined;
+  return `${describeValue(value)}${where}`;
 }
 
 /**
- * A `ca`, `mtls.cert` or `mtls.key` value as handed to TLS: text as it is, and anything
- * else as a `Buffer` of its own bytes - a view's or an `ArrayBuffer`'s copied, a
- * `Bun.file()` read from its path. The runtime's shared connection pool tells one TLS
- * setup from another by these values' text, and a `DataView`, an `ArrayBuffer` or a blob
- * reads as the same `[object ...]` whatever it holds: passed on as they are, a connection
- * one adapter opened trusting one CA, or presenting one client certificate, would be
- * reused by another adapter configured with different ones. A `Buffer` reads as its
- * bytes. A `ca` or `mtls.ca` file is handed over as the bytes `check` read and checked
- * (see `isBlobTrustAnchor`), not read again.
+ * A `ca`, `mtls.cert` or `mtls.key` value as handed to TLS: text as it is, and bytes as a
+ * `Buffer` of their own - a view's or an `ArrayBuffer`'s copied. The runtime's shared
+ * connection pool tells one TLS setup from another by these values' text, and a
+ * `DataView` or an `ArrayBuffer` reads as the same `[object ...]` whatever it holds:
+ * passed on as they are, a connection one adapter opened trusting one CA, or presenting
+ * one client certificate, would be reused by another adapter configured with different
+ * ones. A `Buffer` reads as its bytes.
  */
 function tlsMaterial(
   value: string | Buffer | object,
   name: string,
-  check?: TrustAnchorCheck,
 ): string | Buffer {
   if (typeof value === 'string') {
     return value;
@@ -5366,50 +5213,28 @@ function tlsMaterial(
     return copyToOwnMemory(crlBytesOf(value));
   }
 
-  if (arrayBufferKindOf(value) === 'ArrayBuffer') {
-    return copyToOwnMemory(new Uint8Array(value as ArrayBuffer));
+  if (arrayBufferKindOf(value) !== undefined) {
+    // A buffer detached since it was checked reads as empty, as a view over one does
+    // (see `crlBytesOf`), and TLS refuses it.
+    return readBinaryByteLength(value) === 0
+      ? Buffer.alloc(0)
+      : copyToOwnMemory(new Uint8Array(value as ArrayBufferLike));
   }
 
-  const checked =
-    typeof Blob === 'function' && value instanceof Blob
-      ? check?.bytesByBlob.get(value)
-      : undefined;
-  if (checked !== undefined) {
-    return checked;
-  }
-
-  const path =
-    typeof Blob === 'function' && value instanceof Blob
-      ? blobPath(value)
-      : undefined;
-  if (path === undefined) {
-    throw optionRefusal(`NodeAdapter ${name} must be PEM text or bytes`);
-  }
-
-  try {
-    return readFileSync(path);
-  } catch (error) {
-    throw nonRetryableAdapterErrorFrom(
-      new Error(`NodeAdapter ${name} file could not be read`, {
-        cause: error,
-      }),
-    );
-  }
+  throw optionRefusal(
+    `NodeAdapter ${name} must be PEM text or bytes (got ${describeTLSMaterial(value)})`,
+  );
 }
 
 /**
- * Refuse a trust store with nothing in it - `''`, `[]`, an empty buffer or blob, or a list
+ * Refuse a trust store with nothing in it - `''`, `[]`, an empty buffer, or a list
  * with any empty entry (`['', pem]` reads as a mistake, not a store) - as `crl` refuses an
  * empty list: it would leave the connection on the
  * runtime's public roots, the opposite of what a caller supplying its own CA meant. And
- * refuse one that is not a trust anchor or a list of them (see {@link isTrustAnchor}),
+ * refuse one that is not TLS material or a list of it (see {@link isTLSMaterial}),
  * which would build the adapter and fail every HTTPS request.
  */
-function assertTrustAnchors(
-  value: unknown,
-  name: string,
-  check: TrustAnchorCheck,
-): void {
+function assertTrustAnchors(value: unknown, name: string): void {
   if (value === undefined) {
     return;
   }
@@ -5419,7 +5244,9 @@ function assertTrustAnchors(
     entry === null ||
     entry === undefined ||
     (typeof entry === 'string' && isBlankText(entry)) ||
-    (typeof entry === 'object' && trustAnchorByteSize(entry) === 0);
+    // Measured through the intrinsic getters, so a subclass's own `byteLength` cannot
+    // claim bytes it does not hold; a detached buffer holds none.
+    (typeof entry === 'object' && readBinaryByteLength(entry) === 0);
   // Every entry, not `some`, which skips a hole: the list is this adapter's own copy, and
   // its iterator reads a hole as the `undefined` it is.
   const hasEmptyEntry = (list: unknown[]): boolean => {
@@ -5439,21 +5266,14 @@ function assertTrustAnchors(
   }
 
   // A list's entries each one anchor, never a list of their own (`[loadPems()]`).
-  const isWrong = (entry: unknown): boolean => !isTrustAnchor(entry, check);
+  const isWrong = (entry: unknown): boolean => !isTLSMaterial(entry);
   const isList = Array.isArray(value);
   const list: unknown[] = isList ? (value as unknown[]) : [value];
   const index = list.findIndex(isWrong);
   if (index !== -1) {
-    const wrongEntry = list[index];
-    const got = Array.isArray(wrongEntry)
-      ? 'an array'
-      : isPlainRecord(wrongEntry)
-        ? 'a plain object'
-        : typeof Blob === 'function' && wrongEntry instanceof Blob
-          ? 'a blob that is not a Bun.file() of a certificate opened by its path'
-          : describeValue(wrongEntry);
+    const got = describeTLSMaterial(list[index], isList ? ' in the list' : '');
     throw optionRefusal(
-      `NodeAdapter ${name} must be PEM text or bytes, or a list of them (got ${isList ? `${got} in the list` : got})`,
+      `NodeAdapter ${name} must be PEM text or bytes, or a list of them (got ${got})`,
     );
   }
 }

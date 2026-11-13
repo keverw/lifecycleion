@@ -34,8 +34,8 @@ export type HeldAttemptRequest = Omit<AttemptRequest, 'body' | 'rawBody'> & {
   rawBody?: unknown;
 };
 
-/** The tokens whose build failure has been reported; see `isBuildFailureUnreported`. */
-const reportedFailures = new WeakSet<object>();
+/** The tokens whose build failure has been reported; see `claimBuildFailureReport`. */
+const claimedFailures = new WeakSet<object>();
 
 /**
  * A token for `build()`'s value, built once (see `once`): its value kept - and the build,
@@ -85,37 +85,25 @@ export function handedBodyValue(value: unknown): unknown {
 }
 
 /**
- * Whether the failure to build one of `values` - the `body` and `rawBody` of an attempt's
- * request, as `handedBodyValue` was asked for them - is yet to be reported, marking each
- * failed token reported: the copies of one attempt's request share its tokens, so a
- * failure is reported once for the attempt, whichever phases hand its request out. A
- * failure no token holds is always reported.
+ * Claims the report of a failure `handedBodyValue` threw for `value`: `true` the first time
+ * for a token, so its failure is reported then, and `false` after - the copies of one
+ * attempt's request share its tokens, so a failure is reported once for the attempt,
+ * whichever phases hand its request out, and once for a bytes or form `body` and `rawBody`
+ * that share one token. A value that is no token is always claimed.
  */
-export function isBuildFailureUnreported(values: readonly unknown[]): boolean {
-  let failedTokens = 0;
-  let isUnreported = false;
-
-  for (const value of values) {
-    const pending =
-      typeof value === 'object' && value !== null
-        ? pendingByToken.get(value)
-        : undefined;
-
-    if (pending === undefined) {
-      continue;
-    }
-
-    try {
-      pending();
-    } catch {
-      failedTokens++;
-
-      if (!reportedFailures.has(value as object)) {
-        reportedFailures.add(value as object);
-        isUnreported = true;
-      }
-    }
+export function claimBuildFailureReport(value: unknown): boolean {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !pendingByToken.has(value)
+  ) {
+    return true;
   }
 
-  return isUnreported || failedTokens === 0;
+  if (claimedFailures.has(value)) {
+    return false;
+  }
+
+  claimedFailures.add(value);
+  return true;
 }
