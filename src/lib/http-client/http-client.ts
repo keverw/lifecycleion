@@ -1,7 +1,6 @@
 import { normalizeStandardMethod } from './internal/http-method';
 import {
   asciiLowercase,
-  asciiUppercase,
   isBlankText,
   trimEndWhere,
 } from '../internal/ascii-text';
@@ -89,7 +88,6 @@ import {
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
   MOCK_ADAPTER_DEFAULT_BASE_URL,
-  BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   EFFECTIVE_REQUEST_HEADERS_KEY,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
@@ -170,6 +168,12 @@ import {
   serializesToNothing,
 } from './internal/request-body-copy';
 import { isStatusCode } from './internal/status-code';
+import {
+  bodyOnBodilessMethodMessage,
+  forbiddenMethodMessage,
+  isBodilessMethod,
+  isForbiddenBrowserMethod,
+} from './internal/method-refusal';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
 import { listenForUploadSourceWait } from './internal/upload-source-wait';
 import { listenForStreamFailureSettled } from './internal/stream-failure-settled';
@@ -5687,13 +5691,9 @@ export class BaseHTTPClient {
     if (
       (adapterType === 'fetch' ||
         (adapterType === 'xhr' && this._isBrowserRuntime)) &&
-      BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(
-        asciiLowercase(request.method),
-      )
+      isForbiddenBrowserMethod(request.method)
     ) {
-      throw methodRefusal(
-        `[${adapterName}] Cannot send a ${request.method} request: fetch and browsers refuse the CONNECT, TRACE and TRACK methods.`,
-      );
+      throw methodRefusal(forbiddenMethodMessage(adapterName, request.method));
     }
   }
 
@@ -5707,17 +5707,14 @@ export class BaseHTTPClient {
     // `_assertRequestShapeIsSupported`).
     // XHR in a browser only, as the TRACE refusal there: a non-browser XHR (React Native,
     // a shim) may send the body.
-    const method = asciiUppercase(request.method);
     if (
       (adapterType === 'fetch' ||
         (adapterType === 'xhr' && this._isBrowserRuntime)) &&
-      (method === 'GET' || method === 'HEAD') &&
+      isBodilessMethod(request.method) &&
       hasRequestBody(request.body)
     ) {
       throw methodRefusal(
-        adapterType === 'fetch'
-          ? `[FetchAdapter] Cannot send a ${request.method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`
-          : `[XHRAdapter] Cannot send a ${request.method} request with a body: XMLHttpRequest drops it. Send the body with POST.`,
+        bodyOnBodilessMethodMessage(adapterType, request.method),
         true,
       );
     }

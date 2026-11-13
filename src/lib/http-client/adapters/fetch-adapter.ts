@@ -58,9 +58,12 @@ import {
 } from '../../internal/binary-view';
 import { asciiLowercase } from '../../internal/ascii-text';
 import {
-  BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES,
-  RESPONSE_DECODE_ERROR_KEY,
-} from '../consts';
+  bodyOnBodilessMethodMessage,
+  forbiddenMethodMessage,
+  isBodilessMethod,
+  isForbiddenBrowserMethod,
+} from '../internal/method-refusal';
+import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
 
 export class FetchAdapter implements HTTPAdapter {
   constructor() {
@@ -107,10 +110,8 @@ export class FetchAdapter implements HTTPAdapter {
 
     // The Fetch Standard forbids these, but Bun's `fetch` sends a `CONNECT` or `TRACE`, so
     // they are refused here, on every runtime, rather than left to it.
-    if (BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(asciiLowercase(method))) {
-      const refusal = new Error(
-        `[FetchAdapter] Cannot send a ${method} request: fetch refuses the CONNECT, TRACE and TRACK methods.`,
-      );
+    if (isForbiddenBrowserMethod(method)) {
+      const refusal = new Error(forbiddenMethodMessage('FetchAdapter', method));
       markNonRetryableAdapterError(refusal);
       throw refusal;
     }
@@ -122,14 +123,8 @@ export class FetchAdapter implements HTTPAdapter {
     // network failure to no end. The probe below is built without the body, so it is
     // checked here. `HTTPClient` refuses one before this, and hands a JSON body that
     // serializes to nothing over as `null`.
-    if (
-      (method === 'GET' || method === 'HEAD') &&
-      body !== null &&
-      body !== undefined
-    ) {
-      const refusal = new Error(
-        `[FetchAdapter] Cannot send a ${method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`,
-      );
+    if (isBodilessMethod(method) && body !== null && body !== undefined) {
+      const refusal = new Error(bodyOnBodilessMethodMessage('fetch', method));
       markNonRetryableAdapterError(refusal);
       throw refusal;
     }

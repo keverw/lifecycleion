@@ -142,6 +142,9 @@ async function runInterceptors(
   let current = request;
   /** Whether `current` is an interceptor's result, not yet copied. */
   let isCurrentUncopied = isInterceptorResult;
+  let filterContext:
+    | { request: unknown; context: Parameters<typeof matchesFilter>[1] }
+    | undefined;
   /** `prepareRequest` while it is still to be called. */
   let pendingPrepare = prepareRequest;
 
@@ -178,20 +181,24 @@ async function runInterceptors(
       isCurrentUncopied = false;
     }
 
-    // A JSON body copy's contents are parsed from its text only for a
-    // `bodyContainsKeys` filter the rest of which has matched (see
-    // `readRequestBodyContents`).
-    if (
-      !matchesFilter(
-        filter,
-        {
+    // One context while the request is the same one, so the filters before the next
+    // interceptor that returns another share its URL's parse (see `matchesFilter`).
+    if (filterContext?.request !== current) {
+      filterContext = {
+        request: current,
+        context: {
           method: current.method,
           requestURL: current.requestURL,
           body: current.body,
         },
-        'request',
-        readBodyContents,
-      )
+      };
+    }
+
+    // A JSON body copy's contents are parsed from its text only for a
+    // `bodyContainsKeys` filter the rest of which has matched (see
+    // `readRequestBodyContents`).
+    if (
+      !matchesFilter(filter, filterContext.context, 'request', readBodyContents)
     ) {
       continue;
     }

@@ -35,6 +35,10 @@ import {
 } from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
+import {
+  bodyOnBodilessMethodMessage,
+  isBodilessMethod,
+} from '../internal/method-refusal';
 import { readUnknownMember } from '../../internal/read-member';
 import { isLoopbackHost } from '../internal/loopback-host';
 import type {
@@ -105,13 +109,13 @@ export class XHRAdapter implements HTTPAdapter {
     // serializes to nothing over as `null`. In a browser only: a non-browser XHR (React
     // Native, a shim) may send the body.
     if (
-      (upperMethod === 'GET' || upperMethod === 'HEAD') &&
+      isBodilessMethod(upperMethod) &&
       requestBody !== null &&
       requestBody !== undefined &&
       isBrowserEnvironment()
     ) {
       const refusal = new Error(
-        `[XHRAdapter] Cannot send a ${upperMethod} request with a body: XMLHttpRequest drops it. Send the body with POST.`,
+        bodyOnBodilessMethodMessage('xhr', upperMethod),
       );
       markNonRetryableAdapterError(refusal);
       throw refusal;

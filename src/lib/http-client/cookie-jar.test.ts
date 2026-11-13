@@ -7,6 +7,7 @@ import {
   setSystemTime,
   spyOn,
 } from 'bun:test';
+import * as tr46Module from 'tr46';
 import { CookieJar } from './cookie-jar';
 import type { Cookie } from './cookie-jar';
 
@@ -5565,4 +5566,55 @@ describe('Leave Secure Cookies Alone reaches the sites on either side of a domai
     // each, seconds.
     expect(elapsedMS).toBeLessThan(1000);
   }, 60_000);
+});
+
+test('a domain is mapped to ASCII once for a Set-Cookie and not again for the next naming it', () => {
+  const jar = new CookieJar();
+  const mapped = spyOn(tr46Module, 'toASCII');
+  try {
+    jar.parseSetCookieHeader(
+      'a=1; Domain=example.co.uk; Path=/',
+      'https://www.example.co.uk/',
+    );
+    const first = mapped.mock.calls.length;
+    jar.parseSetCookieHeader(
+      'b=1; Domain=example.co.uk; Path=/',
+      'https://www.example.co.uk/',
+    );
+
+    // The cookie's domain and the request host, once each.
+    expect(first).toBe(2);
+    expect(mapped.mock.calls.length).toBe(first);
+  } finally {
+    mapped.mockRestore();
+  }
+
+  // Past the names it keeps, each is still normalized as it would be.
+  for (let index = 0; index < 100; index++) {
+    jar.parseSetCookieHeader(
+      `c${String(index)}=1; Domain=Site${String(index)}.example`,
+      `https://www.site${String(index)}.example/`,
+    );
+  }
+  expect(jar.getCookiesFor('https://www.example.co.uk/')).toHaveLength(2);
+  expect(jar.getCookiesFor('https://x.site99.example/')).toHaveLength(1);
+  expect(jar.getStoredDomains()).toContainEqual({
+    domain: 'site7.example',
+    count: 1,
+  });
+});
+
+test('a name longer than any domain is normalized but not kept', () => {
+  const jar = new CookieJar();
+  const kept = (): number =>
+    (Reflect.get(jar, 'normalizedDomains') as Map<string, string>).size;
+
+  expect(
+    jar.setCookie({ name: 'a', value: '1', domain: 'x'.repeat(100_000) }),
+  ).toBe(false);
+  expect(kept()).toBe(0);
+  expect(jar.setCookie({ name: 'a', value: '1', domain: 'example.com' })).toBe(
+    true,
+  );
+  expect(kept()).toBe(1);
 });

@@ -4,6 +4,7 @@ import { MockAdapter } from './adapters/mock-adapter';
 import type { AdapterResponse } from './types';
 import { captureErrorReports } from './test-helpers/capture-error-reports';
 import * as bodyCopyModule from './internal/request-body-copy';
+import * as domainUtilsModule from '../domain-utils/domain-utils';
 import {
   THROWING_FILTER_HOST,
   makeMarkedFiltersThrow,
@@ -800,3 +801,69 @@ test.each<[string, () => unknown, (rawBody: unknown) => unknown]>([
     expect(seen).toEqual([{ hasBody: true, rawBody: read(makeBody()) }]);
   },
 );
+
+test.each(['interceptors', 'observers'] as const)(
+  'host-scoped %s of one phase parse the request URL once between them',
+  async (kind) => {
+    const parsesWith = async (count: number): Promise<number> => {
+      const client = new HTTPClient({
+        adapter: {
+          getType: () => 'mock',
+          send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+        },
+      });
+      for (let index = 0; index < count; index++) {
+        if (kind === 'interceptors') {
+          client.addRequestInterceptor((request) => request, {
+            hosts: ['other.example.com'],
+          });
+        } else {
+          client.addResponseObserver(() => undefined, {
+            hosts: ['other.example.com'],
+          });
+        }
+      }
+      const parse = spyOn(domainUtilsModule, 'safeParseURL');
+      try {
+        await client.get('https://api.example.com/x').send();
+        return parse.mock.calls.length;
+      } finally {
+        parse.mockRestore();
+      }
+    };
+
+    expect(await parsesWith(3)).toBe(await parsesWith(1));
+  },
+);
+
+test("an interceptor's in-place edit of the URL is what the filters after it match", async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+    },
+  });
+  const ran: string[] = [];
+  client.addRequestInterceptor((request) => {
+    request.requestURL = 'https://moved.test/x';
+    return request;
+  });
+  client.addRequestInterceptor(
+    (request) => {
+      ran.push('moved');
+      return request;
+    },
+    { hosts: ['moved.test'] },
+  );
+  client.addRequestInterceptor(
+    (request) => {
+      ran.push('original');
+      return request;
+    },
+    { hosts: ['api.test'] },
+  );
+
+  await client.get('https://api.test/x').send();
+
+  expect(ran).toEqual(['moved']);
+});

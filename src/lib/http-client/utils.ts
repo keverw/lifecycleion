@@ -1639,6 +1639,18 @@ export function matchesFilterPhase(
 }
 
 /**
+ * The request URL each filter context was parsed to by `matchesFilter`, with the URL it
+ * read: the observers of one phase - a parent client's and a sub-client's - are matched
+ * against one context, and the filters of an interceptor chain against one while its
+ * request is unchanged, so their host and scheme checks share one parse. Kept only while
+ * the context is.
+ */
+const parsedURLByContext = new WeakMap<
+  object,
+  { requestURL: string | undefined; parsed: URL | null }
+>();
+
+/**
  * Tests whether a request context matches an interceptor/observer filter, its `phases`
  * aside: those are {@link matchesFilterPhase}'s, asked first.
  *
@@ -1741,15 +1753,18 @@ export function matchesFilter(
   // Checked whenever the filter names hosts or schemes, as `methods` is: a request whose
   // URL could not be read (`''`), or that has none, matches no host or scheme rather
   // than skipping the filter, so a host-scoped observer does not hear about other hosts.
-  // Parsed once for the host and scheme checks, and only when one of them reads it.
+  // Parsed only when one of them reads it, and once for every filter matched against the
+  // same context - one per phase - by its URL as read then (see `parsedURLByContext`).
   const { requestURL } = context;
-  let parsedRequestURL: URL | null | undefined;
   const readRequestURL = (): URL | null => {
-    if (parsedRequestURL === undefined) {
-      parsedRequestURL = safeParseURL(requestURL ?? '');
+    const known = parsedURLByContext.get(context);
+    if (known !== undefined && known.requestURL === requestURL) {
+      return known.parsed;
     }
 
-    return parsedRequestURL;
+    const parsed = safeParseURL(requestURL ?? '');
+    parsedURLByContext.set(context, { requestURL, parsed });
+    return parsed;
   };
 
   if (filter.hosts) {

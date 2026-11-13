@@ -250,6 +250,38 @@ describe('holdsSameBytes', () => {
     expect(holdsSameBytes(left, detached)).toBe(false);
   });
 
+  test.each([
+    [
+      "a polyfill's, whose equals takes only a Buffer",
+      function (this: Buffer, other: Uint8Array): boolean {
+        if (!Buffer.isBuffer(other)) {
+          throw new TypeError('Argument must be a Buffer');
+        }
+        return Buffer.compare(this, other) === 0;
+      },
+    ],
+    [
+      'one whose equals refuses everything',
+      (): boolean => {
+        throw new TypeError('refused');
+      },
+    ],
+  ])('compares the bytes with a Buffer like %s', (_label, equals) => {
+    const equalsSpy = spyOn(Buffer.prototype, 'equals').mockImplementation(
+      equals,
+    );
+    try {
+      expect(
+        holdsSameBytes(new Uint8Array([5, 6]), new Uint8Array([5, 6])),
+      ).toBe(true);
+      expect(
+        holdsSameBytes(new Uint8Array([5, 6]), new Uint8Array([5, 7])),
+      ).toBe(false);
+    } finally {
+      equalsSpy.mockRestore();
+    }
+  });
+
   test('compares by index where there is no Buffer', () => {
     const buffer = globalThis.Buffer;
     Reflect.deleteProperty(globalThis, 'Buffer');

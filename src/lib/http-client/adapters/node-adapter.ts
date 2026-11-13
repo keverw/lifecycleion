@@ -32,6 +32,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
 import { urlToHttpOptions } from 'node:url';
+import { types } from 'node:util';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -796,8 +797,9 @@ export class NodeAdapter implements HTTPAdapter {
         // remote server's choice, not the caller's, and must not be able to make this
         // adapter authenticate to a third party.
         if (!isCrossOriginHop) {
-          httpsOptions.cert = tlsMaterial(clientCertificate.cert, 'mtls.cert');
-          httpsOptions.key = tlsMaterial(clientCertificate.key, 'mtls.key');
+          // Each already as TLS takes it (see `readClientCertificate`).
+          httpsOptions.cert = clientCertificate.cert;
+          httpsOptions.key = clientCertificate.key;
           if (clientCertificate.passphrase !== undefined) {
             httpsOptions.passphrase = clientCertificate.passphrase;
           }
@@ -5111,11 +5113,17 @@ function readClientCertificate(
   }
 
   const { cert, key, passphrase } = mtls as Record<string, unknown>;
+  // Each as TLS takes it (see `tlsMaterial`) as soon as it is checked, before any other
+  // option the caller's getters answer is read, so the bytes checked are the bytes sent.
+  const material: Record<'cert' | 'key', string | Buffer> = {
+    cert: '',
+    key: '',
+  };
 
   for (const [field, value] of [
     ['cert', cert],
     ['key', key],
-  ] as Array<[string, unknown]>) {
+  ] as Array<['cert' | 'key', unknown]>) {
     const isText = typeof value === 'string';
     if (!isTLSMaterial(value)) {
       throw optionRefusal(
@@ -5129,6 +5137,7 @@ function readClientCertificate(
     ) {
       throw optionRefusal(`NodeAdapter mtls.${field} is empty`);
     }
+    material[field] = tlsMaterial(value as TLSMaterial, `mtls.${field}`);
   }
 
   if (passphrase !== undefined && typeof passphrase !== 'string') {
@@ -5138,8 +5147,8 @@ function readClientCertificate(
   }
 
   return {
-    cert: cert as string | Buffer,
-    key: key as string | Buffer,
+    cert: material.cert,
+    key: material.key,
     ...(passphrase === undefined ? {} : { passphrase }),
   };
 }
@@ -5153,8 +5162,8 @@ function isSuccessStatus(status: number): boolean {
  * Whether `entry` is TLS material this adapter takes for `ca`, `mtls.ca`, `mtls.cert` or
  * `mtls.key`: PEM text, or its bytes - a typed array, a `DataView` or an `ArrayBuffer`,
  * shared or not, each handed to TLS as a `Buffer` of its own (see `tlsMaterial`), so on
- * Node and Bun alike. A list inside the list, a number, a blob - a `Bun.file()` among them, which
- * the caller reads first - or any other object is not.
+ * Node and Bun alike. A list inside the list, a number, a blob - a `Bun.file()` among
+ * them, which the caller reads first - or any other object is not.
  */
 function isTLSMaterial(entry: unknown): boolean {
   return (
@@ -5168,11 +5177,15 @@ function isTLSMaterial(entry: unknown): boolean {
 
 /**
  * What a refusal of TLS material says it got (see `isTLSMaterial`), `where` it sat - `''`,
- * or `' in the list'` - with a blob told apart. Read without running the value's own code
- * where it can be: a `Proxy` whose traps throw, or a revoked one, is described as
- * `describeValue` describes it rather than replacing the refusal with its own error.
+ * or `' in the list'` - with a blob told apart. A `Proxy` is named as one and nothing
+ * else asked of it, so none of its traps runs while the refusal is built, and a check
+ * that still throws leaves the value described by its type alone.
  */
 function describeTLSMaterial(value: unknown, where = ''): string {
+  if (types.isProxy(value)) {
+    return `a Proxy${where}`;
+  }
+
   try {
     if (Array.isArray(value)) {
       return `an array${where}`;
@@ -5193,37 +5206,56 @@ function describeTLSMaterial(value: unknown, where = ''): string {
 }
 
 /**
- * A `ca`, `mtls.cert` or `mtls.key` value as handed to TLS: text as it is, and bytes as a
- * `Buffer` of their own - a view's or an `ArrayBuffer`'s copied. The runtime's shared
- * connection pool tells one TLS setup from another by these values' text, and a
- * `DataView` or an `ArrayBuffer` reads as the same `[object ...]` whatever it holds:
- * passed on as they are, a connection one adapter opened trusting one CA, or presenting
- * one client certificate, would be reused by another adapter configured with different
- * ones. A `Buffer` reads as its bytes.
+ * The copy each byte-form TLS value was last handed to TLS as, by the value: reused while
+ * the value still holds the same bytes - a compare, not an allocation and a copy, on each
+ * request - and taken again once the caller has changed them in place.
  */
-function tlsMaterial(
-  value: string | Buffer | object,
-  name: string,
-): string | Buffer {
+const ownedTLSBytes = new WeakMap<object, Buffer>();
+
+/**
+ * A `ca`, `mtls.cert` or `mtls.key` value as handed to TLS: text as it is, and bytes as a
+ * `Buffer` of their own - a view's or an `ArrayBuffer`'s copied, the copy reused while
+ * they are unchanged (see `ownedTLSBytes`). The runtime's shared connection pool tells
+ * one TLS setup from another by these values' text, and a `DataView` or an `ArrayBuffer`
+ * reads as the same `[object ...]` whatever it holds: passed on as they are, a connection
+ * one adapter opened trusting one CA, or presenting one client certificate, would be
+ * reused by another adapter configured with different ones. A `Buffer` reads as its
+ * bytes. Bytes that read as empty - a buffer detached since it was checked - are refused
+ * as empty: Node would take an empty `ca` as no CA, and leave the connection on the
+ * public roots.
+ */
+function tlsMaterial(value: TLSMaterial, name: string): string | Buffer {
   if (typeof value === 'string') {
     return value;
   }
 
+  let bytes: Uint8Array;
+
   if (ArrayBuffer.isView(value)) {
-    return copyToOwnMemory(crlBytesOf(value));
+    bytes = crlBytesOf(value);
+  } else if (arrayBufferKindOf(value) !== undefined) {
+    bytes =
+      readBinaryByteLength(value) === 0
+        ? new Uint8Array(0)
+        : new Uint8Array(value);
+  } else {
+    throw optionRefusal(
+      `NodeAdapter ${name} must be PEM text or bytes (got ${describeTLSMaterial(value)})`,
+    );
   }
 
-  if (arrayBufferKindOf(value) !== undefined) {
-    // A buffer detached since it was checked reads as empty, as a view over one does
-    // (see `crlBytesOf`), and TLS refuses it.
-    return readBinaryByteLength(value) === 0
-      ? Buffer.alloc(0)
-      : copyToOwnMemory(new Uint8Array(value as ArrayBufferLike));
+  if (bytes.byteLength === 0) {
+    throw optionRefusal(`NodeAdapter ${name} is empty`);
   }
 
-  throw optionRefusal(
-    `NodeAdapter ${name} must be PEM text or bytes (got ${describeTLSMaterial(value)})`,
-  );
+  const kept = ownedTLSBytes.get(value);
+  if (kept !== undefined && kept.equals(bytes)) {
+    return kept;
+  }
+
+  const copy = copyToOwnMemory(bytes);
+  ownedTLSBytes.set(value, copy);
+  return copy;
 }
 
 /**

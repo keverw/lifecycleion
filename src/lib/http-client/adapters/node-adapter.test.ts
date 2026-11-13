@@ -12904,7 +12904,7 @@ describe('NodeAdapter - unsupported bodies and per-request option reads', () => 
       spy.mockRestore();
     }
   });
-  test('an ArrayBuffer certificate detached after it was checked reaches TLS as no bytes', async () => {
+  test('an ArrayBuffer certificate detached after it was checked is sent as it was checked', async () => {
     const { good } = getRevocationFixtures();
     const cert = new Uint8Array(Buffer.from(good.cert)).buffer;
     const config: NodeAdapterConfig = {
@@ -12936,10 +12936,118 @@ describe('NodeAdapter - unsupported bodies and per-request option reads', () => 
       });
 
       expect(Buffer.isBuffer(captured?.cert)).toBe(true);
-      expect((captured?.cert as Buffer).byteLength).toBe(0);
+      expect(String(captured?.cert)).toBe(good.cert);
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test('a byte-form ca is copied once while its bytes are unchanged, and again once changed in place', async () => {
+    const { caCert } = getRevocationFixtures();
+    const ca = Buffer.from(caCert);
+    const adapter = new NodeAdapter({ ca });
+    const captured: https.RequestOptions[] = [];
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured.push(options);
+
+      return failingRequest();
+    }) as unknown as typeof https.request);
+    const send = () =>
+      adapter.send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+      });
+
+    try {
+      await send();
+      await send();
+      ca[0] = 0x20;
+      await send();
+
+      expect(captured).toHaveLength(3);
+      expect(captured[1].ca).toBe(captured[0].ca);
+      expect(captured[0].ca).not.toBe(ca);
+      expect(captured[2].ca).not.toBe(captured[0].ca);
+      expect(String(captured[2].ca)).toBe(' ' + caCert.slice(1));
+      expect(String(captured[0].ca)).toBe(caCert);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a byte-form client certificate, key and mtls.ca are copied once while unchanged', async () => {
+    const { caCert, good } = getRevocationFixtures();
+    const cert = Buffer.from(good.cert);
+    const key = new Uint8Array(Buffer.from(good.key)).buffer;
+    const mtlsCA = new DataView(new Uint8Array(Buffer.from(caCert)).buffer);
+    const adapter = new NodeAdapter({ mtls: { cert, key, ca: mtlsCA } });
+    const captured: https.RequestOptions[] = [];
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured.push(options);
+
+      return failingRequest();
+    }) as unknown as typeof https.request);
+    const send = () =>
+      adapter.send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: {},
+      });
+
+    try {
+      await send();
+      await send();
+      cert[0] = 0x20;
+      await send();
+
+      expect(captured[1].cert).toBe(captured[0].cert);
+      expect(captured[1].key).toBe(captured[0].key);
+      expect(captured[1].ca).toBe(captured[0].ca);
+      expect(String(captured[0].ca)).toBe(caCert);
+      expect(captured[2].cert).not.toBe(captured[0].cert);
+      expect(String(captured[2].cert)).toBe(' ' + good.cert.slice(1));
+      expect(captured[2].key).toBe(captured[0].key);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a Proxy refused as TLS material is named as one, its traps never run', () => {
+    let traps = 0;
+    // Every trap counted, each answering as a Blob would.
+    const counted = new Proxy(
+      {},
+      new Proxy(
+        {},
+        {
+          get: (_handler, trap) => {
+            return (...args: unknown[]) => {
+              traps++;
+              return trap === 'getPrototypeOf'
+                ? Blob.prototype
+                : Reflect.apply(
+                    Reflect.get(Reflect, trap) as (...a: unknown[]) => unknown,
+                    undefined,
+                    args,
+                  );
+            };
+          },
+        },
+      ),
+    );
+
+    expect(() => new NodeAdapter({ ca: counted } as never)).toThrow(
+      'NodeAdapter ca must be PEM text or bytes, or a list of them (got a Proxy)',
+    );
+    expect(
+      () => new NodeAdapter({ mtls: { cert: counted, key: 'k' } } as never),
+    ).toThrow('NodeAdapter mtls.cert must be PEM text or bytes (got a Proxy)');
+    expect(traps).toBe(0);
   });
 
   test('a ca set later that is no trust store is refused on the request that reads it', async () => {

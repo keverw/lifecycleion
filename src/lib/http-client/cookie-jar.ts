@@ -352,6 +352,15 @@ export interface CookieJarOptions {
   publicSuffixes?: PublicSuffixOverrides;
 }
 
+/** How many names a jar's {@link CookieJar} domain normalization keeps at once. */
+const MAX_NORMALIZED_DOMAINS = 64;
+
+/**
+ * The longest name a jar keeps the normal form of: a domain is at most 253 characters in
+ * ASCII, and its Unicode form, before IDNA mapping, seldom twice that.
+ */
+const MAX_NORMALIZED_DOMAIN_LENGTH = 512;
+
 /**
  * Shareable, standalone cookie jar.
  *
@@ -399,6 +408,12 @@ export class CookieJar {
   //            is one site.
   // Inner key: `cookieKey`'s JSON of [name, domain, path, hostOnly], for deduplication.
   private buckets: Map<string, Map<string, StoredCookie>> = new Map();
+  /**
+   * The names {@link normalizeStoredDomain} normalized lately, with their normal form: a
+   * pure answer, kept for at most {@link MAX_NORMALIZED_DOMAINS} names and then dropped
+   * all at once, so names a caller supplies cannot grow it.
+   */
+  private readonly normalizedDomains = new Map<string, string>();
 
   /**
    * Each name a bucket's key sits under - the text after each dot in it - to the keys of
@@ -1319,14 +1334,11 @@ export class CookieJar {
     const candidateBuckets = new Set<string>([site]);
 
     if (requestHost.canonicalIP === null) {
-      let parent = site;
-      let dot = parent.indexOf('.');
-
-      // A trailing dot ends the walk: `com.` has no name above it.
-      while (dot !== -1 && dot !== parent.length - 1) {
-        parent = parent.slice(dot + 1);
-        candidateBuckets.add(this.siteFor(parent));
-        dot = parent.indexOf('.');
+      for (const parent of namesAbove(site)) {
+        // A trailing dot ends the walk: `com.` has no name above it.
+        if (parent !== '') {
+          candidateBuckets.add(this.siteFor(parent));
+        }
       }
     }
 
@@ -1416,8 +1428,35 @@ export class CookieJar {
    * §5.1.2 canonicalizes a host without removing it and §5.1.3 domain-matches strings as
    * they are, so `example.com.` is a different host from `example.com`, as browsers treat
    * it. A second trailing dot names no host and is refused.
+   *
+   * Answered from {@link normalizedDomains} for a name normalized lately: storing one
+   * `Set-Cookie` with a `Domain` normalizes its domain and the request host several times
+   * over - its own checks, then `setCookie`'s - and the IDNA mapping is most of its cost.
    */
   private normalizeStoredDomain(domain: string): string {
+    const known = this.normalizedDomains.get(domain);
+    if (known !== undefined) {
+      return known;
+    }
+
+    const normalized = this.normalizeDomainText(domain);
+
+    // A longer name than any domain is normalized and not kept, so a caller's long string
+    // is let go as soon as it is answered.
+    if (domain.length > MAX_NORMALIZED_DOMAIN_LENGTH) {
+      return normalized;
+    }
+
+    if (this.normalizedDomains.size >= MAX_NORMALIZED_DOMAINS) {
+      this.normalizedDomains.clear();
+    }
+    this.normalizedDomains.set(domain, normalized);
+
+    return normalized;
+  }
+
+  /** {@link normalizeStoredDomain}'s answer, worked out. */
+  private normalizeDomainText(domain: string): string {
     // Only a leading dot actually written is dropped (RFC 6265 ignores it); one that a
     // full stop such as U+3002 maps to is left, so the check below refuses it.
     const raw = toAsciiDots(domain.startsWith('.') ? domain.slice(1) : domain);

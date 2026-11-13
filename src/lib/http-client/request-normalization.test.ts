@@ -1260,7 +1260,7 @@ test('a misspelled config or request option is refused rather than read as absen
   expect(
     () =>
       new NodeAdapter({ mtls: { cert: revoked.proxy, key: 'pem' } } as never),
-  ).toThrow('NodeAdapter mtls.cert must be PEM text or bytes (got object)');
+  ).toThrow('NodeAdapter mtls.cert must be PEM text or bytes (got a Proxy)');
   expect(
     () =>
       new NodeAdapter({
@@ -1277,7 +1277,7 @@ test('a misspelled config or request option is refused rather than read as absen
         ],
       } as never),
   ).toThrow(
-    'NodeAdapter ca must be PEM text or bytes, or a list of them (got object in the list)',
+    'NodeAdapter ca must be PEM text or bytes, or a list of them (got a Proxy in the list)',
   );
   expect(
     () => new NodeAdapter({ ca: ['pem', new Blob(['pem'])] } as never),

@@ -324,12 +324,24 @@ export function holdsSameBytes(left: Uint8Array, right: Uint8Array): boolean {
     return false;
   }
 
+  // Both sides as a `Buffer`, as a polyfill's `equals` - the `buffer` package a browser
+  // bundle carries - takes nothing else; one that still refuses them is compared by index.
   if (typeof Buffer !== 'undefined') {
-    return Buffer.from(
-      leftBytes.buffer,
-      leftBytes.byteOffset,
-      leftBytes.byteLength,
-    ).equals(rightBytes);
+    try {
+      return Buffer.from(
+        leftBytes.buffer,
+        leftBytes.byteOffset,
+        leftBytes.byteLength,
+      ).equals(
+        Buffer.from(
+          rightBytes.buffer,
+          rightBytes.byteOffset,
+          rightBytes.byteLength,
+        ),
+      );
+    } catch {
+      // Compared by index below.
+    }
   }
 
   let index = 0;
