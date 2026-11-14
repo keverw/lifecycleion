@@ -63,6 +63,8 @@ import {
   blockedPortMessage,
   bodyOnBodilessMethodMessage,
   fetchBlockedPort,
+  fetchRefusedHeader,
+  fetchRefusedHeaderMessage,
   forbiddenMethodMessage,
   isBodilessMethod,
   isForbiddenBrowserMethod,
@@ -132,6 +134,19 @@ export class FetchAdapter implements HTTPAdapter {
     const bodyRefusal = unsendableBodyRefusal('FetchAdapter', body);
     if (bodyRefusal !== undefined) {
       throw bodyRefusal;
+    }
+
+    // Refused by name, before the method, as `HTTPClient` and NodeAdapter refuse one; and
+    // here, on every runtime, before the 0% upload event, rather than left to the runtime:
+    // Node's `fetch` refuses one only once it dispatches, and Bun's sends it (see
+    // `fetchRefusedHeader`).
+    const refusedHeader = fetchRefusedHeader(headers);
+    if (refusedHeader !== undefined) {
+      const refusal = new TypeError(
+        fetchRefusedHeaderMessage('FetchAdapter', refusedHeader),
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
     }
 
     // The Fetch Standard forbids these, but Bun's `fetch` sends a `CONNECT` or `TRACE`, so
@@ -245,13 +260,12 @@ export class FetchAdapter implements HTTPAdapter {
 
       const normalizedError = normalizeError(error);
 
-      // A request Node's undici refuses at dispatch rather than at `new Request` - a
-      // `transfer-encoding`, `keep-alive`, `expect` or `upgrade` header, a `connection`
-      // other than `close` or `keep-alive`, a fetch-blocked port - is refused the same way
-      // on every attempt, so it fails once as the non-retryable `adapter_error` it is, as
+      // A request Node's undici refuses at dispatch rather than at `new Request` - a header
+      // or a port it refuses that `fetchRefusedHeader` and `fetchBlockedPort` above do not
+      // know of - is refused the same way on every attempt, so it fails once as the non-retryable `adapter_error` it is, as
       // the `new Request` refusals above do, rather than as a network error retried to no
       // end with nothing sent. Told by undici's error code, not by header name, so a header
-      // a later Node refuses is caught too, and one it stops refusing is sent.
+      // a later Node refuses that `fetchRefusedHeader` does not know of is caught too.
       if (isFetchDispatchRefusal(normalizedError)) {
         throw nonRetryableAdapterErrorFrom(normalizedError);
       }
@@ -879,9 +893,9 @@ function isSignalRefusal(
 
 /**
  * Whether `fetch` failed because the runtime refused to dispatch the request at all:
- * undici's invalid-argument and not-supported refusals (a `transfer-encoding`,
- * `keep-alive`, `expect` or `upgrade` header, a `connection` other than `close` or
- * `keep-alive`), and the Fetch standard's blocked ports. Read
+ * undici's invalid-argument and not-supported refusals, and the Fetch standard's blocked
+ * ports - the backstop for a header or port a later Node refuses that the up-front
+ * refusals (`fetchRefusedHeader`, `fetchBlockedPort`) do not know of. Read
  * off the `cause` Node hangs them on, guardedly; a browser's opaque `TypeError` is none.
  */
 function isFetchDispatchRefusal(error: Error): boolean {

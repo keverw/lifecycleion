@@ -558,3 +558,25 @@ test('XHRAdapter in a browser refuses a port the Fetch Standard blocks, and outs
   expect(outside).not.toContain('blocks port');
   expect(opened).toBe(1);
 });
+
+test('FetchAdapter refuses a body it does not send before a header fetch refuses, and that header before the method', async () => {
+  const send = (request: Partial<AdapterRequest>) =>
+    refusalOf(
+      new FetchAdapter().send({
+        requestURL: 'https://api.example.com/x',
+        method: 'POST',
+        headers: { expect: '100-continue' },
+        ...request,
+      }),
+    );
+
+  expect([
+    await send({ body: { a: 1 } as never }),
+    await send({ method: 'TRACE' }),
+    await send({ method: 'GET', body: 'x' }),
+  ]).toEqual([
+    'FetchAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+    "[FetchAdapter] Cannot send a request with an Expect header: the Fetch Standard forbids one, and Node's fetch refuses it.",
+    "[FetchAdapter] Cannot send a request with an Expect header: the Fetch Standard forbids one, and Node's fetch refuses it.",
+  ]);
+});

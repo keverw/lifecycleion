@@ -514,6 +514,71 @@ describe('FetchAdapter', () => {
     expect(response.errorCause).toBe(failure);
   });
 
+  test('a header fetch refuses is refused before the upload starts, on every runtime', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response('ok'));
+    };
+    const sendWith = (headers: Record<string, string | string[]>) => {
+      const uploads: unknown[] = [];
+      return new FetchAdapter()
+        .send({
+          requestURL: 'http://example.test/',
+          method: 'POST',
+          headers,
+          body: 'x',
+          onUploadProgress: (event) => uploads.push(event),
+        })
+        .then(
+          () => ({ refusal: undefined, uploads }),
+          (error: unknown) => ({
+            refusal: error as Record<PropertyKey, unknown>,
+            uploads,
+          }),
+        );
+    };
+    const refused: Array<Record<string, string | string[]>> = [
+      { 'Transfer-Encoding': 'chunked' },
+      { 'keep-alive': 'timeout=5' },
+      { upgrade: 'websocket' },
+      { expect: '100-continue' },
+      { connection: 'upgrade' },
+      { connection: ['close', 'close'] },
+      { Connection: 'close', connection: 'close' },
+    ];
+    const named = [
+      'a Transfer-Encoding header',
+      'a Keep-Alive header',
+      'an Upgrade header',
+      'an Expect header',
+      ...Array.from(
+        { length: 3 },
+        () => 'a Connection header other than close or keep-alive',
+      ),
+    ];
+
+    for (const [index, headers] of refused.entries()) {
+      const { refusal, uploads } = await sendWith(headers);
+
+      expect(refusal).toBeInstanceOf(TypeError);
+      expect(refusal?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(String(refusal?.message)).toBe(
+        `[FetchAdapter] Cannot send a request with ${named[index]}: the Fetch Standard forbids one, and Node's fetch refuses it.`,
+      );
+      expect(uploads).toEqual([]);
+    }
+    expect(calls).toBe(0);
+
+    for (const headers of [
+      { connection: ' Close ' },
+      { Connection: 'keep-alive' },
+    ] as Array<Record<string, string>>) {
+      expect((await sendWith(headers)).refusal).toBeUndefined();
+    }
+    expect(calls).toBe(2);
+  });
+
   test.each([
     ['UND_ERR_NOT_SUPPORTED', 'expect header not supported'],
     ['UND_ERR_INVALID_ARG', 'invalid transfer-encoding header'],

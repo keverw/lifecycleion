@@ -1,5 +1,9 @@
 import { BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES } from '../consts';
-import { asciiLowercase, asciiUppercase } from '../../internal/ascii-text';
+import {
+  asciiLowercase,
+  asciiUppercase,
+  trimHTTPWhitespace,
+} from '../../internal/ascii-text';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 
 /**
@@ -66,4 +70,64 @@ export function fetchBlockedPort(url: string): string | undefined {
 /** The refusal of a request to a port the Fetch Standard blocks, by its adapter. */
 export function blockedPortMessage(adapterName: string, port: string): string {
   return `[${adapterName}] The Fetch Standard blocks port ${port}, so ${adapterName} does not send to it.`;
+}
+
+/**
+ * Request headers `fetch` refuses whatever their value: the Fetch Standard forbids them,
+ * and Node's undici refuses each at dispatch, since it frames and keeps connections
+ * itself, switches no protocols and waits for no `100 Continue`. By lowercase name, each
+ * to what a refusal calls it.
+ */
+const FETCH_REFUSED_HEADERS: ReadonlyMap<string, string> = new Map([
+  ['transfer-encoding', 'a Transfer-Encoding header'],
+  ['keep-alive', 'a Keep-Alive header'],
+  ['upgrade', 'an Upgrade header'],
+  ['expect', 'an Expect header'],
+]);
+
+/**
+ * What a refusal names of a header in `headers` that `fetch` refuses - one of
+ * {@link FETCH_REFUSED_HEADERS}, or a `Connection` other than `close` or `keep-alive`, the
+ * two undici takes - or `undefined`. Asked of the headers alone, on every runtime: Bun's
+ * `fetch` sends them, a `Transfer-Encoding` beside the `Content-Length` it frames the
+ * body with (RFC 9112 6.1 forbids both on one message), and a browser's drops them - a
+ * `Connection` of any value, though only one other than `close` or `keep-alive` is
+ * refused here, as undici refuses it. Node's
+ * refusing one at dispatch anyway is still read as the refusal it is, for a header this
+ * list does not know of.
+ */
+export function fetchRefusedHeader(
+  headers: Record<string, string | string[]>,
+): string | undefined {
+  /** Every `Connection` value, whatever the case of its name, as `fetch` merges them. */
+  const connection: string[] = [];
+
+  for (const [name, value] of Object.entries(headers)) {
+    const lowerName = asciiLowercase(name);
+    const refused = FETCH_REFUSED_HEADERS.get(lowerName);
+    if (refused !== undefined) {
+      return refused;
+    }
+
+    if (lowerName === 'connection') {
+      connection.push(...(Array.isArray(value) ? value : [value]));
+    }
+  }
+
+  // As `fetch` hands it on: each value trimmed, the values joined.
+  const text = asciiLowercase(
+    connection.map((part) => trimHTTPWhitespace(part)).join(', '),
+  );
+
+  return connection.length === 0 || text === 'close' || text === 'keep-alive'
+    ? undefined
+    : 'a Connection header other than close or keep-alive';
+}
+
+/** The refusal of a request carrying a header `fetch` refuses (see {@link fetchRefusedHeader}). */
+export function fetchRefusedHeaderMessage(
+  adapterName: string,
+  refusedHeader: string,
+): string {
+  return `[${adapterName}] Cannot send a request with ${refusedHeader}: the Fetch Standard forbids one, and Node's fetch refuses it.`;
 }
