@@ -25,8 +25,13 @@ export function describeNonTokenMethod(method: string): string | undefined {
  * non-idempotent check and method filters, and every adapter sends `patch` as `PATCH`
  * (`fetch` uppercases only six of them) - and any other method as given, since method
  * names are case-sensitive (RFC 9110) and a server may route `purge` and `PURGE` apart.
+ * `CONNECT`, which RFC 9110 defines but nothing here sends, is uppercased too, as every
+ * refusal of it reads it in any case: so a request filter on `CONNECT` selects the
+ * `connect` one interceptor hands the next.
  */
 export function normalizeStandardMethod(method: string): string {
   const uppercased = asciiUppercase(method);
-  return STANDARD_HTTP_METHODS.has(uppercased) ? uppercased : method;
+  return STANDARD_HTTP_METHODS.has(uppercased) || uppercased === 'CONNECT'
+    ? uppercased
+    : method;
 }

@@ -14,7 +14,7 @@ import { isNullish } from '../internal/is-nullish';
 import { describeValue } from '../internal/describe-value';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { copyArrayValue } from '../internal/array-copy';
-import { isFormData } from './internal/form-entries';
+import { isFormData, isMethodlessFormData } from './internal/form-entries';
 import { readUnknownMember } from '../internal/read-member';
 import { isUint8ArrayValue } from '../internal/binary-view';
 import {
@@ -1068,24 +1068,24 @@ function hasXMLHttpRequestGlobal(): boolean {
 /**
  * The first of a `Location` that fetch or XHR joined from repeated headers, or the value
  * whole. A value that is one non-empty target repeated (`next, next` - a header a server
- * or proxy sent twice - or `Smith, John.pdf, Smith, John.pdf`) is that target. Otherwise
- * split only where what follows the `, ` starts as a URL target does - a path (`/`, `./`,
- * `../`), a query (`?`) or `scheme://`: a single value with a raw space
- * (`/files/Smith, John.pdf`) is kept whole. A single value with an unencoded `, /`,
+ * or proxy sent twice - or `Smith, John.pdf, Smith, John.pdf`) is that target. That
+ * target, or the value, is then split only where what follows the `, ` starts as a URL
+ * target does - a path (`/`, `./`, `../`), a query (`?`) or `scheme://` - so `/a, /b`
+ * sent twice is `/a`. A single value with a raw space (`/files/Smith, John.pdf`) is
+ * kept whole. A single value with an unencoded `, /`,
  * `, ./`, `, ../`, `, ?` or `, scheme://` in it (`/r?to=/a, /b`) is cut there too, as is
  * one that is a target written twice (`a, a`): fetch and XHR join repeats into the same
  * text, so the two cannot be told apart. A server percent-encodes the space in such a
  * value.
  */
 export function firstJoinedLocation(value: string): string {
-  const repeated = repeatedTarget(value);
-  if (repeated !== undefined) {
-    return repeated;
-  }
+  // The repeated unit is split as any value is: `/a, /b` sent twice is `/a`.
+  const candidate = repeatedTarget(value) ?? value;
+  const separator = candidate.search(
+    /, (?:\/|\.\.?\/|\?|[a-z][a-z\d+.-]*:\/\/)/i,
+  );
 
-  const separator = value.search(/, (?:\/|\.\.?\/|\?|[a-z][a-z\d+.-]*:\/\/)/i);
-
-  return separator === -1 ? value : value.slice(0, separator);
+  return separator === -1 ? candidate : candidate.slice(0, separator);
 }
 
 /**
@@ -1578,6 +1578,21 @@ export const UNSUPPORTED_REQUEST_BODY_MESSAGE =
   'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.';
 
 /**
+ * The refusal of a React Native `FormData`, which has no `has()` (see
+ * `isMethodlessFormData`): the client copies a form and reads its entries, which such a
+ * form does not let it, so the refusal names the adapters that send one as it is.
+ */
+export const METHODLESS_FORM_DATA_BODY_MESSAGE =
+  'Unsupported request body type: a FormData with no has() (React Native) cannot be copied or read by HTTPClient. Send it through FetchAdapter or XHRAdapter driven directly.';
+
+/** {@link UNSUPPORTED_REQUEST_BODY_MESSAGE}, or for a React Native form its own refusal. */
+export function unsupportedRequestBodyMessage(body: unknown): string {
+  return isMethodlessFormData(body)
+    ? METHODLESS_FORM_DATA_BODY_MESSAGE
+    : UNSUPPORTED_REQUEST_BODY_MESSAGE;
+}
+
+/**
  * Refuse a request body the client neither sends as it is (see `isAdapterRequestBody`)
  * nor serializes as JSON (a plain object or an array).
  */
@@ -1590,7 +1605,7 @@ export function assertSupportedRequestBody(body: unknown): void {
     return;
   }
 
-  throw new TypeError(UNSUPPORTED_REQUEST_BODY_MESSAGE);
+  throw new TypeError(unsupportedRequestBodyMessage(body));
 }
 
 /**

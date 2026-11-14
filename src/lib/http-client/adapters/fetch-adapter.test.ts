@@ -21,6 +21,42 @@ import type { AdapterRequest } from '../types';
 import { errorText } from '../test-helpers/error-text';
 
 let server: TestServer;
+/**
+ * Requests Node's `fetch` refuses at dispatch, each with the `cause` it hangs the refusal
+ * on (as Node 25's undici words them), read by FetchAdapter's dispatch-refusal backstop.
+ */
+const NODE_FETCH_DISPATCH_REFUSALS: Array<{
+  url: string;
+  headers: Record<string, string>;
+  code: string | undefined;
+  message: string;
+}> = [
+  {
+    url: 'http://127.0.0.1:59999/',
+    headers: { expect: '100-continue' },
+    code: 'UND_ERR_NOT_SUPPORTED',
+    message: 'expect header not supported',
+  },
+  {
+    url: 'http://127.0.0.1:59999/',
+    headers: { 'transfer-encoding': 'chunked' },
+    code: 'UND_ERR_INVALID_ARG',
+    message: 'invalid transfer-encoding header',
+  },
+  {
+    url: 'http://127.0.0.1:59999/',
+    headers: { connection: 'upgrade' },
+    code: 'UND_ERR_INVALID_ARG',
+    message: 'invalid connection header',
+  },
+  {
+    url: 'http://127.0.0.1:6000/',
+    headers: {},
+    code: undefined,
+    message: 'bad port',
+  },
+];
+
 const decoder = new TextDecoder();
 const originalFetch = globalThis.fetch;
 const originalWindow = (globalThis as any).window;
@@ -579,12 +615,9 @@ describe('FetchAdapter', () => {
     expect(calls).toBe(2);
   });
 
-  test.each([
-    ['UND_ERR_NOT_SUPPORTED', 'expect header not supported'],
-    ['UND_ERR_INVALID_ARG', 'invalid transfer-encoding header'],
-    ['UND_ERR_INVALID_ARG', 'invalid connection header'],
-    [undefined, 'bad port'],
-  ])(
+  test.each(
+    NODE_FETCH_DISPATCH_REFUSALS.map(({ code, message }) => [code, message]),
+  )(
     "a request Node's fetch refuses at dispatch (%s: %s) fails once as non-retryable",
     async (code, message) => {
       let calls = 0;
@@ -612,6 +645,40 @@ describe('FetchAdapter', () => {
 
       expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
       expect(calls).toBe(1);
+    },
+  );
+
+  // Pins the refusals above to the real `fetch` of the `node` on this machine, so a Node
+  // that rewords or recodes one fails here rather than turning it into a retried network
+  // error. Bun's `fetch` refuses none of these, so only Node is asked.
+  test.skipIf(Bun.which('node') === null)(
+    "Node's fetch refuses each at dispatch with the cause the adapter reads",
+    () => {
+      const script = `
+        const probes = ${JSON.stringify(NODE_FETCH_DISPATCH_REFUSALS)};
+        (async () => {
+          const causes = [];
+          for (const { url, headers } of probes) {
+            try {
+              await fetch(url, { headers });
+              causes.push('sent');
+            } catch (error) {
+              causes.push({ code: error.cause?.code, message: error.cause?.message });
+            }
+          }
+          console.log(JSON.stringify(causes));
+        })();
+      `;
+      const result = Bun.spawnSync(['node', '-e', script], { timeout: 10_000 });
+      expect(result.stderr.toString()).toBe('');
+      const causes = JSON.parse(result.stdout.toString()) as unknown;
+
+      expect(causes).toEqual(
+        NODE_FETCH_DISPATCH_REFUSALS.map(({ code, message }) => ({
+          ...(code === undefined ? {} : { code }),
+          message,
+        })),
+      );
     },
   );
 

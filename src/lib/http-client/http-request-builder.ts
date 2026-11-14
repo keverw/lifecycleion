@@ -15,13 +15,14 @@ import {
   copyRequestBody,
   releaseRequestBody,
 } from './internal/request-body-copy';
-import { isFormData } from './internal/form-entries';
+import { isFormData, isMethodlessFormData } from './internal/form-entries';
 import {
   assertKnownFields,
   assertOptionsObject,
   fieldNames,
 } from '../internal/known-fields';
 import { copyParamArrayValue } from './internal/param-array-copy';
+import { assertSerializableParams } from './internal/param-check';
 import { copyArrayValue } from '../internal/array-copy';
 import {
   assertOptionalHeaderRecord,
@@ -214,6 +215,7 @@ export class HTTPRequestBuilder<T = unknown> {
     for (const [key, value] of Object.entries(params)) {
       defineEntry(copied, key, copyParamArrayValue(value));
     }
+    assertSerializableParams(copied);
     this._params = copied;
     return this;
   }
@@ -236,9 +238,14 @@ export class HTTPRequestBuilder<T = unknown> {
   public formData(data: FormData): this {
     this._assertNotSent('formData');
     // Refused by type rather than sent as what it is: a plain object of fields given here
-    // would go out as JSON, to a server reading multipart.
+    // would go out as JSON, to a server reading multipart. A React Native form is refused
+    // as the body is, in words that name the adapters that send one.
     const candidate: unknown = data;
-    if (!isNullish(candidate) && !isFormData(candidate)) {
+    if (
+      !isNullish(candidate) &&
+      !isFormData(candidate) &&
+      !isMethodlessFormData(candidate)
+    ) {
       throw new TypeError(
         `HTTPRequestBuilder formData must be a FormData (got ${describeValue(candidate)})`,
       );

@@ -437,6 +437,8 @@ test('FetchAdapter refuses a port the Fetch Standard blocks, on every runtime, b
         method: 'POST',
         body: { a: 1 },
       },
+      // The first entry of the Fetch Standard's list, which Node's fetch does not block.
+      { requestURL: 'http://api.example.com:0/x', method: 'GET' },
     ]) {
       refusals.push(
         await refusalOf(
@@ -469,6 +471,7 @@ test('FetchAdapter refuses a port the Fetch Standard blocks, on every runtime, b
     '[FetchAdapter] The Fetch Standard blocks port 6000, so FetchAdapter does not send to it.',
     '[FetchAdapter] The Fetch Standard blocks port 25, so FetchAdapter does not send to it.',
     '[FetchAdapter] The Fetch Standard blocks port 10080, so FetchAdapter does not send to it.',
+    '[FetchAdapter] The Fetch Standard blocks port 0, so FetchAdapter does not send to it.',
     undefined,
     undefined,
   ]);
@@ -476,27 +479,35 @@ test('FetchAdapter refuses a port the Fetch Standard blocks, on every runtime, b
   expect(calls).toBe(2);
 });
 
-test('a filter can select a CONNECT one interceptor hands the next', async () => {
-  const sent: string[] = [];
-  const adapter: HTTPAdapter = {
-    getType: () => 'mock',
-    send: (request) => {
-      sent.push(request.method);
-      return Promise.resolve({ status: 200, headers: {}, body: null });
-    },
-  };
-  const client = new HTTPClient({ adapter });
-  client.addRequestInterceptor((request) => ({
-    ...request,
-    method: 'CONNECT',
-  }));
-  client.addRequestInterceptor((request) => ({ ...request, method: 'POST' }), {
-    methods: ['CONNECT'],
-  });
-  await client.get('https://api.example.com/x').send();
+test.each([
+  ['CONNECT', 'CONNECT'],
+  ['connect', 'CONNECT'],
+  ['CONNECT', 'Connect'],
+])(
+  'a filter on %p can select a %p one interceptor hands the next, as CONNECT is refused in any case',
+  async (handed, filtered) => {
+    const sent: string[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request) => {
+        sent.push(request.method);
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const client = new HTTPClient({ adapter });
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      method: handed,
+    }));
+    client.addRequestInterceptor(
+      (request) => ({ ...request, method: 'POST' }),
+      { methods: [filtered] },
+    );
+    await client.get('https://api.example.com/x').send();
 
-  expect(sent).toEqual(['POST']);
-});
+    expect(sent).toEqual(['POST']);
+  },
+);
 
 test("a redirect interceptor's CONNECT is refused before an unusable Location it left as it was", async () => {
   const adapter: HTTPAdapter = {
@@ -612,4 +623,47 @@ test("FetchAdapter sends a React Native form, whose FormData has no has(), to fe
     globalThis.FormData = originalFormData;
     globalThis.fetch = originalFetch;
   }
+});
+
+test('HTTPClient refuses a React Native form, whose FormData has no has(), naming the adapters that send one', () => {
+  const originalFormData = globalThis.FormData;
+  class MethodlessFormData {
+    public append(): void {}
+  }
+  (globalThis as Record<string, unknown>).FormData = MethodlessFormData;
+  try {
+    const client = new HTTPClient({ adapter: new MockAdapter() });
+    const form = new MethodlessFormData() as unknown as FormData;
+    const refusal =
+      'Unsupported request body type: a FormData with no has() (React Native) cannot be copied or read by HTTPClient. Send it through FetchAdapter or XHRAdapter driven directly.';
+
+    expect(() => client.post('/upload').body(form)).toThrow(refusal);
+    expect(() => client.post('/upload').formData(form)).toThrow(refusal);
+    // Any other body of an unsupported type keeps the general refusal.
+    expect(() =>
+      client.post('/upload').body(new URLSearchParams() as never),
+    ).toThrow('Unsupported request body type. Supported types:');
+  } finally {
+    globalThis.FormData = originalFormData;
+  }
+});
+
+test('FetchAdapter refuses a long Connection array as the refused header it is, not a stack overflow', async () => {
+  // Spread into call arguments, 2,000,000 items overflow the stack on Bun and on Node.
+  const refusal = await new FetchAdapter()
+    .send({
+      requestURL: 'http://127.0.0.1:59999/',
+      method: 'GET',
+      headers: { connection: new Array<string>(2_000_000).fill('upgrade') },
+    })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+
+  expect(refusal).toBeInstanceOf(TypeError);
+  expect(refusal?.message).toContain(
+    'a Connection header other than close or keep-alive',
+  );
+  expect(refusal?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });

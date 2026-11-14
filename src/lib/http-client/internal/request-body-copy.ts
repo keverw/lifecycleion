@@ -1,4 +1,4 @@
-import { isRequestBodyBytes, UNSUPPORTED_REQUEST_BODY_MESSAGE } from '../utils';
+import { isRequestBodyBytes, unsupportedRequestBodyMessage } from '../utils';
 import { isPlainRecord } from './plain-record';
 import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { filePartNameToSend, formEntries, isFormData } from './form-entries';
@@ -94,7 +94,7 @@ export function copyRequestBody(body: unknown): unknown {
   }
 
   // Refused as `params()` refuses a query it cannot copy: by type, when it is handed over.
-  throw new TypeError(UNSUPPORTED_REQUEST_BODY_MESSAGE);
+  throw new TypeError(unsupportedRequestBodyMessage(body));
 }
 
 /**

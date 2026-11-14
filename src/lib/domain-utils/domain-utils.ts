@@ -1345,7 +1345,7 @@ export function validateConfigEntry(
     }
 
     // Normalize Unicode dots and trim
-    const trimmed = trimHTTPWhitespace(pattern).replace(/[．。｡]/g, '.'); // normalize Unicode dot variants to ASCII
+    const trimmed = toAsciiDots(trimHTTPWhitespace(pattern));
 
     if (INVALID_DOMAIN_CHARS.test(trimmed)) {
       return {
@@ -1888,7 +1888,7 @@ function hasOriginExtras(text: string): boolean {
 
 function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
   // Already trimmed by the list; held to its rule here too (see `readTrimmedEntry`).
-  const trimmed = trimHTTPWhitespace(pattern).replace(/[．。｡]/g, '.');
+  const trimmed = toAsciiDots(trimHTTPWhitespace(pattern));
 
   function isValidCredentialWildcardHost(written: string): boolean {
     // One trailing dot dropped, as the other matchers drop it: its empty last label

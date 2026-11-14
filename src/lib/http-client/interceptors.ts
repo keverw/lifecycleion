@@ -494,7 +494,8 @@ function interceptedBody(request: InterceptedRequest): unknown {
  * differently on each call is checked and sent as one string. Names are lowercased, and
  * an unset value removes the header whatever its capitalization. A standard method is
  * uppercased (see `normalizeStandardMethod`), so a `post` is the `POST` the retry and
- * redirect rules check for; any other method is kept as given.
+ * redirect rules check for, and a `connect` is the `CONNECT` a filter selects and the
+ * client refuses; any other method is kept as given.
  * Throws on a `requestURL` that is not a string, a `method` that is not a method name
  * (see `describeMalformedHTTPMethod`), or `headers` that is not a plain object (an array,
  * a `Headers` or a `Map` is refused), and on any read or conversion that throws; each

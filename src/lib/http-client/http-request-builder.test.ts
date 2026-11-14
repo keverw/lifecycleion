@@ -1021,6 +1021,69 @@ test('a params array keeps a named key set on it, as qs serializes the array', a
   );
 });
 
+test('params refuses an invalid Date and a value nested inside itself when given, naming the key, as qs could not build the query', async () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  const cycle: Record<string, unknown> = { a: 1 };
+  cycle.self = cycle;
+
+  expect(() =>
+    client.get('/events').params({ since: new Date('nope') }),
+  ).toThrow('HTTPRequestBuilder params.since is not a valid Date');
+  expect(() =>
+    client.get('/events').params({ range: { from: new Date('nope') } }),
+  ).toThrow('HTTPRequestBuilder params.range.from is not a valid Date');
+  expect(() => client.get('/events').params({ filter: cycle })).toThrow(
+    'HTTPRequestBuilder params.filter.self is an object it is nested inside',
+  );
+  expect(() =>
+    client.get('/events', { params: { since: new Date(Number.NaN) } }),
+  ).toThrow('HTTPRequestBuilder params.since is not a valid Date');
+
+  // An object reached twice but not inside itself, and a valid Date, are serialized.
+  const adapter = new MockAdapter();
+  adapter.routes.get('/events', () => ({ status: 200 }));
+  const shared = { x: '1' };
+  const response = await new HTTPClient({ adapter, baseURL: 'http://api.test' })
+    .get('/events')
+    .params({ a: shared, b: shared, at: new Date(0) })
+    .send();
+  expect(decodeURIComponent(response.requestURL)).toBe(
+    'http://api.test/events?a[x]=1&b[x]=1&at=1970-01-01T00:00:00.000Z',
+  );
+});
+
+test('params checks nested values without running a getter, which qs alone reads at send', async () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  let reads = 0;
+  const nested = {
+    get value() {
+      reads++;
+      return new Date('nope');
+    },
+  };
+
+  const builder = client.get('/events').params({ nested });
+  expect(reads).toBe(0);
+  const sendError = await builder.send().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  expect(sendError).toBeInstanceOf(RangeError);
+  expect(reads).toBe(1);
+});
+
+test('params walks a typed array as qs does, and keeps a Buffer as its text', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  const bytes = Object.assign(new Uint8Array(1), { extra: new Date('nope') });
+
+  expect(() => client.get('/events').params({ bytes })).toThrow(
+    'HTTPRequestBuilder params.bytes.extra is not a valid Date',
+  );
+  const buffer = Object.assign(Buffer.from('a'), { self: {} });
+  buffer.self = buffer;
+  expect(() => client.get('/events').params({ buffer })).not.toThrow();
+});
+
 test('a byte body whose prototype is a Proxy is copied without running its traps', () => {
   const bytes = new Uint8Array([1, 2, 3]);
   let trapCalls = 0;

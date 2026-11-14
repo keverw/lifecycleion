@@ -1816,6 +1816,8 @@ describe('firstJoinedLocation', () => {
 
   test('splits at a `, ` followed by a path or scheme, and nowhere else', () => {
     expect(firstJoinedLocation('/a, /b')).toBe('/a');
+    // Two different targets sent twice each split as one pair does.
+    expect(firstJoinedLocation('/a, /b, /a, /b')).toBe('/a');
     expect(firstJoinedLocation('https://x.test/a, https://y.test/b')).toBe(
       'https://x.test/a',
     );
