@@ -18,7 +18,7 @@ import {
   markResponseStreamAbort,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
-  unsendableBodyRefusal,
+  unsendableBrowserBodyRefusal,
 } from '../internal/adapter-error';
 import {
   extractFetchHeaders,
@@ -130,13 +130,14 @@ export class FetchAdapter implements HTTPAdapter {
 
     // `fetch` sends a plain object as `[object Object]` and a number as its text, and on
     // Node fails a `ReadableStream` on every attempt as a network error: refused, as every
-    // adapter refuses a body it does not send.
-    const bodyRefusal = unsendableBodyRefusal('FetchAdapter', body);
+    // adapter refuses a body it does not send. A React Native form is one its `fetch`
+    // sends (see `unsendableBrowserBodyRefusal`).
+    const bodyRefusal = unsendableBrowserBodyRefusal('FetchAdapter', body);
     if (bodyRefusal !== undefined) {
       throw bodyRefusal;
     }
 
-    // Refused by name, before the method, as `HTTPClient` and NodeAdapter refuse one; and
+    // Refused by name, before the method, in the order NodeAdapter refuses its own; and
     // here, on every runtime, before the 0% upload event, rather than left to the runtime:
     // Node's `fetch` refuses one only once it dispatches, and Bun's sends it (see
     // `fetchRefusedHeader`).
@@ -262,10 +263,10 @@ export class FetchAdapter implements HTTPAdapter {
 
       // A request Node's undici refuses at dispatch rather than at `new Request` - a header
       // or a port it refuses that `fetchRefusedHeader` and `fetchBlockedPort` above do not
-      // know of - is refused the same way on every attempt, so it fails once as the non-retryable `adapter_error` it is, as
-      // the `new Request` refusals above do, rather than as a network error retried to no
-      // end with nothing sent. Told by undici's error code, not by header name, so a header
-      // a later Node refuses that `fetchRefusedHeader` does not know of is caught too.
+      // know of - is refused the same way on every attempt, so it fails once as the
+      // non-retryable `adapter_error` it is, as the `new Request` refusals above do,
+      // rather than as a network error retried to no end with nothing sent. Told by
+      // undici's error code, not by header name, so one a later Node refuses is caught.
       if (isFetchDispatchRefusal(normalizedError)) {
         throw nonRetryableAdapterErrorFrom(normalizedError);
       }

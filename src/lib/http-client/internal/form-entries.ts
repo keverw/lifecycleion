@@ -47,9 +47,10 @@ export function isFormData(value: unknown): value is FormData {
  * which holds only `append`, `getAll` and `getParts` - so {@link isFormData} cannot tell
  * one by its methods: told by `instanceof` there instead. Never on a runtime whose
  * `FormData` has `has`, so a form is told the same way as before wherever it can be.
- * For XHRAdapter, which hands such a form to its runtime's XHR to send; nothing else here
- * can read one. With no brand to ask, a `Proxy` over such a form, or an object that only
- * inherits from its prototype, is taken as one there too: XHR is then what refuses it.
+ * For FetchAdapter and XHRAdapter, which hand such a form to their runtime's transport to
+ * send, and for the Content-Type they drop beside it; nothing here reads one's entries.
+ * With no brand to ask, a `Proxy` over such a form, or an object that only inherits from
+ * its prototype, is taken as one there too: the transport is then what refuses it.
  */
 export function isMethodlessFormData(value: unknown): boolean {
   try {

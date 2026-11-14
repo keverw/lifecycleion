@@ -19,7 +19,7 @@ import {
   makeAbortError,
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
-  unsendableBodyRefusal,
+  unsendableBrowserBodyRefusal,
 } from '../internal/adapter-error';
 import {
   isSignalAborted,
@@ -35,7 +35,6 @@ import {
   streamErrorAnswer,
 } from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
-import { isMethodlessFormData } from '../internal/form-entries';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 import {
   blockedPortMessage,
@@ -125,8 +124,10 @@ export class XHRAdapter implements HTTPAdapter {
     // A browser's XHR fails a request to a port the Fetch Standard blocks on every
     // attempt, as an opaque network error: refused here, as part of the URL, in
     // FetchAdapter's words. In a browser only: a non-browser XHR may reach it.
-    const blockedPort = fetchBlockedPort(answeredURL);
-    if (blockedPort !== undefined && isBrowserEnvironment()) {
+    const blockedPort = isBrowserEnvironment()
+      ? fetchBlockedPort(answeredURL)
+      : undefined;
+    if (blockedPort !== undefined) {
       const refusal = new TypeError(
         blockedPortMessage('XHRAdapter', blockedPort),
       );
@@ -136,10 +137,8 @@ export class XHRAdapter implements HTTPAdapter {
 
     // XHR sends a plain object as `[object Object]` and a number as its text: refused, as
     // every adapter refuses a body it does not send. A React Native form is one XHR
-    // sends, though `isFormData` cannot tell it (see `isMethodlessFormData`).
-    const bodyRefusal = isMethodlessFormData(requestBody)
-      ? undefined
-      : unsendableBodyRefusal('XHRAdapter', requestBody);
+    // sends (see `unsendableBrowserBodyRefusal`).
+    const bodyRefusal = unsendableBrowserBodyRefusal('XHRAdapter', requestBody);
     if (bodyRefusal !== undefined) {
       throw bodyRefusal;
     }

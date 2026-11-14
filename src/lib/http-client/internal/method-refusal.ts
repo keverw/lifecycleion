@@ -88,13 +88,12 @@ const FETCH_REFUSED_HEADERS: ReadonlyMap<string, string> = new Map([
 /**
  * What a refusal names of a header in `headers` that `fetch` refuses - one of
  * {@link FETCH_REFUSED_HEADERS}, or a `Connection` other than `close` or `keep-alive`, the
- * two undici takes - or `undefined`. Asked of the headers alone, on every runtime: Bun's
- * `fetch` sends them, a `Transfer-Encoding` beside the `Content-Length` it frames the
- * body with (RFC 9112 6.1 forbids both on one message), and a browser's drops them - a
- * `Connection` of any value, though only one other than `close` or `keep-alive` is
- * refused here, as undici refuses it. Node's
- * refusing one at dispatch anyway is still read as the refusal it is, for a header this
- * list does not know of.
+ * two undici takes - or `undefined`. Asked of the headers alone, on every runtime.
+ * Bun's `fetch` sends them, a `Transfer-Encoding` beside the `Content-Length` it frames
+ * the body with (RFC 9112 6.1 forbids both on one message). A browser's drops them, and
+ * a `Connection` of any value, though only one other than `close` or `keep-alive` is
+ * refused here, as undici refuses it. Node's refusing one at dispatch anyway is still
+ * read as the refusal it is, for a header this list does not know of.
  */
 export function fetchRefusedHeader(
   headers: Record<string, string | string[]>,

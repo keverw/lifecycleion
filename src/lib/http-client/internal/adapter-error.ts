@@ -9,7 +9,7 @@ import {
 import { isErrorValue } from '../../to-error';
 import { readUnknownMember } from '../../internal/read-member';
 import { isUint8ArrayValue } from '../../internal/binary-view';
-import { isFormData } from './form-entries';
+import { isFormData, isMethodlessFormData } from './form-entries';
 
 /**
  * A non-retryable adapter error for a failure that may be the caller's own error - one a
@@ -164,7 +164,8 @@ export function isAdapterRequestBody(body: unknown): boolean {
  * `ArrayBuffer`, a `Blob`, a `ReadableStream`, a plain object, a number, a `Proxy` over a
  * form, an object that only inherits from `FormData.prototype` - would go out as no body,
  * as its `String()` text, or fail on every attempt, so every adapter refuses it in these
- * words. `HTTPClient` serializes or refuses such a body before an adapter is handed it;
+ * words (on React Native, the browser adapters take any object of its `FormData`'s
+ * prototype as a form; see `unsendableBrowserBodyRefusal`). `HTTPClient` serializes or refuses such a body before an adapter is handed it;
  * this is an adapter driven directly. Non-retryable.
  */
 export function unsendableBodyRefusal(
@@ -174,6 +175,21 @@ export function unsendableBodyRefusal(
   return isAdapterRequestBody(body)
     ? undefined
     : unsendableBodyError(adapterName);
+}
+
+/**
+ * {@link unsendableBodyRefusal} for FetchAdapter and XHRAdapter, which hand a form to
+ * their runtime's transport to send: a React Native form, which `isFormData` cannot tell
+ * (see `isMethodlessFormData`), is one they send too. NodeAdapter and MockAdapter read a
+ * form's entries, which such a form lacks, and refuse it.
+ */
+export function unsendableBrowserBodyRefusal(
+  adapterName: string,
+  body: unknown,
+): TypeError | undefined {
+  return isMethodlessFormData(body)
+    ? undefined
+    : unsendableBodyRefusal(adapterName, body);
 }
 
 /**

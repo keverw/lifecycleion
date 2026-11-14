@@ -737,8 +737,10 @@ export interface HTTPResponse<T = unknown> {
   requestID: string;
   adapterType: AdapterType;
   /**
-   * True when the response body was piped to a StreamResponseFactory writable.
-   * body is null in this case — do not try to parse it.
+   * True when the response body was piped to a StreamResponseFactory writable in full;
+   * body is null in this case — do not try to parse it. False when the stream failed
+   * (`isStreamError`), even part-way through, with bytes already written: check
+   * `isStreamError` to clean up a partial write.
    */
   isStreamed: boolean;
   /**

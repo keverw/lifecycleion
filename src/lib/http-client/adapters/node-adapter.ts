@@ -547,9 +547,10 @@ export class NodeAdapter implements HTTPAdapter {
     dropBodilessContentLength(request);
 
     // An unusable URL is refused first, then a body this adapter cannot send, then a
-    // refused header and the method: the order `HTTPClient` checks them in. FetchAdapter
-    // and XHRAdapter refuse the URL and body first too, and refuse no header by name;
-    // MockAdapter, which routes a URL that does not parse as written, refuses a body first.
+    // refused header and the method: the order FetchAdapter refuses the headers its
+    // `fetch` refuses in, and `HTTPClient` its own in a browser. XHRAdapter refuses the
+    // URL and body first too, and no header by name; MockAdapter, which routes a URL that
+    // does not parse as written, refuses a body first.
     //
     // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
     // URL fails the same way on every attempt. In its own words, without the parser's

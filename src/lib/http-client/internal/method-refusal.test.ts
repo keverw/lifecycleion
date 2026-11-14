@@ -580,3 +580,36 @@ test('FetchAdapter refuses a body it does not send before a header fetch refuses
     "[FetchAdapter] Cannot send a request with an Expect header: the Fetch Standard forbids one, and Node's fetch refuses it.",
   ]);
 });
+
+test("FetchAdapter sends a React Native form, whose FormData has no has(), to fetch as it is, its caller's Content-Type dropped", async () => {
+  const originalFormData = globalThis.FormData;
+  const originalFetch = globalThis.fetch;
+  // React Native's FormData holds only append, getAll and getParts.
+  class MethodlessFormData {
+    public append(): void {}
+  }
+  let sentBody: unknown;
+  let sentHeaders: unknown;
+  (globalThis as Record<string, unknown>).FormData = MethodlessFormData;
+  globalThis.fetch = ((_url: string, init: RequestInit) => {
+    sentBody = init.body;
+    sentHeaders = init.headers;
+    return Promise.resolve(new Response(null, { status: 204 }));
+  }) as unknown as typeof fetch;
+  try {
+    const form = new MethodlessFormData();
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://api.example.com/upload',
+      method: 'POST',
+      headers: { 'content-type': 'multipart/form-data' },
+      body: form as unknown as FormData,
+    });
+
+    expect(response.status).toBe(204);
+    expect(sentBody).toBe(form);
+    expect(JSON.stringify(sentHeaders)).not.toContain('content-type');
+  } finally {
+    globalThis.FormData = originalFormData;
+    globalThis.fetch = originalFetch;
+  }
+});
