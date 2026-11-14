@@ -6301,8 +6301,9 @@ describe('HTTPClient — sub-clients', () => {
       order.push('sub');
     });
 
-    // Use a port nothing is listening on to guarantee a transport failure
-    await sub.get('http://127.0.0.1:1').send();
+    // Use a port nothing is listening on, and no fetch blocks, to guarantee a transport
+    // failure
+    await sub.get('http://127.0.0.1:59999').send();
     expect(order).toEqual(['root', 'sub']);
   });
 

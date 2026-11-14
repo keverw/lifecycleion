@@ -451,7 +451,7 @@ describe('FetchAdapter', () => {
 
     const outcome = await new FetchAdapter()
       .send({
-        requestURL: 'http://127.0.0.1:1/',
+        requestURL: 'http://127.0.0.1:59999/',
         method: 'GET',
         headers: {},
         signal,

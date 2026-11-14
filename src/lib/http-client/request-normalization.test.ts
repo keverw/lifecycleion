@@ -4993,7 +4993,7 @@ test('a missing URL matches no host, methods are copied, bodyContainsKeys needs 
 
   // A methods list's own map is not called; a hole is refused.
   const client = new HTTPClient();
-  const methods = ['CONNECT'];
+  const methods = ['GET POST'];
   (methods as unknown as { map: unknown }).map = () => undefined;
   expect(() =>
     client.addRequestInterceptor((request) => request, { methods }),
@@ -6669,7 +6669,7 @@ test('FetchAdapter refusals at dispatch are not retried; terminal upload events 
   try {
     const builder = new HTTPClient({
       adapter: new FetchAdapter(),
-      baseURL: 'http://127.0.0.1:1',
+      baseURL: 'http://127.0.0.1:59999',
       retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
     }).get('/x');
     await builder.send();
@@ -9575,7 +9575,7 @@ test('a request with an aborted signal reports no upload start', async () => {
 
     await adapter
       .send({
-        requestURL: 'http://127.0.0.1:9/x',
+        requestURL: 'http://127.0.0.1:59999/x',
         method: 'POST',
         headers: {},
         body: 'x',

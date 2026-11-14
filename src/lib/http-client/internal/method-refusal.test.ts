@@ -418,3 +418,143 @@ test("an interceptor's CONNECT is handed to the next as a method name, and refus
     '[HTTPClient] Interceptor returned a request whose method is CONNECT, which opens a tunnel and is not supported.',
   );
 });
+
+test('FetchAdapter refuses a port the Fetch Standard blocks, on every runtime, before its body and method rules', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (() => {
+    calls++;
+    return Promise.resolve(new Response('ok'));
+  }) as unknown as typeof fetch;
+  const uploads: unknown[] = [];
+  const refusals: Array<string | undefined> = [];
+  try {
+    for (const request of [
+      { requestURL: 'http://api.example.com:6000/x', method: 'GET' },
+      { requestURL: 'https://api.example.com:25/x', method: 'TRACE' },
+      {
+        requestURL: 'http://api.example.com:10080/x',
+        method: 'POST',
+        body: { a: 1 },
+      },
+    ]) {
+      refusals.push(
+        await refusalOf(
+          new FetchAdapter().send({
+            headers: {},
+            onUploadProgress: (event) => {
+              uploads.push(event);
+            },
+            ...request,
+          } as AdapterRequest),
+        ),
+      );
+    }
+    // A default port, and one next to a blocked one, are sent.
+    for (const requestURL of [
+      'http://api.example.com:80/x',
+      'http://api.example.com:6001/x',
+    ]) {
+      refusals.push(
+        await refusalOf(
+          new FetchAdapter().send({ requestURL, method: 'GET', headers: {} }),
+        ),
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  expect(refusals).toEqual([
+    '[FetchAdapter] The Fetch Standard blocks port 6000, so FetchAdapter does not send to it.',
+    '[FetchAdapter] The Fetch Standard blocks port 25, so FetchAdapter does not send to it.',
+    '[FetchAdapter] The Fetch Standard blocks port 10080, so FetchAdapter does not send to it.',
+    undefined,
+    undefined,
+  ]);
+  expect(uploads).toEqual([]);
+  expect(calls).toBe(2);
+});
+
+test('a filter can select a CONNECT one interceptor hands the next', async () => {
+  const sent: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request) => {
+      sent.push(request.method);
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    method: 'CONNECT',
+  }));
+  client.addRequestInterceptor((request) => ({ ...request, method: 'POST' }), {
+    methods: ['CONNECT'],
+  });
+  await client.get('https://api.example.com/x').send();
+
+  expect(sent).toEqual(['POST']);
+});
+
+test("a redirect interceptor's CONNECT is refused before an unusable Location it left as it was", async () => {
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () =>
+      Promise.resolve<AdapterResponse>({
+        status: 302,
+        headers: { location: 'ftp://files.example/x' },
+        body: null,
+      }),
+  };
+  const client = new HTTPClient({ adapter, followRedirects: true });
+  client.addRequestInterceptor(
+    (request) => ({ ...request, method: 'CONNECT' }),
+    { phases: ['redirect'] },
+  );
+  const builder = client.get('https://api.example.com/x');
+  await builder.send();
+
+  expect(builder.error?.code).toBe('interceptor_error');
+  expect(builder.error?.cause?.message).toBe(
+    '[HTTPClient] Interceptor returned a request whose method is CONNECT, which opens a tunnel and is not supported.',
+  );
+});
+
+test('XHRAdapter in a browser refuses a port the Fetch Standard blocks, and outside one sends it', async () => {
+  const browserGlobals = globalThis as { window?: unknown; document?: unknown };
+  const originalXHR = globalThis.XMLHttpRequest;
+  let opened = 0;
+  (globalThis as Record<string, unknown>).XMLHttpRequest = class {
+    constructor() {
+      opened++;
+      throw new Error('opened');
+    }
+  };
+  const send = () =>
+    refusalOf(
+      new XHRAdapter().send({
+        requestURL: 'http://api.example.com:6000/x',
+        method: 'GET',
+        headers: {},
+      }),
+    );
+  let inBrowser: string | undefined;
+  browserGlobals.window = globalThis;
+  browserGlobals.document = {};
+  try {
+    inBrowser = await send();
+  } finally {
+    delete browserGlobals.window;
+    delete browserGlobals.document;
+  }
+  const outside = await send();
+  globalThis.XMLHttpRequest = originalXHR;
+
+  expect(inBrowser).toBe(
+    '[XHRAdapter] The Fetch Standard blocks port 6000, so XHRAdapter does not send to it.',
+  );
+  expect(outside).not.toContain('blocks port');
+  expect(opened).toBe(1);
+});

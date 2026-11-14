@@ -17,7 +17,10 @@ import { copyArrayValue } from '../internal/array-copy';
 import { isFormData } from './internal/form-entries';
 import { readUnknownMember } from '../internal/read-member';
 import { isUint8ArrayValue } from '../internal/binary-view';
-import { nonRetryableAdapterErrorFrom } from './internal/adapter-error';
+import {
+  isAdapterRequestBody,
+  nonRetryableAdapterErrorFrom,
+} from './internal/adapter-error';
 import {
   lowerCaseHeaderName,
   presentHeaderValue,
@@ -708,9 +711,10 @@ export function findBrowserPage(): BrowserPage | undefined {
 /**
  * What is wrong with `candidate` as a request method - completing "the method …" - or
  * `undefined` when nothing is: a `CONNECT`, or what {@link describeMalformedHTTPMethod}
- * refuses. Shared by `request()` and request filters; the interceptor phases check
- * {@link describeMalformedHTTPMethod} as each result is copied, and a `CONNECT` once the
- * chain's URL is checked (see `_assertRequestShapeIsSupported`).
+ * refuses: `request()`'s rule. Request filters and the interceptor phases check
+ * {@link describeMalformedHTTPMethod}, as an interceptor may hand a `CONNECT` to the next;
+ * the phases refuse one once the chain's URL is checked (see
+ * `_assertRequestShapeIsSupported`).
  */
 export function describeInvalidHTTPMethod(
   candidate: unknown,
@@ -735,8 +739,9 @@ export const CONNECT_METHOD_PROBLEM =
  * What is wrong with `candidate` as the name of a method, as
  * {@link describeInvalidHTTPMethod} words it, or `undefined` when nothing is. A method is
  * a non-empty string of RFC 9110 token characters; every adapter refuses anything else,
- * but only at dispatch, where a caller's typo reads as a failed send. The interceptor
- * snapshot's rule: a `CONNECT` is a method name, refused once the chain's URL is checked.
+ * but only at dispatch, where a caller's typo reads as a failed send. The rule of the
+ * interceptor snapshot and of request filters: a `CONNECT` is a method name, refused once
+ * the chain's URL is checked, so a filter can select one an interceptor handed on.
  */
 export function describeMalformedHTTPMethod(
   candidate: unknown,
@@ -750,8 +755,8 @@ export function describeMalformedHTTPMethod(
 /**
  * A filter's `methods`, checked and normalized once when its callback is registered, so
  * matching a request is a plain lookup. Nullish means no method filter. Anything else must
- * be an array of method names, each held to the rule a request's method is; anything else
- * throws a `TypeError` naming `label`.
+ * be an array of method names, each held to the rule an interceptor's method is (see
+ * `describeMalformedHTTPMethod`); anything else throws a `TypeError` naming `label`.
  */
 export function normalizeFilterMethods(
   methods: unknown,
@@ -779,10 +784,11 @@ export function normalizeFilterMethods(
   }
   const normalized: HTTPMethod[] = [];
   for (const [index, entry] of entries.entries()) {
-    // Held to the rule a request's method is, so an entry no request can have - `''`,
-    // `'GET, POST'` - is refused rather than registered to match nothing. Named by its
-    // place in the list, as every other filter list's entries are.
-    const problem = describeInvalidHTTPMethod(entry);
+    // Held to the rule an interceptor's method is, so an entry no request can have - `''`,
+    // `'GET, POST'` - is refused rather than registered to match nothing, while a `CONNECT`
+    // one interceptor hands the next can be selected. Named by its place in the list, as
+    // every other filter list's entries are.
+    const problem = describeMalformedHTTPMethod(entry);
     if (problem !== undefined) {
       throw new TypeError(
         `${label} filter methods[${String(index)}] ${problem}`,
@@ -1535,13 +1541,13 @@ export function serializeBody(
 export const UNSUPPORTED_REQUEST_BODY_MESSAGE =
   'Unsupported request body type. Supported types: string, Uint8Array, FormData, plain object, array, null, and undefined.';
 
+/**
+ * Refuse a request body the client neither sends as it is (see `isAdapterRequestBody`)
+ * nor serializes as JSON (a plain object or an array).
+ */
 export function assertSupportedRequestBody(body: unknown): void {
   if (
-    body === undefined ||
-    body === null ||
-    typeof body === 'string' ||
-    isRequestBodyBytes(body) ||
-    isFormData(body) ||
+    isAdapterRequestBody(body) ||
     Array.isArray(body) ||
     isPlainRecord(body)
   ) {

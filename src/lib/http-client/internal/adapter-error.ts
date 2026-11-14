@@ -143,28 +143,45 @@ export function connectRefusal(adapterName: string): TypeError {
 }
 
 /**
- * The refusal of a request body `adapterName` does not send, or `undefined` for one it
- * does: none, a string, a `Uint8Array` (another realm's included) or a `FormData`.
- * Anything else - an `ArrayBuffer`, a `Blob`, a `ReadableStream`, a plain object, a
- * number, a `Proxy` over a form, an object that only inherits from `FormData.prototype` -
- * would go out as no body, as its `String()` text, or fail on every attempt, so every
- * adapter refuses it in these words. `HTTPClient` serializes or refuses such a body before
- * an adapter is handed it; this is an adapter driven directly. Non-retryable.
+ * Whether `body` is one an adapter sends as it is: none, a string, a `Uint8Array` (another
+ * realm's included) or a `FormData`. The one list of them: `assertSupportedRequestBody`
+ * adds the JSON bodies the client serializes, and {@link unsendableBodyRefusal} refuses
+ * the rest.
  */
-export function unsendableBodyRefusal(
-  adapterName: string,
-  body: unknown,
-): TypeError | undefined {
-  if (
+export function isAdapterRequestBody(body: unknown): boolean {
+  return (
     body === undefined ||
     body === null ||
     typeof body === 'string' ||
     isUint8ArrayValue(body) ||
     isFormData(body)
-  ) {
-    return undefined;
-  }
+  );
+}
 
+/**
+ * The refusal of a request body `adapterName` does not send (see
+ * {@link isAdapterRequestBody}), or `undefined` for one it does. Anything else - an
+ * `ArrayBuffer`, a `Blob`, a `ReadableStream`, a plain object, a number, a `Proxy` over a
+ * form, an object that only inherits from `FormData.prototype` - would go out as no body,
+ * as its `String()` text, or fail on every attempt, so every adapter refuses it in these
+ * words. `HTTPClient` serializes or refuses such a body before an adapter is handed it;
+ * this is an adapter driven directly. Non-retryable.
+ */
+export function unsendableBodyRefusal(
+  adapterName: string,
+  body: unknown,
+): TypeError | undefined {
+  return isAdapterRequestBody(body)
+    ? undefined
+    : unsendableBodyError(adapterName);
+}
+
+/**
+ * {@link unsendableBodyRefusal}'s error, for an adapter that tells a body it sends by its
+ * own reading of it - NodeAdapter's, which refuses whatever it cannot classify, so what it
+ * refuses and what it writes cannot disagree.
+ */
+export function unsendableBodyError(adapterName: string): TypeError {
   const refusal = new TypeError(
     `${adapterName} sends a string, Uint8Array or FormData body; serialize other bodies first`,
   );

@@ -1,5 +1,6 @@
 import { BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES } from '../consts';
 import { asciiLowercase, asciiUppercase } from '../../internal/ascii-text';
+import { safeParseURL } from '../../domain-utils/domain-utils';
 
 /**
  * The refusals `HTTPClient` and the browser adapters make of a request their transport
@@ -37,4 +38,32 @@ export function bodyOnBodilessMethodMessage(
   return adapter === 'fetch'
     ? `[FetchAdapter] Cannot send a ${method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`
     : `[XHRAdapter] Cannot send a ${method} request with a body: XMLHttpRequest drops it. Send the body with POST.`;
+}
+
+/**
+ * The ports the Fetch Standard's "bad port" list blocks
+ * (https://fetch.spec.whatwg.org/#port-blocking), as Node's undici and browsers block
+ * them, for `fetch` and XHR alike.
+ */
+const FETCH_BLOCKED_PORTS: ReadonlySet<string> = new Set(
+  (
+    '1 7 9 11 13 15 17 19 20 21 22 23 25 37 42 43 53 69 77 79 87 95 101 102 103 104 109 ' +
+    '110 111 113 115 117 119 123 135 137 139 143 161 179 389 427 465 512 513 514 515 526 ' +
+    '530 531 532 540 548 554 556 563 587 601 636 989 990 993 995 1719 1720 1723 2049 3659 ' +
+    '4045 4190 5060 5061 6000 6566 6665 6666 6667 6668 6669 6679 6697 10080'
+  ).split(' '),
+);
+
+/**
+ * The port `url` (an absolute http(s) URL) names when the Fetch Standard blocks it, and
+ * `undefined` otherwise: a default port is never blocked, and a `URL` leaves it out.
+ */
+export function fetchBlockedPort(url: string): string | undefined {
+  const port = safeParseURL(url)?.port ?? '';
+  return FETCH_BLOCKED_PORTS.has(port) ? port : undefined;
+}
+
+/** The refusal of a request to a port the Fetch Standard blocks, by its adapter. */
+export function blockedPortMessage(adapterName: string, port: string): string {
+  return `[${adapterName}] The Fetch Standard blocks port ${port}, so ${adapterName} does not send to it.`;
 }

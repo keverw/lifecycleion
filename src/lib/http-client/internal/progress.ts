@@ -68,8 +68,7 @@ export function knownBodyByteLength(body: unknown): number | undefined {
 
   // Bytes by their internal slot, as the response limit measures them: a buffer of any
   // kind, from any realm, at its real size rather than the one it reports.
-  const byteLength = readBinaryByteLength(body);
-  return byteLength ?? undefined;
+  return readBinaryByteLength(body) ?? undefined;
 }
 
 /** Whether `value` is a count of bytes: a safe, non-negative integer. */

@@ -311,6 +311,46 @@ async function sendPastLimitWithoutCoding(
 // ---------------------------------------------------------------------------
 
 describe('XHRAdapter', () => {
+  test("a React Native form, whose FormData has no has(), is handed to the XHR as it is, its caller's Content-Type dropped", async () => {
+    const originalFormData = globalThis.FormData;
+    // React Native's FormData holds only append, getAll and getParts.
+    class MethodlessFormData {
+      public append(): void {}
+    }
+    (globalThis as Record<string, unknown>).FormData = MethodlessFormData;
+    try {
+      const form = new MethodlessFormData();
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/upload',
+        method: 'POST',
+        headers: { 'content-type': 'multipart/form-data' },
+        body: form as unknown as FormData,
+      });
+
+      expect(lastXHR.sentBody).toBe(form as unknown as XMLHttpRequestBodyInit);
+      expect(lastXHR.requestHeaders['content-type']).toBeUndefined();
+      lastXHR.status = 204;
+      lastXHR.simulateLoad();
+      expect((await promise).status).toBe(204);
+
+      // Anything else is still refused there.
+      const refusal = await new XHRAdapter()
+        .send({
+          requestURL: 'https://api.test/upload',
+          method: 'POST',
+          headers: {},
+          body: { a: 1 } as never,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Error,
+        );
+      expect(refusal).toBeInstanceOf(TypeError);
+    } finally {
+      globalThis.FormData = originalFormData;
+    }
+  });
+
   test('getType returns xhr', () => {
     expect(new XHRAdapter().getType()).toBe('xhr');
   });

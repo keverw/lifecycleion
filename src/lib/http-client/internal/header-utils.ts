@@ -5,7 +5,7 @@ import {
 } from '../consts';
 import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
-import { isFormData } from './form-entries';
+import { isFormData, isMethodlessFormData } from './form-entries';
 import { isHTTPToken } from './http-token';
 import { isForbiddenBrowserMethod } from './method-refusal';
 import {
@@ -126,7 +126,7 @@ export function dropTransportFramedHeaders(
 ): void {
   deleteHeader(headers, 'content-length');
 
-  if (isFormData(body)) {
+  if (isFormData(body) || isMethodlessFormData(body)) {
     deleteHeader(headers, 'content-type');
   }
 }

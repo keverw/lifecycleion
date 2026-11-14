@@ -43,6 +43,27 @@ export function isFormData(value: unknown): value is FormData {
 }
 
 /**
+ * Whether `value` is a form of a runtime whose `FormData` has no `has` - React Native's,
+ * which holds only `append`, `getAll` and `getParts` - so {@link isFormData} cannot tell
+ * one by its methods: told by `instanceof` there instead. Never on a runtime whose
+ * `FormData` has `has`, so a form is told the same way as before wherever it can be.
+ * For XHRAdapter, which hands such a form to its runtime's XHR to send; nothing else here
+ * can read one. With no brand to ask, a `Proxy` over such a form, or an object that only
+ * inherits from its prototype, is taken as one there too: XHR is then what refuses it.
+ */
+export function isMethodlessFormData(value: unknown): boolean {
+  try {
+    return (
+      typeof FormData === 'function' &&
+      typeof (FormData.prototype as Partial<FormData>).has !== 'function' &&
+      value instanceof FormData
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The name a file part named `name` is sent under: `name`, except on Bun. A file backed by
  * a path there - `Bun.file()`, `openAsBlob` - reports the path as its name, even when
  * appended under another, and a form's entries do not tell it from a `File` named with a

@@ -16,7 +16,7 @@ import {
   connectRefusal,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
-  unsendableBodyRefusal,
+  unsendableBodyError,
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
 import { isPlainRecord } from '../internal/plain-record';
@@ -547,9 +547,9 @@ export class NodeAdapter implements HTTPAdapter {
     dropBodilessContentLength(request);
 
     // An unusable URL is refused first, then a body this adapter cannot send, then a
-    // refused header and the method: the order `HTTPClient` checks them in, as FetchAdapter
-    // and XHRAdapter do. MockAdapter, which routes a URL that does not parse as written,
-    // refuses a body first.
+    // refused header and the method: the order `HTTPClient` checks them in. FetchAdapter
+    // and XHRAdapter refuse the URL and body first too, and refuse no header by name;
+    // MockAdapter, which routes a URL that does not parse as written, refuses a body first.
     //
     // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
     // URL fails the same way on every attempt. In its own words, without the parser's
@@ -590,12 +590,16 @@ export class NodeAdapter implements HTTPAdapter {
     // adapter called directly. Here, before the config is read, the 0% upload event and
     // the request is created, so a request refused before it is sent reports no upload
     // start and opens no connection, as in FetchAdapter and XHRAdapter. Read once, by
-    // both the branch that opens the upload's outcome and the one that writes the body.
-    const bodyRefusal = unsendableBodyRefusal('NodeAdapter', request.body);
-    if (bodyRefusal !== undefined) {
-      throw bodyRefusal;
-    }
+    // both the branch that opens the upload's outcome and the one that writes the body,
+    // and refused by it: a body it does not classify is one it would not write.
     const classifiedBody = classifyRequestBody(request.body);
+    if (
+      classifiedBody === undefined &&
+      request.body !== undefined &&
+      request.body !== null
+    ) {
+      throw unsendableBodyError('NodeAdapter');
+    }
 
     // This adapter frames every body itself with a `Content-Length`. A caller's
     // `Transfer-Encoding` would go out beside it - both on one message, which RFC 9112

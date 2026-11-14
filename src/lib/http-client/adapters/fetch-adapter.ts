@@ -60,7 +60,9 @@ import {
 } from '../../internal/binary-view';
 import { asciiLowercase, asciiUppercase } from '../../internal/ascii-text';
 import {
+  blockedPortMessage,
   bodyOnBodilessMethodMessage,
+  fetchBlockedPort,
   forbiddenMethodMessage,
   isBodilessMethod,
   isForbiddenBrowserMethod,
@@ -110,6 +112,20 @@ export class FetchAdapter implements HTTPAdapter {
       throw dispatchedURL;
     }
 
+    // A port the Fetch Standard blocks is refused by Node's and every browser's `fetch`
+    // on every attempt - a browser's as an opaque `TypeError`, retried as a network
+    // failure with nothing sent - and sent by Bun's: refused here, on every runtime, as
+    // part of the URL, before the body, the method and the headers are checked and
+    // before anything is reported.
+    const blockedPort = fetchBlockedPort(dispatchedURL);
+    if (blockedPort !== undefined) {
+      const refusal = new TypeError(
+        blockedPortMessage('FetchAdapter', blockedPort),
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
+
     // `fetch` sends a plain object as `[object Object]` and a number as its text, and on
     // Node fails a `ReadableStream` on every attempt as a network error: refused, as every
     // adapter refuses a body it does not send.
@@ -121,10 +137,10 @@ export class FetchAdapter implements HTTPAdapter {
     // The Fetch Standard forbids these, but Bun's `fetch` sends a `CONNECT` or `TRACE`, so
     // they are refused here, on every runtime, rather than left to it - a `CONNECT` as
     // every adapter refuses one.
-    if (asciiUppercase(method) === 'CONNECT') {
-      throw connectRefusal('FetchAdapter');
-    }
     if (isForbiddenBrowserMethod(method)) {
+      if (asciiUppercase(method) === 'CONNECT') {
+        throw connectRefusal('FetchAdapter');
+      }
       const refusal = new Error(forbiddenMethodMessage('FetchAdapter', method));
       markNonRetryableAdapterError(refusal);
       throw refusal;

@@ -35,9 +35,12 @@ import {
   streamErrorAnswer,
 } from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
+import { isMethodlessFormData } from '../internal/form-entries';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 import {
+  blockedPortMessage,
   bodyOnBodilessMethodMessage,
+  fetchBlockedPort,
   forbiddenMethodMessage,
   isBodilessMethod,
   isForbiddenBrowserMethod,
@@ -119,9 +122,24 @@ export class XHRAdapter implements HTTPAdapter {
       throw answeredURL;
     }
 
+    // A browser's XHR fails a request to a port the Fetch Standard blocks on every
+    // attempt, as an opaque network error: refused here, as part of the URL, in
+    // FetchAdapter's words. In a browser only: a non-browser XHR may reach it.
+    const blockedPort = fetchBlockedPort(answeredURL);
+    if (blockedPort !== undefined && isBrowserEnvironment()) {
+      const refusal = new TypeError(
+        blockedPortMessage('XHRAdapter', blockedPort),
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
+
     // XHR sends a plain object as `[object Object]` and a number as its text: refused, as
-    // every adapter refuses a body it does not send.
-    const bodyRefusal = unsendableBodyRefusal('XHRAdapter', requestBody);
+    // every adapter refuses a body it does not send. A React Native form is one XHR
+    // sends, though `isFormData` cannot tell it (see `isMethodlessFormData`).
+    const bodyRefusal = isMethodlessFormData(requestBody)
+      ? undefined
+      : unsendableBodyRefusal('XHRAdapter', requestBody);
     if (bodyRefusal !== undefined) {
       throw bodyRefusal;
     }
@@ -1170,9 +1188,10 @@ export class XHRAdapter implements HTTPAdapter {
       }
 
       // The send itself, guarded. An asynchronous `send()` throws only an
-      // `InvalidStateError` or a body it cannot convert (a `toString` that throws, a
-      // detached buffer) - network failures arrive as events - and either fails the same
-      // way on every attempt, so it is refused as non-retryable - unless the request was
+      // `InvalidStateError` or a body it cannot read (a buffer detached since it was
+      // checked) - network failures arrive as events - and an XHR outside a browser may
+      // throw for its own reasons; each fails the same way on every attempt, so it is
+      // refused as non-retryable - unless the request was
       // cancelled as it was handed over, which stays the cancel, as FetchAdapter keeps one
       // that lands while `fetch` dispatches.
       try {
@@ -1189,8 +1208,8 @@ export class XHRAdapter implements HTTPAdapter {
         return;
       }
 
-      // A cancel while `send()` read the body - a value of the caller's converted to text
-      // can run code - came before the XHR marked itself sent, where the XHR standard has
+      // A cancel while `send()` ran - an XHR outside a browser may fire events or run code
+      // inside it - came before the XHR marked itself sent, where the XHR standard has
       // `abort()` do nothing and fire no event, so the request went out regardless: stopped
       // now, and ended as the cancel it is if no `abort` event did.
       //
