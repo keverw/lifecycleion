@@ -239,6 +239,9 @@ async function runInterceptors(
     const handed = handedRequest(current, parsedContents);
 
     let result: Awaited<ReturnType<RequestInterceptor>>;
+    // What the interceptor returned, once it has: only the handed request itself can carry
+    // its body on unread (see `keepUnreadContents`).
+    let returned: unknown;
     try {
       // Adopted, not awaited as it is: an interceptor is caller code, and one returning
       // a native promise with its own `constructor` and a no-op `then` would hang the
@@ -255,6 +258,7 @@ async function runInterceptors(
         ),
         cancelSignal,
       ));
+      returned = result;
     } catch (error) {
       // A cancel made before the interceptor threw - by that interceptor, say - ends the
       // chain as a cancel, not a failure: whoever cancelled was told the request is
@@ -264,7 +268,7 @@ async function runInterceptors(
       }
       throw error;
     } finally {
-      keepUnreadContents(handed, parsedContents);
+      keepUnreadContents(handed, parsedContents, returned === handed);
     }
 
     // A cancel made while the interceptor ran ends the chain before its result is read:
@@ -427,18 +431,24 @@ function handedRequest(
 
 /**
  * Once an interceptor `handedRequest` handed `request` to has run: the data a filter parsed
- * its body to, if the interceptor neither read nor assigned the body, goes back into
- * `parsedContents`, for the phase's later filters and interceptors; the handed request,
- * which the interceptor may keep, holds none of it.
+ * its body to, if the interceptor neither read nor assigned the body and returned
+ * `request` itself (`isCarriedOn`) - the one object its unread body travels on - goes back
+ * into `parsedContents`, for the phase's later filters and interceptors. Otherwise it is
+ * dropped: a request returned in its place carries another body, and one that threw or
+ * cancelled ends the chain. Either way the handed request, which the interceptor may
+ * keep, holds none of it.
  */
 function keepUnreadContents(
   request: InterceptedRequest,
   parsedContents: Map<unknown, object>,
+  isCarriedOn: boolean,
 ): void {
   const lazy = lazyBodyByRequest.get(request);
 
   if (lazy?.parsed !== undefined) {
-    parsedContents.set(lazy.body, lazy.parsed);
+    if (isCarriedOn) {
+      parsedContents.set(lazy.body, lazy.parsed);
+    }
     lazy.parsed = undefined;
   }
 }

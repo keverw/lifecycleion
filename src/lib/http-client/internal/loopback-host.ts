@@ -1,3 +1,4 @@
+import { withoutTrailingDot } from '../../internal/ascii-text';
 /**
  * Whether a parsed URL's `hostname` names this machine, as browsers treat it as
  * potentially trustworthy: `localhost` and any name under it (a trailing dot aside),
@@ -6,7 +7,7 @@
  * adapter connects to; the HTTP client docs say where that does not hold.
  */
 export function isLoopbackHost(hostname: string): boolean {
-  const name = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
+  const name = withoutTrailingDot(hostname);
 
   return (
     name === 'localhost' ||

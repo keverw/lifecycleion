@@ -120,3 +120,12 @@ export function hasNonHTTPWhitespaceEdge(text: string): boolean {
 export function isBlankText(text: string): boolean {
   return !/\S/.test(text);
 }
+
+/**
+ * `name` without one trailing dot - the absolute (FQDN) form of a host name read as the
+ * same host - and as it is otherwise: `example.com..` keeps one. The one rule every host
+ * comparison here uses for it.
+ */
+export function withoutTrailingDot(name: string): string {
+  return name.endsWith('.') ? name.slice(0, -1) : name;
+}

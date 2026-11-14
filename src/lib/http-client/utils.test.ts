@@ -1792,6 +1792,28 @@ test('serializeBody refuses a body whose prototype answers differently once it h
 });
 
 describe('firstJoinedLocation', () => {
+  test('a header repeated whole, or a relative target that starts as one does, is split', () => {
+    expect(firstJoinedLocation('next, next')).toBe('next');
+    expect(firstJoinedLocation('?page=2, ?page=2')).toBe('?page=2');
+    expect(firstJoinedLocation('../x, ../x')).toBe('../x');
+    expect(firstJoinedLocation('next, next, next')).toBe('next');
+    expect(firstJoinedLocation('a, ./b')).toBe('a');
+    expect(firstJoinedLocation('a, ?b=1')).toBe('a');
+    // Not one part repeated, and not starting as a target: kept whole.
+    expect(firstJoinedLocation('/files/Smith, John.pdf')).toBe(
+      '/files/Smith, John.pdf',
+    );
+    expect(firstJoinedLocation('Smith, Smith, John')).toBe(
+      'Smith, Smith, John',
+    );
+    // A target holding `, ` itself, sent twice; and no empty target.
+    expect(firstJoinedLocation('Smith, John.pdf, Smith, John.pdf')).toBe(
+      'Smith, John.pdf',
+    );
+    expect(firstJoinedLocation(', ')).toBe(', ');
+    expect(firstJoinedLocation('a, a, b')).toBe('a, a, b');
+  });
+
   test('splits at a `, ` followed by a path or scheme, and nowhere else', () => {
     expect(firstJoinedLocation('/a, /b')).toBe('/a');
     expect(firstJoinedLocation('https://x.test/a, https://y.test/b')).toBe(

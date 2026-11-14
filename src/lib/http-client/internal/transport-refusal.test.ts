@@ -576,8 +576,8 @@ test('FetchAdapter refuses a body it does not send before a header fetch refuses
     await send({ method: 'GET', body: 'x' }),
   ]).toEqual([
     'FetchAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
-    "[FetchAdapter] Cannot send a request with an Expect header: the Fetch Standard forbids one, and Node's fetch refuses it.",
-    "[FetchAdapter] Cannot send a request with an Expect header: the Fetch Standard forbids one, and Node's fetch refuses it.",
+    '[FetchAdapter] Cannot send a request with an Expect header: the Fetch Standard forbids one, so FetchAdapter does not send it.',
+    '[FetchAdapter] Cannot send a request with an Expect header: the Fetch Standard forbids one, so FetchAdapter does not send it.',
   ]);
 });
 

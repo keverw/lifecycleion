@@ -1,3 +1,4 @@
+import { copyRequestBody } from './internal/request-body-copy';
 import { describe, test, expect, spyOn } from 'bun:test';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
 import { HTTPClient } from './http-client';
@@ -1418,4 +1419,33 @@ describe('JSON body copies read by interceptors', () => {
     expect(handed).toEqual([{ a: 1, marker: 'probe' }]);
     expect(sent).toEqual([text, '{"a":99,"marker":"probe"}']);
   });
+});
+
+test("a filter's parsed body is kept for the phase only while the handed request carries it on", async () => {
+  const sizes: number[] = [];
+  for (const isReplaced of [false, true]) {
+    const mgr = new RequestInterceptorManager();
+    mgr.add(
+      (request) =>
+        isReplaced
+          ? {
+              requestURL: request.requestURL,
+              method: request.method,
+              headers: request.headers,
+              body: { replaced: true },
+            }
+          : request,
+      { bodyContainsKeys: ['token'] },
+    );
+    const parsedContents = new Map<unknown, object>();
+    await mgr.snapshot()(
+      { ...makeRequest(), body: copyRequestBody({ token: 'x' }) },
+      { type: 'initial' },
+      makeContext(),
+      { parsedContents },
+    );
+    sizes.push(parsedContents.size);
+  }
+
+  expect(sizes).toEqual([1, 0]);
 });

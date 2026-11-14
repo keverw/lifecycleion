@@ -327,7 +327,12 @@ export const ADAPTER_TYPES: ReadonlySet<AdapterType> = new Set<AdapterType>([
   'mock',
 ]);
 
-/** The standard methods: sent uppercase whatever case they are given in. */
+/**
+ * The standard methods: sent uppercase whatever case they are given in. `TRACE` is sent
+ * by NodeAdapter, MockAdapter and XHRAdapter outside a browser: FetchAdapter refuses it,
+ * and XHRAdapter and `HTTPClient` do in a browser (see the methods section of the
+ * http-client docs).
+ */
 export const HTTP_METHODS: ReadonlyArray<HTTPMethod> = [
   'GET',
   'POST',

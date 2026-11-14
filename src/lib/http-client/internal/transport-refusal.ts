@@ -128,7 +128,7 @@ export function fetchRefusedHeaderMessage(
   adapterName: string,
   refusedHeader: string,
 ): string {
-  return `[${adapterName}] Cannot send a request with ${refusedHeader}: the Fetch Standard forbids one, and Node's fetch refuses it.`;
+  return `[${adapterName}] Cannot send a request with ${refusedHeader}: the Fetch Standard forbids one, so ${adapterName} does not send it.`;
 }
 
 /**

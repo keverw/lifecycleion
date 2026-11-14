@@ -4,7 +4,7 @@ import { describeValue } from '../internal/describe-value';
 import { assertKnownFields } from '../internal/known-fields';
 import { parse } from 'tldts';
 import { endsInANumber } from '../domain-utils/helpers';
-import { asciiLowercase } from '../internal/ascii-text';
+import { asciiLowercase, withoutTrailingDot } from '../internal/ascii-text';
 
 /**
  * Caller adjustments to the Public Suffix List the jar scopes cookies with.
@@ -55,7 +55,7 @@ export interface PublicSuffixOverrides {
 
 /** A hostname label list, lowercased in ASCII, with a trailing root dot dropped. */
 function toLabels(hostname: string): string[] {
-  const trimmed = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
+  const trimmed = withoutTrailingDot(hostname);
 
   return asciiLowercase(trimmed).split('.');
 }
@@ -87,9 +87,7 @@ function normalizeSuffix(
   const stripped = entry.startsWith('.') ? entry.slice(1) : entry;
   // Lowercased in ASCII only, so a typo is refused below: `toLowerCase` would turn the
   // Kelvin sign in `\u212Aorp.internal` into the `k` of a valid `korp.internal`.
-  const normalized = asciiLowercase(
-    stripped.endsWith('.') ? stripped.slice(0, -1) : stripped,
-  );
+  const normalized = asciiLowercase(withoutTrailingDot(stripped));
 
   if (normalized === '') {
     throw new TypeError(`${entryName} is empty`);

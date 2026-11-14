@@ -44,6 +44,7 @@ import {
   hasNonHTTPWhitespaceEdge,
   trimHTTPWhitespace,
   trimWhere,
+  withoutTrailingDot,
 } from '../internal/ascii-text';
 
 /**
@@ -1901,7 +1902,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
     if (isHostTooLongToNormalize(host)) {
       return false;
     }
-    const hostPattern = host.endsWith('.') ? host.slice(0, -1) : host;
+    const hostPattern = withoutTrailingDot(host);
 
     if (isAllWildcards(hostPattern)) {
       return false;

@@ -11,6 +11,7 @@ import {
   asciiLowercase,
   hasNonHTTPWhitespaceEdge,
   trimHTTPWhitespace,
+  withoutTrailingDot,
 } from '../internal/ascii-text';
 import {
   checkDNSLength,
@@ -126,10 +127,6 @@ export function endsInNumericLabel(name: string): boolean {
   const withoutDot = withoutTrailingDot(name);
 
   return endsInANumber(withoutDot.slice(withoutDot.lastIndexOf('.') + 1));
-}
-
-function withoutTrailingDot(name: string): string {
-  return name.endsWith('.') ? name.slice(0, -1) : name;
 }
 
 /**

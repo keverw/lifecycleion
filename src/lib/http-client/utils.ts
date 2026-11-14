@@ -1067,16 +1067,52 @@ function hasXMLHttpRequestGlobal(): boolean {
 
 /**
  * The first of a `Location` that fetch or XHR joined from repeated headers, or the value
- * whole. Split only where what follows the `, ` starts as a URL target does - a path or
- * `scheme://`: a single value with a raw space (`/files/Smith, John.pdf`) is kept whole.
- * A single value with an unencoded `, /` or `, scheme://` in it (`/r?to=/a, /b`) is cut
- * there too: fetch and XHR join repeats into the same text, so the two cannot be told
- * apart. A server percent-encodes the space in such a value.
+ * whole. A value that is one non-empty target repeated (`next, next` - a header a server
+ * or proxy sent twice - or `Smith, John.pdf, Smith, John.pdf`) is that target. Otherwise
+ * split only where what follows the `, ` starts as a URL target does - a path (`/`, `./`,
+ * `../`), a query (`?`) or `scheme://`: a single value with a raw space
+ * (`/files/Smith, John.pdf`) is kept whole. A single value with an unencoded `, /`,
+ * `, ./`, `, ../`, `, ?` or `, scheme://` in it (`/r?to=/a, /b`) is cut there too, as is
+ * one that is a target written twice (`a, a`): fetch and XHR join repeats into the same
+ * text, so the two cannot be told apart. A server percent-encodes the space in such a
+ * value.
  */
 export function firstJoinedLocation(value: string): string {
-  const separator = value.search(/, (?:\/|[a-z][a-z\d+.-]*:\/\/)/i);
+  const repeated = repeatedTarget(value);
+  if (repeated !== undefined) {
+    return repeated;
+  }
+
+  const separator = value.search(/, (?:\/|\.\.?\/|\?|[a-z][a-z\d+.-]*:\/\/)/i);
 
   return separator === -1 ? value : value.slice(0, separator);
+}
+
+/**
+ * The non-empty target `value` is two or more copies of, joined by `, `, or `undefined`.
+ * Only a length that divides the value evenly is tried, each with one comparison, so a
+ * long header costs a few passes over it, not one per `, ` in it.
+ */
+function repeatedTarget(value: string): string | undefined {
+  const joinedLength = value.length + 2;
+
+  for (
+    let comma = value.indexOf(', ');
+    comma > 0;
+    comma = value.indexOf(', ', comma + 1)
+  ) {
+    const span = comma + 2;
+    if (joinedLength % span !== 0) {
+      continue;
+    }
+
+    const target = value.slice(0, comma);
+    if (`${value}, ` === `${target}, `.repeat(joinedLength / span)) {
+      return target;
+    }
+  }
+
+  return undefined;
 }
 
 /**

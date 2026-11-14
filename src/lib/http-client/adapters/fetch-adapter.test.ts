@@ -564,7 +564,7 @@ describe('FetchAdapter', () => {
       expect(refusal).toBeInstanceOf(TypeError);
       expect(refusal?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
       expect(String(refusal?.message)).toBe(
-        `[FetchAdapter] Cannot send a request with ${named[index]}: the Fetch Standard forbids one, and Node's fetch refuses it.`,
+        `[FetchAdapter] Cannot send a request with ${named[index]}: the Fetch Standard forbids one, so FetchAdapter does not send it.`,
       );
       expect(uploads).toEqual([]);
     }

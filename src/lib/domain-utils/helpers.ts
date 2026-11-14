@@ -655,7 +655,7 @@ export function normalizeWildcardPattern(pattern: string): string {
   // Not NFC-normalized first: each label goes through TR46, which normalizes after
   // mapping, as the URL parser does (see `normalizeHostText`).
   // Trimmed of HTTP whitespace only: any other whitespace left is refused below.
-  let trimmed = trimHTTPWhitespace(pattern).replace(/[．。｡]/g, '.'); // normalize Unicode dot variants to ASCII
+  let trimmed = toAsciiDots(trimHTTPWhitespace(pattern));
 
   // The whole pattern, before it is split into labels that each pass the per-label
   // guard alone (see `isHostTooLongToNormalize`).
