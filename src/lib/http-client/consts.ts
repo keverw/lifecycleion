@@ -393,11 +393,22 @@ export const BROWSER_METHOD_OVERRIDE_HEADER_NAMES: ReadonlySet<string> =
   new Set(['x-http-method', 'x-http-method-override', 'x-method-override']);
 
 /**
+ * The methods the Fetch Standard forbids (CONNECT, TRACE and TRACK), lowercase: the ones
+ * FetchAdapter, and XHRAdapter in a browser, refuse to send.
+ */
+export const FETCH_FORBIDDEN_METHODS: ReadonlySet<string> = new Set([
+  'connect',
+  'trace',
+  'track',
+]);
+
+/**
  * Methods that browsers do not allow request headers to tunnel via the
- * override headers above.
+ * override headers above: the Fetch Standard's forbidden methods, the same list as
+ * {@link FETCH_FORBIDDEN_METHODS}, in a set of its own.
  */
 export const BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES: ReadonlySet<string> =
-  new Set(['connect', 'trace', 'track']);
+  new Set(FETCH_FORBIDDEN_METHODS);
 
 export const DEFAULT_MAX_REDIRECTS = 5;
 

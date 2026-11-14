@@ -1,63 +1,137 @@
 /**
+ * How deep a `.params()` value may nest: a top-level value is at depth 0, and an entry
+ * of an object at depth `d` is at `d + 1`. `qs` is given it as its `depth` option, so it
+ * refuses a deeper value rather than overflowing the stack, which it does from about
+ * 3,000 levels on Node; {@link assertSerializableParams} refuses the same values when
+ * they are handed over.
+ */
+export const MAX_PARAM_DEPTH = 1000;
+
+/** `qs`'s refusal of a value deeper than {@link MAX_PARAM_DEPTH}, in its own words. */
+export const PARAM_DEPTH_EXCEEDED_MESSAGE = `Input depth exceeded depth option of ${String(MAX_PARAM_DEPTH)}`;
+
+/**
  * Refuses a `.params()` value `qs` would throw on when the query is built, so a data
  * condition - a `Date` parsed from bad input - is refused where it is handed over, as a
  * body that cannot be copied is, rather than rejecting `send()` with `qs`'s own
  * `RangeError`: a `Date` (by `instanceof`, as `qs` tells one) that `toISOString`, the
- * call `qs` serializes it by, throws on, and an object nested inside itself. Walks the
- * own enumerable keys `qs` walks - a typed array's too, all but a `Buffer`'s, which `qs`
- * sends as its text - through data properties only, so no getter runs before `qs` reads
- * it; a getter's value, and a nested object changed after this call, are still read only
- * by `qs`, at `send()`. A nested `Proxy` is asked for its keys and descriptors here, so
- * its `ownKeys` and `getOwnPropertyDescriptor` traps run, and throw, here too.
+ * call `qs` serializes it by, throws on, an object nested inside itself, and an entry
+ * deeper than {@link MAX_PARAM_DEPTH}. Walks the own enumerable keys `qs` walks - an
+ * object's, a function's and a typed array's, all but a `Buffer`'s, which `qs` sends as
+ * its text - through data properties only, so no getter runs before `qs` reads it; a
+ * getter's value, and a nested object changed after this call, are still read only by
+ * `qs`, at `send()`. An object reached by more than one path is walked once. A nested
+ * `Proxy` is asked for its keys and descriptors here, so its `ownKeys` and
+ * `getOwnPropertyDescriptor` traps run, and throw, here too.
+ *
+ * Kept separate from `buildURL`'s snapshot of the nested values (`snapshotParamValue`),
+ * which reads through getters - it is the read `qs` serializes - where this check must
+ * not. The two share {@link MAX_PARAM_DEPTH}.
  */
 export function assertSerializableParams(
   params: Record<string, unknown>,
 ): void {
-  const ancestors = new Set<object>();
-  ancestors.add(params);
+  const walk: ParamWalk = {
+    path: [],
+    ancestors: new Set([params]),
+    heights: new Map(),
+  };
+
   for (const key of Object.keys(params)) {
-    checkParamValue(params, key, key, ancestors);
+    walk.path.push(key);
+    checkParamValue(params, key, 0, walk);
+    walk.path.pop();
   }
 }
 
+interface ParamWalk {
+  /** The keys from the top level down to the entry being checked. */
+  readonly path: string[];
+  /** The objects the entry being checked is nested inside. */
+  readonly ancestors: Set<object>;
+  /**
+   * The objects whose entries were all checked and found serializable, each to how many
+   * levels below it its deepest entry is.
+   */
+  readonly heights: Map<object, number>;
+}
+
+/**
+ * Checks the entry `key` of `holder`, at `depth`, and answers how many levels below it
+ * its deepest entry is: 0 for a value `qs` does not walk into.
+ */
 function checkParamValue(
   holder: object,
   key: string,
-  path: string,
-  ancestors: Set<object>,
-): void {
+  depth: number,
+  walk: ParamWalk,
+): number {
   const descriptor = Reflect.getOwnPropertyDescriptor(holder, key);
   if (descriptor === undefined || !('value' in descriptor)) {
-    return;
+    return 0;
   }
 
   const value: unknown = descriptor.value;
-  if (typeof value !== 'object' || value === null || isNodeBuffer(value)) {
-    return;
+  if (
+    (typeof value !== 'object' && typeof value !== 'function') ||
+    value === null ||
+    isNodeBuffer(value)
+  ) {
+    return 0;
   }
 
   if (value instanceof Date) {
     try {
       Date.prototype.toISOString.call(value);
     } catch {
-      throw new TypeError(
-        `HTTPRequestBuilder params.${path} is not a valid Date, so it cannot be put in a query`,
-      );
+      throw paramRefusal(walk, 'is not a valid Date');
     }
-    return;
+    return 0;
   }
 
-  if (ancestors.has(value)) {
-    throw new TypeError(
-      `HTTPRequestBuilder params.${path} is an object it is nested inside, so it cannot be put in a query`,
+  const checkedHeight = walk.heights.get(value);
+  if (checkedHeight !== undefined) {
+    if (depth + checkedHeight > MAX_PARAM_DEPTH) {
+      throw depthRefusal(walk);
+    }
+    return checkedHeight;
+  }
+
+  if (walk.ancestors.has(value)) {
+    throw paramRefusal(walk, 'is an object it is nested inside');
+  }
+
+  const keys = Object.keys(value);
+  if (keys.length > 0 && depth + 1 > MAX_PARAM_DEPTH) {
+    throw depthRefusal(walk);
+  }
+
+  let height = 0;
+  walk.ancestors.add(value);
+  for (const nestedKey of keys) {
+    walk.path.push(nestedKey);
+    height = Math.max(
+      height,
+      1 + checkParamValue(value, nestedKey, depth + 1, walk),
     );
+    walk.path.pop();
   }
+  walk.ancestors.delete(value);
+  walk.heights.set(value, height);
+  return height;
+}
 
-  ancestors.add(value);
-  for (const nestedKey of Object.keys(value)) {
-    checkParamValue(value, nestedKey, `${path}.${nestedKey}`, ancestors);
-  }
-  ancestors.delete(value);
+function depthRefusal(walk: ParamWalk): TypeError {
+  return paramRefusal(
+    walk,
+    `nests deeper than ${String(MAX_PARAM_DEPTH)} levels`,
+  );
+}
+
+function paramRefusal(walk: ParamWalk, problem: string): TypeError {
+  return new TypeError(
+    `HTTPRequestBuilder params.${walk.path.join('.')} ${problem}, so it cannot be put in a query`,
+  );
 }
 
 /** Whether `value` is a `Buffer`, which `qs` sends as its text rather than walking it. */

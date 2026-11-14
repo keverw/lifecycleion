@@ -15,6 +15,10 @@ import { describeValue } from '../internal/describe-value';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { copyArrayValue } from '../internal/array-copy';
 import { isFormData, isMethodlessFormData } from './internal/form-entries';
+import {
+  MAX_PARAM_DEPTH,
+  PARAM_DEPTH_EXCEEDED_MESSAGE,
+} from './internal/param-check';
 import { readUnknownMember } from '../internal/read-member';
 import { isUint8ArrayValue } from '../internal/binary-view';
 import {
@@ -76,6 +80,15 @@ export function isAbsoluteWebURL(url: string): boolean {
   return tryAbsoluteWebHref(url) !== null;
 }
 
+/**
+ * `qs.stringify`'s `depth` option (qs 6.16), which `@types/qs` does not list yet: a value
+ * deeper than {@link MAX_PARAM_DEPTH} is refused with its `RangeError` rather than
+ * overflowing the stack.
+ */
+const QS_STRINGIFY_DEPTH: qs.IStringifyOptions & { depth: number } = {
+  depth: MAX_PARAM_DEPTH,
+};
+
 /** Whether a `.params()` value names its key: not `undefined`, nor made only of it. */
 function isGivenParam(value: unknown): boolean {
   if (value === undefined) {
@@ -94,14 +107,20 @@ function isGivenParam(value: unknown): boolean {
  * A param value with every array and plain record in it copied, each member read once:
  * the override check and the query both read the copy, so a nested getter cannot answer
  * one of them differently from the other. Any other value is kept as it is - only `qs`
- * reads into it. A cycle is refused as `qs` refuses one.
+ * reads into it. A cycle, and an entry deeper than `MAX_PARAM_DEPTH`, are refused as `qs`
+ * refuses them, with its `RangeError`. An object reached by more than one path is copied
+ * once for each, as `qs` reads it once for each - a getter in it included.
  *
  * An array is copied by the keys `qs` serializes it by, as a record is - its own
  * enumerable keys, so a hole is skipped and a key that is not an index (`list.extra`) kept
  * - into an array, which `qs` still writes as one.
+ *
+ * Kept separate from `.params()`'s check (`assertSerializableParams`), which must run no
+ * getter, since this read is the one `qs` serializes, and reads through them.
  */
 function snapshotParamValue(
   value: unknown,
+  depth = 0,
   ancestors: Set<object> = new Set(),
 ): unknown {
   const isArray = Array.isArray(value);
@@ -114,11 +133,20 @@ function snapshotParamValue(
     throw new RangeError('Cyclic object value');
   }
 
-  ancestors.add(value);
   const source = value as Record<string, unknown>;
+  const keys = Object.keys(source);
+  if (keys.length > 0 && depth + 1 > MAX_PARAM_DEPTH) {
+    throw new RangeError(PARAM_DEPTH_EXCEEDED_MESSAGE);
+  }
+
+  ancestors.add(value);
   const copy = (isArray ? [] : {}) as Record<string, unknown>;
-  for (const key of Object.keys(source)) {
-    defineEntry(copy, key, snapshotParamValue(source[key], ancestors));
+  for (const key of keys) {
+    defineEntry(
+      copy,
+      key,
+      snapshotParamValue(source[key], depth + 1, ancestors),
+    );
   }
 
   ancestors.delete(value);
@@ -216,7 +244,10 @@ export function buildURL(
     const queryStartIndex = urlWithoutHash.indexOf('?');
 
     if (queryStartIndex === -1) {
-      const queryString = qs.stringify(params, { addQueryPrefix: true });
+      const queryString = qs.stringify(params, {
+        ...QS_STRINGIFY_DEPTH,
+        addQueryPrefix: true,
+      });
       url = `${urlWithoutHash}${queryString}${fragment}`;
     } else {
       const basePath = urlWithoutHash.slice(0, queryStartIndex);
@@ -249,7 +280,7 @@ export function buildURL(
       const kept = pairs.filter(
         (pair) => !overridden.has(topLevelQueryKey(pair)),
       );
-      const added = qs.stringify(snapshot);
+      const added = qs.stringify(snapshot, QS_STRINGIFY_DEPTH);
 
       // Params that add nothing and replace no pair of the path's - each unset, or given
       // empty for a key the path does not have - leave the URL as written, its query
@@ -1070,10 +1101,11 @@ function hasXMLHttpRequestGlobal(): boolean {
  * whole. A value that is one non-empty target repeated (`next, next` - a header a server
  * or proxy sent twice - or `Smith, John.pdf, Smith, John.pdf`) is that target. That
  * target, or the value, is then split only where what follows the `, ` starts as a URL
- * target does - a path (`/`, `./`, `../`), a query (`?`) or `scheme://` - so `/a, /b`
- * sent twice is `/a`. A single value with a raw space (`/files/Smith, John.pdf`) is
- * kept whole. A single value with an unencoded `, /`,
- * `, ./`, `, ../`, `, ?` or `, scheme://` in it (`/r?to=/a, /b`) is cut there too, as is
+ * target does - a path (`/`, `./`, `../`), a query (`?`), a fragment (`#`) or
+ * `scheme://` - so `/a, /b` sent twice is `/a`. A single value with a raw space
+ * (`/files/Smith, John.pdf`) is kept whole. A single value with an unencoded `, /`,
+ * `, ./`, `, ../`, `, ?`, `, #` or `, scheme://` in it (`/r?to=/a, /b`) is cut there too,
+ * as is
  * one that is a target written twice (`a, a`): fetch and XHR join repeats into the same
  * text, so the two cannot be told apart. A server percent-encodes the space in such a
  * value.
@@ -1082,7 +1114,7 @@ export function firstJoinedLocation(value: string): string {
   // The repeated unit is split as any value is: `/a, /b` sent twice is `/a`.
   const candidate = repeatedTarget(value) ?? value;
   const separator = candidate.search(
-    /, (?:\/|\.\.?\/|\?|[a-z][a-z\d+.-]*:\/\/)/i,
+    /, (?:\/|\.\.?\/|\?|#|[a-z][a-z\d+.-]*:\/\/)/i,
   );
 
   return separator === -1 ? candidate : candidate.slice(0, separator);
@@ -1090,25 +1122,31 @@ export function firstJoinedLocation(value: string): string {
 
 /**
  * The non-empty target `value` is two or more copies of, joined by `, `, or `undefined`.
- * Only a length that divides the value evenly is tried, each with one comparison, so a
- * long header costs a few passes over it, not one per `, ` in it.
+ * Only a length that divides the value evenly is tried, each compared in place, copy by
+ * copy, so a long header costs a few passes over it, not one per `, ` in it.
  */
 function repeatedTarget(value: string): string | undefined {
-  const joinedLength = value.length + 2;
+  const joined = `${value}, `;
 
   for (
     let comma = value.indexOf(', ');
-    comma > 0;
+    comma !== -1;
     comma = value.indexOf(', ', comma + 1)
   ) {
     const span = comma + 2;
-    if (joinedLength % span !== 0) {
+    // A `, ` at the start is an empty target, which the value is no copies of.
+    if (comma === 0 || joined.length % span !== 0) {
       continue;
     }
 
-    const target = value.slice(0, comma);
-    if (`${value}, ` === `${target}, `.repeat(joinedLength / span)) {
-      return target;
+    const unit = joined.slice(0, span);
+    let offset = span;
+    while (offset < joined.length && joined.startsWith(unit, offset)) {
+      offset += span;
+    }
+
+    if (offset === joined.length) {
+      return value.slice(0, comma);
     }
   }
 

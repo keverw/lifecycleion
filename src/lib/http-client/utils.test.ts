@@ -1799,6 +1799,7 @@ describe('firstJoinedLocation', () => {
     expect(firstJoinedLocation('next, next, next')).toBe('next');
     expect(firstJoinedLocation('a, ./b')).toBe('a');
     expect(firstJoinedLocation('a, ?b=1')).toBe('a');
+    expect(firstJoinedLocation('page2#a, #b')).toBe('page2#a');
     // Not one part repeated, and not starting as a target: kept whole.
     expect(firstJoinedLocation('/files/Smith, John.pdf')).toBe(
       '/files/Smith, John.pdf',
@@ -1811,6 +1812,8 @@ describe('firstJoinedLocation', () => {
       'Smith, John.pdf',
     );
     expect(firstJoinedLocation(', ')).toBe(', ');
+    // A target that starts with `, ` itself, sent twice.
+    expect(firstJoinedLocation(', a, , a')).toBe(', a');
     expect(firstJoinedLocation('a, a, b')).toBe('a, a, b');
   });
 

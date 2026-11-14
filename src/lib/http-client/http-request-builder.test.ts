@@ -1072,6 +1072,156 @@ test('params checks nested values without running a getter, which qs alone reads
   expect(reads).toBe(1);
 });
 
+/** An object `levels` deep: `{ l: { l: ... { v: 1 } } }`. */
+function nestedParam(levels: number): Record<string, unknown> {
+  let value: Record<string, unknown> = { v: 1 };
+  for (let level = 1; level < levels; level++) {
+    value = { l: value };
+  }
+  return value;
+}
+
+test('params refuses a value nested deeper than qs is given, naming the key, without overflowing the stack', async () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+
+  // `a` is at depth 0, so its deepest entry, `v`, is at depth 1000 when it nests 1000.
+  expect(() => client.get('/x').params({ a: nestedParam(1001) })).toThrow(
+    /^HTTPRequestBuilder params\.a(\.l)+ nests deeper than 1000 levels/,
+  );
+  expect(() => client.get('/x').params({ a: nestedParam(200_000) })).toThrow(
+    'nests deeper than 1000 levels',
+  );
+
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const response = await new HTTPClient({ adapter, baseURL: 'http://api.test' })
+    .get('/x')
+    .params({ a: nestedParam(1000) })
+    .send();
+  expect(response.status).toBe(200);
+});
+
+test('params refuses a shared object that nests too deep where it is reached a second time', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  // Ten levels below `shared`: its `v` is at depth 1000 when `shared` is at depth 990.
+  const shared = nestedParam(10);
+  const reachedAt = (depth: number): Record<string, unknown> => {
+    let value: Record<string, unknown> = { shared };
+    for (let level = 1; level < depth; level++) {
+      value = { l: value };
+    }
+    return value;
+  };
+
+  // Seen first at depth 1 under `a`, then again deep under `b`.
+  expect(() =>
+    client.get('/x').params({ a: shared, b: reachedAt(990) }),
+  ).not.toThrow();
+  expect(() =>
+    client.get('/x').params({ a: shared, b: reachedAt(991) }),
+  ).toThrow('shared nests deeper than 1000 levels');
+});
+
+test('a params value changed after .params() is held to the depth qs is given, with or without a query in the path', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  // `a` is at depth 0 and the chain starts at 1, so 999 levels end at depth 1000.
+  for (const path of ['/x', '/x?keep=1']) {
+    for (const [levels, isSent] of [
+      [999, true],
+      [1000, false],
+    ] as const) {
+      const holder: Record<string, unknown> = {};
+      const builder = client.get(path).params({ a: holder });
+      holder.l = nestedParam(levels);
+      const refusal = await builder.send().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      expect(refusal === undefined).toBe(isSent);
+      if (!isSent) {
+        expect((refusal as Error).message).toBe(
+          'Input depth exceeded depth option of 1000',
+        );
+      }
+    }
+  }
+});
+
+test('a getter in an object params reaches twice is read once for each, with or without a query in the path', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  for (const path of ['/x', '/x?k=1']) {
+    let reads = 0;
+    const shared = {
+      get g() {
+        return ++reads;
+      },
+    };
+    const response = await client
+      .get(path)
+      .params({ a: shared, b: shared })
+      .send();
+
+    expect(decodeURIComponent(response.requestURL)).toContain('a[g]=1&b[g]=2');
+  }
+});
+
+test("a params value nested too deep after .params() rejects send() with qs's depth refusal, not a stack overflow", async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  // Without a query in the path, and with one, which `buildURL` snapshots first.
+  for (const path of ['/x', '/x?keep=1']) {
+    const holder: Record<string, unknown> = {};
+    const builder = client.get(path).params({ a: holder });
+    holder.l = nestedParam(200_000);
+    const refusal = await builder.send().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(refusal).toBeInstanceOf(RangeError);
+    expect((refusal as Error).message).toBe(
+      'Input depth exceeded depth option of 1000',
+    );
+  }
+});
+
+test('params checks a function as qs walks one, by its own keys', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  const dated = Object.assign(() => 1, { at: new Date('nope') });
+  const looped: (() => number) & { self?: unknown } = () => 1;
+  looped.self = looped;
+
+  expect(() => client.get('/x').params({ cb: dated })).toThrow(
+    'HTTPRequestBuilder params.cb.at is not a valid Date',
+  );
+  expect(() => client.get('/x').params({ cb: looped })).toThrow(
+    'HTTPRequestBuilder params.cb.self is an object it is nested inside',
+  );
+  expect(() => client.get('/x').params({ cb: () => 1 })).not.toThrow();
+});
+
+test('params checks an object shared under many parents once, not once per path', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  let shared: Record<string, unknown> = { a: 1 };
+  // 2 ** 40 paths to the innermost object.
+  for (let level = 0; level < 40; level++) {
+    shared = { l: shared, r: shared };
+  }
+
+  const startedAt = performance.now();
+  client.get('/x').params({ x: shared });
+  expect(performance.now() - startedAt).toBeLessThan(1000);
+});
+
 test('params walks a typed array as qs does, and keeps a Buffer as its text', () => {
   const client = new HTTPClient({ adapter: new MockAdapter() });
   const bytes = Object.assign(new Uint8Array(1), { extra: new Date('nope') });

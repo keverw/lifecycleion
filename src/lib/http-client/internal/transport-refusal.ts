@@ -1,4 +1,4 @@
-import { BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES } from '../consts';
+import { FETCH_FORBIDDEN_METHODS } from '../consts';
 import {
   asciiLowercase,
   asciiUppercase,
@@ -17,7 +17,7 @@ import { safeParseURL } from '../../domain-utils/domain-utils';
 
 /** Whether `method` is one the Fetch Standard forbids: CONNECT, TRACE or TRACK. */
 export function isForbiddenBrowserMethod(method: string): boolean {
-  return BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(asciiLowercase(method));
+  return FETCH_FORBIDDEN_METHODS.has(asciiLowercase(method));
 }
 
 /** The refusal of a CONNECT, TRACE or TRACK request, by the adapter it was meant for. */
