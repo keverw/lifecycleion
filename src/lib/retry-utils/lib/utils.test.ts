@@ -1,7 +1,40 @@
 import { describe, expect, test } from 'bun:test';
-import { calculateExponentialDelay, getMostCommonError } from './utils';
+import { calculateExponentialDelays, getMostCommonError } from './utils';
 
-describe('calculateExponentialDelay', () => {
+describe('calculateExponentialDelays', () => {
+  test('jitters the base it returns, drawing one random number', () => {
+    let draws = 0;
+    const delays = calculateExponentialDelays({
+      retryCount: 2,
+      minTimeoutMS: 100,
+      maxTimeoutMS: 10_000,
+      factor: 2,
+      dispersion: 0.5,
+      randomFn: () => {
+        draws++;
+        return 1;
+      },
+    });
+
+    expect(delays).toEqual({ delayMS: 600, baseDelayMS: 400 });
+    expect(draws).toBe(1);
+  });
+
+  test('holds both to the bounds', () => {
+    expect(
+      calculateExponentialDelays({
+        retryCount: 10,
+        minTimeoutMS: 100,
+        maxTimeoutMS: 1000,
+        factor: 2,
+        dispersion: 0.5,
+        randomFn: () => 0,
+      }),
+    ).toEqual({ delayMS: 500, baseDelayMS: 1000 });
+  });
+});
+
+describe('calculateExponentialDelays delayMS', () => {
   // Test without dispersion
   test('calculates exponential delay without dispersion correctly', () => {
     const params = {
@@ -15,7 +48,7 @@ describe('calculateExponentialDelay', () => {
 
     const expectedDelay = 400; // 100 * 2^2
 
-    expect(calculateExponentialDelay(params)).toBe(expectedDelay);
+    expect(calculateExponentialDelays(params).delayMS).toBe(expectedDelay);
   });
 
   // Test with dispersion
@@ -35,7 +68,9 @@ describe('calculateExponentialDelay', () => {
     const expectedDelay =
       baseDelay + (0.5 * (dispersionAmount * 2) - dispersionAmount);
 
-    expect(calculateExponentialDelay(params)).toBeCloseTo(expectedDelay);
+    expect(calculateExponentialDelays(params).delayMS).toBeCloseTo(
+      expectedDelay,
+    );
   });
 
   // Test clamping to maxTimeoutMS
@@ -49,14 +84,16 @@ describe('calculateExponentialDelay', () => {
       randomFn: (): number => 0.5,
     };
 
-    expect(calculateExponentialDelay(params)).toBe(params.maxTimeoutMS);
+    expect(calculateExponentialDelays(params).delayMS).toBe(
+      params.maxTimeoutMS,
+    );
   });
 
   // A delay that overflows to `Infinity` would make jitter `Infinity - Infinity`, which is
   // `NaN`, which `clamp` (`Math.max`/`Math.min`) passes straight through. The runner uses
   // a delay as given, and a `NaN` timer runs in about 1ms - a near-busy retry.
   test('an overflowing delay is capped rather than turning into NaN', () => {
-    const delay = calculateExponentialDelay({
+    const { delayMS: delay } = calculateExponentialDelays({
       retryCount: 2,
       minTimeoutMS: 100,
       maxTimeoutMS: 10000,
@@ -70,7 +107,7 @@ describe('calculateExponentialDelay', () => {
   });
 
   test('enough attempts at an ordinary factor also stay finite', () => {
-    const delay = calculateExponentialDelay({
+    const { delayMS: delay } = calculateExponentialDelays({
       retryCount: 5000,
       minTimeoutMS: 100,
       maxTimeoutMS: 10000,
@@ -94,7 +131,9 @@ describe('calculateExponentialDelay', () => {
       randomFn: (): number => 0, // This would give the minimum possible delay with dispersion
     };
 
-    expect(calculateExponentialDelay(params)).toBe(params.minTimeoutMS);
+    expect(calculateExponentialDelays(params).delayMS).toBe(
+      params.minTimeoutMS,
+    );
   });
 });
 

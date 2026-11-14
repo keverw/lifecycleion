@@ -1,4 +1,23 @@
-import { matchesFilter } from './utils';
+import {
+  describeMalformedHTTPMethod,
+  matchesFilter,
+  matchesFilterPhase,
+  mergeHeaders,
+} from './utils';
+import { normalizeStandardMethod } from './internal/http-method';
+import { isPlainRecord } from './internal/plain-record';
+import { describeValue } from '../internal/describe-value';
+import { adoptPromise } from '../internal/adopt-promise';
+import {
+  isUnfilledRequestBody,
+  readRequestBodyContents,
+  releaseRequestBody,
+} from './internal/request-body-copy';
+import {
+  CallbackRegistry,
+  copyCallbackPhase,
+} from './internal/callback-registry';
+import type { RegisteredCallback } from './internal/callback-registry';
 import type {
   RequestInterceptorFilter,
   RequestInterceptor,
@@ -8,79 +27,572 @@ import type {
   InterceptorPhase,
 } from './types';
 
-interface RegisteredInterceptor<T> {
-  fn: T;
-  filter?: RequestInterceptorFilter;
-}
-
-type RemoveFn = () => void;
 const DEFAULT_INTERCEPTOR_PHASES: RequestInterceptorFilter['phases'] = [
   'initial',
 ];
 
-export class RequestInterceptorManager {
-  private interceptors: RegisteredInterceptor<RequestInterceptor>[] = [];
-
-  public add(
-    fn: RequestInterceptor,
-    filter?: RequestInterceptorFilter,
-  ): RemoveFn {
-    const entry: RegisteredInterceptor<RequestInterceptor> = {
-      fn,
-      filter: {
-        ...filter,
-        phases: filter?.phases ?? DEFAULT_INTERCEPTOR_PHASES,
-      },
-    };
-    this.interceptors.push(entry);
-
-    return () => {
-      const idx = this.interceptors.indexOf(entry);
-
-      if (idx !== -1) {
-        this.interceptors.splice(idx, 1);
-      }
-    };
+export class RequestInterceptorManager extends CallbackRegistry<
+  RequestInterceptor,
+  RequestInterceptorFilter
+> {
+  constructor() {
+    super(DEFAULT_INTERCEPTOR_PHASES, 'HTTPClient request interceptor', {
+      fields: ['phases', 'hosts', 'schemes', 'bodyContainsKeys'],
+      phases: ['initial', 'retry', 'redirect'],
+    });
   }
 
-  public async run(
-    request: InterceptedRequest,
-    phase: InterceptorPhase,
-    context: RequestInterceptorContext,
-  ): Promise<InterceptedRequest | InterceptorCancel> {
-    let current = request;
+  /**
+   * Take the current registrations as a chain that later `add()` and removal calls do
+   * not reach. A client takes its parent's snapshot and its own together when a chain run
+   * begins - once per phase of a request - so a callback registered on either while the
+   * other's chain is awaiting applies to the next chain run, not this one.
+   */
+  public snapshot(): InterceptorChain {
+    const interceptors = this.currentRegistrations();
 
-    for (const { fn, filter } of this.interceptors) {
-      if (
-        !matchesFilter(
-          filter ?? {},
-          {
-            method: current.method,
-            requestURL: current.requestURL,
-            body: current.body,
-          },
-          phase.type,
-          'request',
-        )
-      ) {
-        continue;
+    return (request, phase, context, options) =>
+      runInterceptors(interceptors, request, phase, context, options ?? {});
+  }
+}
+
+export type InterceptorChain = (
+  request: InterceptedRequest,
+  phase: InterceptorPhase,
+  context: RequestInterceptorContext,
+  options?: InterceptorChainOptions,
+) => Promise<InterceptedRequest | InterceptorCancel>;
+
+export interface InterceptorChainOptions {
+  /**
+   * Whether the request was cancelled, after which no further interceptor runs and the
+   * chain returns a cancel of its own, with no reason: the caller reads the reason from
+   * whatever cancelled the request.
+   */
+  isCancelled?: () => boolean;
+  /**
+   * What cancels the request, so a cancel does not wait on an interceptor that never
+   * settles - a token refresh that hung - as the attempt does not wait on an adapter that
+   * ignores its abort: `send()` settles as that cancel, and the interceptor's late answer
+   * is ignored.
+   */
+  cancelSignal?: AbortSignal;
+  /**
+   * Whether `request` may be an interceptor's result - a parent client's chain's - rather
+   * than one the client built, so it is copied before an interceptor here reads it.
+   */
+  isInterceptorResult?: boolean;
+  /**
+   * Handed the interceptor result whose copy failed, before the failure is thrown, so the
+   * phase reports from it as it does when its own copy of the chain's result fails.
+   */
+  onCopyFailure?: (request: InterceptedRequest) => void;
+  /**
+   * Called as an interceptor's function is about to be called, so a caller can tell a
+   * result some interceptor was handed the request for - and may have rewritten in place
+   * - from the request it passed, untouched.
+   */
+  onInterceptorCalled?: () => void;
+  /**
+   * The data each JSON body copy a `bodyContainsKeys` filter read was parsed to (see
+   * `readRequestBodyContents`), shared by the phase's chains - a parent client's and a
+   * sub-client's - so the body is parsed once however many of their filters and
+   * interceptors read it, and let go with the phase: nothing else holds it. A chain run
+   * without one keeps its own.
+   */
+  parsedContents?: Map<unknown, object>;
+  /**
+   * Called once, as the first interceptor's function this phase calls is about to be
+   * called - after its filter, which reads the request as it was handed over - and its
+   * answer read in place of the request: the client hands each phase's interceptors a
+   * copy of the parts of the request it keeps this way - the header record in the initial
+   * phase, the body in the retry phase, both in the redirect phase - so one that edits
+   * them in place edits neither the request a cancel or a failure reports, the body the
+   * hop's later attempts start from, what a hop to an origin the caller never chose
+   * sends, nor an upload still under way.
+   * The filters up to and including that interceptor's read the request as handed over,
+   * as on any other hop; the filters after it read the prepared request, or whatever an
+   * interceptor returned in its place. A request no interceptor's function is called
+   * for is never prepared, so a phase with nothing registered for it, or nothing its
+   * filters match, pays nothing.
+   */
+  prepareRequest?: (request: InterceptedRequest) => InterceptedRequest;
+}
+
+async function runInterceptors(
+  interceptors: ReadonlyArray<
+    RegisteredCallback<RequestInterceptor, RequestInterceptorFilter>
+  >,
+  request: InterceptedRequest,
+  phase: InterceptorPhase,
+  context: RequestInterceptorContext,
+  {
+    isCancelled,
+    cancelSignal,
+    isInterceptorResult = false,
+    onCopyFailure,
+    onInterceptorCalled,
+    prepareRequest,
+    parsedContents = new Map<unknown, object>(),
+  }: InterceptorChainOptions,
+): Promise<InterceptedRequest | InterceptorCancel> {
+  const readBodyContents = (
+    body: Record<string, unknown>,
+  ): Record<string, unknown> => readRequestBodyContents(body, parsedContents);
+  let current = request;
+  /** Whether `current` is an interceptor's result, not yet copied. */
+  let isCurrentUncopied = isInterceptorResult;
+  let filterContext:
+    | {
+        request: InterceptedRequest;
+        context: Parameters<typeof matchesFilter>[1];
       }
+    | undefined;
+  /** `prepareRequest` while it is still to be called. */
+  let pendingPrepare = prepareRequest;
 
-      const result = await fn(current, phase, context);
-
-      // null is shorthand for { cancel: true } with no reason
-      if (result === null) {
-        return { cancel: true };
-      }
-
-      // Interceptor signalled cancellation with optional reason
-      if (result && 'cancel' in result && result.cancel === true) {
-        return result;
-      }
-
-      current = result as InterceptedRequest;
+  for (const { fn, filter } of interceptors) {
+    // A cancel made by an earlier interceptor, or while it ran, ends the chain: the request
+    // is not dispatched, so the rest - a token refresh, say - has nothing to prepare.
+    if (isCancelled?.()) {
+      break;
     }
 
-    return current;
+    // Asked first, and only here - `matchesFilter` leaves `phases` to it - as it reads only
+    // the filter: an interceptor this phase never reaches (one registered for `retry`
+    // alone, in the initial phase) reads no request, so it takes no copy - and cannot
+    // change how a result that fails to copy is reported.
+    if (!matchesFilterPhase(filter.phases, phase.type)) {
+      continue;
+    }
+
+    // An earlier interceptor's result, copied before this one's filter and function read
+    // it, as the chain's own result is copied once it ends (see
+    // `snapshotInterceptedRequest`). Uncopied, the two would read it apart: a
+    // `requestURL` getter that answers a trusted host to a filter and another to the
+    // interceptor it guards would hand a token interceptor's credentials to the other
+    // host. Copied only once an interceptor is reached that will read it, so a result no
+    // later interceptor reads is left for the phase to copy. A copy that fails here hands
+    // the phase that result, so the failure is reported from it either way.
+    if (isCurrentUncopied) {
+      try {
+        current = snapshotInterceptedRequest(current);
+      } catch (error) {
+        onCopyFailure?.(current);
+        throw error;
+      }
+      isCurrentUncopied = false;
+    }
+
+    // One context while the request is the same one, so the filters before the next
+    // interceptor that returns another share its URL's parse (see `matchesFilter`). Its
+    // fields are read once, which holds because a context never outlives an interceptor
+    // call: whatever an interceptor returns, `current` itself changed in place included,
+    // is copied into a new object before the next filter reads it.
+    if (filterContext?.request !== current) {
+      filterContext = {
+        request: current,
+        context: {
+          method: current.method,
+          requestURL: current.requestURL,
+          body: current.body,
+        },
+      };
+    }
+
+    // A JSON body copy's contents are parsed from its text only for a
+    // `bodyContainsKeys` filter the rest of which has matched (see
+    // `readRequestBodyContents`).
+    if (
+      !matchesFilter(filter, filterContext.context, 'request', readBodyContents)
+    ) {
+      continue;
+    }
+
+    // After the filter, which reads the request as it was handed over, so this filter
+    // and every one before it match as they do where nothing is prepared; before the
+    // function, the first that can touch the request. Later filters read what it
+    // returns.
+    if (pendingPrepare !== undefined) {
+      const { body: unprepared } = current;
+      current = pendingPrepare(current);
+      pendingPrepare = undefined;
+
+      // A copy of a body a filter parsed takes the data parsed for it, which only one copy
+      // is ever filled with.
+      const parsed = parsedContents.get(unprepared);
+      if (parsed !== undefined && current.body !== unprepared) {
+        parsedContents.delete(unprepared);
+        parsedContents.set(current.body, parsed);
+      }
+    }
+
+    // Asked again: the copy, the filter and the preparation above run caller code - a
+    // getter, a `toJSON` - and a cancel made there ends the chain before this interceptor
+    // runs, as one made by an earlier interceptor does.
+    if (isCancelled?.()) {
+      break;
+    }
+
+    onInterceptorCalled?.();
+
+    const handed = handedRequest(current, parsedContents);
+
+    let result: Awaited<ReturnType<RequestInterceptor>>;
+    // What the interceptor returned, once it has: only the handed request itself can carry
+    // its body on unread (see `keepUnreadContents`).
+    let returned: unknown;
+    try {
+      // Adopted, not awaited as it is: an interceptor is caller code, and one returning
+      // a native promise with its own `constructor` and a no-op `then` would hang the
+      // request. See `adoptPromise()`.
+      ({ value: result } = await untilCancelled(
+        adoptPromise(
+          // The context too, its `redirectHistory` with it: one shared per chain would let
+          // an interceptor that pushes to it or rewrites a field change what the next is
+          // told.
+          fn(handed, copyCallbackPhase(phase), {
+            ...context,
+            redirectHistory: [...context.redirectHistory],
+          }),
+        ),
+        cancelSignal,
+      ));
+      returned = result;
+    } catch (error) {
+      // A cancel made before the interceptor threw - by that interceptor, say - ends the
+      // chain as a cancel, not a failure: whoever cancelled was told the request is
+      // cancelled, and it never goes out, so the error is dropped as its result would be.
+      if (isCancelled?.()) {
+        break;
+      }
+      throw error;
+    } finally {
+      keepUnreadContents(handed, parsedContents, returned === handed);
+    }
+
+    // A cancel made while the interceptor ran ends the chain before its result is read:
+    // that result is never sent, so a value that is no request - `undefined` from an
+    // interceptor that cancelled and returned nothing - is not refused, and a request it
+    // returned is neither copied nor reported.
+    if (isCancelled?.()) {
+      break;
+    }
+
+    // null is shorthand for { cancel: true } with no reason
+    if (result === null) {
+      return makeInterceptorCancel(undefined);
+    }
+
+    // Refused here, before anything reads it as a request: an `in` check on a primitive
+    // throws its own obscure TypeError, and a forgotten `return request` answers
+    // `undefined`, which the next interceptor's filter would fail to read.
+    const candidate: unknown = result;
+    if (typeof candidate !== 'object') {
+      throw new TypeError(
+        `[HTTPClient] Interceptor returned a value that is not a request, a cancel or null (got ${typeof candidate}).`,
+      );
+    }
+
+    // Interceptor signalled cancellation with optional reason. Only `cancel: true`
+    // cancels: a request carrying `cancel: false` is passed on as a request.
+    if (result && 'cancel' in result && result.cancel === true) {
+      // Read once, and kept only as a string: it becomes `cancelReason`, which is
+      // typed as one, as the stream factory's cancel reason is.
+      const reason: unknown = result.reason;
+
+      return makeInterceptorCancel(
+        typeof reason === 'string' ? reason : undefined,
+      );
+    }
+
+    current = result as InterceptedRequest;
+    isCurrentUncopied = true;
   }
+
+  // A cancel, of the chain's own, rather than the request it reached - which may be an
+  // interceptor's result, not yet copied: the request is not sent, so nothing reads that
+  // result, and the chain's answer says it was cancelled, so every phase ends it as it
+  // ends an interceptor's cancel. Asked here, once, for every way out of the loop above,
+  // and for a cancel made while a result was read as a cancel or not - a `Proxy` whose
+  // `has` trap cancels.
+  return isCancelled?.() ? makeInterceptorCancel(undefined) : current;
+}
+
+/**
+ * `answer`, or an answer holding nothing once `signal` aborts - which the chain reads as
+ * the cancel it is before looking at the value. A rejection after that is `answer`'s own,
+ * handled here, and dropped as its result would be.
+ */
+export function untilCancelled<T>(
+  answer: Promise<{ value: T }>,
+  signal: AbortSignal | undefined,
+): Promise<{ value: T }> {
+  if (signal === undefined) {
+    return answer;
+  }
+
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      resolve({ value: undefined as T });
+    };
+
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    answer
+      .then(resolve, reject)
+      .finally(() => {
+        signal.removeEventListener('abort', onAbort);
+      })
+      .catch(() => undefined);
+  });
+}
+
+/**
+ * What `handedRequest` keeps of a request it handed an interceptor with a lazy `body`: the
+ * accessor's own getter, and the body it answers - the JSON body copy, until it is read
+ * or replaced - and whether either has happened; and, while the interceptor runs, the
+ * data a filter parsed the copy to, which a read fills it with.
+ */
+interface LazyBody {
+  get: () => unknown;
+  body: unknown;
+  isTouched: boolean;
+  parsed: object | undefined;
+}
+
+const lazyBodyByRequest = new WeakMap<object, LazyBody>();
+
+/**
+ * The request an interceptor's function is handed. A JSON body copy still sent as its text
+ * (see `isUnfilledRequestBody`) is handed behind a `body` accessor on a copy of the request:
+ * read, it is parsed back and released to the interceptor (see `releaseRequestBody`), to
+ * keep and change in place; assigned, the new value replaces it. An interceptor that never
+ * reads it - one that sets a header in place and returns the request - leaves it unparsed,
+ * and `snapshotInterceptedRequest` takes it as it is, so it is sent as its text, with no
+ * parse and no second serialization. The data a filter parsed the copy to is taken from
+ * `parsedContents` for the read to fill it with, and put back by `keepUnreadContents` once
+ * the interceptor has run if it was not read. Any other body is released and the request
+ * handed as it is.
+ */
+function handedRequest(
+  request: InterceptedRequest,
+  parsedContents: Map<unknown, object>,
+): InterceptedRequest {
+  const { body } = request;
+
+  if (!isUnfilledRequestBody(body)) {
+    // Caller code may keep the body it is handed and change it in place, so a JSON copy
+    // the client took is no longer sent as the text it was read from.
+    releaseRequestBody(body);
+    return request;
+  }
+
+  const lazy: LazyBody = {
+    get: () => {
+      // Read once it is released: a parse that throws leaves it unread, so the next read
+      // parses it again rather than answering the empty copy.
+      if (!lazy.isTouched) {
+        releaseRequestBody(lazy.body, lazy.parsed);
+        lazy.isTouched = true;
+        lazy.parsed = undefined;
+      }
+
+      return lazy.body;
+    },
+    body,
+    isTouched: false,
+    parsed: parsedContents.get(body),
+  };
+  parsedContents.delete(body);
+  const handed = { ...request };
+
+  // An accessor that stays one, so a request the interceptor froze is still read.
+  Object.defineProperty(handed, 'body', {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    __proto__: null,
+    get: lazy.get,
+    set: (value: unknown) => {
+      lazy.isTouched = true;
+      lazy.body = value;
+      lazy.parsed = undefined;
+    },
+    enumerable: true,
+    configurable: true,
+  } as PropertyDescriptor);
+  lazyBodyByRequest.set(handed, lazy);
+
+  return handed;
+}
+
+/**
+ * Once an interceptor `handedRequest` handed `request` to has run: the data a filter parsed
+ * its body to, if the interceptor neither read nor assigned the body and returned
+ * `request` itself (`isCarriedOn`) - the one object its unread body travels on - goes back
+ * into `parsedContents`, for the phase's later filters and interceptors. Otherwise it is
+ * dropped: a request returned in its place carries another body, and one that threw or
+ * cancelled ends the chain. Either way the handed request, which the interceptor may
+ * keep, holds none of it.
+ */
+function keepUnreadContents(
+  request: InterceptedRequest,
+  parsedContents: Map<unknown, object>,
+  isCarriedOn: boolean,
+): void {
+  const lazy = lazyBodyByRequest.get(request);
+
+  if (lazy?.parsed !== undefined) {
+    if (isCarriedOn) {
+      parsedContents.set(lazy.body, lazy.parsed);
+    }
+    lazy.parsed = undefined;
+  }
+}
+
+/**
+ * A request's `body` as `snapshotInterceptedRequest` reads it: for a request `handedRequest`
+ * handed out whose `body` is still its own accessor and was neither read nor assigned, the
+ * JSON body copy itself, unreleased; for any other, `request.body`, read once.
+ */
+function interceptedBody(request: InterceptedRequest): unknown {
+  const lazy = lazyBodyByRequest.get(request);
+
+  if (
+    lazy !== undefined &&
+    !lazy.isTouched &&
+    Object.getOwnPropertyDescriptor(request, 'body')?.get === lazy.get
+  ) {
+    return lazy.body;
+  }
+
+  return request.body;
+}
+
+/**
+ * Read a request an interceptor returned once, into a plain object the client owns: in the
+ * chain, before the next interceptor reads it (see `runInterceptors`), and the chain's
+ * result in each phase once the chain ends.
+ *
+ * An interceptor's result is caller code: any member can be a getter, and the header
+ * record a `Proxy` or an object whose entries are getters. Everything after it validates
+ * a field and then uses it - the next interceptor's filter and then the interceptor; once
+ * the chain is done, the URL is checked as http(s), then read again for the cookie jar
+ * and again for the adapter; the headers are checked against the browser-restricted
+ * list, then merged for dispatch - and each of those reads could answer differently. A
+ * `requestURL` getter that answers `https://api.example/x` to the check and
+ * `https://evil.example/` afterwards would attach `api.example`'s cookies to a request
+ * sent to `evil.example`. Taken here, once, every later check and use sees the same
+ * values.
+ *
+ * Header values are normalized here as `mergeHeaders` normalizes them for dispatch - a
+ * single value converted to a string, an array's elements each converted, and a
+ * one-element array collapsed to its string - so a value whose `toString` answers
+ * differently on each call is checked and sent as one string. Names are lowercased, and
+ * an unset value removes the header whatever its capitalization. A standard method is
+ * uppercased (see `normalizeStandardMethod`), so a `post` is the `POST` the retry and
+ * redirect rules check for, and a `connect` is the `CONNECT` a filter selects and the
+ * client refuses; any other method is kept as given.
+ * Throws on a `requestURL` that is not a string, a `method` that is not a method name
+ * (see `describeMalformedHTTPMethod`), or `headers` that is not a plain object (an array,
+ * a `Headers` or a `Map` is refused), and on any read or conversion that throws; each
+ * phase reports that as the interceptor's failure. A `CONNECT` is a method name: handed
+ * to the next interceptor as any other, and refused once the chain's URL is checked, as
+ * FetchAdapter, XHRAdapter and NodeAdapter refuse a request's URL before its method.
+ */
+export function snapshotInterceptedRequest(
+  request: InterceptedRequest,
+): ResolvedRequest {
+  const { requestURL, method, headers } = request;
+  const body = interceptedBody(request);
+
+  if (typeof requestURL !== 'string') {
+    throw new TypeError(
+      `[HTTPClient] Interceptor returned a request whose requestURL is not a string (got ${describeValue(requestURL)}).`,
+    );
+  }
+
+  const methodProblem = describeMalformedHTTPMethod(method);
+
+  if (methodProblem !== undefined) {
+    throw new TypeError(
+      `[HTTPClient] Interceptor returned a request whose method ${methodProblem}.`,
+    );
+  }
+
+  const normalizedMethod = normalizeStandardMethod(method);
+
+  const candidateHeaders: unknown = headers;
+
+  // A plain record only (see `isPlainRecord`): a `Headers` or `Map` would have every
+  // header it carries silently dropped, and an array's indices taken for names.
+  if (!isPlainRecord(candidateHeaders)) {
+    const got =
+      candidateHeaders === null
+        ? 'null'
+        : Array.isArray(candidateHeaders)
+          ? 'an array'
+          : typeof candidateHeaders !== 'object'
+            ? typeof candidateHeaders
+            : 'an object with a non-Object prototype, such as Headers or Map';
+    throw new TypeError(
+      `[HTTPClient] Interceptor returned a request whose headers is not a plain object (got ${got}).`,
+    );
+  }
+
+  // Read as every other phase's headers are: names lowercased, and an unset value
+  // removing the header, whatever its capitalization -
+  // `{ ...request.headers, Authorization: undefined }` drops `authorization` rather
+  // than sending it.
+  const headersSnapshot = mergeHeaders(
+    candidateHeaders as Record<string, string | string[]>,
+  );
+
+  return {
+    requestURL,
+    method: normalizedMethod,
+    headers: headersSnapshot,
+    body,
+  };
+}
+
+/**
+ * A request as the client holds it once its headers are normalized - names lowercased,
+ * values strings or arrays, unset ones removed: what `snapshotInterceptedRequest` returns
+ * and what the attempt loop sends. Typed apart from {@link InterceptedRequest}, whose
+ * headers may still carry an interceptor's `undefined`, so a step that only copies
+ * headers can rely on that without normalizing them again.
+ */
+export type ResolvedRequest = Omit<InterceptedRequest, 'headers'> & {
+  headers: Record<string, string | string[]>;
+};
+
+/**
+ * The cancels a chain has returned. Each is the chain's own object rather than the
+ * interceptor's, so telling one from a request reads nothing the caller supplied: a
+ * request whose `cancel` key is `false`, or whose getter answers differently on a
+ * second read, cannot be taken for a cancel once the chain has passed it on.
+ */
+const interceptorCancels = new WeakSet<object>();
+
+/**
+ * A cancel of the client's own, which {@link isInterceptorCancel} tells from a request,
+ * carrying `reason` when there is one.
+ */
+function makeInterceptorCancel(reason: string | undefined): InterceptorCancel {
+  const cancel: InterceptorCancel =
+    reason !== undefined ? { cancel: true, reason } : { cancel: true };
+  interceptorCancels.add(cancel);
+
+  return cancel;
+}
+
+/** Whether an {@link InterceptorChain} result is a cancel rather than a request. */
+export function isInterceptorCancel(
+  result: InterceptedRequest | InterceptorCancel,
+): result is InterceptorCancel {
+  return interceptorCancels.has(result);
 }

@@ -1,59 +1,252 @@
 import {
+  describeRefusedHeader,
+  dropTransportFramedHeaders,
+  materializeRequestHeaders,
+  requestHeaderPairs,
+} from '../internal/header-utils';
+import { defineEntry } from '../../internal/define-entry';
+import { concatChunks } from '../internal/concat-chunks';
+import {
+  isSignalAborted,
+  isSignalAbortedQuietly,
+  readAdapterRequestFields,
+} from '../internal/request-fields';
+import {
+  connectRefusal,
+  isAbortError,
+  makeAbortError,
+  markResponseStreamAbort,
+  markNonRetryableAdapterError,
+  nonRetryableAdapterErrorFrom,
+  unsendableBrowserBodyRefusal,
+} from '../internal/adapter-error';
+import {
   extractFetchHeaders,
-  resolveDetectedRedirectURL,
-  stripCrossOriginURLCredentials,
+  derivedRedirectFields,
+  resolveBrowserDispatchURL,
 } from '../utils';
-import { guardProgressCallback } from '../internal/progress';
+import {
+  knownBodyByteLength,
+  completeProgressEvent,
+} from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
-import { REDIRECT_STATUS_CODES, RESPONSE_STREAM_ABORT_FLAG } from '../consts';
+import {
+  hasResponseBody,
+  isIdentityContentEncoding,
+  tooLargeAnswer,
+  streamErrorAnswer,
+  parseContentLength,
+} from '../internal/response-limit';
 import type {
   HTTPAdapter,
   AdapterRequest,
   AdapterResponse,
   AdapterType,
 } from '../types';
+import { markBuiltInNetworkAdapter } from '../internal/built-in-adapter';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
 // original value retained on cause for consumers of the normalized error.
-import { isErrorValue, toError as normalizeError } from '../../to-error';
-// Guard error members for the same reason adapter marker reads are guarded.
-import { readMember as readObjectMember } from '../../internal/read-member';
+import { toError as normalizeError } from '../../to-error';
+// Members of a body or a thrown error read guarded, for the same reason adapter marker
+// reads are.
+import { readUnknownMember } from '../../internal/read-member';
+import { adoptPromise } from '../../internal/adopt-promise';
+import { noop, observeRejection } from '../../internal/promise-reactions';
+import { isObjectLike } from '../../internal/is-object-like';
+import {
+  readBinaryByteLength,
+  isUint8ArrayValue,
+} from '../../internal/binary-view';
+import { asciiLowercase, asciiUppercase } from '../../internal/ascii-text';
+import {
+  blockedPortMessage,
+  bodyOnBodilessMethodMessage,
+  fetchBlockedPort,
+  fetchRefusedHeader,
+  fetchRefusedHeaderMessage,
+  forbiddenMethodMessage,
+  isBodilessMethod,
+  isForbiddenBrowserMethod,
+} from '../internal/transport-refusal';
+import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
 
 export class FetchAdapter implements HTTPAdapter {
+  constructor() {
+    // Its class's `send`, so the client hands it the request body uncopied while that is
+    // the `send` called (see `isBuiltInNetworkSend`).
+    markBuiltInNetworkAdapter(
+      this,
+      Reflect.get(FetchAdapter.prototype, 'send'),
+    );
+  }
+
   public getType(): AdapterType {
     return 'fetch';
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    // Guarded once, at the boundary, so every call site below is covered - including the
-    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
-    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
-    // change whether a request succeeded; a throwing callback used to propagate out and be
-    // classified as a transport failure. See `guardProgressCallback`.
-    const guardedUploadProgress = guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    );
-    const guardedDownloadProgress = guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    );
-
-    const { requestURL, method, headers, body, signal } = request;
-    const dispatchedURL = stripCrossOriginURLCredentials(
+    // `maxResponseBytes` is the most a buffered body may hold, as `fetch` decodes it.
+    const {
+      guardedUploadProgress,
+      guardedDownloadProgress,
+      body,
+      signal,
+      headers,
+      method,
+      maxResponseBytes,
       requestURL,
-      request.initialURL,
+      initialURL,
+    } = readAdapterRequestFields(request);
+    // A relative URL is resolved as `fetch` resolves it, against the document's base URL
+    // or the worker's `location`, with credentials withheld for another origin than the
+    // initial URL's; one that does not resolve, or is not http(s), is refused as the
+    // non-retryable `adapter_error` it is (see `resolveBrowserDispatchURL`). Unresolved,
+    // `fetch` would throw an invalid URL error retried as a network failure to no end. The
+    // URL sent, and what a `Location` resolves against.
+    const dispatchedURL = resolveBrowserDispatchURL(
+      requestURL,
+      initialURL,
+      'FetchAdapter',
     );
 
-    // Fire 0% upload progress
-    guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+    if (typeof dispatchedURL !== 'string') {
+      throw dispatchedURL;
+    }
+
+    // A port the Fetch Standard blocks is refused by Node's and every browser's `fetch`
+    // on every attempt - a browser's as an opaque `TypeError`, retried as a network
+    // failure with nothing sent - and sent by Bun's: refused here, on every runtime, as
+    // part of the URL, before the body, the method and the headers are checked and
+    // before anything is reported.
+    const blockedPort = fetchBlockedPort(dispatchedURL);
+    if (blockedPort !== undefined) {
+      const refusal = new TypeError(
+        blockedPortMessage('FetchAdapter', blockedPort),
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
+
+    // `fetch` sends a plain object as `[object Object]` and a number as its text, and on
+    // Node fails a `ReadableStream` on every attempt as a network error: refused, as every
+    // adapter refuses a body it does not send. A React Native form is one its `fetch`
+    // sends (see `unsendableBrowserBodyRefusal`).
+    const bodyRefusal = unsendableBrowserBodyRefusal('FetchAdapter', body);
+    if (bodyRefusal !== undefined) {
+      throw bodyRefusal;
+    }
+
+    // Refused by name, before the method, in the order NodeAdapter refuses its own; and
+    // here, on every runtime, before the 0% upload event, rather than left to the runtime:
+    // Node's `fetch` refuses one only once it dispatches, and Bun's sends it (see
+    // `fetchRefusedHeader`).
+    const refusedHeader = fetchRefusedHeader(headers);
+    if (refusedHeader !== undefined) {
+      const refusal = new TypeError(
+        fetchRefusedHeaderMessage('FetchAdapter', refusedHeader),
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
+
+    // The Fetch Standard forbids these, but Bun's `fetch` sends a `CONNECT` or `TRACE`, so
+    // they are refused here, on every runtime, rather than left to it - a `CONNECT` as
+    // every adapter refuses one.
+    if (isForbiddenBrowserMethod(method)) {
+      if (asciiUppercase(method) === 'CONNECT') {
+        throw connectRefusal('FetchAdapter');
+      }
+      const refusal = new Error(forbiddenMethodMessage('FetchAdapter', method));
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
+
+    dropTransportFramedHeaders(headers, body);
+
+    // `fetch` refuses a GET or HEAD with any body that is not `null`, an empty string
+    // included, on every attempt - a `TypeError` with no code, which would be retried as a
+    // network failure to no end. The probe below is built without the body, so it is
+    // checked here. `HTTPClient` refuses one before this, and hands a JSON body that
+    // serializes to nothing over as `null`.
+    if (isBodilessMethod(method) && body !== null && body !== undefined) {
+      const refusal = new Error(bodyOnBodilessMethodMessage('fetch', method));
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
+
+    // Checked before it is sent, so a request fetch refuses to build - Node's fetch refuses
+    // a URL carrying credentials, on every attempt - fails once as the non-retryable
+    // `adapter_error` it is, rather than as a network error retried to no end. Built
+    // without the body or signal, which `fetch` below takes, so nothing is consumed. A
+    // header value or method `fetch` refuses is caught here too, rather than coming back
+    // from `fetch` as its `TypeError` and retried the same way.
+    //
+    // Only where it can be: a runtime with `Request` - a test setup that polyfills only
+    // `fetch` has none. There the headers are still checked, by `Headers` where it exists,
+    // so a value it refuses is not retried either.
+    //
+    // Refused in its own words, and without the runtime's error: that quotes what it
+    // refused - Bun a header value, Node a URL with its userinfo and query - and a
+    // carrier's message and `cause` reach logs.
+    //
+    // The headers are materialized once, here, and kept for `fetch` below.
+    let fetchHeaders: HeadersInit;
+    try {
+      fetchHeaders = materializeFetchHeaders(headers);
+      if (typeof Request !== 'function' && typeof Headers === 'function') {
+        new Headers(fetchHeaders);
+      }
+    } catch {
+      throw refusedRequestBuild(headers);
+    }
+
+    if (typeof Request === 'function') {
+      let builtMethod: string;
+      try {
+        builtMethod = new Request(dispatchedURL, {
+          method,
+          headers: fetchHeaders,
+          redirect: 'manual',
+        }).method;
+      } catch {
+        throw refusedRequestBuild(headers);
+      }
+
+      // A runtime that rewrites the method - Bun's fetch reads one it does not know as
+      // `GET` - would send a different request than the caller's, and report its answer
+      // as a success: a state-changing custom verb landing on a GET handler. Refused.
+      // Compared exactly: a standard method is already uppercase (see
+      // `readAdapterMethod`), and any other is case-sensitive - a `fetch` that
+      // uppercases `purge` sends a different method, which a server may route apart.
+      if (builtMethod !== method) {
+        const refusal = new Error(
+          `[FetchAdapter] This runtime's fetch would send the ${method} request as ${builtMethod}. Use NodeAdapter for it.`,
+        );
+        markNonRetryableAdapterError(refusal);
+        throw refusal;
+      }
+    }
+
+    // Read through the guarded accessor before anything is dispatched, as the other
+    // adapters read it: `fetch` reads the signal's internal state, not the getter, so a
+    // signal whose `aborted` throws would otherwise go out unrefused. An aborted one is
+    // `fetch`'s to reject, with its reason. The failure paths below read it quietly.
+    const wasAbortedAtDispatch = isSignalAborted(signal);
+
+    // Fire 0% upload progress - once every refusal above has passed, so a request refused
+    // before anything is sent, an aborted one included, reports no upload start. One that
+    // cancels here aborts the signal `fetch` is handed, which rejects with it.
+    if (!wasAbortedAtDispatch) {
+      guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+    }
 
     let response: Response;
 
     try {
       response = await fetch(dispatchedURL, {
         method,
-        headers: materializeFetchHeaders(headers),
+        headers: fetchHeaders,
         body: body as BodyInit | null,
         signal: signal ?? null,
         redirect: 'manual',
@@ -62,11 +255,33 @@ export class FetchAdapter implements HTTPAdapter {
       // Re-throw AbortErrors and any error thrown when the signal is already
       // aborted. When abort(string) is called, fetch rejects with the string
       // itself (not an AbortError), so checking signal.aborted covers that case.
-      if (isAbortError(error) || signal?.aborted) {
+      if (isAbortError(error) || isSignalAbortedQuietly(signal)) {
         throw error; // preserve cancellation / timeout classification
       }
 
       const normalizedError = normalizeError(error);
+
+      // A request Node's undici refuses at dispatch rather than at `new Request` - a header
+      // or a port it refuses that `fetchRefusedHeader` and `fetchBlockedPort` above do not
+      // know of - is refused the same way on every attempt, so it fails once as the
+      // non-retryable `adapter_error` it is, as the `new Request` refusals above do,
+      // rather than as a network error retried to no end with nothing sent. Told by
+      // undici's error code, not by header name, so one a later Node refuses is caught.
+      if (isFetchDispatchRefusal(normalizedError)) {
+        throw nonRetryableAdapterErrorFrom(normalizedError);
+      }
+
+      // A signal that is not this runtime's own AbortSignal - from a polyfill or jsdom's
+      // `AbortController`, which `fetch` cannot read - is refused the same way too. Asked
+      // only of what `fetch` threw, so a stubbed `fetch` that takes one still gets it, and
+      // a network failure with one stays a network failure.
+      if (isSignalRefusal(normalizedError, dispatchedURL, signal)) {
+        throw nonRetryableAdapterErrorFrom(
+          new TypeError(
+            "FetchAdapter request could not be sent: this runtime's fetch refused its signal, which is not a native AbortSignal",
+          ),
+        );
+      }
 
       // TLS certificate failures → 495, matching NodeAdapter. A rejected
       // certificate fails identically every time, and `status: 0` is retryable.
@@ -92,18 +307,52 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
+    // Each read once and guarded, as a polyfill's or test double's response may carry any
+    // getter. One that throws fails the same way on every attempt, so it is refused as
+    // non-retryable rather than repeating a request the server answered, and its body let go.
+    let responseType: unknown;
+    let isOpaqueRedirect: boolean;
+    let status = 0;
+    let responseHeadersForBody: Record<string, string | string[]> = {};
+
+    try {
+      responseType = response.type;
+      isOpaqueRedirect = responseType === 'opaqueredirect';
+
+      if (!isOpaqueRedirect) {
+        status = response.status;
+        responseHeadersForBody = extractFetchHeaders(response.headers);
+      }
+    } catch (error) {
+      cancelBodyQuietly(readUnknownMember(response, 'body'));
+      // The server answered, so the upload ended, as on every other answered path.
+      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+
+      // A cancellation stays a cancellation, as on the body read below.
+      if (isAbortError(error) || isSignalAbortedQuietly(signal)) {
+        throw isAbortError(error) ? error : makeAbortError();
+      }
+
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+
     // Browser-only: `redirect: 'manual'` in a browser context yields an opaque
     // redirect response (status 0, no accessible Location header) due to CORS
     // security constraints. In server runtimes (Bun, Node) `redirect: 'manual'`
     // returns the real 3xx with a Location header, so this branch is never hit
     // there — the real status falls through to the normal return path below and
     // HTTPClient's redirect loop handles it as usual.
-    if (response.type === 'opaqueredirect') {
+    if (isOpaqueRedirect) {
       // Even though the client will classify this as redirect_disabled, the
       // browser completed the fetch operation. Emit terminal progress so the
       // browser adapters match the server/mock adapters' completion semantics.
-      guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
-      guardedDownloadProgress?.({ loaded: 0, total: 0, progress: 1 });
+      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+
+      // Not for a request that callback cancelled, which reports no completion, as a
+      // cancelled download never does: the client sorts the redirect from the cancel.
+      if (!isSignalAbortedQuietly(signal)) {
+        guardedDownloadProgress?.(completeProgressEvent(0));
+      }
 
       return {
         status: 0,
@@ -113,15 +362,34 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
-    // Fire 100% upload + download progress (fetch has no real per-chunk progress)
-    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+    // Fire 100% upload progress (fetch has no real per-chunk progress). Download progress
+    // fires once the body has been read and passed the limit, below.
+    guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
 
-    const responseHeadersForBody = extractFetchHeaders(response.headers);
+    // A cancel from that callback ends the request as a cancel over the answer, as the
+    // body read below ends one, and as NodeAdapter ends it: a bodiless answer has no read
+    // to stop, and would otherwise resolve as though it had not been cancelled.
+    // The body is let go of, as on every abort once the headers are in: a polyfill's Node
+    // `Readable` would hold its socket until the server closed it.
+    if (isSignalAbortedQuietly(signal)) {
+      cancelBodyQuietly(readUnknownMember(response, 'body'));
+      throw markResponseStreamAbort(
+        makeAbortError(),
+        status,
+        responseHeadersForBody,
+      );
+    }
 
-    let rawBody: Uint8Array | null;
+    let rawBody: Uint8Array | null | typeof RESPONSE_TOO_LARGE;
 
     try {
-      rawBody = await readResponseBody(method, response);
+      rawBody = await readResponseBody(
+        method,
+        response,
+        { status, headers: responseHeadersForBody, type: responseType },
+        maxResponseBytes,
+        signal,
+      );
     } catch (error) {
       // Headers already arrived, so the status is real and the body transfer is
       // what failed. Resolve with isStreamError rather than throwing, which would
@@ -133,174 +401,561 @@ export class FetchAdapter implements HTTPAdapter {
       // out with the error, the way NodeAdapter tags its aborts, and the client
       // sorts it: cancel stays cancelled, a post-header timeout becomes a
       // terminal stream error with the real status.
-      if (isAbortError(error) || signal?.aborted) {
-        throw markResponseStreamAbort(
-          error,
-          response.status,
-          responseHeadersForBody,
-        );
+      if (isAbortError(error) || isSignalAbortedQuietly(signal)) {
+        throw markResponseStreamAbort(error, status, responseHeadersForBody);
       }
 
       // Redirect detection is reported the same way as on the success path: the
       // headers arrived, so a 3xx here still knows where it was pointing, and a
       // truncated body must not lose the target an intact one would report.
-      const detectedRedirectURL = resolveDetectedRedirectURL(
+      //
+      // The body is only collected here, never written out, so there is no local write to
+      // fail: what reaches here is a failed transfer or a chunk `readBodyWithin` refused.
+      return streamErrorAnswer(
         dispatchedURL,
-        response.status,
+        status,
         responseHeadersForBody,
+        'stream_response_error',
+        isRuntimeDecodeFailure(error, responseHeadersForBody)
+          ? decodeFailure(error)
+          : normalizeError(error),
       );
-
-      return {
-        status: response.status,
-        wasRedirectDetected:
-          detectedRedirectURL !== undefined ||
-          REDIRECT_STATUS_CODES.has(response.status),
-        ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
-        headers: responseHeadersForBody,
-        body: null,
-        isStreamError: true,
-        // fetch buffers the body for us, so there is no per-chunk delivery to
-        // distinguish a local write failure from an upstream stream failure.
-        // Everything reaching here is an upstream/transfer failure.
-        streamErrorCode: 'stream_response_error',
-        errorCause: normalizeError(error),
-      };
     }
 
-    guardedDownloadProgress?.({
-      loaded: rawBody?.length ?? 0,
-      total: rawBody?.length ?? 0,
-      progress: 1,
-    });
+    // A body over the limit fails as a stream error with the real status, as a body that
+    // failed in transit does just above: the server answered, and what failed is taking
+    // delivery. No terminal progress, for the reason a failed read reports none.
+    if (rawBody === RESPONSE_TOO_LARGE) {
+      return tooLargeAnswer(
+        dispatchedURL,
+        status,
+        responseHeadersForBody,
+        maxResponseBytes,
+      );
+    }
 
-    const responseHeaders = responseHeadersForBody;
-    const detectedRedirectURL = resolveDetectedRedirectURL(
-      dispatchedURL,
-      response.status,
-      responseHeaders,
-    );
+    guardedDownloadProgress?.(completeProgressEvent(rawBody?.length ?? 0));
 
     return {
-      status: response.status,
+      status,
       // Server/runtime manual redirects reach this path as real 3xx responses.
       // Browser opaque redirects returned above never reach this branch.
-      wasRedirectDetected:
-        detectedRedirectURL !== undefined ||
-        REDIRECT_STATUS_CODES.has(response.status),
-      ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
-      headers: responseHeaders,
+      ...derivedRedirectFields(dispatchedURL, status, responseHeadersForBody),
+      headers: responseHeadersForBody,
       body: rawBody,
     };
   }
 }
 
+/** How many empty chunks a body read takes between the waits that let timers run. */
+const EMPTY_CHUNKS_PER_YIELD = 64;
+
+/** What {@link readResponseBody} answers for a body over `maxResponseBytes`. */
+const RESPONSE_TOO_LARGE = Symbol('response too large');
+
+/**
+ * The response body's bytes, `null` for a response that carries none, or
+ * {@link RESPONSE_TOO_LARGE} once the body passes `maxResponseBytes`.
+ *
+ * With a limit, the body is read chunk by chunk and counted as it arrives, so a body over
+ * it is cancelled - the rest neither downloaded nor held - rather than buffered whole by
+ * `arrayBuffer()` and refused afterwards. Without one, or without a `body` that is a web
+ * stream or async-iterable (a test double, an XHR-based polyfill), it is read whole through
+ * `arrayBuffer()`, and checked after where there is a limit.
+ */
 async function readResponseBody(
   method: string,
   response: Response,
-): Promise<Uint8Array | null> {
-  if (method === 'HEAD' || response.status === 204 || response.status === 304) {
+  answered: {
+    status: number;
+    headers: Record<string, string | string[]>;
+    type: unknown;
+  },
+  maxResponseBytes: number,
+  signal: AbortSignal | undefined,
+): Promise<Uint8Array | null | typeof RESPONSE_TOO_LARGE> {
+  // `body`, and its `getReader` and `Symbol.asyncIterator`, each read once and guarded, as
+  // a polyfill's or test double's response may carry any getter: one that throws reads as
+  // absent. `arrayBuffer()` is the read of last resort; a failure there fails the send.
+  const body = readUnknownMember(response, 'body');
+
+  if (!hasResponseBody(method, answered.status)) {
+    // Native `fetch` hands over no body here, but a polyfill's Node `Readable` would hold
+    // its socket until the server closed it.
+    cancelBodyQuietly(body);
     return null;
   }
 
-  const buffer = await response.arrayBuffer();
-  return new Uint8Array(buffer);
-}
+  if (maxResponseBytes === Number.POSITIVE_INFINITY) {
+    return await readWholeBody(response, body, signal);
+  }
 
-function isAbortError(error: unknown): boolean {
-  const normalized = asError(error);
+  // Refused before reading when the body says up front it is over the limit - only where
+  // its `Content-Length` counts what `fetch` hands over, which is the decoded body: so
+  // not when a coding is applied, nor when one may be hidden. A browser exposes
+  // `Content-Encoding` on a cross-origin (`cors`) response only when the server lists it
+  // in `Access-Control-Expose-Headers`, so its absence there proves nothing.
+  const contentEncoding = answered.headers['content-encoding'];
+  const isIdentityEncoded =
+    contentEncoding === undefined
+      ? answered.type !== 'cors'
+      : isIdentityContentEncoding(contentEncoding);
+  const declaredLength = isIdentityEncoded
+    ? parseContentLength(answered.headers['content-length'])
+    : undefined;
 
-  return (
-    normalized !== undefined &&
-    readObjectMember(normalized, 'name') === 'AbortError'
+  if (declaredLength !== undefined && declaredLength > maxResponseBytes) {
+    cancelBodyQuietly(body);
+    return RESPONSE_TOO_LARGE;
+  }
+
+  // Read through a reader only where the body is a web stream. A polyfilled `fetch`
+  // (node-fetch, cross-fetch) hands over a Node `Readable`, which has no `getReader`, and
+  // a test double may hand over anything: those that are not async-iterable either are
+  // read whole and checked after.
+  const getReader = readUnknownMember(body, 'getReader');
+
+  if (typeof getReader !== 'function') {
+    // A Node `Readable` is async-iterable: read it a chunk at a time as well, so a body
+    // over the limit is neither read whole first nor left holding its socket. Iterated
+    // through the method read here, not read again by `for await`.
+    const iterate = readUnknownMember(body, Symbol.asyncIterator);
+
+    if (typeof iterate === 'function') {
+      const iterable: AsyncIterable<unknown> = {
+        [Symbol.asyncIterator]: () =>
+          Reflect.apply(iterate, body, []) as AsyncIterator<unknown>,
+      };
+      // Text taken as well, as its UTF-8 bytes: a `Readable` given an encoding yields
+      // strings, which node-fetch 3's own `arrayBuffer()` joins and encodes as UTF-8.
+      return await readBodyWithin(
+        iterable,
+        maxResponseBytes,
+        () => {
+          cancelBodyQuietly(body);
+        },
+        true,
+        signal,
+      );
+    }
+
+    const bytes = await readWholeBody(response, body, signal);
+    return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
+  }
+
+  const reader = Reflect.apply(
+    getReader,
+    body,
+    [],
+  ) as ReadableStreamDefaultReader<unknown>;
+
+  // Cancelled, not awaited: the cancel settles once the stream has let go, and the
+  // answer here does not depend on when that is.
+  return await readBodyWithin(
+    readerChunks(reader),
+    maxResponseBytes,
+    () => {
+      cancelBodyQuietly(reader);
+    },
+    false,
+    signal,
   );
 }
 
 /**
- * Return an Error value without letting a Proxy prototype trap escape.
- *
- * The shared check, not a local `instanceof`, so this answers the same question
- * `normalizeError` above already answers: an error built in another realm - a `vm`
- * context, an iframe - fails `instanceof` while being an error in every respect. A
- * cross-realm `AbortError` was therefore invisible to `isAbortError`.
+ * The body through `arrayBuffer()`, with `body` (as already read) let go of on an abort.
+ * That reaches a polyfill's Node `Readable`, which `arrayBuffer()` does not lock. A web
+ * stream it has locked refuses the cancel: native `fetch` ends that read through its own
+ * signal, and a polyfill that does not heed it reads on.
  */
-function asError(value: unknown): Error | undefined {
-  return isErrorValue(value) ? value : undefined;
+async function readWholeBody(
+  response: Response,
+  body: unknown,
+  signal: AbortSignal | undefined,
+): Promise<Uint8Array> {
+  const stopWatching = letGoOnAbort(signal, () => {
+    cancelBodyQuietly(body);
+  });
+
+  try {
+    const buffer = await response.arrayBuffer();
+
+    // A cancel can end the read as if finished; what it read is not the whole body.
+    if (isSignalAbortedQuietly(signal)) {
+      throw makeAbortError();
+    }
+
+    return new Uint8Array(buffer);
+  } finally {
+    stopWatching();
+  }
 }
 
+/** A web stream reader's chunks, as an async iterable. */
+async function* readerChunks(
+  reader: ReadableStreamDefaultReader<unknown>,
+): AsyncGenerator<unknown> {
+  while (true) {
+    const { done: isDone, value } = await reader.read();
+
+    if (isDone) {
+      return;
+    }
+
+    yield value;
+  }
+}
+
+/**
+ * Runs `letGo` on an abort, at once if the signal has aborted already, until the returned
+ * function is called. For a body being read: a polyfill's stream need not heed the signal,
+ * and would otherwise hold its socket with a read stalled, or go on being read after the
+ * request had ended. A signal that cannot be listened on, or refuses the removal, is
+ * ignored: `once` bounds the listener to one call.
+ */
+function letGoOnAbort(
+  signal: AbortSignal | undefined,
+  letGo: () => void,
+): () => void {
+  if (isSignalAbortedQuietly(signal)) {
+    letGo();
+    return () => {};
+  }
+
+  try {
+    signal?.addEventListener('abort', letGo, { once: true });
+  } catch {
+    // Nothing to remove, and nothing more to do for that signal.
+  }
+
+  return () => {
+    try {
+      signal?.removeEventListener('abort', letGo);
+    } catch {
+      // The listener stays.
+    }
+  };
+}
+
+/**
+ * A body read a chunk at a time - a web stream's, through its reader, or a polyfilled
+ * `fetch`'s async-iterable Node `Readable` - counted as it comes, and let go through
+ * `cancel` the moment it passes the limit: counted before the chunk is kept, so a body
+ * over the limit is never held whole.
+ *
+ * Each chunk must be a `Uint8Array`, from any realm, told and measured by its internal
+ * slot rather than by the `byteLength` it reports - or, where `isTextChunkAccepted`, a
+ * string, taken as its UTF-8 bytes. Anything else is refused with the `TypeError` the
+ * Fetch standard's `arrayBuffer()` rejects with for the same stream, and the body let go:
+ * an `ArrayBuffer` or `DataView` chunk would be counted but joined as zeros, and one with
+ * no `byteLength` would turn the count to `NaN`, which no limit is under.
+ */
+async function readBodyWithin(
+  source: AsyncIterable<unknown>,
+  maxResponseBytes: number,
+  cancel: () => void,
+  isTextChunkAccepted: boolean,
+  signal: AbortSignal | undefined,
+): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
+  const chunks: Uint8Array[] = [];
+  let loadedBytes = 0;
+  let emptyChunks = 0;
+  let encoder: TextEncoder | undefined;
+
+  // The body is let go of on an abort, not only when a chunk next arrives: a polyfill's
+  // stream need not heed the signal, and would otherwise hold its socket with a read
+  // stalled, or go on being read and kept after the request had ended.
+  let didLetGo = false;
+  const letGo = (): void => {
+    if (!didLetGo) {
+      didLetGo = true;
+      cancel();
+    }
+  };
+  const throwIfAborted = (): void => {
+    if (isSignalAbortedQuietly(signal)) {
+      letGo();
+      throw makeAbortError();
+    }
+  };
+
+  throwIfAborted();
+
+  const stopWatching = letGoOnAbort(signal, letGo);
+
+  try {
+    for await (const value of source) {
+      throwIfAborted();
+
+      const chunk =
+        isTextChunkAccepted && typeof value === 'string'
+          ? (encoder ??= new TextEncoder()).encode(value)
+          : value;
+      const byteLength = isUint8ArrayValue(chunk)
+        ? readBinaryByteLength(chunk)
+        : null;
+
+      if (byteLength === null) {
+        letGo();
+        throw new TypeError(
+          'FetchAdapter response body yielded a chunk that is not a Uint8Array',
+        );
+      }
+
+      // No bytes to count or keep, and no limit they could reach: a stream that keeps
+      // answering with them from microtasks alone would otherwise starve every timer, the
+      // attempt timeout's included. `setTimeout`, as this adapter also runs in browsers -
+      // once every so many of them, counted over the whole body so bytes between them do
+      // not put the wait off, as a browser holds a timer set from a timer's callback to at
+      // least 4 ms past a few levels, which a wait after each one would add up. Chunks
+      // with bytes need none: the limit bounds them (a body with no limit is read whole, not
+      // here), and ones that all come from microtasks are a body already in memory, whose
+      // read is work as parsing it would be. A wait on every so many of a real download's
+      // would hold it on a timer a hidden tab throttles to a second or more.
+      if (byteLength === 0) {
+        emptyChunks += 1;
+
+        if (emptyChunks % EMPTY_CHUNKS_PER_YIELD === 0) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 0);
+          });
+        }
+
+        continue;
+      }
+
+      loadedBytes += byteLength;
+
+      if (loadedBytes > maxResponseBytes) {
+        letGo();
+        return RESPONSE_TOO_LARGE;
+      }
+
+      chunks.push(chunk as Uint8Array);
+    }
+
+    // A cancel can end the stream as if finished; what it read is not the whole body.
+    throwIfAborted();
+
+    return concatChunks(chunks, loadedBytes);
+  } finally {
+    stopWatching();
+  }
+}
+
+/**
+ * Let go of a body that will not be read, ignoring one that refuses: a web stream, or the
+ * reader it is locked to, is cancelled, and a polyfilled `fetch`'s Node `Readable` - which
+ * has no `cancel` - is destroyed, so its socket is not held with the body unread.
+ */
+function cancelBodyQuietly(body: unknown): void {
+  if (!body) {
+    return;
+  }
+
+  try {
+    const cancel = readUnknownMember(body, 'cancel');
+    if (typeof cancel === 'function') {
+      const cancelled: unknown = cancel.call(body);
+      // The body is being discarded; a stream that fails to cancel has nothing to add.
+      // Any thenable is followed - another realm's promise, a polyfill's - so a
+      // rejection is never left unhandled.
+      if (isObjectLike(cancelled)) {
+        observeRejection(adoptPromise(cancelled), noop);
+      }
+      return;
+    }
+
+    const destroy = readUnknownMember(body, 'destroy');
+    if (typeof destroy === 'function') {
+      destroy.call(body);
+    }
+  } catch {
+    // A locked or already-cancelled stream, or a cancel that throws: nothing left to
+    // release.
+  }
+}
+
+/**
+ * The request headers as `fetch` takes them, each value read once: a fresh record, or a
+ * `Headers` when a name repeats and the runtime has one. Never the caller's own object,
+ * which the build check and `fetch` would each read again - a getter could answer one
+ * and send the other.
+ */
 function materializeFetchHeaders(
   headers: Record<string, string | string[]>,
 ): HeadersInit {
-  let shouldUseHeadersObject = false;
-
-  for (const value of Object.values(headers)) {
-    if (Array.isArray(value)) {
-      shouldUseHeadersObject = true;
-      break;
-    }
+  // A runtime with no `Headers` (a test setup that polyfills only `fetch`) gets a record
+  // holding each name once, in any case, under its first spelling: values that repeat
+  // joined with `, `, the one field a `Headers` would send them as, and `Cookie` joined
+  // by the same rule - as NodeAdapter sends them.
+  if (typeof Headers !== 'function') {
+    return materializeRequestHeaders(headers);
   }
 
-  if (!shouldUseHeadersObject) {
-    return headers as Record<string, string>;
-  }
+  // The `Cookie` field built by NodeAdapter's rule (see `requestHeaderPairs`), so whether
+  // it is sent, and how, does not turn on how the other headers are given. Every choice
+  // below is made from these pairs alone.
+  const pairs = requestHeaderPairs(headers);
 
-  const materialized = new Headers();
-
-  for (const [key, value] of Object.entries(headers)) {
-    if (Array.isArray(value)) {
-      if (key.toLowerCase() === 'cookie') {
-        materialized.set(key, value.join('; '));
-      } else {
-        for (const item of value) {
-          materialized.append(key, item);
-        }
+  // A record holds each name once, so a name that repeats - an array value of more than
+  // one item - takes a `Headers`, which sends every value under it.
+  const record: Record<string, string> = {};
+  for (const [name, value] of pairs) {
+    if (Object.hasOwn(record, name)) {
+      const materialized = new Headers();
+      for (const [pairName, pairValue] of pairs) {
+        materialized.append(pairName, pairValue);
       }
-    } else {
-      materialized.append(key, value);
+
+      return materialized;
     }
+
+    defineEntry(record, name, value);
   }
 
-  return materialized;
+  return record;
 }
 
 /**
- * Tag an abort thrown while reading the body with the response already received,
- * matching what NodeAdapter attaches to its response-stream aborts. The client
- * decides what the abort meant; this only makes the evidence survive the throw.
- *
- * `effectiveRequestHeaders` is omitted throughout this adapter: `fetch` exposes
- * no view of the final wire headers, and echoing the request's own back would
- * claim a proof it does not have.
+ * The non-retryable refusal of a request the runtime will not build, naming what it refused
+ * by kind: the first header `Headers` will not take - its name, never its value - or else
+ * the URL or method.
  */
-function markResponseStreamAbort(
-  error: unknown,
-  status: number,
+function refusedRequestBuild(
   headers: Record<string, string | string[]>,
-): unknown {
-  // Per the Fetch Standard the rejection is the abort reason verbatim, so
-  // returning it untagged sends the client down its early cancellation path and
-  // drops the response headers, Set-Cookie included.
-  //
-  // Always a fresh object, never the reason itself: a signal hands the same
-  // reason to every consumer, so two requests sharing one controller would
-  // overwrite each other's status and headers (and a frozen reason would throw).
-  // `name` is copied because the client routes on it.
-  const original = asError(error);
-  const originalMessage =
-    original === undefined ? undefined : readObjectMember(original, 'message');
-  const originalName =
-    original === undefined ? undefined : readObjectMember(original, 'name');
-  const tagged = new Error(
-    typeof originalMessage === 'string' ? originalMessage : 'Request aborted',
+): Error {
+  return nonRetryableAdapterErrorFrom(
+    new TypeError(
+      `FetchAdapter request could not be built: the runtime refused ${describeFetchRefusal(headers)}`,
+    ),
   );
+}
 
-  tagged.name = typeof originalName === 'string' ? originalName : 'AbortError';
+function describeFetchRefusal(
+  headers: Record<string, string | string[]>,
+): string {
+  if (typeof Headers !== 'function') {
+    return 'its URL, method or headers';
+  }
 
-  Object.assign(tagged, {
-    [RESPONSE_STREAM_ABORT_FLAG]: true,
-    streamAbortStatus: status,
-    streamAbortHeaders: headers,
-    cause: error,
-  });
+  for (const [name, value] of requestHeaderPairs(headers)) {
+    try {
+      new Headers().append(name, value);
+    } catch {
+      return describeRefusedHeader(
+        name,
+        isHeaderNameAccepted(name) ? 'value' : 'name',
+      );
+    }
+  }
 
-  return tagged;
+  return 'its URL or method';
+}
+
+/** Whether `Headers` takes `name` with a plain value: if so, it was the value it refused. */
+function isHeaderNameAccepted(name: string): boolean {
+  try {
+    new Headers().append(name, 'x');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `error` is `fetch` refusing `signal`: it names `AbortSignal`, as Node's, Bun's and
+ * browsers' refusals do, and this runtime's `Request` refuses the signal too. The name
+ * alone could come from a URL quoted in some other failure.
+ */
+function isSignalRefusal(
+  error: Error,
+  url: string,
+  signal: AbortSignal | undefined,
+): boolean {
+  const message = readUnknownMember(error, 'message');
+
+  if (
+    signal === undefined ||
+    typeof Request !== 'function' ||
+    typeof message !== 'string' ||
+    !message.includes('AbortSignal')
+  ) {
+    return false;
+  }
+
+  try {
+    new Request(url, { signal });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether `fetch` failed because the runtime refused to dispatch the request at all:
+ * undici's invalid-argument and not-supported refusals, and the Fetch standard's blocked
+ * ports - the backstop for a header or port a later Node refuses that the up-front
+ * refusals (`fetchRefusedHeader`, `fetchBlockedPort`) do not know of. Read
+ * off the `cause` Node hangs them on, guardedly; a browser's opaque `TypeError` is none.
+ */
+function isFetchDispatchRefusal(error: Error): boolean {
+  const cause = readUnknownMember(error, 'cause');
+  const code = readUnknownMember(cause, 'code');
+  const message = readUnknownMember(cause, 'message');
+
+  return (
+    code === 'UND_ERR_INVALID_ARG' ||
+    code === 'UND_ERR_NOT_SUPPORTED' ||
+    (typeof message === 'string' && asciiLowercase(message) === 'bad port')
+  );
+}
+
+/** The error codes a server runtime's `fetch` gives a body that failed to decode. */
+const BUN_DECODE_ERROR_CODES = [
+  'ZlibError',
+  'BrotliDecompressionError',
+  'ZstdDecompressionError',
+];
+/** Node's (undici's): its cause is the decoder's own error, coded by zlib, brotli or zstd. */
+const NODE_DECODE_ERROR_CODE = /^(?:Z_|ERR__ERROR_|ZSTD_error_)/;
+
+/**
+ * Whether `error`, from reading a body whose `Content-Encoding` is not identity, is the
+ * runtime's decoding failure rather than a failed transfer: in a server runtime `fetch`
+ * decodes the body itself, and says so by the error's code (Bun) or its cause's (Node).
+ * A browser's says nothing of why, so its failure is a transfer's.
+ */
+function isRuntimeDecodeFailure(
+  error: unknown,
+  headers: Record<string, string | string[]>,
+): boolean {
+  const encoding = headers['content-encoding'];
+  if (encoding === undefined || isIdentityContentEncoding(encoding)) {
+    return false;
+  }
+
+  const code = readUnknownMember(error, 'code');
+  if (typeof code === 'string' && BUN_DECODE_ERROR_CODES.includes(code)) {
+    return true;
+  }
+
+  const causeCode = readUnknownMember(
+    readUnknownMember(error, 'cause'),
+    'code',
+  );
+  return (
+    typeof causeCode === 'string' && NODE_DECODE_ERROR_CODE.test(causeCode)
+  );
+}
+
+/**
+ * The runtime's decoding failure, reported as one (see `RESPONSE_DECODE_ERROR_KEY`): an
+ * error of this adapter's own carries the tag, its message the runtime's and its cause the
+ * runtime's error, which is not changed.
+ */
+function decodeFailure(error: unknown): Error {
+  const reported = new Error(normalizeError(error).message, { cause: error });
+  Object.defineProperty(reported, RESPONSE_DECODE_ERROR_KEY, { value: true });
+  return reported;
 }

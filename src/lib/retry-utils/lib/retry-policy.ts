@@ -11,7 +11,11 @@ import {
   assertNumberOption,
   resolveTimeoutMS,
 } from '../../internal/timer-limits';
-import { calculateExponentialDelay, getMostCommonError } from './utils';
+import {
+  calculateExponentialDelays,
+  DEFAULT_EXPONENTIAL_MAX_TIMEOUT_MS,
+  getMostCommonError,
+} from './utils';
 
 interface CurrentState {
   wasInitialAttemptTaken: boolean; // Represents if the initial attempt was taken or not since if errors is empty, it should return 1
@@ -164,7 +168,6 @@ export class RetryPolicy {
     const DEFAULT_MAX_RETRY_ATTEMPTS = 10;
     const DEFAULT_FACTOR = 1.5;
     const DEFAULT_MIN_TIMEOUT_MS = 1000;
-    const DEFAULT_MAX_TIMEOUT_MS = 30000;
     const DEFAULT_DISPERSION = 0.1;
 
     // Duration inputs are validated before clamping. Zero becomes the 1ms minimum, and
@@ -244,7 +247,7 @@ export class RetryPolicy {
       );
       const maxTimeoutMS = duration(
         requestedMaxTimeoutMS,
-        DEFAULT_MAX_TIMEOUT_MS,
+        DEFAULT_EXPONENTIAL_MAX_TIMEOUT_MS,
         'Retry maxTimeoutMS',
       );
 
@@ -351,7 +354,8 @@ export class RetryPolicy {
    *
    * @param {unknown} error The error that resulted from the last operation attempt. Can be omitted when `isQueryOnly` is `true`.
    * @param {boolean} isQueryOnly If true, the method only queries if a retry should be made without storing the error.
-   * @returns {RetryQueryResult} An object indicating whether a retry should be attempted and the delay before the next attempt.
+   * @returns {RetryQueryResult} An object indicating whether a retry should be attempted,
+   *   and the delay before the next attempt with and without its jitter.
    */
 
   public shouldRetry(
@@ -365,7 +369,7 @@ export class RetryPolicy {
       }
 
       // Once successful, retries are never allowed.
-      return { shouldRetry: false, delayMS: 0 };
+      return { shouldRetry: false, delayMS: 0, baseDelayMS: 0 };
     }
 
     if (!isQueryOnly) {
@@ -375,12 +379,10 @@ export class RetryPolicy {
 
     // Decide if we should retry - check if we've exhausted our retry attempts
     if (this.areAttemptsExhausted) {
-      return { shouldRetry: false, delayMS: 0 };
+      return { shouldRetry: false, delayMS: 0, baseDelayMS: 0 };
     } else {
       // Calculate the delay for the next retry attempt
-      const delayMS = this.calculateNextDelay();
-
-      return { shouldRetry: true, delayMS };
+      return { shouldRetry: true, ...this.calculateNextDelays() };
     }
   }
 
@@ -408,14 +410,15 @@ export class RetryPolicy {
    * based on the exponential backoff formula, considering the number of retry attempts, the base delay,
    * the exponential factor, and any specified dispersion to introduce randomness.
    *
-   * @returns {number} The calculated delay in milliseconds before the next retry attempt.
+   * @returns The delay in milliseconds before the next retry attempt, with its jitter
+   * (`delayMS`) and without it (`baseDelayMS`).
    */
 
-  private calculateNextDelay(): number {
+  private calculateNextDelays(): { delayMS: number; baseDelayMS: number } {
     if (this.policy.strategy === 'fixed') {
-      return this.policy.delayMS;
+      return { delayMS: this.policy.delayMS, baseDelayMS: this.policy.delayMS };
     } else if (this.policy.strategy === 'exponential') {
-      return calculateExponentialDelay({
+      return calculateExponentialDelays({
         retryCount: this.retryCount,
         minTimeoutMS: this.policy.minTimeoutMS,
         maxTimeoutMS: this.policy.maxTimeoutMS,
@@ -425,6 +428,6 @@ export class RetryPolicy {
       });
     }
 
-    return 1; // Should never reach here
+    return { delayMS: 1, baseDelayMS: 1 }; // Should never reach here
   }
 }

@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeEach, mock } from 'bun:test';
+import { runInNewContext } from 'node:vm';
 import {
   LRUCache,
   type LRUCacheChangeEvent,
@@ -948,6 +949,35 @@ describe('LRUCache', () => {
     });
   });
 
+  describe('Default size estimate of nested arrays', () => {
+    test('an array met again is counted once, not walked again', () => {
+      const cache = new LRUCache<string, unknown>(10);
+      let shared: unknown[] = [1];
+      for (let level = 0; level < 22; level++) {
+        shared = [shared, shared];
+      }
+
+      const startedAt = performance.now();
+      cache.set('k', shared);
+
+      // Walked once per reference, it took half a second and counted about 369 MB.
+      expect(performance.now() - startedAt).toBeLessThan(200);
+      expect(cache.byteSize).toBeLessThan(10_000);
+    });
+
+    test('an array nested past the depth the estimate follows takes the fallback, rather than failing set()', () => {
+      const cache = new LRUCache<string, unknown>(10);
+      let deep: unknown[] = [];
+      for (let level = 0; level < 200_000; level++) {
+        deep = [deep];
+      }
+
+      expect(() => cache.set('deep', deep)).not.toThrow();
+      expect(cache.get('deep')).toBe(deep);
+      expect(cache.byteSize).toBeGreaterThan(0);
+    });
+  });
+
   describe('Custom size calculator', () => {
     test('should use custom size calculator when provided', () => {
       const sizeCalculator = (value: any) => {
@@ -1132,6 +1162,465 @@ describe('LRUCache', () => {
             onChangeReasons: ['set', 'skip', 'bogus' as any],
           }),
       ).toThrow('Invalid onChange reason: bogus');
+    });
+
+    test('checks onChangeReasons on the copy it keeps, not through its own iterator', () => {
+      let passes = 0;
+      const reasons = ['set'] as LRUCacheChangeReason[];
+      // Valid on the first pass and another reason after: read twice, the check passes
+      // and the cache keeps the other.
+      Object.defineProperty(reasons, Symbol.iterator, {
+        value: function* () {
+          yield passes++ === 0 ? 'set' : 'delete';
+        },
+      });
+      const events: LRUCacheChangeEvent<string, string>[] = [];
+      const cache = new LRUCache<string, string>(5, {
+        onChange: (event) => {
+          events.push(event);
+        },
+        onChangeReasons: reasons,
+      });
+
+      cache.set('a', '1');
+      cache.delete('a');
+
+      expect(events.map((event) => event.reason)).toEqual(['set']);
+    });
+
+    test('refuses an onChangeReasons length an array cannot have', () => {
+      const reasons = new Proxy(['set'], {
+        get: (target, key, receiver) =>
+          key === 'length' ? Infinity : Reflect.get(target, key, receiver),
+      });
+
+      expect(
+        () =>
+          new LRUCache<string, string>(1, {
+            onChangeReasons: reasons as LRUCacheChangeReason[],
+          }),
+      ).toThrow(new TypeError('onChangeReasons has no array length'));
+    });
+
+    test('takes the fallback estimate for an array whose length is not one an array can have', () => {
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+      const invalid = new Proxy([1], {
+        get: (target, key, receiver) =>
+          key === 'length' ? 1.5 : Reflect.get(target, key, receiver),
+      });
+
+      cache.set('invalid', invalid);
+      expect(cache.byteSize).toBe(1000);
+    });
+
+    test('sizes a sparse array by its own entries, without walking its length', () => {
+      const sparse: unknown[] = [];
+      sparse[5] = 'ab';
+      sparse[3_000_000_000] = 'cd';
+      sparse.length = 2 ** 32 - 1;
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      cache.set('sparse', sparse);
+
+      // 40 for the array and 4 bytes for each of its two strings.
+      expect(cache.byteSize).toBe(48);
+    });
+
+    test('counts a non-enumerable own entry past enough holes', () => {
+      const value: unknown[] = [];
+      value.length = 200_000;
+      Object.defineProperty(value, 150_000, { value: 'x'.repeat(10) });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      cache.set('a', value);
+
+      expect(cache.byteSize).toBe(40 + 20);
+    });
+
+    test('reads a sparse array with an entry every so often by its keys, not its length', () => {
+      // An entry every 1,000 indices across the whole length: no run of holes is long,
+      // but holes far outnumber entries, counted over the whole walk.
+      const length = 2 ** 28;
+      const value: unknown[] = [];
+      for (let index = 0; index < length; index += 1000) {
+        value[index] = 1;
+      }
+      value.length = length;
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 10_000_000 });
+
+      cache.set('a', value);
+
+      expect(cache.byteSize).toBe(40 + Math.ceil(length / 1000) * 8);
+    });
+
+    test('does not read a tail index an earlier entry removed', () => {
+      let inheritedReads = 0;
+      const value: unknown[] = [];
+      value.length = 200_000;
+      value[150_000] = 'x'.repeat(10);
+      Object.defineProperty(value, 100_000, {
+        enumerable: true,
+        get() {
+          Reflect.deleteProperty(value, 150_000);
+          Object.setPrototypeOf(
+            value,
+            Object.defineProperty(Object.create(Array.prototype), 150_000, {
+              get: () => {
+                inheritedReads++;
+                return 'y'.repeat(1000);
+              },
+            }),
+          );
+          return 'a';
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      cache.set('a', value);
+
+      // 40 for the array and 2 bytes for the one string still its own.
+      expect(cache.byteSize).toBe(42);
+      expect(inheritedReads).toBe(0);
+    });
+
+    test('counts a dense array past the copy cap in full', () => {
+      const dense = new Array<number>(2 ** 24 + 1).fill(1);
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 2 ** 30 });
+
+      cache.set('dense', dense);
+
+      expect(cache.byteSize).toBe(40 + (2 ** 24 + 1) * 8);
+    });
+
+    test('does not count a hole the prototype fills, nor run its getter', () => {
+      let inheritedReads = 0;
+      const value = ['keep'];
+      value.length = 2;
+      Object.setPrototypeOf(
+        value,
+        Object.defineProperty(Object.create(Array.prototype), 1, {
+          get: () => {
+            inheritedReads++;
+            return 'inherited';
+          },
+        }),
+      );
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1000 });
+
+      cache.set('a', value);
+
+      // 40 for the array and 2 bytes per UTF-16 unit of its own string.
+      expect(cache.byteSize).toBe(48);
+      expect(inheritedReads).toBe(0);
+    });
+
+    test('does not run an inherited getter that answers another holed array', () => {
+      let inheritedReads = 0;
+      const prototype: object = Object.create(Array.prototype);
+      const holed = (): unknown[] => {
+        const list: unknown[] = [];
+        list.length = 1;
+        Object.setPrototypeOf(list, prototype);
+        return list;
+      };
+      Object.defineProperty(prototype, 0, {
+        get: () => {
+          inheritedReads++;
+          return holed();
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1000 });
+
+      cache.set('a', holed());
+
+      expect(cache.get('a')).toBeDefined();
+      expect(cache.byteSize).toBe(40);
+      expect(inheritedReads).toBe(0);
+    });
+
+    test('charges an entry whose read throws the fallback estimate', () => {
+      const value = new Proxy([1, 2], {
+        get: (target, key, receiver) => {
+          if (key === '0') {
+            throw new Error('unreadable entry');
+          }
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      cache.set('a', value);
+
+      expect(cache.get('a')).toBe(value);
+      // 40 for the array, 1000 for the entry that throws, 8 for the number after it.
+      expect(cache.byteSize).toBe(1048);
+    });
+
+    test("sizes an Array subclass's and another realm's array by their own entries", () => {
+      class List extends Array<unknown> {}
+      const subclass = new List();
+      subclass.push('ab', 1);
+      subclass.length = 3;
+      const otherRealm = runInNewContext(
+        'const list = ["ab", 1]; list.length = 3; list',
+      ) as unknown[];
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1000 });
+
+      cache.set('subclass', subclass);
+      // 40 for the array, 4 for its string, 8 for its number; the hole counts for nothing.
+      expect(cache.byteSize).toBe(52);
+
+      cache.set('other realm', otherRealm);
+      expect(cache.byteSize).toBe(104);
+    });
+
+    test('counts an entry whose read throws as held, so the holes after it are walked as deepClone walks them', () => {
+      let ownKeysCalls = 0;
+      const target: unknown[] = [];
+      for (let index = 0; index < 2000; index++) {
+        target[index] = index;
+      }
+      target[72_000] = 1;
+      const value = new Proxy(target, {
+        get: (array, key, receiver) => {
+          if (typeof key === 'string' && Number(key) < 2000) {
+            throw new Error('unreadable entry');
+          }
+          return Reflect.get(array, key, receiver) as unknown;
+        },
+        ownKeys: (array) => {
+          ownKeysCalls++;
+          return Reflect.ownKeys(array);
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 10_000_000 });
+
+      cache.set('a', value);
+
+      // 40 for the array, 1000 for each entry that throws, 8 for the number past the holes.
+      expect(cache.byteSize).toBe(40 + 2000 * 1000 + 8);
+      // 70,000 holes, short of 64 per entry held: walked, not listed.
+      expect(ownKeysCalls).toBe(0);
+    });
+
+    test('takes the fallback, not a failing set(), for an array whose prototype stops reading once its prototypes are listed', () => {
+      let wasListed = false;
+      const prototype = new Proxy(Object.create(Array.prototype) as object, {
+        ownKeys: (target) => {
+          wasListed = true;
+          return Reflect.ownKeys(target);
+        },
+      });
+      const value = new Proxy([1, 2, 3], {
+        getPrototypeOf: () => {
+          if (wasListed) {
+            throw new Error('prototype trap');
+          }
+          return prototype;
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 10_000_000 });
+
+      expect(() => cache.set('a', value)).not.toThrow();
+      // 40 for the array, then the fallback once its first index cannot be told.
+      expect(cache.byteSize).toBe(40 + 1000);
+    });
+
+    test("catches a Proxy prototype that answers for holes only past the first checked indices, reading at most a gap's worth", () => {
+      let inheritedReads = 0;
+      const value: unknown[] = new (class List extends Array<unknown> {})();
+      for (let index = 0; index < 5000; index++) {
+        value.push(1);
+      }
+      value.length = 2 ** 32 - 1;
+      Object.setPrototypeOf(
+        value,
+        new Proxy(Object.getPrototypeOf(value) as object, {
+          has: (target, key) =>
+            Number(key) >= 5000 ? true : Reflect.has(target, key),
+          get: (target, key, receiver) => {
+            if (typeof key === 'string' && Number(key) >= 5000) {
+              inheritedReads++;
+              return 'inherited-value';
+            }
+            return Reflect.get(target, key, receiver) as unknown;
+          },
+        }),
+      );
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1_000_000 });
+
+      cache.set('a', value);
+
+      // 40 for the array and 8 for each of its own numbers: sized again once caught.
+      expect(cache.byteSize).toBe(40 + 5000 * 8);
+      expect(inheritedReads).toBeLessThanOrEqual(128);
+    });
+
+    test('counts in full again the arrays a pass sized before it was caught and sized again', () => {
+      const inner = Array.from({ length: 1000 }, () => 'x'.repeat(10));
+      const value: unknown[] = [inner];
+      value.length = 2;
+      Object.setPrototypeOf(
+        value,
+        new Proxy(Object.create(Array.prototype) as object, {
+          has: () => true,
+        }),
+      );
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1_000_000 });
+
+      cache.set('a', value);
+
+      // 40 for each array and 20 bytes for each ten-character string, not 8 for an inner
+      // array already met.
+      expect(cache.byteSize).toBe(40 + 40 + 1000 * 20);
+    });
+
+    test('sizes many arrays that are each caught and sized again in time linear in their count', () => {
+      const prototype = new Proxy(Object.create(Array.prototype) as object, {
+        has: () => true,
+      });
+      // Each caught at its hole and sized again, after every array before it was sized.
+      const value = Array.from({ length: 60_000 }, () => {
+        const array: unknown[] = [1];
+        array.length = 2;
+        Object.setPrototypeOf(array, prototype);
+        return array;
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1e12 });
+
+      const startedAt = performance.now();
+      cache.set('a', value);
+      const elapsedMS = performance.now() - startedAt;
+
+      // 40 for the outer array, and 40 and 8 for its one number for each array in it.
+      expect(cache.byteSize).toBe(40 + 60_000 * 48);
+      // Linear in the arrays' count this is tens of milliseconds; quadratic, seconds.
+      expect(elapsedMS).toBeLessThan(1500);
+    }, 30_000);
+
+    test("neither reads nor walks the holes a Proxy prototype's has answers for", () => {
+      let inheritedReads = 0;
+      const prototype = new Proxy(Object.create(Array.prototype) as object, {
+        // Unheld at every 4096th index, held at every other.
+        has: (_target, key) => Number(key) % 4096 !== 0,
+        get: (target, key, receiver) => {
+          if (typeof key === 'string' && /^\d+$/.test(key)) {
+            inheritedReads++;
+            return 'inherited-value';
+          }
+          return Reflect.get(target, key, receiver) as unknown;
+        },
+      });
+      const sparse: unknown[] = ['abc'];
+      sparse.length = 2 ** 32 - 1;
+      Object.setPrototypeOf(sparse, prototype);
+      const short: unknown[] = ['ab'];
+      short.length = 2;
+      Object.setPrototypeOf(short, prototype);
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      cache.set('sparse', sparse);
+      // 40 for the array and 2 bytes per UTF-16 unit of its one string.
+      expect(cache.byteSize).toBe(46);
+
+      cache.set('short', short);
+      expect(cache.byteSize).toBe(46 + 44);
+      expect(inheritedReads).toBe(0);
+    });
+
+    test('reads by Object.hasOwn once an entry swaps in a prototype that answers for holes', () => {
+      let inheritedReads = 0;
+      const value: unknown[] = [];
+      Object.defineProperty(value, 0, {
+        enumerable: true,
+        get: () => {
+          Object.setPrototypeOf(
+            value,
+            new Proxy(Object.create(Array.prototype) as object, {
+              has: () => true,
+              get: (target, key, receiver) => {
+                if (typeof key === 'string' && /^\d+$/.test(key)) {
+                  inheritedReads++;
+                }
+                return Reflect.get(target, key, receiver) as unknown;
+              },
+            }),
+          );
+          return 'abc';
+        },
+      });
+      value.length = 2 ** 32 - 1;
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      cache.set('a', value);
+
+      expect(cache.byteSize).toBe(46);
+      expect(inheritedReads).toBe(0);
+    });
+
+    test('charges the fallback once and stops when whether an index is held cannot be told', () => {
+      let hasCalls = 0;
+      const value = new Proxy(['abc'], {
+        get: (target, key, receiver) =>
+          key === 'length' ? 1_000_000 : Reflect.get(target, key, receiver),
+        has: (target, key) => {
+          if (key !== '0') {
+            hasCalls++;
+            throw new Error('unknowable');
+          }
+          return Reflect.has(target, key);
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      cache.set('a', value);
+
+      expect(cache.get('a')).toBe(value);
+      // 40 for the array, 6 for its one string, 1000 for the rest.
+      expect(cache.byteSize).toBe(40 + 6 + 1000);
+      expect(hasCalls).toBe(1);
+    });
+
+    test('charges a throwing entry the fallback and keeps the entries measured before it', () => {
+      const huge = 'x'.repeat(50_000);
+      const value: unknown[] = [huge];
+      Object.defineProperty(value, 1, {
+        enumerable: true,
+        get() {
+          throw new Error('unreadable');
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1_000_000 });
+
+      cache.set('a', value);
+
+      expect(cache.get('a')).toBe(value);
+      // 40 for the array, 2 bytes per UTF-16 unit of the string, 1000 for the entry.
+      expect(cache.byteSize).toBe(40 + 100_000 + 1000);
+    });
+
+    test('fails set() when sizing an entry it read fails, as sizing the value itself does', () => {
+      const unsizable = new Proxy([1], {
+        getPrototypeOf: () => {
+          throw new Error('proto');
+        },
+      });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
+
+      expect(() => cache.set('top', unsizable)).toThrow('proto');
+      expect(() => cache.set('nested', [unsizable])).toThrow('proto');
+      expect(cache.size).toBe(0);
+    });
+
+    test("estimates an array value's size by index, not through its own reduce", () => {
+      const value = ['abc'];
+      Object.defineProperty(value, 'reduce', { value: () => 1_000_000 });
+      const cache = new LRUCache<string, unknown>(5, { maxSize: 1000 });
+
+      cache.set('a', value);
+
+      // 40 for the array and 2 bytes per UTF-16 unit of its one string.
+      expect(cache.byteSize).toBe(46);
     });
 
     test('should reject invalid custom TTL values', () => {

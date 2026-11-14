@@ -9647,13 +9647,25 @@ describe('LifecycleManager - Signal Integration', () => {
         wasArmedAfterFailure: boolean;
       }> = [];
 
+      // The retry's force stop is held until the signals below have been handled, rather
+      // than for a fixed time they would have to land within: on a slow runner the timers
+      // between them can run late enough for the retry to finish first.
+      let forceStopCalls = 0;
+      let releaseRetryForceStop: () => void = () => undefined;
+      const retryForceStopReleased = new Promise<void>((resolve) => {
+        releaseRetryForceStop = resolve;
+      });
+
       class SlowFailingStopComponent extends TestComponent {
         public stop(): void {
           throw new Error('Slow stop failed');
         }
 
         public async onShutdownForce(): Promise<void> {
-          await sleep(150);
+          forceStopCalls++;
+          if (forceStopCalls > 1) {
+            await retryForceStopReleased;
+          }
           throw new Error('Slow force stop failed');
         }
       }
@@ -9703,6 +9715,7 @@ describe('LifecycleManager - Signal Integration', () => {
       (lifecycle as any).handleShutdownRequest('SIGTERM');
       await sleep(10);
       (lifecycle as any).handleShutdownRequest('SIGTERM');
+      releaseRetryForceStop();
 
       const secondShutdown = await retryPromise;
       expect(secondShutdown.success).toBe(false);

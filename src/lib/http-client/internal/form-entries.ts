@@ -1,0 +1,102 @@
+import { isPlainRecord } from './plain-record';
+import { isBunRuntime } from '../../internal/is-bun-runtime';
+
+/**
+ * `form`'s entries, read through the intrinsic `FormData.prototype.entries`, as the client
+ * reads a form everywhere: a subclass's or a `Proxy`'s own `entries` would report entries
+ * the form does not hold, and a `Proxy` over a form, which has no internal slots, throws
+ * here. Read live, so an entry appended while they are read is reached.
+ */
+export function formEntries(form: FormData): ReturnType<FormData['entries']> {
+  return FormData.prototype.entries.call(form);
+}
+
+/**
+ * Whether `value` is a form, told by `FormData`'s own `has` - the intrinsic one, which the
+ * runtime answers only for a real form, a subclass's included - as the client tells one
+ * everywhere, rather than by `instanceof` alone: an object that only inherits from
+ * `FormData.prototype`, or a `Proxy` over a form, has no entries to read and is no form.
+ * Where `has` checks the internal slot (Bun, browsers), a form from another realm (an
+ * iframe) is one; Node's checks `instanceof` as well. An array, bytes, or a plain record
+ * (see `isPlainRecord`, any realm's) - a JSON body - is answered without asking, as `has` throws
+ * for anything that is not a form; a form reparented onto one of those is no form here.
+ */
+export function isFormData(value: unknown): value is FormData {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  try {
+    if (Array.isArray(value) || ArrayBuffer.isView(value)) {
+      return false;
+    }
+
+    if (isPlainRecord(value)) {
+      return false;
+    }
+
+    FormData.prototype.has.call(value, '');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `value` is a form of a runtime whose `FormData` has no `has` - React Native's,
+ * which holds only `append`, `getAll` and `getParts` - so {@link isFormData} cannot tell
+ * one by its methods: told by `instanceof` there instead. Never on a runtime whose
+ * `FormData` has `has`, where a form is told by {@link isFormData} alone.
+ * For FetchAdapter and XHRAdapter, which hand such a form to their runtime's transport to
+ * send, and for the Content-Type they drop beside it; nothing here reads one's entries.
+ * With no brand to ask, a `Proxy` over such a form, or an object that only inherits from
+ * its prototype, is taken as one there too: the transport is then what refuses it.
+ */
+export function isMethodlessFormData(value: unknown): boolean {
+  try {
+    return (
+      typeof FormData === 'function' &&
+      typeof (FormData.prototype as Partial<FormData>).has !== 'function' &&
+      value instanceof FormData
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The name a file part named `name` is sent under: `name`, except on Bun. A file backed by
+ * a path there - `Bun.file()`, `openAsBlob` - reports the path as its name, even when
+ * appended under another, and a form's entries do not tell it from a `File` named with a
+ * slash. So only the last segment is sent, as the form-data package sends it
+ * (`path.basename`, a Windows drive prefix included): a local path is no business of the
+ * server's. Trailing separators are dropped first, so `/home/me/dir/` is sent as `dir`. A
+ * name with no segment left (`/`, `C:\\`) is sent as it is. Handed the name rather than
+ * the part, so each use reads a part's name once.
+ */
+export function filePartNameToSend(name: unknown): unknown {
+  if (!isBunRuntime || typeof name !== 'string') {
+    return name;
+  }
+
+  const isWindows = process.platform === 'win32';
+  const isSeparator = (char: string): boolean =>
+    char === '/' || (isWindows && char === '\\');
+
+  // A drive prefix (`C:`) is a local path too, as `path.win32.basename` reads it.
+  const root = isWindows && /^[A-Za-z]:/.test(name) ? 2 : 0;
+
+  let end = name.length;
+  while (end > root && isSeparator(name[end - 1])) {
+    end--;
+  }
+
+  let start = end;
+  while (start > root && !isSeparator(name[start - 1])) {
+    start--;
+  }
+
+  // A name of separators alone names no path, and is left as it is: sent as `filename=""`,
+  // a server would read the part as no file chosen.
+  return start === end ? name : name.slice(start, end);
+}

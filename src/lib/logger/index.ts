@@ -1,4 +1,8 @@
 import { isNullish } from '../internal/is-nullish';
+import {
+  MAX_COPIED_ARRAY_LENGTH,
+  readArrayLength,
+} from '../internal/array-copy';
 import { isObjectLike } from '../internal/is-object-like';
 import {
   noop,
@@ -55,6 +59,8 @@ import { LoggerService } from './logger-service';
 import { diagnosticEntry } from './internal/diagnostic-entry';
 import { registerSinkFailureReporter } from './internal/sink-failure-routing';
 import { resolveTimeoutMS } from '../internal/timer-limits';
+import { readCopiedIndex } from '../internal/array-indices';
+import { describeValue } from '../internal/describe-value';
 import { raceDeadline } from '../internal/race-deadline';
 
 const DEFAULT_LOGGER_CLOSE_TIMEOUT_MS = 60_000;
@@ -307,8 +313,12 @@ export class Logger extends EventEmitter {
       'Logger closeTimeoutMS',
     );
 
-    this.sinks = copySinkList(options.sinks);
-    this.diagnosticSinks = copySinkList(options.diagnosticSinks);
+    this.sinks = copySinkList(options.sinks, 'Logger sinks');
+    this.diagnosticSinks = copySinkList(
+      options.diagnosticSinks,
+      'Logger diagnosticSinks',
+      true,
+    );
     this.redactFunction = options.redactFunction;
     this.callProcessExit = options.callProcessExit ?? true;
     this.beforeExitCallback = options.beforeExitCallback;
@@ -1014,6 +1024,7 @@ export class Logger extends EventEmitter {
    */
   public addSink(sink: LogSink): void {
     this.assertCanAddSink();
+    assertLogSink(sink, 'Logger.addSink() sink');
     this.sinks = [...this.sinks, sink];
     this.ownSinkFailures(sink);
   }
@@ -1045,6 +1056,7 @@ export class Logger extends EventEmitter {
    */
   public addDiagnosticSink(sink: LogSink): void {
     this.assertCanAddSink();
+    assertLogSink(sink, 'Logger.addDiagnosticSink() sink', true);
     this.diagnosticSinks = [...this.diagnosticSinks, sink];
     this.ownSinkFailures(sink);
   }
@@ -2467,9 +2479,16 @@ function isMutedConsoleSink(sink: LogSink): boolean {
   }
 }
 
-/** Own the list by numeric membership; caller iterators do not select destinations. */
+/**
+ * Own the list by numeric membership; caller iterators do not select destinations. Its own
+ * entries only, to a length checked as an array's (see `readArrayLength`), each one
+ * checked as a sink (see `assertLogSink`): a hole - one its prototype fills included - is
+ * refused as no sink.
+ */
 function copySinkList(
   source: readonly LogSink[] | null | undefined,
+  label: string,
+  isDiagnostic = false,
 ): LogSink[] {
   if (isNullish(source)) {
     return [];
@@ -2479,9 +2498,58 @@ function copySinkList(
   if (!Array.isArray(source)) {
     throw new TypeError('Logger sink lists must be arrays');
   }
+  const length = readArrayLength(entries, label, MAX_COPIED_ARRAY_LENGTH);
   const sinks: LogSink[] = [];
-  for (let index = 0, length = entries.length; index < length; index++) {
-    sinks.push(entries[index]);
+  for (let index = 0; index < length; index++) {
+    const sink: unknown = readCopiedIndex(entries, index);
+    // Named by its place in the list; a hole is no sink either.
+    assertLogSink(sink, `${label}[${String(index)}]`, isDiagnostic);
+    sinks.push(sink);
   }
   return sinks;
+}
+
+/**
+ * Refuses, with a `TypeError` naming `label`, a value that is not a sink: an object (or a
+ * function) with a `write` method - or, for a diagnostic sink, a `writeDiagnostic` one,
+ * which it is handed every diagnostic through when it has one. Checked where a sink is
+ * handed over, so a list with a hole or a value that cannot be written to fails there,
+ * not once per entry on every log call.
+ */
+function assertLogSink(
+  sink: unknown,
+  label: string,
+  isDiagnostic = false,
+): asserts sink is LogSink {
+  const needs = isDiagnostic
+    ? 'a write() or writeDiagnostic() method'
+    : 'a write() method';
+
+  if (!isObjectLike(sink)) {
+    throw new TypeError(
+      `${label} must be a sink with ${needs} (got ${describeValue(sink)})`,
+    );
+  }
+
+  let write: unknown;
+  let writeDiagnostic: unknown;
+  try {
+    write = (sink as Partial<LogSink>).write;
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- only its type is read
+    writeDiagnostic = isDiagnostic ? (sink as LogSink).writeDiagnostic : null;
+  } catch (error) {
+    throw new TypeError(`${label} has a method that could not be read`, {
+      cause: error,
+    });
+  }
+
+  // A diagnostic sink is handed diagnostics through `writeDiagnostic` when it has one,
+  // and through `write` when it has none.
+  const writer = isNullish(writeDiagnostic) ? write : writeDiagnostic;
+
+  if (typeof writer !== 'function') {
+    throw new TypeError(
+      `${label} must be a sink with ${needs} (got ${isNullish(writeDiagnostic) ? 'write' : 'writeDiagnostic'}: ${describeValue(writer)})`,
+    );
+  }
 }
