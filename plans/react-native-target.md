@@ -72,7 +72,7 @@ The research covers React Native 0.88 with Hermes V1 and the New Architecture. "
 ### Phase 1: fail fast and fix what we can in code
 
 1. **DOMException.** Build abort errors through one helper that uses `DOMException` when it exists. Otherwise it returns an `Error` with `name = 'AbortError'`. The client already identifies these by `name`, not `instanceof`.
-2. **FormData clone.** In `cloneBodyValue`, don't depend on `entries()`. Use it when present. Otherwise pass the FormData through unchanged, or refuse it, but never let it throw. Decide which.
+2. **FormData clone.** In `cloneBodyValue`, don't depend on `entries()`. Use it when present. Otherwise pass the FormData through unchanged, or refuse it, but never let it throw. Decide which. Before that: `isFormData` (`internal/form-entries.ts`) tells a form by calling `FormData.prototype.has`, which React Native's `FormData` lacks, so `HTTPClient` refuses a React Native form as an unsupported body type before any copy is attempted. PR #34 lets only `XHRAdapter` driven directly accept one, through `isMethodlessFormData` (an `instanceof` check used only when `FormData.prototype.has` is missing); the client's own checks (`assertSupportedRequestBody`, the body copy) need the same decision.
 3. **Timeout reason.** When `signal.reason` is `undefined`, throw an explicit timeout `AbortError` instead.
 4. **A preflight check, run once when XHRAdapter is constructed.**
    - It refuses to run on a runtime missing what the client needs for correctness. It throws a `TypeError` that names the polyfill to install.
