@@ -1360,32 +1360,49 @@ describe('MockAdapter.send() — low-level contract', () => {
     },
   );
 
-  test('a Transfer-Encoding request header is refused before the route runs, as NodeAdapter refuses it', async () => {
-    let calls = 0;
-    adapter.routes.post('/te', () => {
-      calls++;
-      return { status: 200 };
-    });
+  test.each([
+    [
+      { 'Transfer-Encoding': 'chunked' },
+      'MockAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
+    ],
+    [
+      { Upgrade: 'websocket' },
+      'MockAdapter does not switch protocols; an Upgrade request header is not supported',
+    ],
+    [
+      { expect: '100-continue' },
+      'MockAdapter does not wait for 100 Continue; an Expect request header is not supported',
+    ],
+  ])(
+    'a %p request header is refused before the route runs, as NodeAdapter refuses it',
+    async (headers, message) => {
+      let calls = 0;
+      adapter.routes.post('/te', () => {
+        calls++;
+        return { status: 200 };
+      });
 
-    const failure = await adapter
-      .send(
-        makeAdapterRequest({
-          requestURL: '/te',
-          method: 'POST',
-          headers: { 'Transfer-Encoding': 'chunked' },
-          body: 'x',
-        }),
-      )
-      .catch((error: unknown) => error);
+      const failure = await adapter
+        .send(
+          makeAdapterRequest({
+            requestURL: '/te',
+            method: 'POST',
+            headers,
+            body: 'x',
+          }),
+        )
+        .catch((error: unknown) => error);
 
-    expect(calls).toBe(0);
-    expect(failure).toBeInstanceOf(TypeError);
-    expect(
-      (failure as Record<string, unknown>)[
-        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
-      ],
-    ).toBe(true);
-  });
+      expect(calls).toBe(0);
+      expect(failure).toBeInstanceOf(TypeError);
+      expect((failure as Error).message).toBe(message);
+      expect(
+        (failure as Record<string, unknown>)[
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+        ],
+      ).toBe(true);
+    },
+  );
 
   test.each([
     ['/a/../b', '/b', '/b'],

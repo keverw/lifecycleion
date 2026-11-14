@@ -165,8 +165,9 @@ export function isAdapterRequestBody(body: unknown): boolean {
  * form, an object that only inherits from `FormData.prototype` - would go out as no body,
  * as its `String()` text, or fail on every attempt, so every adapter refuses it in these
  * words (on React Native, the browser adapters take any object of its `FormData`'s
- * prototype as a form; see `unsendableBrowserBodyRefusal`). `HTTPClient` serializes or refuses such a body before an adapter is handed it;
- * this is an adapter driven directly. Non-retryable.
+ * prototype as a form; see `unsendableBrowserBodyRefusal`). `HTTPClient` serializes or
+ * refuses such a body before an adapter is handed it; this is an adapter driven directly.
+ * Non-retryable.
  */
 export function unsendableBodyRefusal(
   adapterName: string,

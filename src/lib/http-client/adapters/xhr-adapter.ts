@@ -43,7 +43,7 @@ import {
   forbiddenMethodMessage,
   isBodilessMethod,
   isForbiddenBrowserMethod,
-} from '../internal/method-refusal';
+} from '../internal/transport-refusal';
 import { readUnknownMember } from '../../internal/read-member';
 import { isLoopbackHost } from '../internal/loopback-host';
 import type {
@@ -108,10 +108,10 @@ export class XHRAdapter implements HTTPAdapter {
     // URL's, and that one absolute URL is what is opened, what `compareResponseURL`
     // compares `responseURL` with, and what a `Location` resolves against. One that does
     // not resolve, or is not http(s), is refused first, as FetchAdapter and NodeAdapter
-    // refuse it, as the non-retryable error it is (see `resolveBrowserDispatchURL`): whether an answer
-    // came from where the request was sent cannot be told without an absolute URL to
-    // compare `responseURL` with, and XHR would open a `file:` or `data:` URL where the
-    // runtime loads one.
+    // refuse it, as the non-retryable error it is (see `resolveBrowserDispatchURL`):
+    // whether an answer came from where the request was sent cannot be told without an
+    // absolute URL to compare `responseURL` with, and XHR would open a `file:` or `data:`
+    // URL where the runtime loads one.
     const answeredURL = resolveBrowserDispatchURL(
       requestURL,
       initialURL,
@@ -489,10 +489,10 @@ export class XHRAdapter implements HTTPAdapter {
       let uploadTotalBytes = 0;
 
       // The size of a body that is not text, read once: `0` for none or an empty one,
-      // `undefined` where it cannot be known up front (a `FormData`). Text with any characters is at
-      // least a byte, so it is measured only by the final upload event, and only when the
-      // browser reported nothing. Only when upload progress was asked for: nothing else
-      // reads it.
+      // `undefined` where it cannot be known up front (a `FormData`). Text with any
+      // characters is at least a byte, so it is measured only by the final upload event,
+      // and only when the browser reported nothing. Only when upload progress was asked
+      // for: nothing else reads it.
       const binaryBodyByteLength =
         !guardedUploadProgress || typeof requestBody === 'string'
           ? undefined

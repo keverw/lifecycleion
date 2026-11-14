@@ -130,3 +130,42 @@ export function fetchRefusedHeaderMessage(
 ): string {
   return `[${adapterName}] Cannot send a request with ${refusedHeader}: the Fetch Standard forbids one, and Node's fetch refuses it.`;
 }
+
+/**
+ * Request headers NodeAdapter refuses by name, each with why, for it and for MockAdapter,
+ * which mirrors it: both frame the body themselves with a `Content-Length`, switch no
+ * protocols and wait for no `100 Continue`.
+ */
+const FRAMING_REFUSED_HEADERS: ReadonlyMap<string, string> = new Map([
+  [
+    'transfer-encoding',
+    'frames request bodies itself; a Transfer-Encoding request header is not supported',
+  ],
+  [
+    'upgrade',
+    'does not switch protocols; an Upgrade request header is not supported',
+  ],
+  [
+    'expect',
+    'does not wait for 100 Continue; an Expect request header is not supported',
+  ],
+]);
+
+/**
+ * The refusal of the first header in `headerNames` that NodeAdapter and MockAdapter
+ * refuse (see {@link FRAMING_REFUSED_HEADERS}), by the adapter named, or `undefined`.
+ * Names are read whatever their case.
+ */
+export function framingRefusedHeaderMessage(
+  adapterName: string,
+  headerNames: Iterable<string>,
+): string | undefined {
+  for (const name of headerNames) {
+    const reason = FRAMING_REFUSED_HEADERS.get(asciiLowercase(name));
+    if (reason !== undefined) {
+      return `${adapterName} ${reason}`;
+    }
+  }
+
+  return undefined;
+}

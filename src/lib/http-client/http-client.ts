@@ -175,7 +175,7 @@ import {
   forbiddenMethodMessage,
   isBodilessMethod,
   isForbiddenBrowserMethod,
-} from './internal/method-refusal';
+} from './internal/transport-refusal';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
 import { listenForUploadSourceWait } from './internal/upload-source-wait';
 import { listenForStreamFailureSettled } from './internal/stream-failure-settled';

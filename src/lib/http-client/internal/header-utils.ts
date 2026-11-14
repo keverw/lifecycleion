@@ -7,7 +7,7 @@ import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
 import { isFormData, isMethodlessFormData } from './form-entries';
 import { isHTTPToken } from './http-token';
-import { isForbiddenBrowserMethod } from './method-refusal';
+import { isForbiddenBrowserMethod } from './transport-refusal';
 import {
   copyArrayValue,
   MAX_COPIED_ARRAY_LENGTH,

@@ -54,14 +54,15 @@ test('the post-upload-failure deadline keeps a response that is behind its consu
         await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
         const url = 'http://127.0.0.1:' + server.address().port + '/';
 
-        // A multipart File that yields 10 of its 100 bytes: the upload fails at its source.
-        const shortForm = () => {
+        // A multipart File that yields 10 of its 100 bytes once \`answered\` settles - the
+        // client has the response - so the upload fails at its source behind it.
+        const shortForm = (answered) => {
           const file = new File([new Uint8Array(100)], 'f.bin');
           Object.defineProperty(file, 'stream', {
             value() {
               return new ReadableStream({
                 async start(controller) {
-                  await new Promise((resolve) => setTimeout(resolve, 300));
+                  await answered;
                   controller.enqueue(new Uint8Array(10));
                   controller.close();
                 },
@@ -89,16 +90,21 @@ test('the post-upload-failure deadline keeps a response that is behind its consu
             }
           },
         });
+        let answerPaused;
+        const pausedAnswered = new Promise((resolve) => { answerPaused = resolve; });
         const paused = new NodeAdapter().send({
-          requestURL: url + 'big', method: 'POST', headers: {}, body: shortForm(),
-          streamResponse: () => slowSink,
+          requestURL: url + 'big', method: 'POST', headers: {}, body: shortForm(pausedAnswered),
+          streamResponse: () => { answerPaused(); return slowSink; },
         });
 
         // A complete response whose async factory is still opening its sink at the deadline.
         let small = '';
+        let answerPending;
+        const pendingAnswered = new Promise((resolve) => { answerPending = resolve; });
         const pending = new NodeAdapter().send({
-          requestURL: url + 'small', method: 'POST', headers: {}, body: shortForm(),
+          requestURL: url + 'small', method: 'POST', headers: {}, body: shortForm(pendingAnswered),
           streamResponse: async () => {
+            answerPending();
             await new Promise((resolve) => setTimeout(resolve, 6500));
             const sink = new PassThrough();
             sink.on('data', (chunk) => { small += chunk.toString(); });
@@ -177,13 +183,16 @@ test('an upload that fails behind a response still arriving cuts it at once, as 
         });
         await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
-        // A multipart File that yields 10 of its 100 bytes: the upload fails at its source.
+        // A multipart File that yields 10 of its 100 bytes once the client has the
+        // response (its first download event): the upload fails at its source behind it.
+        let answer;
+        const answered = new Promise((resolve) => { answer = resolve; });
         const file = new File([new Uint8Array(100)], 'f.bin');
         Object.defineProperty(file, 'stream', {
           value() {
             return new ReadableStream({
               async start(controller) {
-                await new Promise((resolve) => setTimeout(resolve, 300));
+                await answered;
                 controller.enqueue(new Uint8Array(10));
                 controller.close();
               },
@@ -198,6 +207,7 @@ test('an upload that fails behind a response still arriving cuts it at once, as 
         const response = await new NodeAdapter().send({
           requestURL: 'http://127.0.0.1:' + server.address().port + '/',
           method: 'POST', headers: {}, body: form,
+          onDownloadProgress: () => answer(),
         });
         clearTimeout(hang);
         const elapsed = Math.round(performance.now() - startedAt);
@@ -250,7 +260,8 @@ test.each([
         import { NodeAdapter } from './adapter.mjs';
 
         // Answers 205 at once, and sends 100 KiB of stray bytes against a 64 KiB limit
-        // with it, or a second later, after the upload has failed at its source (300 ms).
+        // with it, or a second later, after the upload has failed at its source (as soon
+        // as the client has the answer).
         const STRAY = 100 * 1024;
         let answeredAt;
         let closedAt;
@@ -270,13 +281,16 @@ test.each([
         });
         await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
-        // A multipart File that yields 10 of its 100 bytes: the upload fails at its source.
+        // A multipart File that yields 10 of its 100 bytes once the client has the
+        // response (its first download event): the upload fails at its source behind it.
+        let answer;
+        const answered = new Promise((resolve) => { answer = resolve; });
         const file = new File([new Uint8Array(100)], 'f.bin');
         Object.defineProperty(file, 'stream', {
           value() {
             return new ReadableStream({
               async start(controller) {
-                await new Promise((resolve) => setTimeout(resolve, 300));
+                await answered;
                 controller.enqueue(new Uint8Array(10));
                 controller.close();
               },
@@ -289,6 +303,7 @@ test.each([
         const response = await new NodeAdapter().send({
           requestURL: 'http://127.0.0.1:' + server.address().port + '/',
           method: 'POST', headers: {}, body: form, maxResponseBytes: 64 * 1024,
+          onDownloadProgress: () => answer(),
         });
         assert.equal(response.status, 205);
         assert.ok(await response.requestBodySettled instanceof Error, 'the upload failed');
@@ -299,7 +314,8 @@ test.each([
         }
         clearTimeout(hang);
 
-        // Let go as the upload fails (300 ms in), not when a window ends five seconds on.
+        // Let go as the upload fails, just after the answer, not when a window ends five
+        // seconds on.
         assert.ok(closedAt - answeredAt < 2000, 'closed ' + Math.round(closedAt - answeredAt) + ' ms after the answer');
         for (const socket of sockets) socket.destroy();
         server.close();

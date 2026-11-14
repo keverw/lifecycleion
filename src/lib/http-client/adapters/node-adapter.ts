@@ -1,3 +1,4 @@
+import { framingRefusedHeaderMessage } from '../internal/transport-refusal';
 import {
   asciiLowercase,
   asciiUppercase,
@@ -618,13 +619,12 @@ export class NodeAdapter implements HTTPAdapter {
     // `adapter_error`, a `FormData` one as a transport failure, retried and failing the
     // same each time), and a bodiless one would go out chunked rather than with no
     // length - and RFC 9110 has no `100-continue` on a request without content anyway.
-    for (const name of Object.keys(request.headers)) {
-      const refusalMessage = REFUSED_REQUEST_HEADERS.get(
-        lowerCaseHeaderName(name),
-      );
-      if (refusalMessage !== undefined) {
-        throw optionRefusal(refusalMessage);
-      }
+    const refusalMessage = framingRefusedHeaderMessage(
+      'NodeAdapter',
+      Object.keys(request.headers),
+    );
+    if (refusalMessage !== undefined) {
+      throw optionRefusal(refusalMessage);
     }
 
     if (asciiUppercase(request.method) === 'CONNECT') {
@@ -4386,22 +4386,6 @@ function assertCRLParses(crl: string | Buffer | Array<string | Buffer>): void {
     );
   }
 }
-
-/** Request headers `NodeAdapter` refuses before dispatch, by name, with why. */
-const REFUSED_REQUEST_HEADERS: ReadonlyMap<string, string> = new Map([
-  [
-    'transfer-encoding',
-    'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
-  ],
-  [
-    'upgrade',
-    'NodeAdapter does not switch protocols; an Upgrade request header is not supported',
-  ],
-  [
-    'expect',
-    'NodeAdapter does not wait for 100 Continue; an Expect request header is not supported',
-  ],
-]);
 
 /**
  * One `crl` value — or one element of an array of them.

@@ -68,7 +68,7 @@ import {
   forbiddenMethodMessage,
   isBodilessMethod,
   isForbiddenBrowserMethod,
-} from '../internal/method-refusal';
+} from '../internal/transport-refusal';
 import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
 
 export class FetchAdapter implements HTTPAdapter {

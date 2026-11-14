@@ -1,3 +1,4 @@
+import { framingRefusedHeaderMessage } from '../internal/transport-refusal';
 import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
 import { isNullish } from '../../internal/is-nullish';
 import {
@@ -387,12 +388,16 @@ export class MockAdapter implements HTTPAdapter {
       );
     }
 
-    // Refused as NodeAdapter refuses it: the mock frames the body itself, by the
-    // `content-length` below, and a request framed both ways is one RFC 9112 forbids.
-    if (Object.hasOwn(materializedHeaders, 'transfer-encoding')) {
-      const refusal = new TypeError(
-        'MockAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
-      );
+    // Refused as NodeAdapter refuses them, so a test that passes here does not fail
+    // against a server: the mock frames the body itself, by the `content-length` below -
+    // a request framed both ways is one RFC 9112 forbids - and answers no protocol switch
+    // or `100 Continue`.
+    const refusalMessage = framingRefusedHeaderMessage(
+      'MockAdapter',
+      Object.keys(materializedHeaders),
+    );
+    if (refusalMessage !== undefined) {
+      const refusal = new TypeError(refusalMessage);
       markNonRetryableAdapterError(refusal);
       throw refusal;
     }

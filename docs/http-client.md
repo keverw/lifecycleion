@@ -1389,7 +1389,7 @@ Every built-in adapter, driven directly, refuses a `method` that is absent, empt
 
 Uses the global `fetch()` API. Works in browsers, Node.js 18+, Bun, and Deno.
 
-A request to a port the [Fetch Standard blocks](https://fetch.spec.whatwg.org/#port-blocking) (`:25`, `:6000`, `:10080` and the rest of its list) is refused as a non-retryable `adapter_error` before anything is sent, on every runtime, as Node's and browsers' `fetch` refuse it; Bun's would send it. Use `NodeAdapter` to reach such a port from a server runtime. So is a request with a header `fetch` refuses (`Transfer-Encoding`, `Keep-Alive`, `Upgrade`, `Expect`, or a `Connection` other than `close` or `keep-alive`), on every runtime; `NodeAdapter` sends a `Keep-Alive` and a `Connection` of any value, and refuses the other three.
+A request to a port the [Fetch Standard blocks](https://fetch.spec.whatwg.org/#port-blocking) (`:25`, `:6000`, `:10080` and the rest of its list) is refused as a non-retryable `adapter_error` before anything is sent, on every runtime, as Node's and browsers' `fetch` refuse it; Bun's would send it. Use `NodeAdapter` to reach such a port from a server runtime, and `XHRAdapter` from React Native, whose XHR is not held to the list outside a browser. So is a request with a header `fetch` refuses (`Transfer-Encoding`, `Keep-Alive`, `Upgrade`, `Expect`, or a `Connection` other than `close` or `keep-alive`), on every runtime; `NodeAdapter` sends a `Keep-Alive` and a `Connection` of any value, and refuses the other three.
 
 ```typescript
 import { FetchAdapter, HTTPClient } from 'lifecycleion/http-client';
@@ -1621,6 +1621,8 @@ Because browsers follow redirects silently, XHR cannot intercept them mid-flight
 ### MockAdapter (Testing)
 
 Route-based mock server for unit and integration tests. Routes match on **path only**. The domain in the URL is stripped before matching.
+
+Before a route runs it refuses, as `NodeAdapter` does, a body other than a string, `Uint8Array`, `FormData` or none, a `Transfer-Encoding`, `Upgrade` or `Expect` header, and a `CONNECT`, each as a non-retryable `TypeError` in `NodeAdapter`'s words under its own name, so a test that passes against the mock does not fail against a server for one of these. A URL that does not parse is routed as written, where `NodeAdapter` refuses it. It mirrors `NodeAdapter`, not `FetchAdapter`: a `Keep-Alive` header, or a `Connection` of any value, reaches the route.
 
 ```typescript
 import { MockAdapter } from 'lifecycleion/http-client-mock';

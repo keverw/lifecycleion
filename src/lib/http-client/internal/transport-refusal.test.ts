@@ -13,7 +13,7 @@ import {
   forbiddenMethodMessage,
   isBodilessMethod,
   isForbiddenBrowserMethod,
-} from './method-refusal';
+} from './transport-refusal';
 
 test('the rules read a method by its ASCII case alone', () => {
   expect(['CONNECT', 'trace', 'Track'].map(isForbiddenBrowserMethod)).toEqual([
