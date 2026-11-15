@@ -3,7 +3,6 @@ import {
   isAllWildcards,
   isHostTooLongToNormalize,
   hasPartialLabelWildcard,
-  checkDNSLength,
   normalizeDomain,
   normalizeDomainName,
   readURLParserIPv4,
@@ -140,6 +139,11 @@ export function safeParseURL(input: string): URL | null {
   }
 }
 
+/**
+ * Whether a parsed origin's host is one `normalizeOrigin` reads, for the global and
+ * protocol wildcards: not one with a hyphen at a label's edge (`-edge.example.com`),
+ * which the URL parser accepts and no origin entry here can name.
+ */
 function hasValidWildcardOriginHost(url: URL): boolean {
   return normalizeDomain(url.hostname) !== '';
 }
@@ -292,98 +296,125 @@ export function normalizeOrigin(origin: string): string {
     return 'null';
   }
 
+  const bare = readBareOrigin(origin);
+
+  return bare === undefined ? '' : (canonicalOrigin(bare)?.origin ?? '');
+}
+
+/** An origin's text as the URL parser reads it, and the parse (see `readBareOrigin`). */
+interface BareOrigin {
+  /** Cleaned as the parser cleans it (see `toOriginText`), its host's dots folded. */
+  text: string;
+  url: URL;
+}
+
+/**
+ * `origin` read as a bare origin - a scheme and an authority with nothing past the host
+ * and port but one trailing `/` - or `undefined`. The one reading `normalizeOrigin`, the
+ * wildcard matcher and the exact-origin matcher share, so they refuse the same text.
+ */
+function readBareOrigin(origin: string): BareOrigin | undefined {
   // Read as the parser reads its text; see `toOriginText`.
   const originText = toOriginText(origin);
   if (originText === undefined) {
-    return '';
+    return undefined;
   }
 
   // Normalize Unicode dots before URL parsing for browser compatibility
   // Chrome allows URLs like https://127。0。0。1 - but only for a special scheme's host:
   // a non-special scheme's is opaque, and the parser percent-encodes those dots.
-  const normalizedOrigin = foldOriginDots(originText);
-  if (hasDanglingPortInAuthority(normalizedOrigin)) {
-    return '';
-  }
+  const text = foldOriginDots(originText);
 
   // A percent-encoded host (`https://ex%61mple.com`) is refused, as `validateConfigEntry`
-  // refuses it. See `hasPercentEncodedHost`. So is an empty userinfo, query or fragment.
+  // refuses it. See `hasPercentEncodedHost`. So is an empty port, userinfo, query or
+  // fragment.
   if (
-    hasPercentEncodedHost(normalizedOrigin) ||
-    hasOriginExtras(normalizedOrigin)
+    hasDanglingPortInAuthority(text) ||
+    hasPercentEncodedHost(text) ||
+    hasOriginExtras(text)
   ) {
-    return '';
+    return undefined;
   }
 
-  const url = safeParseURL(normalizedOrigin);
-  if (url) {
-    // Only normalize bare origins. Allow a single trailing slash so callers
-    // can pass values like "https://example.com/" without broadening real paths.
-    if (
-      url.username ||
-      url.password ||
-      (url.pathname && url.pathname !== '/') ||
-      url.search ||
-      url.hash
-    ) {
-      return '';
-    }
+  const url = safeParseURL(text);
 
-    // Normalize hostname with punycode, as the URL parser read it. See
-    // `normalizeOriginHostname`.
-    const protocolLower = asciiLowercase(url.protocol);
-    const normalizedHostname = normalizeOriginHostname(
-      protocolLower,
-      url.hostname,
-    );
-
-    // If hostname normalization fails (pathological IDN), return original origin
-    // to avoid emitting values like "https://" with an empty host.
-    if (normalizedHostname === '') {
-      return '';
-    }
-
-    // Preserve brackets for IPv6 hosts; avoid double-bracketing if already present
-    let host: string;
-    // Extract the raw bracketed host (if present) from the authority portion only
-    // to prevent matching brackets in path/query/fragment portions of full URLs.
-    const schemeSep = normalizedOrigin.indexOf('://');
-    const authority = extractAuthority(normalizedOrigin, schemeSep);
-    const bracketMatch = authority.match(/\[([^\]]+)\]/);
-    const rawBracketContent = bracketMatch ? bracketMatch[1] : null;
-
-    // Decode only for IPv6 detection, not for output
-    const hostnameForIpv6Check = asciiLowercase(
-      (rawBracketContent ? rawBracketContent : normalizedHostname).replace(
-        /%25/g,
-        '%',
-      ),
-    );
-
-    if (isIPv6(hostnameForIpv6Check)) {
-      // Canonicalize bracket content using shared helper (do not decode %25)
-      const raw = rawBracketContent
-        ? rawBracketContent
-        : normalizedHostname.replace(/^\[|\]$/g, '');
-
-      const canon = canonicalizeBracketedIPv6Content(raw);
-
-      host = `[${canon}]`;
-    } else {
-      host = normalizedHostname;
-    }
-
-    // An empty `url.port` is the scheme's default: the parser drops every special
-    // scheme's (`wss://x.com:443` reads as `wss://x.com`), so it stays off.
-    const port = url.port ? `:${url.port}` : '';
-
-    // Explicitly use lowercase protocol for consistency
-    return `${protocolLower}//${host}${port}`;
+  // Only bare origins. A single trailing slash is allowed so callers can pass values like
+  // "https://example.com/" without broadening real paths.
+  if (
+    !url ||
+    url.username ||
+    url.password ||
+    (url.pathname && url.pathname !== '/') ||
+    url.search ||
+    url.hash
+  ) {
+    return undefined;
   }
 
-  // If URL parsing fails, return empty sentinel (handles invalid URLs).
-  // Literal "null" is handled above.
-  return '';
+  return { text, url };
+}
+
+/**
+ * A bare origin's canonical form, with its hostname normalized as `normalizeOrigin`
+ * compares it, or `undefined` when the hostname does not normalize (a pathological IDN,
+ * an edge-hyphen label): such an origin is invalid, rather than a value like "https://"
+ * with an empty host.
+ */
+function canonicalOrigin({
+  text,
+  url,
+}: BareOrigin): { origin: string; hostname: string } | undefined {
+  // Normalize hostname with punycode, as the URL parser read it. See
+  // `normalizeOriginHostname`.
+  const protocolLower = asciiLowercase(url.protocol);
+  const normalizedHostname = normalizeOriginHostname(
+    protocolLower,
+    url.hostname,
+  );
+
+  if (normalizedHostname === '') {
+    return undefined;
+  }
+
+  // Preserve brackets for IPv6 hosts; avoid double-bracketing if already present
+  let host: string;
+  // Extract the raw bracketed host (if present) from the authority portion only
+  // to prevent matching brackets in path/query/fragment portions of full URLs.
+  const schemeSep = text.indexOf('://');
+  const authority = extractAuthority(text, schemeSep);
+  const bracketMatch = authority.match(/\[([^\]]+)\]/);
+  const rawBracketContent = bracketMatch ? bracketMatch[1] : null;
+
+  // Decode only for IPv6 detection, not for output
+  const hostnameForIpv6Check = asciiLowercase(
+    (rawBracketContent ? rawBracketContent : normalizedHostname).replace(
+      /%25/g,
+      '%',
+    ),
+  );
+
+  if (isIPv6(hostnameForIpv6Check)) {
+    // Canonicalize bracket content using shared helper (do not decode %25)
+    const raw = rawBracketContent
+      ? rawBracketContent
+      : normalizedHostname.replace(/^\[|\]$/g, '');
+
+    const canon = canonicalizeBracketedIPv6Content(raw);
+
+    host = `[${canon}]`;
+  } else {
+    host = normalizedHostname;
+  }
+
+  // An empty `url.port` is the scheme's default: the parser drops every special
+  // scheme's (`wss://x.com:443` reads as `wss://x.com`), so it stays off.
+  const port = url.port ? `:${url.port}` : '';
+
+  // Explicitly use lowercase protocol for consistency
+  return {
+    origin: `${protocolLower}//${host}${port}`,
+    hostname: normalizedHostname,
+  };
 }
 
 /**
@@ -461,8 +492,8 @@ function matchesNormalizedWildcardIn(
  * Supports protocol-specific wildcards and domain wildcards:
  * - * - matches any valid HTTP(S) origin (global wildcard)
  * - https://* or http://* - matches any domain with specific protocol
- * - *.example.com - matches direct subdomains with any protocol (ignores port)
- * - **.example.com - matches all subdomains including nested with any protocol
+ * - *.example.com - matches direct subdomains over http or https (ignores port)
+ * - **.example.com - matches all subdomains including nested over http or https
  * - https://*.example.com or http://*.example.com - matches direct subdomains with specific protocol
  * - https://**.example.com or http://**.example.com - matches all subdomains including nested with specific protocol
  *
@@ -530,46 +561,21 @@ interface WildcardOrigin {
  * host and port, or `undefined` for one no wildcard pattern matches.
  */
 function readWildcardOrigin(origin: string): URL | undefined {
-  // Read as the parser reads its text, as `normalizeOrigin` reads it; see `toOriginText`.
-  const originText = toOriginText(origin);
-  if (originText === undefined) {
-    return undefined;
-  }
-
-  // Normalize Unicode dots before URL parsing for consistency
-  const normalizedOrigin = foldOriginDots(originText);
-
-  if (
-    hasDanglingPortInAuthority(normalizedOrigin) ||
-    hasPercentEncodedHost(normalizedOrigin) ||
-    hasOriginExtras(normalizedOrigin)
-  ) {
-    return undefined;
-  }
-
-  // Every pattern - `*` and the protocol wildcards included - needs a parsed URL.
-  const originURL = safeParseURL(normalizedOrigin);
-  if (!originURL) {
-    return undefined;
-  }
+  // Read as `normalizeOrigin` reads it. Every pattern - `*` and the protocol wildcards
+  // included - needs a parsed URL.
+  const originURL = readBareOrigin(origin)?.url;
 
   // For CORS, only http/https are relevant.
-  const scheme = asciiLowercase(originURL.protocol);
-  if (scheme !== 'http:' && scheme !== 'https:') {
-    return undefined;
-  }
+  return originURL !== undefined && isHTTPScheme(originURL.protocol)
+    ? originURL
+    : undefined;
+}
 
-  if (
-    originURL.username ||
-    originURL.password ||
-    (originURL.pathname && originURL.pathname !== '/') ||
-    originURL.search ||
-    originURL.hash
-  ) {
-    return undefined;
-  }
+/** Whether `protocol` (with its colon, in any case) is `http:` or `https:`. */
+function isHTTPScheme(protocol: string): boolean {
+  const scheme = asciiLowercase(protocol);
 
-  return originURL;
+  return scheme === 'http:' || scheme === 'https:';
 }
 
 /** Whether an origin read by `readWildcardOrigin` matches `pattern`. */
@@ -688,7 +694,13 @@ const compiledWildcardPatterns = new Map<
   string,
   ReturnType<typeof compileWildcardPattern>
 >();
-const MAX_COMPILED_WILDCARD_PATTERNS = 512;
+
+/**
+ * How many entries each shared cache - {@link compiledWildcardPatterns} and
+ * {@link normalizedExactEntries} - keeps, and so the longest list cached in them (see
+ * `cachedEntry`).
+ */
+const MAX_SHARED_CACHE_ENTRIES = 512;
 
 /** A scheme and `://`: an origin, which a domain list refuses. */
 const ORIGIN_LIKE = /^[a-z][a-z0-9+\-.]*:\/\//i;
@@ -699,7 +711,7 @@ const normalizedExactEntries = new Map<string, string>();
 /**
  * Where a wildcard pattern's compiled form is kept: the shared cache (`true`), nowhere
  * (`false`, for a list longer than it - see `cachedEntry`), or a list's own map (see
- * `originListPatterns`).
+ * `compiledOriginList`).
  */
 type PatternCache =
   boolean | Map<string, ReturnType<typeof compileWildcardPattern>>;
@@ -747,7 +759,7 @@ function cachedEntry<T>(
   }
 
   const value = compute(key);
-  if (cache.size >= MAX_COMPILED_WILDCARD_PATTERNS) {
+  if (cache.size >= MAX_SHARED_CACHE_ENTRIES) {
     const oldest = cache.keys().next();
     if (oldest.done !== true) {
       cache.delete(oldest.value);
@@ -829,7 +841,7 @@ function compiledDomainList(
     cleaned,
     entries: [],
     // A list that fits the shared caches is cached there too; see `cachedEntry`.
-    isCached: cleaned.length <= MAX_COMPILED_WILDCARD_PATTERNS,
+    isCached: cleaned.length <= MAX_SHARED_CACHE_ENTRIES,
   };
   compiledDomainLists.set(allowedDomains, list);
 
@@ -862,35 +874,66 @@ function compiledDomainEntry(
 }
 
 /**
- * Each origin list's compiled wildcard patterns, kept against the list itself, as
- * `compiledDomainLists` keeps a domain list's: checked against a copy of its entries on
- * every call, so a list the caller changes starts afresh.
+ * An origin list's entries, cleaned, with its wildcard patterns compiled and its exact
+ * entries read as each is first reached.
  */
-const originListPatternMaps = new WeakMap<
+interface CompiledOriginList {
+  /** The entries the list held, to check it against next time. */
+  source: readonly string[];
+  /** Trimmed, with the empty ones dropped. */
+  cleaned: readonly string[];
+  /** The wildcard patterns, compiled as reached (see `wildcardOriginMatcher`). */
+  patterns: Map<string, ReturnType<typeof compileWildcardPattern>>;
+  /** Each entry of `cleaned` holding no `*`, by index, read as reached; else `undefined`. */
+  exact: (ExactOriginEntry | undefined)[];
+}
+
+/**
+ * Each origin list's compiled entries, kept against the list itself, as
+ * `compiledDomainLists` keeps a domain list's: checked against a copy of its entries on
+ * every call, so a list the caller changes starts afresh, and holding no more than the
+ * list does. A CORS check runs on every request with the same list, and reading an exact
+ * entry parses it as a URL and maps its host to ASCII.
+ */
+const compiledOriginLists = new WeakMap<
   readonly string[],
-  {
-    source: readonly string[];
-    patterns: Map<string, ReturnType<typeof compileWildcardPattern>>;
-  }
+  CompiledOriginList
 >();
 
-function originListPatterns(
+function compiledOriginList(
   allowedOrigins: readonly string[],
   /** The list's entries as the matcher read them (see `copyEntryList`), kept as its source. */
   entries: readonly string[],
-): Map<string, ReturnType<typeof compileWildcardPattern>> {
-  const kept = originListPatternMaps.get(allowedOrigins);
+): CompiledOriginList {
+  const kept = compiledOriginLists.get(allowedOrigins);
   if (kept !== undefined && isSameList(kept.source, entries)) {
-    return kept.patterns;
+    return kept;
   }
 
-  const patterns = new Map<string, ReturnType<typeof compileWildcardPattern>>();
-  originListPatternMaps.set(allowedOrigins, {
+  const list: CompiledOriginList = {
     source: entries,
-    patterns,
-  });
+    cleaned: entries.map((s) => readTrimmedEntry(s) ?? '').filter(Boolean),
+    patterns: new Map(),
+    exact: [],
+  };
+  compiledOriginLists.set(allowedOrigins, list);
 
-  return patterns;
+  return list;
+}
+
+/** Entry `index` of `list`, which holds no `*`, read the first time it is reached. */
+function exactOriginEntry(
+  list: CompiledOriginList,
+  index: number,
+): ExactOriginEntry {
+  let entry = list.exact[index];
+
+  if (entry === undefined) {
+    entry = readExactOriginEntry(list.cleaned[index]);
+    list.exact[index] = entry;
+  }
+
+  return entry;
 }
 
 /** Whether `list` still holds exactly the entries of `source`, in order. */
@@ -927,7 +970,7 @@ function isSameList(
  */
 export function matchesDomainList(
   domain: string,
-  allowedDomains: string[],
+  allowedDomains: readonly string[],
 ): boolean {
   // Before the early exit below, so a list that is no list is refused on every call.
   assertEntryListIsArray(allowedDomains, 'matchesDomainList', 'allowedDomains');
@@ -1269,38 +1312,6 @@ export function validateConfigEntry(
     return { valid: false, info: 'empty entry', wildcardKind: 'none' };
   }
 
-  // Helper: validate non-wildcard labels (punycode + DNS limits)
-  function validateConcreteLabels(pattern: string): boolean {
-    if (isHostTooLongToNormalize(pattern)) {
-      return false;
-    }
-
-    const labels = pattern.split('.');
-    const concrete: string[] = [];
-
-    for (const lbl of labels) {
-      if (lbl === '*' || lbl === '**') {
-        continue;
-      }
-
-      const nd = normalizeDomainName(lbl);
-
-      if (nd === '') {
-        return false;
-      }
-
-      concrete.push(nd);
-    }
-
-    if (concrete.length > 0) {
-      if (!checkDNSLength(concrete.join('.'))) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
   // Why a wildcard's tail is refused, or `undefined` when it is not: the matcher's own
   // tail rule, so the two cannot disagree, its refusal named for what the tail is.
   function wildcardTailRefusal(normalized: string): string | undefined {
@@ -1381,18 +1392,12 @@ export function validateConfigEntry(
       };
     }
 
+    // `normalizeWildcardPattern` has normalized each concrete label and held them to
+    // DNS's lengths: an invalid one is its `''`, refused above.
     if (isAllWildcards(normalized)) {
       return {
         valid: false,
         info: 'all-wildcards pattern is not allowed',
-        wildcardKind: 'none',
-      };
-    }
-
-    if (!validateConcreteLabels(normalized)) {
-      return {
-        valid: false,
-        info: 'invalid domain labels',
         wildcardKind: 'none',
       };
     }
@@ -1589,11 +1594,7 @@ export function validateConfigEntry(
       };
     }
 
-    const info =
-      scheme === 'http' || scheme === 'https'
-        ? undefined
-        : 'non-http(s) scheme; CORS may not match';
-    return { valid: true, info, wildcardKind: 'protocol' };
+    return { valid: true, wildcardKind: 'protocol' };
   }
 
   // Extract host (and optional port) while respecting IPv6 brackets
@@ -1685,11 +1686,7 @@ export function validateConfigEntry(
       return verdict;
     }
 
-    const info =
-      scheme === 'http' || scheme === 'https'
-        ? undefined
-        : 'non-http(s) scheme; CORS may not match';
-    return { valid: true, info, wildcardKind: 'subdomain' };
+    return { valid: true, wildcardKind: 'subdomain' };
   }
 
   // Exact origin: allow any scheme; validate host as domain or IP. Every acceptance
@@ -1812,66 +1809,94 @@ function parseExactOriginForMatching(entry: string): {
   normalizedHostname: string;
   /** A non-special scheme's host, which the public suffix list says nothing about. */
   isOpaqueHost: boolean;
+  /** Whether the scheme is `http:` or `https:`, the only ones a bare domain matches. */
+  isHTTP: boolean;
 } | null {
   if (entry === 'null') {
     return {
       normalizedOrigin: 'null',
       normalizedHostname: '',
       isOpaqueHost: false,
+      isHTTP: false,
     };
   }
 
-  const entryText = toOriginText(entry);
-  if (entryText === undefined) {
+  // Read and canonicalized as `normalizeOrigin` reads it, from one parse.
+  const bare = readBareOrigin(entry);
+  const canonical = bare === undefined ? undefined : canonicalOrigin(bare);
+  if (bare === undefined || canonical === undefined) {
     return null;
   }
 
-  const normalized = foldOriginDots(entryText);
-  const schemeIdx = normalized.indexOf('://');
-
-  if (schemeIdx !== -1) {
-    const authority = extractAuthority(normalized, schemeIdx);
-    const at = authority.lastIndexOf('@');
-    const hostPort = at === -1 ? authority : authority.slice(at + 1);
-
-    if (hostPort.endsWith(':')) {
-      return null;
-    }
-  }
-
-  const url = safeParseURL(normalized);
-  if (!url) {
-    return null;
-  }
-
-  if (url.username || url.password) {
-    return null;
-  }
-
-  if (url.pathname && url.pathname !== '/') {
-    return null;
-  }
-
-  if (url.search || url.hash) {
-    return null;
-  }
-
-  const normalizedOrigin = normalizeOrigin(entry);
-  if (normalizedOrigin === '') {
-    return null;
-  }
+  const { url } = bare;
 
   return {
-    normalizedOrigin,
-    // Read as `normalizeOrigin` reads it.
-    normalizedHostname: normalizeOriginHostname(
-      asciiLowercase(url.protocol),
-      url.hostname,
-    ),
+    normalizedOrigin: canonical.origin,
+    normalizedHostname: canonical.hostname,
     isOpaqueHost:
       !isSpecialScheme(asciiLowercase(url.protocol)) &&
       !url.hostname.startsWith('['),
+    isHTTP: isHTTPScheme(url.protocol),
   };
+}
+
+/** An allowlist entry that is no wildcard, read once per list (see `compiledOriginList`). */
+type ExactOriginEntry =
+  | { kind: 'null' }
+  /** A bare domain's normalized hostname; `''` for one that can never match. */
+  | { kind: 'domain'; hostname: string }
+  /** An exact origin's canonical form; `''` for one that can never match. */
+  | { kind: 'origin'; origin: string };
+
+/** `allowed`, an allowlist entry holding no `*`, read as the origin matchers compare it. */
+function readExactOriginEntry(allowed: string): ExactOriginEntry {
+  if (allowed === 'null') {
+    return { kind: 'null' };
+  }
+
+  if (!allowed.includes('://')) {
+    const hostname = normalizeDomain(allowed);
+
+    return {
+      kind: 'domain',
+      hostname: isAllowedExactHostname(hostname) ? hostname : '',
+    };
+  }
+
+  const parsed = parseExactOriginEntry(allowed);
+
+  // Not for an opaque host: the public suffix list is about DNS names, and it reads
+  // every unknown single label as a suffix, which would refuse every extension origin
+  // (`chrome-extension://<id>`).
+  const isMatchable =
+    parsed !== null &&
+    (parsed.isOpaqueHost || isAllowedExactHostname(parsed.normalizedHostname));
+
+  return { kind: 'origin', origin: isMatchable ? parsed.normalizedOrigin : '' };
+}
+
+/**
+ * Whether an origin parsed by {@link parseExactOriginForMatching} matches an exact entry:
+ * `"null"` only the literal `null` origin, an exact origin its own canonical form, and a
+ * bare domain an HTTP(S) origin's hostname, any port - as a host wildcard matches only an
+ * HTTP(S) origin.
+ */
+function matchesExactOriginEntry(
+  origin: NonNullable<ReturnType<typeof parseExactOriginForMatching>>,
+  entry: ExactOriginEntry,
+): boolean {
+  switch (entry.kind) {
+    case 'null':
+      return origin.normalizedOrigin === 'null';
+    case 'domain':
+      return (
+        entry.hostname !== '' &&
+        origin.isHTTP &&
+        origin.normalizedHostname === entry.hostname
+      );
+    case 'origin':
+      return entry.origin !== '' && origin.normalizedOrigin === entry.origin;
+  }
 }
 
 /**
@@ -1916,27 +1941,10 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
       return false;
     }
 
-    const labels = hostPattern.split('.');
-    const concrete: string[] = [];
-
-    for (const lbl of labels) {
-      if (lbl === '*' || lbl === '**') {
-        continue;
-      }
-
-      const nd = normalizeDomainName(lbl);
-      if (nd === '') {
-        return false;
-      }
-
-      concrete.push(nd);
-    }
-
-    if (concrete.length > 0 && !checkDNSLength(concrete.join('.'))) {
-      return false;
-    }
-
-    const normalized = normalizeWildcardPattern(hostPattern);
+    // Each concrete label normalized and held to DNS's lengths, an empty one refused.
+    // Handed `host` with its trailing dot, which it drops once itself: a second one is an
+    // empty label, and refused.
+    const normalized = normalizeWildcardPattern(host);
     if (!normalized) {
       return false;
     }
@@ -1971,7 +1979,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
  * Supports exact matches, wildcard matches, and normalization.
  *
  * Exact origins may use non-HTTP(S) schemes and are compared exactly.
- * Wildcard matching remains HTTP(S)-only.
+ * Wildcard and bare-domain entries match HTTP(S) origins only.
  * Blank allowlist entries are ignored after trimming.
  * Special case: single "*" matches any valid HTTP(S) origin.
  *
@@ -1983,7 +1991,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
  */
 export function matchesOriginList(
   origin: string | undefined,
-  allowedOrigins: string[],
+  allowedOrigins: readonly string[],
   opts: { treatNoOriginAsAllowed?: boolean } = {},
 ): boolean {
   const entries = copyEntryList(
@@ -2001,7 +2009,8 @@ export function matchesOriginList(
     false,
     'matchesOriginList options.treatNoOriginAsAllowed',
   );
-  const cleaned = entries.map((s) => readTrimmedEntry(s) ?? '').filter(Boolean);
+  const list = compiledOriginList(allowedOrigins, entries);
+  const { cleaned } = list;
 
   if (!origin) {
     // Only allow requests without Origin header if explicitly opted in AND "*" is in the list
@@ -2014,56 +2023,23 @@ export function matchesOriginList(
   }
 
   // The list's own compiled patterns: two lists that each fit the shared cache, used
-  // in turn, would evict each other there on every call (see `originListPatterns`).
-  const matchesWildcard = wildcardOriginMatcher(
-    origin,
-    originListPatterns(allowedOrigins, entries),
-  );
+  // in turn, would evict each other there on every call (see `compiledOriginList`).
+  const matchesWildcard = wildcardOriginMatcher(origin, list.patterns);
 
-  return cleaned.some((allowed) => {
+  return cleaned.some((allowed, index) =>
     // A wildcard - the global `*` included - is matched against the origin as the
     // wildcard matcher reads it, parsed once for the whole list.
-    if (allowed.includes('*')) {
-      return matchesWildcard(allowed);
-    }
-
-    if (allowed === 'null') {
-      return parsedOrigin.normalizedOrigin === 'null';
-    }
-
-    if (!allowed.includes('://')) {
-      const normalizedAllowedDomain = normalizeDomain(allowed);
-
-      return (
-        isAllowedExactHostname(normalizedAllowedDomain) &&
-        parsedOrigin.normalizedHostname !== '' &&
-        parsedOrigin.normalizedHostname === normalizedAllowedDomain
-      );
-    }
-
-    const parsedAllowed = parseExactOriginEntry(allowed);
-    if (!parsedAllowed) {
-      return false;
-    }
-
-    // Not for an opaque host: the public suffix list is about DNS names, and it reads
-    // every unknown single label as a suffix, which would refuse every extension origin
-    // (`chrome-extension://<id>`).
-    if (
-      !parsedAllowed.isOpaqueHost &&
-      !isAllowedExactHostname(parsedAllowed.normalizedHostname)
-    ) {
-      return false;
-    }
-
-    return parsedOrigin.normalizedOrigin === parsedAllowed.normalizedOrigin;
-  });
+    allowed.includes('*')
+      ? matchesWildcard(allowed)
+      : matchesExactOriginEntry(parsedOrigin, exactOriginEntry(list, index)),
+  );
 }
 
 /**
  * Helper function to check if origin matches any pattern in a list (credentials-safe).
  *
- * Exact origins may use non-HTTP(S) schemes and are compared exactly.
+ * Exact origins may use non-HTTP(S) schemes and are compared exactly; bare-domain
+ * entries match HTTP(S) origins only.
  * When `allowWildcardSubdomains` is enabled, only host subdomain wildcard
  * patterns are honored. Global "*" and protocol-only wildcards such as
  * "https://*" are intentionally not honored in credentials mode.
@@ -2071,7 +2047,7 @@ export function matchesOriginList(
  */
 export function matchesCORSCredentialsList(
   origin: string | undefined,
-  allowedOrigins: string[],
+  allowedOrigins: readonly string[],
   options: { allowWildcardSubdomains?: boolean } = {},
 ): boolean {
   // Read before the origin is: a list that is no list is refused on every call.
@@ -2099,67 +2075,26 @@ export function matchesCORSCredentialsList(
     return false;
   }
 
-  const cleaned = entries.map((s) => readTrimmedEntry(s) ?? '').filter(Boolean);
+  const list = compiledOriginList(allowedOrigins, entries);
 
-  // The list's own compiled patterns (see `originListPatterns`).
-  const matchesWildcard = wildcardOriginMatcher(
-    origin,
-    originListPatterns(allowedOrigins, entries),
-  );
+  // The list's own compiled patterns (see `compiledOriginList`).
+  const matchesWildcard = wildcardOriginMatcher(origin, list.patterns);
 
-  for (const allowed of cleaned) {
+  return list.cleaned.some((allowed, index) => {
+    if (!allowed.includes('*')) {
+      return matchesExactOriginEntry(
+        parsedOrigin,
+        exactOriginEntry(list, index),
+      );
+    }
+
     // Optional wildcard support for credentials lists (subdomain patterns only)
-    if (allowWildcard && allowed.includes('*')) {
-      if (
-        isCredentialsSafeWildcardOriginPattern(allowed) &&
-        matchesWildcard(allowed)
-      ) {
-        return true;
-      }
-      continue;
-    }
-
-    if (allowed === 'null') {
-      if (parsedOrigin.normalizedOrigin === 'null') {
-        return true;
-      }
-
-      continue;
-    }
-
-    if (!allowed.includes('://')) {
-      const normalizedAllowedDomain = normalizeDomain(allowed);
-
-      if (
-        isAllowedExactHostname(normalizedAllowedDomain) &&
-        parsedOrigin.normalizedHostname !== '' &&
-        parsedOrigin.normalizedHostname === normalizedAllowedDomain
-      ) {
-        return true;
-      }
-
-      continue;
-    }
-
-    const parsedAllowed = parseExactOriginEntry(allowed);
-    if (!parsedAllowed) {
-      continue;
-    }
-
-    // As in `matchesOriginList`: no public-suffix rule for an opaque host.
-    if (
-      !parsedAllowed.isOpaqueHost &&
-      !isAllowedExactHostname(parsedAllowed.normalizedHostname)
-    ) {
-      continue;
-    }
-
-    if (parsedOrigin.normalizedOrigin === parsedAllowed.normalizedOrigin) {
-      return true;
-    }
-  }
-
-  return false;
+    return (
+      allowWildcard &&
+      isCredentialsSafeWildcardOriginPattern(allowed) &&
+      matchesWildcard(allowed)
+    );
+  });
 }
 
 /**

@@ -299,6 +299,40 @@ describe('CookieJar', () => {
       expect(jar.getCookieFor('bare', 'http://[0:0::1]/')?.value).toBe('y');
     });
 
+    test('refuses a domain that closes the IPv6 bracket itself or holds a tab', () => {
+      for (const domain of [
+        '::1]/x@[::2',
+        '[::1]/x@[::2]',
+        '[::\t1]',
+        '::\t1',
+        '[::1]:80',
+      ]) {
+        expect(
+          jar.setCookie({
+            name: 'a',
+            value: 'b',
+            domain,
+            path: '/',
+            createdAt: Date.now(),
+          }),
+        ).toBe(false);
+      }
+
+      expect(jar.getCookieHeaderString('http://[::1]/')).toBe('');
+      expect(jar.getCookieHeaderString('http://[::2]/')).toBe('');
+
+      jar.setCookie({
+        name: 'kept',
+        value: '1',
+        domain: '::1',
+        path: '/',
+        createdAt: Date.now(),
+      });
+      expect(jar.clear('::1]/x@[::2', 'hostname')).toBe(0);
+      expect(jar.clear('[::\t1]', 'domain')).toBe(0);
+      expect(jar.getCookieHeaderString('http://[::1]/')).toBe('kept=1');
+    });
+
     test('returns true for .test TLD', () => {
       expect(
         jar.setCookie({
@@ -2098,6 +2132,27 @@ describe('CookieJar', () => {
       expect(jar.getCookiesFor('ws://example.com/')).toHaveLength(0);
     });
 
+    test('a scheme other than http, https, ws or wss stores no cookie and is sent none', () => {
+      jar.parseSetCookieHeader('a=1; Path=/', 'https://example.com/');
+      jar.parseSetCookieHeader('b=2; Path=/', 'ws://example.com/');
+
+      for (const url of [
+        'ftp://example.com/',
+        'file://example.com/',
+        'foo://EXAMPLE.com/',
+        'blob:https://example.com/x',
+      ]) {
+        jar.parseSetCookieHeader('planted=1; Path=/', url);
+        expect(jar.getCookieHeaderString(url)).toBe('');
+        expect(jar.getCookieFor('a', url)).toBeUndefined();
+      }
+
+      expect(jar.getCookieHeaderString('https://example.com/')).toBe(
+        'a=1; b=2',
+      );
+      expect(jar.getCookieHeaderString('wss://example.com/')).toBe('a=1; b=2');
+    });
+
     test('a Secure cookie from http cannot replace the https session', () => {
       jar.parseSetCookieHeader('session=real; Secure', 'https://example.com/');
       jar.parseSetCookieHeader('session=evil; Secure', 'http://example.com/');
@@ -2824,6 +2879,33 @@ describe('CookieJar', () => {
       ]);
     });
 
+    test('a removed suffix that is one through a wildcard rule is the registrable domain, so its Domain= cannot reach the wildcard base', () => {
+      // `sch.uk` and `kawasaki.jp` are no suffixes themselves (the rules are `*.sch.uk`
+      // and `*.kawasaki.jp`), so widening past the removal would reach them and every
+      // other registrant under them.
+      for (const [removed, base, sibling] of [
+        ['foo.sch.uk', 'sch.uk', 'x.other.sch.uk'],
+        ['foo.kawasaki.jp', 'kawasaki.jp', 'x.bar.kawasaki.jp'],
+      ]) {
+        const scoped = new CookieJar({ publicSuffixes: { remove: [removed] } });
+
+        scoped.parseSetCookieHeader(
+          `sid=1; Domain=${base}; Path=/`,
+          `https://a.${removed}/`,
+        );
+        expect(scoped.getAllCookies()).toEqual([]);
+
+        scoped.parseSetCookieHeader(
+          `own=1; Domain=${removed}; Path=/`,
+          `https://a.${removed}/`,
+        );
+        expect(scoped.getCookieHeaderString(`https://b.${removed}/`)).toBe(
+          'own=1',
+        );
+        expect(scoped.getCookieHeaderString(`https://${sibling}/`)).toBe('');
+      }
+    });
+
     test('clear(host, domain) on a removed suffix clears everything under it, as on a listed one', () => {
       const scoped = new CookieJar({ publicSuffixes: { remove: ['uk'] } });
 
@@ -2862,7 +2944,7 @@ describe('CookieJar', () => {
       ]);
     });
 
-    test('clear(host, domain) on a removed suffix beneath another removed one clears only what is under it', () => {
+    test('clear(host, domain) on a removed suffix beneath another removed one clears the site it joined', () => {
       const scoped = new CookieJar({
         publicSuffixes: { remove: ['uk', 'co.uk'] },
       });
@@ -2874,13 +2956,40 @@ describe('CookieJar', () => {
         'https://x.co.uk/',
       );
 
-      expect(scoped.clear('co.uk', 'domain')).toBe(1);
-      expect(
-        scoped
-          .getStoredDomains()
-          .map((entry) => entry.domain)
-          .sort(),
-      ).toEqual(['uk', 'y.org.uk']);
+      // `co.uk` belongs to the `uk` site, as `x.co.uk` does, so naming either clears it;
+      // `y.org.uk` stays a site of its own behind `org.uk`.
+      expect(scoped.clear('co.uk', 'domain')).toBe(2);
+      expect(scoped.getStoredDomains()).toEqual([
+        { domain: 'y.org.uk', count: 1 },
+      ]);
+    });
+
+    test('clear(host, domain) on a removed suffix clears as much as on a host beneath it', () => {
+      const fill = (): CookieJar => {
+        const scoped = new CookieJar({
+          publicSuffixes: { remove: ['s3.amazonaws.com'] },
+        });
+        scoped.parseSetCookieHeader('a=1; Path=/', 'https://x.amazonaws.com/');
+        scoped.parseSetCookieHeader(
+          'b=2; Path=/',
+          'https://bucket.s3.amazonaws.com/',
+        );
+        scoped.parseSetCookieHeader('c=3; Path=/', 'https://amazonaws.com/');
+        scoped.parseSetCookieHeader(
+          'd=4; Domain=amazonaws.com; Path=/',
+          'https://s3.amazonaws.com/',
+        );
+        scoped.parseSetCookieHeader('e=5; Path=/', 'https://example.com/');
+        return scoped;
+      };
+
+      for (const host of ['bucket.s3.amazonaws.com', 's3.amazonaws.com']) {
+        const scoped = fill();
+        expect(scoped.clear(host, 'domain')).toBe(4);
+        expect(scoped.getStoredDomains()).toEqual([
+          { domain: 'example.com', count: 1 },
+        ]);
+      }
     });
 
     test('clear(host, domain) for the site a removal joined leaves a site behind a suffix still listed', () => {
@@ -4450,6 +4559,7 @@ describe('jar limits', () => {
     expectTrueCount(0);
     store('g', 'example.co.uk');
     store('g', 'example.uk');
+    store('g', 'example.org.uk');
     jar.clear('co.uk', 'domain');
     expectTrueCount(1);
     jar.clear();
@@ -5076,10 +5186,12 @@ describe('Leave Secure Cookies Alone reaches the sites on either side of a domai
       a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
     const rebuilt = new Map<string, string[]>();
 
+    // Each name a key ends in after a dot, but for the empty one after a trailing dot,
+    // which names nothing.
     for (const site of internals.buckets.keys()) {
       for (
         let dot = site.indexOf('.');
-        dot !== -1;
+        dot !== -1 && dot !== site.length - 1;
         dot = site.indexOf('.', dot + 1)
       ) {
         const parent = site.slice(dot + 1);

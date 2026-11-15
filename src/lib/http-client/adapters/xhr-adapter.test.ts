@@ -6,6 +6,7 @@ import { materializeRequestHeaders } from '../internal/header-utils';
 import {
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_HEADERS_KEY,
   STREAM_ABORT_STATUS_KEY,
   XHR_BROWSER_TIMEOUT_FLAG,
 } from '../consts';
@@ -935,11 +936,19 @@ describe('XHRAdapter', () => {
     lastXHR.getAllResponseHeadersResult =
       'x-kept: yes\r\ncontent-encoding: identity\r\n';
     lastXHR.simulateDownloadProgress(5000, 5000);
-    const response = await promise;
+    const outcome = (await promise.catch((error: unknown) => error)) as Record<
+      PropertyKey,
+      unknown
+    >;
 
-    expect(response.streamErrorCode).toBe('response_too_large');
-    expect(response.status).toBe(200);
-    expect(response.headers['x-kept']).toBe('yes');
+    // The cancel ends the send, over the answer read for the refusal, though this XHR
+    // showed that answer to no change of state.
+    expect(outcome.name).toBe('AbortError');
+    expect(outcome[STREAM_ABORT_STATUS_KEY]).toBe(200);
+    expect(
+      (outcome[STREAM_ABORT_HEADERS_KEY] as Record<string, string>)['x-kept'],
+    ).toBe('yes');
+    expect(lastXHR.abortCalled).toBe(true);
     // The body's own size, the browser having reported none.
     expect(uploads.at(-1)).toEqual({ loaded: 5, progress: 1 });
   });
@@ -5967,5 +5976,214 @@ describe('XHRAdapter - a runtime timeout once load has started', () => {
     const response = await promise;
 
     expect(response.status).toBe(200);
+  });
+});
+
+describe('XHRAdapter - a cancel on an XHR whose abort() fires no abort event', () => {
+  test('a cancel once sent settles as the cancel', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+    });
+
+    // The fake's `abort()` fires nothing, as a shim's that only tears down its transport.
+    controller.abort();
+    const outcome = (await settlement(promise)) as Record<PropertyKey, unknown>;
+
+    expect(outcome.name).toBe('AbortError');
+    expect(outcome[STREAM_ABORT_STATUS_KEY]).toBeUndefined();
+    expect(lastXHR.abortCalled).toBe(true);
+  });
+
+  test('a cancel once the headers are in settles as the cancel over the answer', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+    });
+
+    lastXHR.simulateHeadersReceived(200, 'x-kept: yes\r\n');
+    controller.abort();
+    const outcome = (await settlement(promise)) as Record<PropertyKey, unknown>;
+
+    expect(outcome.name).toBe('AbortError');
+    expect(outcome[STREAM_ABORT_STATUS_KEY]).toBe(200);
+  });
+});
+
+describe('XHRAdapter - a cancel from a callback at a followed redirect', () => {
+  test.each([
+    ['fires no abort event', false],
+    ['fires its abort event at once', true],
+  ] as const)(
+    'a cancel from the 0-byte download event, on an abort() that %s, ends as the redirect',
+    async (_label, isAbortEventFired) => {
+      const controller = new AbortController();
+      const outcome = await withPageOrigin('https://api.test', async () => {
+        const promise = new XHRAdapter().send({
+          requestURL: 'https://api.test/start',
+          method: 'GET',
+          headers: {},
+          maxResponseBytes: 4,
+          signal: controller.signal,
+          onDownloadProgress: ({ progress }) => {
+            if (progress === 1) {
+              controller.abort();
+            }
+          },
+        });
+        const xhr = lastXHR;
+        if (isAbortEventFired) {
+          xhr.abort = () => {
+            xhr.abortCalled = true;
+            xhr.simulateAbort();
+          };
+        }
+
+        // Seen first by the size limit, before the XHR shows any answer.
+        xhr.readyState = 1;
+        xhr.status = 0;
+        xhr.responseURL = 'https://api.test/elsewhere';
+        xhr.simulateDownloadProgress(10, 0);
+        return await settlement(promise);
+      });
+
+      expect(outcome).toBe('resolved');
+      expect(controller.signal.aborted).toBe(true);
+    },
+  );
+
+  test('a cancel from the final upload event on load ends as the redirect, as on the progress path', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'POST',
+      headers: {},
+      body: 'abc',
+      signal: controller.signal,
+      onUploadProgress: ({ progress }) => {
+        if (progress === 1) {
+          controller.abort();
+        }
+      },
+    });
+    const xhr = lastXHR;
+
+    xhr.readyState = 4;
+    xhr.status = 200;
+    xhr.responseURL = 'https://api.test/elsewhere';
+    xhr.simulateLoad();
+    const response = await promise;
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.status).toBe(0);
+  });
+
+  test('through the client, a cancel from the download event at a followed redirect ends cancelled', async () => {
+    await withPageOrigin('https://api.test', async () => {
+      const client = new HTTPClient({
+        adapter: new XHRAdapter(),
+        baseURL: 'https://api.test',
+        maxResponseBytes: 4,
+      });
+      const builder = client
+        .get('/start')
+        .onDownloadProgress(({ progress }) => {
+          if (progress === 1) {
+            builder.cancel();
+          }
+        });
+      const sending = builder.send();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const xhr = lastXHR;
+      xhr.abort = () => {
+        xhr.abortCalled = true;
+        xhr.simulateAbort();
+      };
+
+      xhr.readyState = 1;
+      xhr.status = 0;
+      xhr.responseURL = 'https://api.test/elsewhere';
+      xhr.simulateDownloadProgress(10, 0);
+      const response = await sending;
+
+      expect(response.isCancelled).toBe(true);
+      expect(builder.error?.code).toBe('cancelled');
+    });
+  });
+});
+
+describe('XHRAdapter - a body past the limit before the XHR shows a status', () => {
+  test('is judged again once the status is readable, and refused with it', async () => {
+    const response = await withPageOrigin('https://api.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 4,
+      });
+      const xhr = lastXHR;
+
+      // Progress before the XHR shows a status: nothing is decided from it.
+      xhr.readyState = 1;
+      xhr.status = 0;
+      xhr.simulateDownloadProgress(10, 0);
+      expect(xhr.abortCalled).toBe(false);
+
+      xhr.simulateHeadersReceived(200, 'x-kept: yes\r\n');
+      xhr.simulateDownloadProgress(20, 0);
+      return await promise;
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(response.headers['x-kept']).toBe('yes');
+  });
+
+  test('a body read as possibly coded at status 0 is judged again once its coding shows', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 4,
+    });
+    const xhr = lastXHR;
+
+    // No page origin, so a body with no readable coding is possibly coded.
+    xhr.readyState = 1;
+    xhr.status = 0;
+    xhr.simulateDownloadProgress(10, 0);
+
+    xhr.simulateHeadersReceived(200, 'content-encoding: identity\r\n');
+    xhr.simulateDownloadProgress(20, 0);
+    expect(xhr.abortCalled).toBe(true);
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+    expect(response.streamErrorCode).toBe('response_too_large');
+  });
+
+  test('a followed redirect seen at status 0 with no page origin ends the send at once', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 4,
+    });
+    const xhr = lastXHR;
+
+    xhr.readyState = 1;
+    xhr.status = 0;
+    xhr.responseURL = 'https://api.test/elsewhere';
+    xhr.simulateDownloadProgress(10, 0);
+    const outcome = await settlement(promise);
+
+    expect(outcome).toBe('resolved');
+    expect(xhr.abortCalled).toBe(true);
   });
 });

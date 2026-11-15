@@ -13,6 +13,7 @@ import { defineEntry } from './internal/define-entry';
 import {
   holdsOwnIndex,
   indicesFrom,
+  isIndexKey,
   isMostlyHoles,
   walksOnByIndex,
   WALKED_HOLES_PER_ENTRY,
@@ -38,8 +39,9 @@ export interface DeepCloneOptions {
    * Named keys copied from every array, at any depth, when the array holds them as its
    * own - `meta` on an array tagged with `arr.meta = {...}`, say. Each value is cloned.
    * Only these keys are looked up: an array's other named entries are not listed, which
-   * would cost a large array many times its clone. A regex match result's `index`,
-   * `input`, `groups` and `indices` are copied without being listed.
+   * would cost a large array many times its clone. `length` and an index (`'0'`) are
+   * passed over: every clone sets its own length and copies its indices. A regex match
+   * result's `index`, `input`, `groups` and `indices` are copied without being listed.
    */
   arrayKeys?: readonly string[];
 }
@@ -136,7 +138,8 @@ function fillFrames(state: CloneState, base: number): void {
 
 /**
  * `arrayKeys` read once, into a list of this module's own: a string array or absent,
- * anything else a `TypeError`. `length` is left out - every clone sets its own.
+ * anything else a `TypeError`. `length` and an index (`'0'`) are left out - every clone
+ * sets its own length and copies its own indices, each read once.
  */
 function readArrayKeys(arrayKeys: unknown): readonly string[] {
   if (arrayKeys === undefined) {
@@ -169,7 +172,7 @@ function readArrayKeys(arrayKeys: unknown): readonly string[] {
       );
     }
 
-    if (key !== 'length' && !seenKeys.has(key)) {
+    if (key !== 'length' && !isIndexKey(key) && !seenKeys.has(key)) {
       seenKeys.add(key);
       keys.push(key);
     }
@@ -188,7 +191,7 @@ function readArrayKeys(arrayKeys: unknown): readonly string[] {
  * fake - `Object.create(Map.prototype)`, a `Proxy` over a `Map` - holds no slot and is
  * cloned as a plain object. The slot is asked about only for a value that could hold it:
  * one whose chain holds the type's prototype, or one from another realm that is not a
- * plain object there. This realm's plain objects are told by `instanceof` alone, and
+ * plain object there. This realm's plain objects are told by their prototype alone, and
  * another realm's by their prototype being that realm's root.
  */
 function cloneValue<T>(obj: T, state: CloneState): T {
@@ -196,8 +199,10 @@ function cloneValue<T>(obj: T, state: CloneState): T {
     return obj;
   }
 
-  if (state.seen.has(obj)) {
-    return state.seen.get(obj) as T;
+  // Every clone is an object, so `undefined` means not met yet.
+  const known = state.seen.get(obj);
+  if (known !== undefined) {
+    return known as T;
   }
 
   // A typed array or `DataView`: a copy of the bytes it covers, so a small view of a
@@ -218,6 +223,17 @@ function cloneValue<T>(obj: T, state: CloneState): T {
     return cloned as T;
   }
 
+  // A plain object - on this realm's `Object.prototype` or none - that is no error: none
+  // of the checks below could tell it as anything else, so it skips them all. An error
+  // moved onto either prototype is still one to `Error.isError`, and goes on to them.
+  const prototype = Reflect.getPrototypeOf(obj);
+  if (
+    (prototype === Object.prototype || prototype === null) &&
+    !hasErrorSlot(obj)
+  ) {
+    return clonePlainObject(obj, prototype, state) as T;
+  }
+
   // An `ArrayBuffer` or `SharedArrayBuffer`: copied whole into a new one of its kind.
   const bufferKind = bufferKindOf(obj, state.SharedBuffer);
   if (bufferKind !== undefined) {
@@ -234,7 +250,19 @@ function cloneValue<T>(obj: T, state: CloneState): T {
     return cloneError(obj, state) as T;
   }
 
-  return clonePlainObject(obj, state) as T;
+  return clonePlainObject(obj, prototype, state) as T;
+}
+
+/**
+ * Whether `value` is an error to `Error.isError`, where the runtime has it - which
+ * {@link isError} asks first. Without it, an error is told by `instanceof Error`, which
+ * an object on `Object.prototype` or none never is.
+ */
+function hasErrorSlot(value: object): boolean {
+  const isErrorSlot = (Error as { isError?: (value: unknown) => boolean })
+    .isError;
+
+  return typeof isErrorSlot === 'function' && isErrorSlot(value);
 }
 
 /** The built-in types another realm's value is asked about by slot. */
@@ -293,11 +321,15 @@ function foreignBuiltInType(obj: object): string | undefined {
  * before its next key is read, so the read order is a recursive clone's - and past that
  * by an {@link ObjectFrame}.
  */
-function clonePlainObject(obj: object, state: CloneState): object {
+function clonePlainObject(
+  obj: object,
+  prototype: object | null,
+  state: CloneState,
+): object {
   const cloned = remember<Record<string, unknown>>(
     state.seen,
     obj,
-    Reflect.getPrototypeOf(obj) === null ? Object.create(null) : {},
+    prototype === null ? Object.create(null) : {},
   );
 
   if (state.depth >= RECURSION_LIMIT) {
@@ -308,22 +340,39 @@ function clonePlainObject(obj: object, state: CloneState): object {
   state.depth++;
   const base = state.frames.length;
 
+  // By `for...in`, which lists no array of keys: a frame, which stops part-way, lists
+  // them with `Object.keys` instead.
   for (const key in obj) {
-    if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      assignEntry(
-        cloned,
-        key,
-        cloneValue((obj as Record<string, unknown>)[key], state),
-      );
+    copyOwnEntry(obj, cloned, key, state);
 
-      if (state.frames.length > base) {
-        fillFrames(state, base);
-      }
+    if (state.frames.length > base) {
+      fillFrames(state, base);
     }
   }
 
   state.depth--;
   return cloned;
+}
+
+/**
+ * `source`'s entry `key`, read once and cloned, set as `target`'s - unless `source` no
+ * longer holds it as its own: one `for...in` reaches on the prototype, or one a getter
+ * read before its turn deleted. How {@link clonePlainObject} and an {@link ObjectFrame}
+ * each fill a plain object.
+ */
+function copyOwnEntry(
+  source: object,
+  target: Record<string, unknown>,
+  key: string,
+  state: CloneState,
+): void {
+  if (Object.prototype.hasOwnProperty.call(source, key)) {
+    assignEntry(
+      target,
+      key,
+      cloneValue((source as Record<string, unknown>)[key], state),
+    );
+  }
 }
 
 /**
@@ -493,16 +542,7 @@ class ObjectFrame implements Frame {
     const depth = state.frames.length;
 
     while (this.position < keys.length) {
-      const key = keys[this.position++];
-      if (!Object.prototype.hasOwnProperty.call(source, key)) {
-        continue;
-      }
-
-      assignEntry(
-        target,
-        key,
-        cloneValue((source as Record<string, unknown>)[key], state),
-      );
+      copyOwnEntry(source, target, keys[this.position++], state);
 
       if (state.frames.length !== depth) {
         return true;

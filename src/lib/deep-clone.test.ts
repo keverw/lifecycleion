@@ -179,6 +179,27 @@ describe('deepClone', () => {
       expect(cloned).toHaveLength(1);
     });
 
+    test('arrayKeys passes over an index, which the clone already copied, so its getter runs once', () => {
+      let reads = 0;
+      const original: unknown[] = [];
+      Object.defineProperty(original, 0, {
+        get: () => ({ read: ++reads }),
+        enumerable: true,
+        configurable: true,
+      });
+      const named = Object.assign(['a'], { '01': 'kept', '1.5': 'kept' });
+
+      const cloned = deepClone(original, { arrayKeys: ['0', '4294967294'] });
+      const clonedNamed = deepClone(named, { arrayKeys: ['01', '1.5'] });
+
+      expect(reads).toBe(1);
+      expect(cloned).toEqual([{ read: 1 }]);
+      expect(cloned).toHaveLength(1);
+      // Keys that only read like a number are named entries, copied when listed.
+      expect(Object.hasOwn(clonedNamed, '01')).toBe(true);
+      expect(Object.hasOwn(clonedNamed, '1.5')).toBe(true);
+    });
+
     test('refuses options that are not an object, null or a function, as structuredClone does', () => {
       expect(() => [{ a: 1 }].map(deepClone as never)).toThrow(TypeError);
       expect(deepClone({ a: 1 }, null as never)).toEqual({ a: 1 });
@@ -390,6 +411,34 @@ describe('deepClone', () => {
         expect(Object.getPrototypeOf(deepClone(error))).toBe(
           Object.getPrototypeOf(error),
         );
+      }
+    });
+
+    test('an error, array or view moved onto Object.prototype or a null prototype is still cloned as one', () => {
+      for (const prototype of [Object.prototype, null]) {
+        const error = Object.setPrototypeOf(
+          new Error('moved', { cause: 1 }),
+          prototype,
+        ) as Error;
+        const list = Object.setPrototypeOf([1, 2], prototype) as number[];
+        const bytes = Object.setPrototypeOf(
+          new Uint8Array([7]),
+          prototype,
+        ) as Uint8Array;
+
+        const clonedError = deepClone(error);
+        expect(Object.getPrototypeOf(clonedError)).toBe(prototype);
+        expect(Object.getOwnPropertyDescriptor(clonedError, 'message')).toEqual(
+          {
+            value: 'moved',
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          },
+        );
+        expect(clonedError.cause).toBe(1);
+        expect(Array.isArray(deepClone(list))).toBe(true);
+        expect(deepClone(bytes)).toEqual(new Uint8Array([7]));
       }
     });
 

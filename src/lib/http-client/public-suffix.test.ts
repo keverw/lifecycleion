@@ -93,6 +93,22 @@ describe('PublicSuffixResolver', () => {
     );
   });
 
+  test('a removed suffix that is one through a wildcard rule is not widened to the wildcard base', () => {
+    const sch = new PublicSuffixResolver({ remove: ['foo.sch.uk'] });
+    expect(sch.registrableDomainFor('a.foo.sch.uk')).toBe('foo.sch.uk');
+    expect(sch.registrableDomainFor('foo.sch.uk')).toBe('foo.sch.uk');
+    expect(sch.registrableDomainFor('sch.uk')).toBe('sch.uk');
+    expect(sch.registrableDomainFor('x.other.sch.uk')).toBe('x.other.sch.uk');
+
+    const kawasaki = new PublicSuffixResolver({ remove: ['foo.kawasaki.jp'] });
+    expect(kawasaki.registrableDomainFor('a.foo.kawasaki.jp')).toBe(
+      'foo.kawasaki.jp',
+    );
+    expect(kawasaki.registrableDomainFor('city.kawasaki.jp')).toBe(
+      'city.kawasaki.jp',
+    );
+  });
+
   test('rejects normalized contradictory overrides and malformed suffixes', () => {
     expect(
       () => new PublicSuffixResolver({ add: ['COM'], remove: ['com'] }),

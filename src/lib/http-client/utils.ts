@@ -154,9 +154,15 @@ function snapshotParamValue(
   return copy;
 }
 
-/** The key a query pair from the wire sets at the top level, as `qs` reads it. */
+/**
+ * The key a query pair from the wire sets at the top level, as `qs` reads it: split at
+ * its first `]=` when it has one, after the `]` - so `[a=b]=1` sets `a=b` - and otherwise
+ * at its first `=`.
+ */
 function topLevelQueryKey(pair: string): string {
-  const rawKey = pair.split('=', 1)[0].replace(/\+/g, ' ');
+  const bracketEquals = pair.indexOf(']=');
+  const end = bracketEquals === -1 ? pair.indexOf('=') : bracketEquals + 1;
+  const rawKey = (end === -1 ? pair : pair.slice(0, end)).replace(/\+/g, ' ');
   let key: string;
   try {
     key = decodeURIComponent(rawKey);

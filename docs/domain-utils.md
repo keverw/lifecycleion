@@ -114,8 +114,8 @@ const ok = matchesOriginList(
 - Partial-label wildcards are not allowed. A label may be `*` or `**` only, patterns like `ex*.demo.com`, `*ample.demo.com`, `a*b.demo.com`, `foo*bar.demo.com` are rejected.
 - Apex domains never match non-global wildcard patterns. List apex explicitly. The global `*` is an exception and does match apex domains.
 - Origins:
-  - `*` matches any valid HTTP(S) origin
-  - `https://*` or `http://*` matches any origin with that scheme
+  - `*` matches any valid HTTP(S) origin: one `normalizeOrigin` reads. A host with a hyphen at a label's edge (`https://-edge.example.com`), which the URL parser accepts, is no valid origin here (`normalizeOrigin` returns `''`), so no origin entry matches it, `*` included - where `matchesHostFilter`'s `*` matches the hostname
+  - `https://*` or `http://*` matches any valid origin with that scheme
   - `https://*.example.com` matches direct subdomains over HTTPS only
 
 ## Security Hardening
@@ -199,7 +199,7 @@ Matches a bare origin against a single wildcard pattern. Supports protocol-speci
 - The `origin` input must be an origin string, not a full URL.
   Valid examples: `https://api.example.com`, `http://localhost:3000`, `https://[::1]`, `https://api.example.com/` (trailing slash accepted)
   Invalid examples: `https://api.example.com/path`, `https://api.example.com?x=1`, `https://user@example.com`, `https://example.com:`
-- A bare domain pattern like `*.example.com` or `**.example.com` is protocol-agnostic and ignores the origin port.
+- A bare domain pattern like `*.example.com` or `**.example.com` matches an `http` or `https` origin, either scheme, and ignores the origin port. No wildcard matches an origin of another scheme.
 - A protocol-specific pattern like `https://*.example.com` or `https://*` requires that exact scheme.
 - Wildcard patterns do not include ports. If you need an exact port match, use `matchesOriginList` or `matchesCORSCredentialsList` with exact origins instead.
 - The `"null"` origin is never matched by wildcard patterns. Include `"null"` explicitly in list helpers if needed.
@@ -238,7 +238,7 @@ Allowlist entries are trimmed of spaces, tabs, CRs and LFs, and blank ones are i
 - Exact origin entries may include a port: `https://example.com:8443`
 - Exact origin and bare-domain entries are normalized before comparison, including canonical IP literal handling
 - Exact origin or bare-domain entries that equal a public suffix such as `com` or `co.uk` are never matched - for a special scheme's origin; an opaque host (`foo://com`) is not a domain, and matches as written (see `normalizeOrigin`). Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries
-- Bare-domain entries such as `example.com` match by hostname only and ignore scheme and port
+- Bare-domain entries such as `example.com` match an `http` or `https` origin of that hostname, either scheme and any port, as a host wildcard does. An origin of another scheme (`ftp://example.com`, `myapp://example.com`) needs an exact origin entry
 - Wildcard entries may be:
   - host-only patterns such as `*.example.com` or `**.example.com`
   - protocol wildcards such as `https://*`
@@ -258,7 +258,7 @@ matchesOriginList(undefined, ['*'], { treatNoOriginAsAllowed: true }); // true
 
 ### matchesCORSCredentialsList
 
-Credentials-safe origin matching. Exact-only by default, with optional subdomain wildcards. The runtime `origin` input must be an origin string, not a full URL. Malformed origins and malformed exact allowlist entries are rejected rather than compared via the invalid-input sentinel. Allowlist entries may be exact bare origins or bare domains. Bare-domain entries match by hostname only and ignore scheme and port, so use exact origins like `https://example.com` when scheme restriction is required. Exact origins may use non-HTTP(S) schemes and are matched exactly, but wildcard matching in credentials mode is limited to host subdomain patterns only. Protocol-only wildcards such as `https://*` and global `"*"` are never honored here. Full URL inputs with userinfo, paths other than trailing slashes, queries, or fragments are rejected. A missing or empty origin always returns `false`, and there is no `treatNoOriginAsAllowed` option in credentials mode. The literal string `"null"` may be included explicitly in the allowlist to match sandbox/file/data origins that emit a `null` Origin header.
+Credentials-safe origin matching. Exact-only by default, with optional subdomain wildcards. The runtime `origin` input must be an origin string, not a full URL. Malformed origins and malformed exact allowlist entries are rejected rather than compared via the invalid-input sentinel. Allowlist entries may be exact bare origins or bare domains. Bare-domain entries match an `http` or `https` origin of that hostname, either scheme and any port, so use exact origins like `https://example.com` when the scheme or port must be restricted further, and to allow an origin of another scheme. Exact origins may use non-HTTP(S) schemes and are matched exactly, but wildcard matching in credentials mode is limited to host subdomain patterns only. Protocol-only wildcards such as `https://*` and global `"*"` are never honored here. Full URL inputs with userinfo, paths other than trailing slashes, queries, or fragments are rejected. A missing or empty origin always returns `false`, and there is no `treatNoOriginAsAllowed` option in credentials mode. The literal string `"null"` may be included explicitly in the allowlist to match sandbox/file/data origins that emit a `null` Origin header.
 
 Invalid inputs are handled internally. Callers do not need to wrap this helper in `try/catch`. Malformed origin strings simply return `false`.
 
@@ -574,7 +574,7 @@ const ok = matchesOriginList(
   - `matchesCORSCredentialsList` also expects a bare origin, not a full URL.
   - If you start with a full URL, pass `new URL(url).origin` to origin helpers and `new URL(url).hostname` to domain helpers.
   - Exact non-HTTP(S) origins such as `ftp://example.com` are allowed and matched exactly by the list helpers. This is separate from wildcard matching.
-  - Domain wildcard patterns (e.g., `*.example.com`, `**.example.com`) are protocol-agnostic.
+  - Domain wildcard patterns (e.g., `*.example.com`, `**.example.com`) and bare-domain entries (`example.com`) match `http` and `https` origins alike, and no other scheme.
   - Wildcard origin matching is HTTP(S)-only. Protocol wildcards (e.g., `https://*`) and protocol + host wildcards (e.g., `https://*.example.com`) match only that scheme.
   - Wildcard origin matching ignores ports. Use exact origins when the port matters.
   - The literal string `"null"` is never matched by wildcard patterns. If you intend to allow it, include `"null"` explicitly in the allowlist.
@@ -598,7 +598,7 @@ const ok = matchesOriginList(
 
 - `matchesOriginList(origin, allowedOrigins, { treatNoOriginAsAllowed })`
   - Default: `{ treatNoOriginAsAllowed: false }`.
-  - `"*"` matches any valid HTTP(S) origin. `"null"` must be explicitly listed.
+  - `"*"` matches any valid HTTP(S) origin (not one whose host has a hyphen at a label's edge, which `normalizeOrigin` refuses). `"null"` must be explicitly listed.
 
 - `matchesCORSCredentialsList(origin, allowedOrigins, { allowWildcardSubdomains })`
   - Default: exact-only. When `allowWildcardSubdomains: true`, host subdomain wildcards are honored (e.g., `https://*.example.com`). Protocol-only wildcards like `https://*` and global `"*"` are still rejected. Always pre-validate entries.

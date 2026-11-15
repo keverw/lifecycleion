@@ -183,7 +183,7 @@ export function readCopiedIndex<T>(
 }
 
 /** Whether `key` is an array index: a canonical integer string below `2 ** 32 - 1`. */
-function isIndexKey(key: string | symbol): boolean {
+export function isIndexKey(key: string | symbol): boolean {
   if (typeof key !== 'string') {
     return false;
   }

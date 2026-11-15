@@ -45,19 +45,19 @@ export interface PublicSuffixOverrides {
    * `Domain=herokuapp.com`; with `s3.amazonaws.com` removed, a bucket may set
    * `Domain=amazonaws.com`, which is sent to every host under `amazonaws.com`. A suffix
    * still listed beneath a removal keeps its tenants sites of their own: with `uk`
-   * removed, `x.co.uk` may not set `Domain=uk` while `co.uk` stays listed. The escape
-   * hatch for a private-section entry that breaks a deployment you control - removing
-   * `herokuapp.com` scopes cookies under it as though the private section did not list
-   * it, for that suffix alone.
+   * removed, `x.co.uk` may not set `Domain=uk` while `co.uk` stays listed. A name that is
+   * a suffix only through a wildcard rule is its own registrable domain once removed:
+   * with `foo.sch.uk` removed under `*.sch.uk`, its hosts may not set `Domain=sch.uk`.
+   * The escape hatch for a private-section entry that breaks a deployment you control -
+   * removing `herokuapp.com` scopes cookies under it as though the private section did
+   * not list it, for that suffix alone.
    */
   remove?: readonly string[];
 }
 
-/** A hostname label list, lowercased in ASCII, with a trailing root dot dropped. */
-function toLabels(hostname: string): string[] {
-  const trimmed = withoutTrailingDot(hostname);
-
-  return asciiLowercase(trimmed).split('.');
+/** A hostname lowercased in ASCII, with a trailing root dot dropped. */
+function normalizeHostname(hostname: string): string {
+  return asciiLowercase(withoutTrailingDot(hostname));
 }
 
 /**
@@ -232,8 +232,7 @@ export class PublicSuffixResolver {
    * accepted host-only by the rule above. `publicSuffixes.remove` opts a name back out.
    */
   public isPublicSuffix(hostname: string): boolean {
-    const labels = toLabels(hostname);
-    const normalized = labels.join('.');
+    const normalized = normalizeHostname(hostname);
 
     if (this.added.has(normalized)) {
       return true;
@@ -253,7 +252,7 @@ export class PublicSuffixResolver {
    * is not one.
    */
   public isRemovedSuffix(hostname: string): boolean {
-    return this.isEffectiveRemoval(toLabels(hostname).join('.'));
+    return this.isEffectiveRemoval(normalizeHostname(hostname));
   }
 
   /**
@@ -267,7 +266,9 @@ export class PublicSuffixResolver {
    * `bucket.s3.amazonaws.com` to `amazonaws.com`, since `amazonaws.com` is no suffix
    * either. A suffix still listed stops the widening, as it does for a browser with the
    * same list: with `uk` removed, `a.x.co.uk` belongs to `x.co.uk`, since `co.uk` is still
-   * a suffix, and with `com` removed, `app.blogspot.com` is still a site of its own.
+   * a suffix, and with `com` removed, `app.blogspot.com` is still a site of its own. A
+   * removal that is a suffix through a wildcard rule is not widened at all: with
+   * `foo.sch.uk` removed, `a.foo.sch.uk` belongs to `foo.sch.uk`.
    *
    * Returns `hostname` itself when nothing sits under it: a public suffix with no
    * registrable part (`github.io`, or `co.uk` with `uk` removed), or a bare name
@@ -303,8 +304,18 @@ export class PublicSuffixResolver {
    * The registrable domain a removed suffix belongs to under the effective list: widened
    * one label at a time until the parent is a suffix still - `herokuapp.com` stays itself
    * below `com`, and `s3.amazonaws.com` becomes `amazonaws.com`.
+   *
+   * A removed name that is a suffix through a wildcard rule is not widened: with
+   * `foo.sch.uk` removed under `*.sch.uk`, `foo.sch.uk` is the registrable domain, as an
+   * exception rule `!foo.sch.uk` would make it. The wildcard's base (`sch.uk`) is no
+   * listed suffix, so widening would stop only at `uk` and join `foo.sch.uk` to every
+   * other registrant under `sch.uk`.
    */
   private widenPastRemoval(removed: string): string {
+    if (isWildcardSuffix(removed)) {
+      return removed;
+    }
+
     let domain = removed;
 
     while (domain.includes('.')) {
@@ -330,8 +341,7 @@ export class PublicSuffixResolver {
    * additions, removals not applied. Returns `hostname` itself when nothing sits under it.
    */
   private listedRegistrableDomainFor(hostname: string): string {
-    const labels = toLabels(hostname);
-    const normalized = labels.join('.');
+    const normalized = normalizeHostname(hostname);
     // The whole hostname, so bundled wildcard exceptions remain in force: probing
     // bundled suffixes one by one loses the exception context (e.g. city.kawasaki.jp).
     // Read without tldts's hostname check (see the fall-through below).
@@ -344,6 +354,7 @@ export class PublicSuffixResolver {
       // Only caller additions may narrow the bundled result. The hostname check would
       // find no suffix at all for an edge-hyphen host, and an added suffix above a
       // longer bundled one would then win.
+      const labels = normalized.split('.');
       const bundledLength = bundled.publicSuffix?.split('.').length ?? 0;
       for (let i = 0; i < labels.length; i++) {
         const candidate = labels.slice(i).join('.');
@@ -369,6 +380,27 @@ export class PublicSuffixResolver {
     // cookies are kept and a domain clear of `example.com` reaches it.
     return bundled.domain ?? normalized;
   }
+}
+
+/**
+ * A label no Public Suffix List rule names: every rule is a hostname, and `_` is not a
+ * hostname label. Only a wildcard rule can make a name that starts with it a suffix.
+ */
+const WILDCARD_PROBE_LABEL = '_';
+
+/**
+ * Whether the bundled list reads the siblings of `normalized` as public suffixes through
+ * a wildcard rule over its parent - `foo.sch.uk` under `*.sch.uk`, `foo.kawasaki.jp`
+ * under `*.kawasaki.jp`. tldts answers lookups only, not the rule that matched, so the
+ * parent is probed with a label no rule can name.
+ */
+function isWildcardSuffix(normalized: string): boolean {
+  const dot = normalized.indexOf('.');
+
+  return (
+    dot !== -1 &&
+    isBundledPublicSuffix(`${WILDCARD_PROBE_LABEL}${normalized.slice(dot)}`)
+  );
 }
 
 /**

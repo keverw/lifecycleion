@@ -112,20 +112,20 @@ export class XHRAdapter implements HTTPAdapter {
     // whether an answer came from where the request was sent cannot be told without an
     // absolute URL to compare `responseURL` with, and XHR would open a `file:` or `data:`
     // URL where the runtime loads one.
-    const answeredURL = resolveBrowserDispatchURL(
+    const dispatchedURL = resolveBrowserDispatchURL(
       requestURL,
       initialURL,
       'XHRAdapter',
     );
-    if (typeof answeredURL !== 'string') {
-      throw answeredURL;
+    if (typeof dispatchedURL !== 'string') {
+      throw dispatchedURL;
     }
 
     // A browser's XHR fails a request to a port the Fetch Standard blocks on every
     // attempt, as an opaque network error: refused here, as part of the URL, in
     // FetchAdapter's words. In a browser only: a non-browser XHR may reach it.
     const blockedPort = isBrowserEnvironment()
-      ? fetchBlockedPort(answeredURL)
+      ? fetchBlockedPort(dispatchedURL)
       : undefined;
     if (blockedPort !== undefined) {
       const refusal = new TypeError(
@@ -188,13 +188,22 @@ export class XHRAdapter implements HTTPAdapter {
       // ended - nor alongside a retry's.
       // A settle also takes the abort listener off the caller's signal: nothing is left for
       // it to stop, and an XHR outside a browser may fire no `loadend` to take it off.
+      // The first settle wins; any after it does nothing.
       let didSettle = false;
       const resolve = (response: AdapterResponse): void => {
+        if (didSettle) {
+          return;
+        }
+
         didSettle = true;
         resolveSend(response);
         removeAbortListener();
       };
       const reject = (reason: unknown): void => {
+        if (didSettle) {
+          return;
+        }
+
         didSettle = true;
         rejectSend(reason);
         removeAbortListener();
@@ -229,7 +238,7 @@ export class XHRAdapter implements HTTPAdapter {
         // Refused in its own words, and without the runtime's error, as a header below is:
         // a browser's quotes the method it refused.
         try {
-          xhr.open(method, answeredURL);
+          xhr.open(method, dispatchedURL);
         } catch {
           refuse(
             new TypeError(
@@ -305,6 +314,30 @@ export class XHRAdapter implements HTTPAdapter {
       let answeredAtHeaders: AnsweredHeaders | undefined;
 
       /**
+       * The URL of a redirect the browser followed, fixed as the send begins to end there
+       * (see `settleFollowedRedirect`) and before any caller callback runs. A cancel from
+       * one of those callbacks then ends the send as that redirect too, however it reaches
+       * a settle, rather than as a plain abort where no answer was read.
+       */
+      let followedRedirectURL: string | undefined;
+
+      /**
+       * Stop the XHR, then end the send as the abort if nothing has ended it: an `abort()`
+       * that throws, or that fires no `abort` event (a shim's that only tears down its
+       * transport), leaves nothing else to settle it. A browser's fires the event within
+       * the call, which settles first, so the settle here does nothing.
+       */
+      const abortQuietly = (): void => {
+        try {
+          xhr.abort();
+        } catch {
+          // Settled below.
+        }
+
+        settleAborted(answeredAtHeaders);
+      };
+
+      /**
        * Stop a send the caller cancelled once it is sent. The answer is read first, before
        * `abort()`, which resets the status to `0`, where the headers did not report it: a
        * timeout that lands once the headers are in has a real answer behind it, and
@@ -321,6 +354,8 @@ export class XHRAdapter implements HTTPAdapter {
        *
        * Each read guarded, as an XHR outside a browser may throw from any of them: the
        * transfer is still stopped, and the abort is reported with what was read already.
+       * Settled by the time it returns, whatever the XHR's `abort()` does (see
+       * `abortQuietly`).
        */
       const stopCancelledSend = (): void => {
         try {
@@ -341,20 +376,15 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        // Guarded too: refused, no `abort` event would follow to end the send.
-        try {
-          xhr.abort();
-        } catch {
-          settleAborted(answeredAtHeaders);
-        }
+        abortQuietly();
       };
 
       /**
        * The URL that answered, which a `Location` resolves against and the page's origin is
-       * compared with: `answeredURL`, or its `https:` form once the answer shows the
+       * compared with: `dispatchedURL`, or its `https:` form once the answer shows the
        * browser upgraded it (see `compareResponseURL`).
        */
-      let answeringURL = answeredURL;
+      let answeringURL = dispatchedURL;
 
       /**
        * The answer as the XHR has it now, its URL taken as `answeringURL`: the one read the
@@ -374,13 +404,13 @@ export class XHRAdapter implements HTTPAdapter {
         const comparison =
           responseURL === ''
             ? undefined
-            : compareResponseURL(responseURL, answeredURL);
+            : compareResponseURL(responseURL, dispatchedURL);
         const redirectURL =
           comparison?.kind === 'redirected' ? responseURL : undefined;
         answeringURL =
           comparison?.kind === 'upgraded'
             ? comparison.upgradedURL
-            : answeredURL;
+            : dispatchedURL;
 
         return {
           status,
@@ -536,10 +566,10 @@ export class XHRAdapter implements HTTPAdapter {
       // listener would leave the send pending with nothing left to end it. Those reads fail
       // the same way on every attempt, so the request is refused as non-retryable. One that
       // fires on an answer ends the upload first, as on every other answered path.
-      const refusingOnThrow = <Event>(
-        listener: (event: Event) => void,
+      const refusingOnThrow = <TEvent>(
+        listener: (event: TEvent) => void,
         isOnAnswer: boolean,
-      ): ((event: Event) => void) => {
+      ): ((event: TEvent) => void) => {
         return (event) => {
           try {
             listener(event);
@@ -549,12 +579,7 @@ export class XHRAdapter implements HTTPAdapter {
             }
 
             refuse(error);
-
-            try {
-              xhr.abort();
-            } catch {
-              // Nothing more to stop it with.
-            }
+            abortQuietly();
           }
         };
       };
@@ -639,21 +664,21 @@ export class XHRAdapter implements HTTPAdapter {
        * past `maxResponseBytes` included - nor its bytes reported. No body is handed over
        * for it, so its download ends at `0` bytes, as FetchAdapter reports its opaque
        * redirect.
+       *
+       * A cancel from the final upload or download callback ends it as the redirect too,
+       * on every path that sees one - as a cancel over any other answer carries that
+       * answer out - and the client reports the request cancelled. The redirect is fixed
+       * before those callbacks run (see `followedRedirectURL`): their cancel may reach a
+       * settle again, through `abort()` and its event, before this one resolves.
        */
       const settleFollowedRedirect = (redirectURL: string): void => {
-        // A cancel from that upload callback ended it already.
-        if (!emitFinalUpload()) {
-          return;
-        }
+        followedRedirectURL ??= redirectURL;
 
+        emitFinalUpload();
         reportDownloadComplete(0);
-        resolve(browserRedirectResponse(redirectURL));
-
-        try {
-          xhr.abort();
-        } catch {
-          // Whatever the page goes on to deliver is reported to no one.
-        }
+        resolve(browserRedirectResponse(followedRedirectURL));
+        // Whatever the page goes on to deliver is reported to no one.
+        abortQuietly();
       };
 
       // --- Download progress ---
@@ -680,18 +705,17 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        // A cancel from that upload callback ends the send as the cancel.
+        // A cancel from that upload callback ends the send as the cancel over `answer`,
+        // kept first for an XHR that showed it only to this read (one that reports no
+        // change of state).
+        answeredAtHeaders ??= answer;
         if (!emitFinalUpload()) {
           return;
         }
 
         settle();
-
-        try {
-          xhr.abort();
-        } catch {
-          // Whatever the answer goes on to deliver is reported to no one.
-        }
+        // Whatever the answer goes on to deliver is reported to no one.
+        abortQuietly();
       };
 
       /**
@@ -859,16 +883,28 @@ export class XHRAdapter implements HTTPAdapter {
               return;
             }
 
-            if (isBodilessAnswer(answer.status)) {
-              answerBodilessEarly(answer);
+            // Told by its URL alone, whatever the status reads.
+            if (answer.redirectURL !== undefined) {
+              settleFollowedRedirect(answer.redirectURL);
               return;
             }
 
-            isBodyKnownUncoded = isKnownUncodedBody(answer, answeringURL);
+            // Decided only on a real status: a `0` is an XHR that does not show the answer
+            // yet (one outside a browser may report progress first), and its headers -
+            // the `Content-Encoding` the decision reads - with it. Judged again on the
+            // next event past the limit, and on `load`.
+            if (answer.status !== 0) {
+              if (isBodilessAnswer(answer.status)) {
+                answerBodilessEarly(answer);
+                return;
+              }
 
-            if (isBodyKnownUncoded) {
-              refuseTooLargeBody(answer);
-              return;
+              isBodyKnownUncoded = isKnownUncodedBody(answer, answeringURL);
+
+              if (isBodyKnownUncoded) {
+                refuseTooLargeBody(answer);
+                return;
+              }
             }
           }
 
@@ -1109,12 +1145,14 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        if (answer !== undefined) {
-          if (answer.redirectURL !== undefined) {
-            settleFollowedRedirect(answer.redirectURL);
-            return;
-          }
+        // A redirect the send is already ending at, whether or not `answer` shows it.
+        const redirectURL = followedRedirectURL ?? answer?.redirectURL;
+        if (redirectURL !== undefined) {
+          settleFollowedRedirect(redirectURL);
+          return;
+        }
 
+        if (answer !== undefined) {
           // An answer, as on `load`: the upload ended with it, wherever the download got to.
           // A cancel from that upload callback ended it already.
           if (!emitFinalUpload()) {
@@ -1210,12 +1248,11 @@ export class XHRAdapter implements HTTPAdapter {
       // A cancel while `send()` ran - an XHR outside a browser may fire events or run code
       // inside it - came before the XHR marked itself sent, where the XHR standard has
       // `abort()` do nothing and fire no event, so the request went out regardless: stopped
-      // now, and ended as the cancel it is if no `abort` event did.
-      //
-      // Stopped as `onAbort` stops one, and ended here where that fired no event.
-      if (!didSettle && isSignalAbortedQuietly(signal)) {
+      // now, as `onAbort` stops one, and ended as the cancel it is. Stopped even once the
+      // abort listener has ended the send: its `abort()` stopped nothing. One the runtime
+      // completed within `send()` is done, and not aborted again.
+      if (isSignalAbortedQuietly(signal)) {
         stopCancelledSend();
-        settleAborted(answeredAtHeaders);
       }
     };
 
@@ -1251,7 +1288,7 @@ export class XHRAdapter implements HTTPAdapter {
  */
 function isKnownUncodedBody(
   answer: AnsweredHeaders,
-  answeredURL: string,
+  answeringURL: string,
 ): boolean {
   const contentEncoding = answer.headers['content-encoding'];
 
@@ -1263,8 +1300,8 @@ function isKnownUncodedBody(
 
   return (
     pageOrigin !== undefined &&
-    !isCrossOrigin(pageOrigin, answeredURL) &&
-    !isCrossOrigin(pageOrigin, answer.responseURL || answeredURL)
+    !isCrossOrigin(pageOrigin, answeringURL) &&
+    !isCrossOrigin(pageOrigin, answer.responseURL || answeringURL)
   );
 }
 
@@ -1496,8 +1533,8 @@ function parseXHRResponseHeaders(
 }
 
 /**
- * How `responseURL` stands to `answeredURL`, the absolute URL `send` opened, compared as
- * browsers evaluate request destinations:
+ * How `responseURL` stands to `dispatchedURL`, the absolute URL `send` opened, compared
+ * as browsers evaluate request destinations:
  * - userinfo (omitted by `responseURL`) and hash fragments (not sent over HTTP) are
  *   stripped
  * - URL normalization makes equivalent forms equal (default ports, dot segments,
@@ -1514,11 +1551,11 @@ function parseXHRResponseHeaders(
  * turned a `POST` into a `GET` among them - is not mistaken for an upgrade. On an
  * `http:` page an upgrade looks exactly like a server's redirect to `https:`, and is
  * reported as one. Anything else is `'redirected'`, a `responseURL` that does not parse
- * among them, since it cannot name `answeredURL`.
+ * among them, since it cannot name `dispatchedURL`.
  */
 function compareResponseURL(
   responseURL: string,
-  answeredURL: string,
+  dispatchedURL: string,
 ): { kind: 'same' | 'redirected' } | { kind: 'upgraded'; upgradedURL: string } {
   const normalizedResponse = safeParseURL(responseURL);
 
@@ -1529,7 +1566,7 @@ function compareResponseURL(
   normalizedResponse.hash = '';
   const responseHref = stripURLCredentials(normalizedResponse.href);
 
-  const request = new URL(answeredURL);
+  const request = new URL(dispatchedURL);
   const hash = request.hash;
   request.hash = '';
 

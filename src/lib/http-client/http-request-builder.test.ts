@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { runInNewContext } from 'node:vm';
 import { HTTPRequestBuilder } from './http-request-builder';
 import type { BuilderSendContext } from './http-request-builder';
 import type { HTTPRequestOptions, HTTPResponse } from './types';
@@ -1315,6 +1316,56 @@ test('params checks a function as qs walks one, by its own keys', () => {
     'HTTPRequestBuilder params.cb.self is an object it is nested inside',
   );
   expect(() => client.get('/x').params({ cb: () => 1 })).not.toThrow();
+});
+
+test('params refuses a Map, Set, WeakMap, WeakSet or URLSearchParams at any depth, whose entries qs would not write', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  class TagSet extends Set<string> {}
+  const otherRealmMap: unknown = runInNewContext('new Map([[1, 2]])');
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{ ids: new Set([1, 2]) }, 'params.ids is a Set'],
+    [{ filter: { by: new Map([['a', 1]]) } }, 'params.filter.by is a Map'],
+    [{ list: [new WeakMap()] }, 'params.list.0 is a WeakMap'],
+    [{ seen: new WeakSet() }, 'params.seen is a WeakSet'],
+    [
+      { q: { raw: new URLSearchParams('a=1') } },
+      'params.q.raw is a URLSearchParams',
+    ],
+    [{ tags: new TagSet(['a']) }, 'params.tags is a Set'],
+    [{ cb: Object.assign(() => 1, { m: new Map() }) }, 'params.cb.m is a Map'],
+    [{ foreign: otherRealmMap }, 'params.foreign is a Map'],
+  ];
+
+  for (const [params, refusal] of cases) {
+    expect(() => client.get('/x').params(params)).toThrow(
+      new TypeError(
+        `HTTPRequestBuilder ${refusal}, whose entries qs does not read, so it cannot be put in a query`,
+      ),
+    );
+  }
+
+  // Only a value holding the collection's own state is one: an object that merely
+  // inherits from its prototype is walked by its own keys, as qs walks it.
+  expect(() =>
+    client.get('/x').params({ fake: Object.create(Map.prototype) as object }),
+  ).not.toThrow();
+});
+
+test('a nested function or keyless class instance in params writes nothing and clears the path key, as an empty object does', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  class Hidden {
+    readonly #secret = 1;
+    public get secret(): number {
+      return this.#secret;
+    }
+  }
+
+  for (const value of [{}, () => 1, new Hidden()]) {
+    const response = await client.get('/x?t=1&u=2').params({ t: value }).send();
+    expect(response.requestURL).toBe('http://api.test/x?u=2');
+  }
 });
 
 test('params checks an object shared under many parents once, not once per path', () => {

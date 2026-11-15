@@ -3079,7 +3079,7 @@ describe('domain-utils', () => {
 
       it('rejects wildcard patterns with concrete labels that fail IDN normalization', () => {
         // A character no host name uses (`!`) normalizes to '' - `_` is allowed, as the URL
-        // standard allows it. This exercises the nd === '' branch in validateConcreteLabels
+        // standard allows it - so the label, and the pattern, are refused.
         const underscoreLabel = validateConfigEntry(
           '*.foo!bar.example.com',
           'domain',
@@ -4433,5 +4433,97 @@ describe('allowlist entries the validator refuses', () => {
         }),
       ).toThrow(TypeError);
     }
+  });
+});
+
+describe('a bare-domain entry in an origin list', () => {
+  it('matches an HTTP(S) origin of that host on any port, and no other scheme, as a host wildcard does', () => {
+    for (const origin of [
+      'https://example.com',
+      'http://example.com',
+      'https://example.com:8443',
+    ]) {
+      expect(matchesOriginList(origin, ['example.com'])).toBe(true);
+      expect(matchesCORSCredentialsList(origin, ['example.com'])).toBe(true);
+    }
+
+    for (const origin of [
+      'ftp://example.com',
+      'myapp://example.com',
+      'ws://example.com',
+      'wss://example.com',
+    ]) {
+      expect(matchesOriginList(origin, ['example.com'])).toBe(false);
+      expect(matchesCORSCredentialsList(origin, ['example.com'])).toBe(false);
+      expect(
+        matchesOriginList(origin.replace('://', '://a.'), ['*.example.com']),
+      ).toBe(false);
+    }
+
+    // An exact origin entry still names another scheme.
+    expect(
+      matchesOriginList('myapp://example.com', ['myapp://example.com']),
+    ).toBe(true);
+    expect(
+      matchesCORSCredentialsList('ftp://example.com', ['ftp://example.com']),
+    ).toBe(true);
+  });
+});
+
+describe('origin lists compiled once per list', () => {
+  it('answers as an uncompiled list would on repeated calls, and reads a changed list afresh', () => {
+    const list = [
+      'https://a.example.com',
+      'b.example.com',
+      'null',
+      '*.c.example.com',
+    ];
+
+    for (let round = 0; round < 3; round++) {
+      expect(matchesOriginList('https://a.example.com', list)).toBe(true);
+      expect(matchesOriginList('https://b.example.com:81', list)).toBe(true);
+      expect(matchesOriginList('null', list)).toBe(true);
+      expect(matchesOriginList('https://x.c.example.com', list)).toBe(true);
+      expect(matchesOriginList('https://d.example.com', list)).toBe(false);
+      expect(matchesCORSCredentialsList('https://a.example.com', list)).toBe(
+        true,
+      );
+      expect(matchesCORSCredentialsList('https://x.c.example.com', list)).toBe(
+        false,
+      );
+    }
+
+    list[0] = 'https://d.example.com';
+    expect(matchesOriginList('https://a.example.com', list)).toBe(false);
+    expect(matchesOriginList('https://d.example.com', list)).toBe(true);
+    expect(matchesCORSCredentialsList('https://a.example.com', list)).toBe(
+      false,
+    );
+    expect(matchesCORSCredentialsList('https://d.example.com', list)).toBe(
+      true,
+    );
+  });
+
+  it('takes a readonly list', () => {
+    const origins = ['https://example.com', 'example.org'] as const;
+    const domains: readonly string[] = ['example.com'];
+
+    expect(matchesOriginList('https://example.com', origins)).toBe(true);
+    expect(matchesCORSCredentialsList('https://example.org', origins)).toBe(
+      true,
+    );
+    expect(matchesDomainList('example.com', domains)).toBe(true);
+  });
+});
+
+describe('an origin whose host has a hyphen at a label edge', () => {
+  it('is no valid origin, so no entry matches it, the global and protocol wildcards included', () => {
+    expect(normalizeOrigin('https://-edge.example.com')).toBe('');
+    for (const entry of ['*', 'https://*', '*.example.com', 'example.com']) {
+      expect(matchesOriginList('https://-edge.example.com', [entry])).toBe(
+        false,
+      );
+    }
+    expect(matchesHostFilter('-edge.example.com', ['*'])).toBe(true);
   });
 });

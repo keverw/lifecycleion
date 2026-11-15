@@ -8,6 +8,7 @@ import {
   arrayBufferKindOf,
   plainBytesView,
   readBinaryByteLength,
+  readTypedArrayBuffer,
   readTypedArrayByteOffset,
 } from '../../internal/binary-view';
 import { describeValue } from '../../internal/describe-value';
@@ -417,8 +418,9 @@ export interface NodeAdapterConfig {
    * requires, as is each string or binary element of an array. Only PEM is
    * read: Node's `tls` does not read DER CRLs, so DER bytes - or a value with
    * no complete CRL block at all - are refused when the adapter is constructed.
-   * Binary data may be any `ArrayBuffer` view: one CRL block is passed on as a `Buffer`,
-   * several are split into one latin1 string each.
+   * Binary data may be any `ArrayBuffer` view, or an `ArrayBuffer` (shared or not), as
+   * for `ca`: one CRL block is passed on as a `Buffer`, several are split into one latin1
+   * string each.
    *
    * The split exists because Node reads only the FIRST CRL of a concatenated
    * string and silently ignores the rest, unlike `ca`, which reads every
@@ -437,7 +439,7 @@ export interface NodeAdapterConfig {
    * Both failures are fail-closed, so a stale CRL never silently stops
    * enforcing — but both can take out healthy connections.
    */
-  crl?: string | ArrayBufferView | Array<string | ArrayBufferView>;
+  crl?: TLSMaterial | TLSMaterial[];
 
   /**
    * Whether a compressed response is decoded before it is handed over, as `fetch`
@@ -576,6 +578,16 @@ export class NodeAdapter implements HTTPAdapter {
       );
     }
 
+    // Refused, not sent: Node's and Bun's `http` read a port of `0` as no port and dial
+    // the scheme's default instead, so a request for `host:0` - its `Authorization` and
+    // `Cookie` with it - would reach whatever listens on `:80` or `:443`, while the
+    // client takes `host:0` as the origin it answered for. No server listens on port 0.
+    // Refused over `socketPath` too, which dials no port, so one rule holds for every
+    // URL and the origin the client records is never `host:0`.
+    if (parsedURL.port === '0') {
+      throw optionRefusal('NodeAdapter cannot send a request to port 0');
+    }
+
     // `urlToHttpOptions` percent-decodes the userinfo, and a malformed escape
     // (`a%E0:b@`) throws a `URIError` that reads the same on every attempt: tagged
     // non-retryable, as the other setup throws are, rather than retried.
@@ -629,6 +641,20 @@ export class NodeAdapter implements HTTPAdapter {
 
     if (asciiUppercase(request.method) === 'CONNECT') {
       throw connectRefusal('NodeAdapter');
+    }
+
+    // A factory that is not a function would fail only once the server has answered - a
+    // `POST` already applied - when it is called. `HTTPClient` checks it as the request is
+    // built; a caller driving the adapter directly does not.
+    const streamResponse: unknown = request.streamResponse;
+    if (
+      streamResponse !== undefined &&
+      streamResponse !== null &&
+      typeof streamResponse !== 'function'
+    ) {
+      throw optionRefusal(
+        `NodeAdapter streamResponse must be a function (got ${describeValue(streamResponse)})`,
+      );
     }
 
     // Guarded once, at the boundary, so every call site below is covered - including the
@@ -714,6 +740,11 @@ export class NodeAdapter implements HTTPAdapter {
     // identity applies unconditionally. An `initialURL` that cannot be parsed is treated
     // as cross-origin (`isCrossOrigin`): it cannot be shown to be the same origin, and
     // failing closed withholds an identity rather than presenting one.
+    //
+    // Each hop is compared with `initialURL`, not with the hop before it, so a chain that
+    // leaves and comes back (A, then B, then A) has the identity again on its return,
+    // with a path and query B chose. Browsers do the same with an origin's credentials,
+    // and the chain has to have been sent away by the origin the caller trusts first.
     const isCrossOriginHop =
       request.initialURL !== undefined &&
       isCrossOrigin(request.initialURL, parsedURL);
@@ -732,29 +763,30 @@ export class NodeAdapter implements HTTPAdapter {
       options.auth = urlOptions.auth;
     }
 
-    if (socketPath && !isCrossOriginHop) {
-      // Unix socket: the TCP connection goes to the socket path, not the host.
-      // We still need options.path so the HTTP request line has the right path.
-      // Preserve the URL host/port too so Node generates the correct Host
-      // header for virtual-hosted services behind the socket.
-      //
-      // Withheld on a cross-origin hop, on the same rule as `mtls.cert` and `servername`
-      // below: the socket is the caller's chosen endpoint, often a privileged one
-      // (`/var/run/docker.sock`), and a `Location` is the remote server's choice. Applied
-      // unconditionally, a redirect to another host would never leave the socket - the
-      // bytes would stay on that privileged endpoint and only the request line and `Host`
-      // header would change, turning a redirect into a request the caller never made
-      // against the very socket it configured. The hop still happens, over TCP to the
-      // host the `Location` actually names, which is where that redirect would have gone
-      // without a socket.
-      options.socketPath = socketPath;
-      options.hostname = urlOptions.hostname;
+    // Unix socket: the connection goes to the socket path, not the host. The URL's host
+    // and port are kept all the same, so Node writes the `Host` header a virtual-hosted
+    // service behind the socket routes by.
+    //
+    // Withheld on a cross-origin hop, on the same rule as `mtls.cert` and `servername`
+    // below: the socket is the caller's chosen endpoint, often a privileged one
+    // (`/var/run/docker.sock`), and a `Location` is the remote server's choice. Applied
+    // unconditionally, a redirect to another host would never leave the socket - the
+    // bytes would stay on that privileged endpoint and only the request line and `Host`
+    // header would change, turning a redirect into a request the caller never made
+    // against the very socket it configured. The hop still happens, over TCP to the
+    // host the `Location` actually names, which is where that redirect would have gone
+    // without a socket.
+    const dialedSocketPath =
+      socketPath && !isCrossOriginHop ? socketPath : undefined;
+
+    options.hostname = urlOptions.hostname;
+    options.path = urlOptions.path;
+
+    if (dialedSocketPath !== undefined) {
+      options.socketPath = dialedSocketPath;
       options.port = urlOptions.port;
-      options.path = urlOptions.path;
     } else {
-      options.hostname = urlOptions.hostname;
       options.port = urlOptions.port ?? (isHTTPS ? 443 : 80);
-      options.path = urlOptions.path;
     }
 
     if (isHTTPS) {
@@ -785,18 +817,8 @@ export class NodeAdapter implements HTTPAdapter {
       // CA through `ca` keeps it when it also configures mTLS.
       // Each as TLS takes it (see `tlsMaterial`), named by the option it came from.
       const ownAnchors = [
-        ...(trustedCA === undefined
-          ? []
-          : Array.isArray(trustedCA)
-            ? trustedCA
-            : [trustedCA]
-        ).map((anchor) => tlsMaterial(anchor, 'ca')),
-        ...(mtlsCA === undefined
-          ? []
-          : Array.isArray(mtlsCA)
-            ? mtlsCA
-            : [mtlsCA]
-        ).map((anchor) => tlsMaterial(anchor, 'mtls.ca')),
+        ...anchorList(trustedCA, 'ca'),
+        ...anchorList(mtlsCA, 'mtls.ca'),
       ];
       if (ownAnchors.length > 0) {
         httpsOptions.ca = ownAnchors.length === 1 ? ownAnchors[0] : ownAnchors;
@@ -1060,8 +1082,12 @@ export class NodeAdapter implements HTTPAdapter {
                * Aborting the stream signal is what lets the factory's own cleanup listeners
                * run, and the `streamAbort.signal.aborted` check after the await then
                * destroys a writable that arrived too late.
+               *
+               * `error` is the failure itself, which decides the teardown; `errorCause`,
+               * when given, is what the answer reports for it.
                */
-              failOnSocketError: ((error: Error) => void) | undefined;
+              failOnSocketError:
+                ((error: Error, errorCause?: Error) => void) | undefined;
 
               /**
                * Whether the response has arrived in full. A socket failure after that -
@@ -1625,12 +1651,7 @@ export class NodeAdapter implements HTTPAdapter {
                 const didHandlerAnswer = didSettleRequest;
 
                 failRequest(failure);
-
-                try {
-                  destroyRequestQuietly(req);
-                } catch {
-                  // A patched request can even refuse its destroyed-state read.
-                }
+                destroyRequestQuietly(req);
 
                 // Delivered: the caller has the recovery failure, so it is not reported on
                 // the host channel as well. Only when the handler had already answered with
@@ -1664,11 +1685,7 @@ export class NodeAdapter implements HTTPAdapter {
               // watchdog. A request answered without one has nothing left in flight to
               // protect.
               if (!didReceiveResponse) {
-                try {
-                  destroyRequestQuietly(req);
-                } catch {
-                  // A patched request can even refuse its destroyed-state read.
-                }
+                destroyRequestQuietly(req);
               }
             }
           });
@@ -1680,6 +1697,16 @@ export class NodeAdapter implements HTTPAdapter {
         // which has no upload to report and correctly carries no field.
         if (classifiedBody !== undefined) {
           openBodyOutcome();
+        }
+
+        // Signal already aborted before the request is made (a pre-cancelled builder, say):
+        // refused before `httpModule.request`, so no connection is opened for it, and after
+        // the outcome above, so a bodied one carries it. By the rule every reader of the
+        // caller's signal shares: exactly `true`, and a getter that throws refused on a
+        // carrier (see `isSignalAborted`).
+        if (isSignalAborted(request.signal)) {
+          failRequest(makeAbortError());
+          return;
         }
 
         /**
@@ -1830,8 +1857,9 @@ export class NodeAdapter implements HTTPAdapter {
             });
           } catch {
             // No way to schedule it, so the request is torn down now rather than left to
-            // hang. A response mid-flight is the lesser loss of the two.
-            destroyUnfinishedRequestQuietly(req);
+            // hang. A response mid-flight is the lesser loss of the two, and cut as the
+            // stream error it is, as the watch would have cut it.
+            cutResponseAndRequest();
           }
         };
 
@@ -1908,6 +1936,14 @@ export class NodeAdapter implements HTTPAdapter {
             ) {
               didTearDownAfterResponse = true;
               destroyRequestQuietly(req);
+
+              // Watched still: a writer parked on a source read that the destroy does not
+              // wake - a custom `stream()` whose reader ignores `cancel()` - would
+              // otherwise leave `requestBodySettled` open for good. One the destroy does
+              // wake settles first and stops the watch.
+              if (stallWatchdogTimer === undefined) {
+                watchForStalledUpload();
+              }
 
               return;
             }
@@ -2014,14 +2050,23 @@ export class NodeAdapter implements HTTPAdapter {
               // response's close that follows, it would be reported as a generic one, the
               // cause dropped.
               let stopWatchingDecodeFailure: (() => void) | undefined;
+              // Reported as the body's failure is once it streams, or as a buffered one:
+              // `'Response stream error'` with the failure on its `cause`.
               const setupFailed = (error: Error): void => {
+                const failure = body.heldError?.() ?? error;
+
                 pendingStreamSetup?.failOnSocketError?.(
-                  body.heldError?.() ?? error,
+                  failure,
+                  makeResponseStreamError('Response stream error', failure),
                 );
               };
               const setupClosed = (): void => {
-                if (!res.complete || body.heldError?.() !== undefined) {
-                  setupFailed(
+                const held = body.heldError?.();
+
+                if (held !== undefined) {
+                  setupFailed(held);
+                } else if (!res.complete) {
+                  pendingStreamSetup?.failOnSocketError?.(
                     makeResponseStreamError(
                       'Response stream closed during setup',
                     ),
@@ -2036,7 +2081,10 @@ export class NodeAdapter implements HTTPAdapter {
                   headers,
                   didCallFactory: false,
                   isResponseComplete: () => res.complete,
-                  failOnSocketError: (error: Error): void => {
+                  failOnSocketError: (
+                    error: Error,
+                    errorCause: Error = error,
+                  ): void => {
                     setup.failOnSocketError = undefined;
                     // Guarded, because this one runs from inside `req.on('error', ...)`.
                     // Every other destroy on this path is in the request's own promise
@@ -2070,7 +2118,7 @@ export class NodeAdapter implements HTTPAdapter {
                           body: null,
                           isStreamError: true,
                           streamErrorCode: 'stream_response_error',
-                          errorCause: error,
+                          errorCause,
                         });
                       },
                       abortStream,
@@ -2228,11 +2276,11 @@ export class NodeAdapter implements HTTPAdapter {
                 const abortErr = makeAbortError(
                   'Request cancelled by streamResponse factory',
                 );
-                Object.assign(abortErr, {
-                  [STREAM_FACTORY_CANCEL_KEY]: cancelReason ?? true,
-                });
-                // The answer it declined, so its `Set-Cookie` is still stored.
+                // Hidden, as the tags beside it are: the caller's reason is not carried
+                // into `JSON.stringify`, `Object.keys` or a spread of the error. With it,
+                // the answer it declined, so its `Set-Cookie` is still stored.
                 defineHiddenTags(abortErr, {
+                  [STREAM_FACTORY_CANCEL_KEY]: cancelReason ?? true,
                   [STREAM_ABORT_STATUS_KEY]: status,
                   [STREAM_ABORT_HEADERS_KEY]: headers,
                 });
@@ -2353,8 +2401,28 @@ export class NodeAdapter implements HTTPAdapter {
             };
 
             // Refused before a byte is read when the body says up front that it is over
-            // the limit, and the progress total below - read once, for both.
+            // the limit, once an abort has had its say below, and the progress total
+            // further on - read once, for both.
             const declaredLength = declaredBodyLength(headers, isDecoded);
+
+            activeBufferedResponse = {
+              status,
+              headers,
+            };
+
+            // Aborted before this answer could be read - an abort the listener answered
+            // before the response arrived, or a signal that reads as aborted without
+            // having dispatched `abort` - is answered by that listener now, as a stream
+            // setup answers it (`answerAbortIfRead`): the answer is let go, and no
+            // download progress, the bodiless answers' 100% among it, is reported for a
+            // request that is already over.
+            if (readIsAborted()) {
+              answerAbort?.();
+
+              if (activeBufferedResponse === undefined) {
+                return;
+              }
+            }
 
             if (
               hasBody &&
@@ -2364,11 +2432,6 @@ export class NodeAdapter implements HTTPAdapter {
               refuseTooLargeBody();
               return;
             }
-
-            activeBufferedResponse = {
-              status,
-              headers,
-            };
 
             // A bodiless answer, with no body handed over: complete at `0` bytes, as one
             // that ends on its own reports it, and its connection let go.
@@ -2715,15 +2778,22 @@ export class NodeAdapter implements HTTPAdapter {
             // Every exit the task means to take tears down what it opened. This one - a
             // throw out of code with no `catch` of its own - tears them down here, so the
             // socket is not left open and the factory's cleanup listeners run. Torn down
-            // after the reject, so neither can stand in for the failure.
+            // after the reject, so neither can stand in for the failure. The client is
+            // told first, once a factory's stream is in play, as `settleStreamFailure`
+            // tells it: this throw ended that stream, and a cancel the factory's cleanup
+            // listener makes is no stand-in for it.
+            if (abortResponseStream !== undefined) {
+              notifyStreamFailureSettled(streamFailureSettledListener);
+            }
             abortResponseStream?.();
             tearDownAfterResponse();
           });
         }));
 
-        // A socket handed over instead of a response - a `101` the server sent unasked, a
-        // tunnel - is not one this adapter can read. Unhandled, Node destroys it and
-        // emits neither `'response'` nor `'error'`, so the request would never settle.
+        // A socket handed over instead of a response - a `101` the server sent unasked - is
+        // not one this adapter can read. Unhandled, Node destroys it and emits neither
+        // `'response'` nor `'error'`, so the request would never settle. (`'connect'`, the
+        // other handover, comes only for a `CONNECT` request, refused before this.)
         const onSocketHandover = (
           _response: unknown,
           socket: { destroy?: () => void } | undefined,
@@ -2740,7 +2810,6 @@ export class NodeAdapter implements HTTPAdapter {
           failRequest(refusal);
         };
         req.on('upgrade', onSocketHandover);
-        req.on('connect', onSocketHandover);
 
         // Network / transport errors (DNS failure, connection refused, cert errors)
         req.on('error', (error) => {
@@ -2858,7 +2927,10 @@ export class NodeAdapter implements HTTPAdapter {
           //
           // Set only when proven, never as `false` — absence means "not known", so
           // an explicit `false` would read as proof of delivery.
-          const wasDefinitelyNotSent = isPreConnectionError(error);
+          const wasDefinitelyNotSent = isPreConnectionError(
+            error,
+            dialedSocketPath !== undefined,
+          );
 
           // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
           settleResponse({
@@ -2877,16 +2949,7 @@ export class NodeAdapter implements HTTPAdapter {
         // leaves the promise unsettled. Promise resolution is idempotent, so any
         // subsequent error event is a safe no-op.
         if (request.signal) {
-          // By the rule every reader of the caller's signal shares: exactly `true`, and a
-          // getter that throws refused on a carrier (see `isSignalAborted`).
-          if (isSignalAborted(request.signal)) {
-            // Signal already aborted before we even started (e.g., pre-cancelled builder)
-            destroyRequestQuietly(req);
-            const abortErr = makeAbortError();
-            failRequest(abortErr);
-            return;
-          }
-
+          // One already aborted was refused before the request was made, above.
           const signal = request.signal;
 
           // Not answered only once: it answers whatever the request holds when it runs, so
@@ -2895,8 +2958,10 @@ export class NodeAdapter implements HTTPAdapter {
           // Each step is safe to repeat - the first settle stands, and a torn-down request
           // or released body is left as it is.
           const onAbort = (): void => {
-            // Notify a pending factory first, while its cleanup still has ownership.
-            pendingStreamSetup?.abort();
+            // A factory still setting up has its stream signal fired after the request
+            // settles, as an active stream's is below, and before the body is released:
+            // a cleanup listener that cancels the request cannot stand in for this abort.
+            const setupToAbort = pendingStreamSetup;
             if (activeResponseStream) {
               // Nothing more is decoded for a request that was cancelled or timed out.
               releaseResponseBody?.();
@@ -2904,10 +2969,6 @@ export class NodeAdapter implements HTTPAdapter {
                 activeResponseStream;
               activeResponseStream = undefined;
               destroyWritableQuietly(writable);
-              // Fired here, not left to `streamResponseBody` to report back: that would
-              // hang on a destroyed writable that never calls its `end` callback, and the
-              // factory's cleanup would never run.
-              abortStream();
               // Guarded, as its writable sibling one line up already is, and for the
               // reason the stall watchdog's destroy is: this whole listener runs from an
               // `AbortSignal` event, where a throw is an uncaught exception rather than a
@@ -2922,6 +2983,13 @@ export class NodeAdapter implements HTTPAdapter {
                   headers,
                 ),
               );
+              // Fired here, not left to `streamResponseBody` to report back: that would
+              // hang on a destroyed writable that never calls its `end` callback, and the
+              // factory's cleanup would never run. After the reject, as every path that
+              // fires it settles first: nothing a cleanup listener does then can stand in
+              // for this abort. The client is not told a stream failure settled it, as
+              // `settleStreamFailure` tells it: this is a cancel or a timeout.
+              abortStream();
               return;
             }
 
@@ -2934,8 +3002,8 @@ export class NodeAdapter implements HTTPAdapter {
             // factory that never ran.
             const unreadAnswer =
               activeBufferedResponse ??
-              (pendingStreamSetup?.didCallFactory === false
-                ? pendingStreamSetup
+              (setupToAbort?.didCallFactory === false
+                ? setupToAbort
                 : undefined);
             if (unreadAnswer !== undefined) {
               const { status, headers } = unreadAnswer;
@@ -2953,12 +3021,13 @@ export class NodeAdapter implements HTTPAdapter {
                     : 'Request aborted before the streamResponse factory was called',
                 ),
               );
+              setupToAbort?.abort();
               releaseResponseBody?.();
               return;
             }
 
-            if (pendingStreamSetup) {
-              const { status, headers } = pendingStreamSetup;
+            if (setupToAbort) {
+              const { status, headers } = setupToAbort;
               destroyRequestQuietly(req);
               const abortErr = makeAbortError(
                 'Request aborted during streamResponse setup',
@@ -2969,6 +3038,7 @@ export class NodeAdapter implements HTTPAdapter {
                   headers,
                 }),
               );
+              setupToAbort.abort();
               releaseResponseBody?.();
               return;
             }
@@ -3140,12 +3210,7 @@ export class NodeAdapter implements HTTPAdapter {
       // been opened. Re-thrown unchanged apart from the tag, so classification upstream is
       // untouched.
       if (requestForCleanup !== undefined) {
-        try {
-          destroyRequestQuietly(requestForCleanup);
-        } catch {
-          // Even a teardown-state getter can throw. Preserve the original failure;
-          // asynchronous recovery already reports any undelivered teardown failure.
-        }
+        destroyRequestQuietly(requestForCleanup);
       }
       throw settleRequestBodyForThrow(normalizeError(error));
     });
@@ -3295,6 +3360,10 @@ async function streamResponseBody(
     let isPaused = false;
     let isSettled = false;
     let didReceiveEnd = false;
+    // Whether `onWritableDrain` is attached. A sink whose `on('drain', ...)` threw has no
+    // way to say it is ready again, so its backpressure is not honoured: the response is
+    // not paused for a `'drain'` nothing would deliver.
+    let hasDrainChannel = false;
 
     const cleanup = (): void => {
       // Before the removal, and on *every* settle path rather than only the `write`/`end`
@@ -3302,9 +3371,10 @@ async function streamResponseBody(
       // the moment it runs the writable has no `'error'` listener of ours left - and an
       // `'error'` event with no listener is an uncaught exception that ends the process.
       // (A writable with no removal method is the one shape this does not cover, and
-      // does not need to: `absorbPendingWritableError` returns early for it, and the
-      // permanent fan-out listener from `attachWritableListener` stays on the writable
-      // whatever this request does, so the `'error'` channel is never unhandled there.
+      // does not need to: `absorbPendingWritableError` puts the permanent fan-out listener
+      // from `attachWritableListener` on it instead, where it is not on already, and that
+      // listener stays on the writable whatever this request does, so the `'error'`
+      // channel is never unhandled there.
       // A late error reaches it with no request registered and is reported through the
       // host error reporter, as the absorber would report it.)
       //
@@ -3422,7 +3492,10 @@ async function streamResponseBody(
         return;
       }
 
-      let canContinue: boolean;
+      // Read as `pipe()` reads it: only `false` is backpressure. `WritableLike` declares a
+      // boolean, but a hand-written sink may return nothing, and pausing for that would
+      // wait on a `'drain'` it never emits.
+      let canContinue: unknown;
       handedBytes += chunk.length;
 
       try {
@@ -3489,8 +3562,9 @@ async function streamResponseBody(
       // failure, so without the check this would only pause a response that is about to
       // be torn down anyway.
       // Pausing a stream whose resume path has been dismantled is wrong regardless of
-      // who cleans up after it.
-      if (!canContinue && !isSettled) {
+      // who cleans up after it, and so is pausing one that never had it: see
+      // `hasDrainChannel`.
+      if (canContinue === false && hasDrainChannel && !isSettled) {
         // Writable signalled backpressure — pause the readable until the
         // drain event fires (handled above) to keep memory bounded.
         isPaused = true;
@@ -3563,14 +3637,17 @@ async function streamResponseBody(
       // Response stream error after headers is terminal for streamed 2xx
       // responses too: bytes may already have been written to the caller's
       // sink, so retrying would risk duplicate/corrupt output.
-      const streamError = new Error('Response stream error');
-      streamError.cause = err;
-      settle({ code: 'stream_response_error', cause: streamError });
+      settle({
+        code: 'stream_response_error',
+        cause: makeResponseStreamError('Response stream error', err),
+      });
     };
 
     const onResponseAborted = (): void => {
-      const streamError = new Error('Response stream aborted');
-      settle({ code: 'stream_response_error', cause: streamError });
+      settle({
+        code: 'stream_response_error',
+        cause: makeResponseStreamError('Response stream aborted'),
+      });
     };
 
     const onResponseClose = (): void => {
@@ -3578,8 +3655,12 @@ async function streamResponseBody(
         return;
       }
 
-      const streamError = new Error('Response stream closed before completion');
-      settle({ code: 'stream_response_error', cause: streamError });
+      settle({
+        code: 'stream_response_error',
+        cause: makeResponseStreamError(
+          'Response stream closed before completion',
+        ),
+      });
     };
 
     // The request is over - cancelled or timed out - and has already been answered. Settled
@@ -3589,7 +3670,7 @@ async function streamResponseBody(
     const onStop = (): void => {
       settle({
         code: 'stream_response_error',
-        cause: new Error('Response stream aborted'),
+        cause: makeResponseStreamError('Response stream aborted'),
       });
     };
 
@@ -3597,7 +3678,8 @@ async function streamResponseBody(
     // an error - settles with that error at once, the response never resumed: written to,
     // it fails only with a destroyed-stream error that hides the real one. Claimed, so the
     // late-error absorber `settle` attaches - in the turn a sync factory returned it, so
-    // before that error's `nextTick` emit - absorbs it without reporting it again.
+    // before that error's `nextTick` emit - absorbs it without reporting it again. For a
+    // sink with no listener-removal method that absorber is the fan-out listener.
     // Truthy, as the end-of-stream read of the same field takes it: a sink that reports
     // `errored: false` is a healthy one.
     const erroredAtStart: unknown = readUnknownMember(writable, 'errored');
@@ -3633,7 +3715,11 @@ async function streamResponseBody(
     // `WritableLike`, and a sink reused across requests would otherwise accumulate two
     // listeners plus the retained request closure behind each of them, request after
     // request.
-    attachWritableListener(writable, 'drain', onWritableDrain);
+    hasDrainChannel = attachWritableListener(
+      writable,
+      'drain',
+      onWritableDrain,
+    );
     attachWritableListener(writable, 'error', onWritableError);
     attachWritableListener(writable, 'close', onWritableClose);
     stopSignal.addEventListener('abort', onStop, { once: true });
@@ -3680,10 +3766,12 @@ async function streamResponseBody(
  * another, which is the unbounded growth this exists to prevent. Nothing is lost by
  * skipping it - such a writable is listened to through the permanent fan-out at
  * {@link attachWritableListener}, whose listener stays attached whatever this request
- * does. A late error reaches it once `cleanup` has deregistered `onWritableError`, finds
- * no request behind it, and is reported through the host error reporter exactly as this
- * absorber would report it, within the same {@link PENDING_WRITABLE_ERROR_WINDOW_MS} -
- * restarted here, as this absorber's would be.
+ * does, and which this attaches to one without a remover that has none yet: a sink that
+ * settled before {@link streamResponseBody} attached its listeners, or one discarded
+ * unstreamed. A late error reaches it once `cleanup` has deregistered
+ * `onWritableError`, finds no request behind it, and is reported through the host error
+ * reporter exactly as this absorber would report it, within the same
+ * {@link PENDING_WRITABLE_ERROR_WINDOW_MS} - restarted here, as this absorber's would be.
  */
 function absorbPendingWritableError(writable: WritableLike): void {
   // A writable fanned out for `'error'` has that permanent listener to absorb and report
@@ -3707,6 +3795,18 @@ function absorbPendingWritableError(writable: WritableLike): void {
   const removeListener = getWritableListenerRemover(writable);
 
   if (removeListener === null) {
+    // Not fanned out yet - a sink that settled before `streamResponseBody` attached its
+    // listeners, or one discarded unstreamed - so the permanent fan-out listener is put
+    // on now: registered and at once deregistered, it reports an `'error'` arriving with
+    // no request registered, and starts its reporting window.
+    try {
+      attachWritableListener(writable, 'error', ignoreWritableError);
+      detachWritableListener(writable, 'error', ignoreWritableError);
+    } catch {
+      // Not a value a listener can be tracked on - a factory that returned a primitive.
+      // Nothing of ours can be attached to it, and nothing can emit on it either.
+    }
+
     return;
   }
 
@@ -3985,20 +4085,7 @@ function absorbPendingWritableError(writable: WritableLike): void {
  * Never throws.
  */
 function discardUnstreamedWritable(writable: WritableLike): void {
-  try {
-    if (getWritableListenerRemover(writable) === null) {
-      // Registered and at once deregistered: what is wanted is the permanent fan-out
-      // listener, which reports an `'error'` arriving with no request registered.
-      attachWritableListener(writable, 'error', ignoreWritableError);
-      detachWritableListener(writable, 'error', ignoreWritableError);
-    } else {
-      absorbPendingWritableError(writable);
-    }
-  } catch {
-    // Not a value a listener can be tracked on - a factory that returned a primitive.
-    // Nothing of ours can be attached to it, and nothing can emit on it either.
-  }
-
+  absorbPendingWritableError(writable);
   destroyWritableQuietly(writable);
 }
 
@@ -4147,7 +4234,7 @@ const RESIDUE_OUTSIDE_PEM_BLOCKS = /\S/;
  * only report `UNABLE_TO_GET_CRL` at handshake time.
  */
 function normalizeCRL(
-  crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
+  crl: TLSMaterial | TLSMaterial[],
   /** The adapter the parse is cached for. */
   owner: object,
 ): string | Buffer | Array<string | Buffer> {
@@ -4169,9 +4256,11 @@ function normalizeCRL(
     // an offset (a `subarray`) is copied there, since Bun's `tls` reads a view from the
     // start of its memory - and the copy kept here is that copy. The offset is the one
     // its internal slot holds, which is where `tls` reads from, not the one it reports.
+    // Not one over shared memory, which `normalizeCRLEntry` copies too.
     return last.isPassedThrough &&
       Buffer.isBuffer(given) &&
-      readTypedArrayByteOffset(given) === 0
+      readTypedArrayByteOffset(given) === 0 &&
+      !isOverSharedMemory(given)
       ? given
       : last.normalized;
   }
@@ -4233,13 +4322,14 @@ function copyTrustList<V>(value: V, label: string): V {
  * A hole is skipped, as `flatMap` skips it, and not kept as one (`copyArrayValue` keeps
  * it): the copy is the cache key `isSameCRLInput` compares entry by entry with `every`,
  * which passes over a hole, so a later list with a CRL at that index would match it.
- * Anything else is left as given.
+ * An `ArrayBuffer` is read as a view of all its bytes (see `crlEntryView`); anything
+ * else is left as given.
  */
 function snapshotCRLInput(
-  crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
+  crl: TLSMaterial | TLSMaterial[],
 ): string | ArrayBufferView | Array<string | ArrayBufferView> {
   if (!Array.isArray(crl)) {
-    return crl;
+    return crlEntryView(crl);
   }
 
   const entries: Array<string | ArrayBufferView> = [];
@@ -4249,10 +4339,30 @@ function snapshotCRLInput(
     MAX_COPIED_ARRAY_LENGTH,
   );
   forEachOwnIndex(crl, length, (index) => {
-    entries.push(crl[index]);
+    entries.push(crlEntryView(crl[index]));
   });
 
   return entries;
+}
+
+/**
+ * A `crl` entry with an `ArrayBuffer` (shared or not) as a `Uint8Array` over all its
+ * bytes, so it is read, compared and copied as any other view is. A detached one reads as
+ * empty, as a view over it does. Anything else is left as given, to be refused by
+ * `normalizeCRLEntry` if it is not a string or a view.
+ */
+function crlEntryView(entry: TLSMaterial): string | ArrayBufferView {
+  if (
+    typeof entry !== 'object' ||
+    entry === null ||
+    arrayBufferKindOf(entry) === undefined
+  ) {
+    return entry as string | ArrayBufferView;
+  }
+
+  return readBinaryByteLength(entry) === 0
+    ? new Uint8Array(0)
+    : new Uint8Array(entry as ArrayBuffer);
 }
 
 /** A normalized CRL entry this adapter owns: a string as is, a buffer copied. */
@@ -4272,21 +4382,27 @@ function copyToOwnMemory(bytes: Uint8Array): Buffer {
 }
 
 /**
- * The bytes a `crl` view holds, as a plain Buffer over the same memory - a view, not a
- * copy - read through its internal slots rather than its own `buffer`, `byteOffset` and
- * `byteLength`, which a subclass or an own property can override. Read so, the bytes
+ * The bytes a view holds (a `crl` entry, or a `ca` or `mtls` value: see `tlsMaterial`),
+ * as a plain Buffer over the same memory - a view, not a copy - read through its internal
+ * slots rather than its own `buffer`, `byteOffset` and `byteLength`, which a subclass or
+ * an own property can override. Read so, the bytes
  * validated, copied and compared are the bytes `tls` reads from the view, not a prefix
  * it reports. A view over a detached buffer - a Buffer, any other typed array, or a
  * `DataView` - reads as empty, as a Buffer's own `toString` reads it, and so is refused
  * as any empty value is rather than throwing as the `Buffer` constructor does.
  */
-function crlBytesOf(view: ArrayBufferView): Buffer {
+function viewBytesOf(view: ArrayBufferView): Buffer {
   if (readBinaryByteLength(view) === 0) {
     return Buffer.alloc(0);
   }
 
   const plain = plainBytesView(view);
   return Buffer.from(plain.buffer, plain.byteOffset, plain.byteLength);
+}
+
+/** Whether a typed array's memory, by its internal slot, is a `SharedArrayBuffer`. */
+function isOverSharedMemory(view: Uint8Array): boolean {
+  return arrayBufferKindOf(readTypedArrayBuffer(view)) === 'SharedArrayBuffer';
 }
 
 /**
@@ -4306,7 +4422,7 @@ function copyCRLInput(
   crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
 ): CRLInputCopy {
   const copyEntry = (entry: string | ArrayBufferView): string | Buffer =>
-    typeof entry === 'string' ? entry : copyToOwnMemory(crlBytesOf(entry));
+    typeof entry === 'string' ? entry : copyToOwnMemory(viewBytesOf(entry));
 
   return Array.isArray(crl) ? crl.map(copyEntry) : copyEntry(crl);
 }
@@ -4333,7 +4449,7 @@ function isSameCRLInput(
     }
 
     try {
-      return copied.equals(crlBytesOf(entry));
+      return copied.equals(viewBytesOf(entry));
     } catch {
       return false;
     }
@@ -4413,7 +4529,7 @@ function normalizeCRLEntry(
   // retried as whatever its `toString` throws. Any binary view is read, as a Buffer over
   // the same bytes - a plain `Uint8Array` (Bun's `file().bytes()`) included - and that
   // Buffer is what is passed on, since not every runtime's `tls` takes another view. The
-  // bytes are read by the view's internal slots (see `crlBytesOf`), so what is checked
+  // bytes are read by the view's internal slots (see `viewBytesOf`), so what is checked
   // here is everything `tls` will read, however the view reports its own size.
   const candidate: unknown = entry;
   if (!Buffer.isBuffer(candidate) && !ArrayBuffer.isView(candidate)) {
@@ -4423,7 +4539,7 @@ function normalizeCRLEntry(
       ),
     );
   }
-  const bytes = crlBytesOf(candidate);
+  const bytes = viewBytesOf(candidate);
 
   // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives exactly; the
   // bytes are only inspected here.
@@ -4452,10 +4568,15 @@ function normalizeCRLEntry(
       ? bytes.subarray(3)
       : bytes;
 
+  // Copied when its memory is a `SharedArrayBuffer`: Bun's `tls` takes the process down
+  // on a CRL over shared memory, where Node reads it.
+  const isShared = isOverSharedMemory(bytes);
+
   // The caller's own Buffer when it is one and needs nothing taken off, by the offset its
   // internal slot holds: its bytes are the ones just read, from the start of its memory.
   if (
     withoutBOM === bytes &&
+    !isShared &&
     Buffer.isBuffer(candidate) &&
     readTypedArrayByteOffset(candidate) === 0
   ) {
@@ -4465,7 +4586,9 @@ function normalizeCRLEntry(
   // Copied when it starts partway into its memory (a `subarray`, a view at an offset):
   // Bun's `tls` reads such a view from the start of the memory, and would fail to parse
   // it.
-  return withoutBOM.byteOffset === 0 ? withoutBOM : copyToOwnMemory(withoutBOM);
+  return withoutBOM.byteOffset === 0 && !isShared
+    ? withoutBOM
+    : copyToOwnMemory(withoutBOM);
 }
 
 /**
@@ -4616,14 +4739,14 @@ function resolveAdapterResponse(
 // `AbortController.abort()` and every timeout a no-op on the transport - the promise
 // rejecting while the response kept streaming into `chunks[]` and the connection
 // stayed open. Only `destroyed` is worth skipping, and the `catch` covers a socket
-// that is already gone answering `ERR_SOCKET_CLOSED`.
+// that is already gone answering `ERR_SOCKET_CLOSED` - and a patched request refusing
+// its `destroyed` read, which most callers reach from an emitter, a timer or an
+// `AbortSignal` listener, where a throw would be an uncaught exception.
 function destroyRequestQuietly(req: http.ClientRequest): void {
-  if (req.destroyed) {
-    return;
-  }
-
   try {
-    req.destroy();
+    if (!req.destroyed) {
+      req.destroy();
+    }
   } catch {
     // Already torn down, which is the state this was trying to reach.
   }
@@ -4684,11 +4807,15 @@ interface SharedWritableListenerEntry {
   reportUnclaimedUntil: number;
 }
 
+/**
+ * Attach `listener` for `event` on `writable`, through its own `on` or the shared
+ * fan-out below. Answers whether it is attached: `false` when the writable's `on` threw.
+ */
 function attachWritableListener(
   writable: WritableLike,
   event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
-): void {
+): boolean {
   // A writable already fanned out for this event keeps that one listener: a request joins
   // its set, whatever the writable's `off` reads as now.
   if (
@@ -4699,8 +4826,9 @@ function attachWritableListener(
     // file. `on` is the sink's own method and free to throw, and an unguarded throw here
     // would report a *request* failure for a response that had arrived intact - a
     // `streamResponse` factory's writable misclassified as a network error. Losing the
-    // listener costs this writable its `'drain'` or `'error'` channel, which the write
-    // loop already tolerates; raising out of the attach does not.
+    // listener costs this writable its `'drain'`, `'error'` or `'close'` channel, which
+    // the write loop tolerates - it does not pause for a `'drain'` it cannot hear, see
+    // `hasDrainChannel` - and raising out of the attach does not.
     try {
       if (event === 'error') {
         writable.on('error', listener);
@@ -4712,9 +4840,10 @@ function attachWritableListener(
     } catch {
       // No channel on this writable, and nothing to undo: `on` either registered the
       // listener or it did not.
+      return false;
     }
 
-    return;
+    return true;
   }
 
   let events = sharedWritableListeners.get(writable);
@@ -4729,7 +4858,7 @@ function attachWritableListener(
   if (existing !== undefined) {
     existing.listeners.add(listener);
 
-    return;
+    return true;
   }
 
   const entry: SharedWritableListenerEntry = {
@@ -4775,17 +4904,13 @@ function attachWritableListener(
   try {
     if (event === 'error') {
       writable.on('error', dispatch as unknown as (error: Error) => void);
-
-      return;
-    }
-
-    if (event === 'close') {
+    } else if (event === 'close') {
       writable.on('close', dispatch as unknown as () => void);
-
-      return;
+    } else {
+      writable.on('drain', dispatch as unknown as () => void);
     }
 
-    writable.on('drain', dispatch as unknown as () => void);
+    return true;
   } catch {
     // The entry goes, so a later request attaches a fresh `dispatch` rather than joining a
     // set nothing reaches. A sink whose `on` registered the listener and *then* threw is
@@ -4793,6 +4918,8 @@ function attachWritableListener(
     // from `detachWritableListener`, which costs a stale listener and no correctness -
     // there is no way to tell that case from one where nothing was registered at all.
     events.delete(event);
+
+    return false;
   }
 }
 
@@ -4917,11 +5044,39 @@ const PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
   'EADDRNOTAVAIL',
 ]);
 
-/** Whether an error proves the request never left for a connected peer. */
-function isPreConnectionError(error: unknown): boolean {
+/**
+ * The same, for a connection to a Unix socket, which fails on its `connect` with a file
+ * system error: `ENOENT` for a socket file that does not exist, `EACCES` for one this
+ * process may not open. Read so on Node and Bun alike.
+ */
+const SOCKET_PATH_PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ENOENT',
+  'EACCES',
+]);
+
+/**
+ * Whether an error proves the request never left for a connected peer. A file system
+ * code counts only from the `connect` of a request dialed to `socketPath`.
+ */
+function isPreConnectionError(
+  error: unknown,
+  isOverSocketPath: boolean,
+): boolean {
   const code = readUnknownMember(error, 'code');
 
-  return typeof code === 'string' && PRE_CONNECTION_ERROR_CODES.has(code);
+  if (typeof code !== 'string') {
+    return false;
+  }
+
+  if (PRE_CONNECTION_ERROR_CODES.has(code)) {
+    return true;
+  }
+
+  return (
+    isOverSocketPath &&
+    SOCKET_PATH_PRE_CONNECTION_ERROR_CODES.has(code) &&
+    readUnknownMember(error, 'syscall') === 'connect'
+  );
 }
 
 function makeResponseStreamError(message: string, cause?: Error): Error {
@@ -5225,7 +5380,7 @@ function tlsMaterial(value: TLSMaterial, name: string): string | Buffer {
   let bytes: Uint8Array;
 
   if (ArrayBuffer.isView(value)) {
-    bytes = crlBytesOf(value);
+    bytes = viewBytesOf(value);
   } else if (arrayBufferKindOf(value) !== undefined) {
     bytes =
       readBinaryByteLength(value) === 0
@@ -5249,6 +5404,20 @@ function tlsMaterial(value: TLSMaterial, name: string): string | Buffer {
   const copy = copyToOwnMemory(bytes);
   ownedTLSBytes.set(value, copy);
   return copy;
+}
+
+/** A `ca` or `mtls.ca` value, one anchor or a list of them, each as TLS takes it. */
+function anchorList(
+  value: TLSMaterial | TLSMaterial[] | undefined,
+  name: string,
+): Array<string | Buffer> {
+  if (value === undefined) {
+    return [];
+  }
+
+  return (Array.isArray(value) ? value : [value]).map((anchor) =>
+    tlsMaterial(anchor, name),
+  );
 }
 
 /**

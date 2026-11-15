@@ -54,6 +54,7 @@ import {
 import {
   lowerCaseHeaderName,
   materializeRequestHeaders,
+  presentHeaderValue,
 } from '../internal/header-utils';
 import {
   hasResponseBody,
@@ -72,6 +73,7 @@ import {
 } from '../consts';
 import {
   derivedRedirectFields,
+  isAdapterHeaderValue,
   isRequestBodyBytes,
   normalizeAdapterResponseHeaders,
   parseContentType,
@@ -313,6 +315,15 @@ interface MockRouteEntry {
 
 const noop: Router.Handler<Router.HTTPVersion.V1> = () => {};
 
+/**
+ * The longest path parameter a route matches, in characters once decoded: 16 KiB, the
+ * whole request head Node's `http` server takes by default (`--max-http-header-size`),
+ * so a token or JWT a real server would take as a parameter matches here too. One longer
+ * does not match its route, and falls to a `/*` route or the default 404 (find-my-way's
+ * `maxParamLength`, 100 by default).
+ */
+const MAX_ROUTE_PARAM_LENGTH = 16 * 1024;
+
 export class MockAdapter implements HTTPAdapter {
   public readonly routes: MockAdapterRoutes;
   private readonly router: Router.Instance<Router.HTTPVersion.V1>;
@@ -334,7 +345,7 @@ export class MockAdapter implements HTTPAdapter {
     this.router = Router({
       ignoreTrailingSlash: true,
       ignoreDuplicateSlashes: false,
-      maxParamLength: 100,
+      maxParamLength: MAX_ROUTE_PARAM_LENGTH,
     });
 
     this.routes = buildRoutes(this.router);
@@ -378,9 +389,10 @@ export class MockAdapter implements HTTPAdapter {
     if (!Object.hasOwn(materializedHeaders, 'host') && parsedURL !== null) {
       defineEntry(materializedHeaders, 'host', parsedURL.host);
     }
+    const isFormBody = isFormData(body);
     // A form's own, replacing a caller's, as NodeAdapter writes the boundary it sends: a
     // caller's `multipart/form-data` names none.
-    if (isFormData(body)) {
+    if (isFormBody) {
       defineEntry(
         materializedHeaders,
         'content-type',
@@ -402,7 +414,10 @@ export class MockAdapter implements HTTPAdapter {
       throw refusal;
     }
 
-    if (asciiUppercase(method) === 'CONNECT') {
+    // Matched uppercased, as a real server sees it: Node's `http` sends any method it
+    // knows uppercase, so `lock` arrives as `LOCK`.
+    const routeMethod = asciiUppercase(method);
+    if (routeMethod === 'CONNECT') {
       throw connectRefusal('MockAdapter');
     }
 
@@ -417,9 +432,9 @@ export class MockAdapter implements HTTPAdapter {
     // `requestBodyLength`). A form's entries are read once, here, once the request is known
     // to go ahead - so a part's getters are not read for one refused or cancelled - and
     // both the `content-length` and what the route is handed are made from that read.
-    const formParts = isFormData(body) ? [...formEntries(body)] : undefined;
+    const formParts = isFormBody ? [...formEntries(body)] : undefined;
     delete materializedHeaders['content-length'];
-    const bodyLength = requestBodyLength(body, method, formParts);
+    const bodyLength = requestBodyLength(body, routeMethod, formParts);
     if (bodyLength !== undefined) {
       defineEntry(materializedHeaders, 'content-length', String(bodyLength));
     }
@@ -476,11 +491,14 @@ export class MockAdapter implements HTTPAdapter {
       allowPrototypes: true,
     }) as QueryObject;
     const cookies = parseCookieHeader(materializedHeaders['cookie']);
-    // Matched uppercased, as a real server sees it: Node's `http` sends any method it
-    // knows uppercase, so `lock` arrives as `LOCK`. The router's own method type is a
-    // fixed list; a method it does not know finds no route, as an unregistered path does.
-    const routeMethod = asciiUppercase(method);
-    const match = this.router.find(routeMethod as RouterHTTPMethod, path);
+    // A path whose percent-encoding does not decode (`/%E0%A4%A`) is answered `400`, as
+    // Fastify, on the same router, answers one: not routed, so no `/*` route sees it.
+    const isMalformedPath = !isDecodablePath(path);
+    // The router's own method type is a fixed list; a method it does not know finds no
+    // route, as an unregistered path does.
+    const match = isMalformedPath
+      ? null
+      : this.router.find(routeMethod as RouterHTTPMethod, path);
     // Copied into a plain object: the router's own is a null-prototype `NullObject`,
     // which a route echoing `req.params` as its body would refuse as an unsupported type.
     const params = { ...(match?.params ?? {}) } as Record<string, string>;
@@ -502,6 +520,7 @@ export class MockAdapter implements HTTPAdapter {
     };
 
     // --- 4. Invoke handler ---
+    // A malformed path → default 400 (see `isMalformedPath`).
     // No registered route → default 404.
     // To customize the 404 body, register a wildcard route:
     //   adapter.routes.get('/*', (req) => ({ status: 404, body: { error: '...' } }))
@@ -516,7 +535,9 @@ export class MockAdapter implements HTTPAdapter {
     // path can carry a secret (`/password-reset/<token>`) the pattern only names.
     let routePattern = '';
 
-    if (match === null) {
+    if (isMalformedPath) {
+      mockResponse = { status: 400, body: { message: 'Bad Request' } };
+    } else if (match === null) {
       mockResponse = { status: 404, body: { message: 'Not Found' } };
     } else {
       const { handler, pattern } = match.store as MockRouteEntry;
@@ -636,10 +657,14 @@ export class MockAdapter implements HTTPAdapter {
     const answered = mockResponse;
     mockResponse = asRouteMistake(() => snapshotMockResponse(answered));
 
-    // What the server would have put on the wire, fixed when the route answers: serialized
-    // now, before the delay, so a body the test changes while the response is delayed is
-    // not delivered changed. HEAD / 204 / 205 / 304 never expose a body to consumers, even
-    // if the handler returned one, keeping the mock transport aligned with real HTTP.
+    // What the server would have put on the wire, fixed as the adapter takes the route's
+    // answer: serialized now, before the delay, so a body the test changes while the
+    // response is delayed is not delivered changed. Now is a few microtasks after the
+    // handler returns, even a synchronous one, as its answer is awaited: a test driving
+    // `send()` directly that changes the body on the next line, before awaiting the
+    // response, is delivered the change. HEAD / 204 / 205 / 304 never expose a body to
+    // consumers, even if the handler returned one, keeping the mock transport aligned
+    // with real HTTP.
     // Not serialized at all under a simulated transport or stream error, which loses it:
     // otherwise a body the mock cannot serialize (a `Map`) would fail the route as an
     // `adapter_error` instead. A body that cannot be serialized is held, and refused
@@ -675,11 +700,9 @@ export class MockAdapter implements HTTPAdapter {
       assertOptionalHeaderRecord(headers, 'MockAdapter route response headers');
       const copy = { ...(headers as AdapterResponse['headers'] | undefined) };
       for (const [name, value] of Object.entries(copy)) {
-        defineEntry(
-          copy,
-          name,
-          copyArrayValue(value, 'MockAdapter route response header value'),
-        );
+        const copied = copyArrayValue(value, ROUTE_HEADER_VALUE_LABEL);
+        assertRouteHeaderValue(name, copied);
+        defineEntry(copy, name, copied);
       }
       return copy;
     });
@@ -710,80 +733,9 @@ export class MockAdapter implements HTTPAdapter {
       routeTransportError !== undefined &&
       routeTransportError !== null &&
       routeTransportError !== false
-        ? captureRead(() => {
-            // A boolean or its options: `'yes'` would be read as `true`, and `0` as none.
-            asRouteMistake(() => {
-              const candidate: unknown = routeTransportError;
-              if (
-                candidate !== true &&
-                (typeof candidate !== 'object' || Array.isArray(candidate))
-              ) {
-                throw new TypeError(
-                  `MockAdapter route returned an unknown transportError (got ${describeValue(candidate)}); it is a boolean or its options`,
-                );
-              }
-            });
-            const options: MockTransportErrorOptions =
-              routeTransportError === true ? {} : routeTransportError;
-            // Held to the rule the client holds an adapter's status to - an integer from 0 to
-            // 999 - here, as the route's mistake: unchecked, it would be refused later as the
-            // adapter's.
-            //
-            // Each field read once, as the answer's own are (see `snapshotMockResponse`):
-            // otherwise a `status` getter that answers `495` to the check and `1000` to the
-            // response would pass one and send another. All read as the route's mistake: a
-            // getter that throws on any of them is refused once, not retried as the adapter's
-            // own failure.
-            return asRouteMistake(() => {
-              assertKnownFields(
-                options,
-                fieldNames<MockTransportErrorOptions>({
-                  status: true,
-                  wasDefinitelyNotSent: true,
-                  isRetryable: true,
-                  message: true,
-                }),
-                'MockAdapter route transportError',
-              );
-              const value: unknown = options.status;
-              if (value !== undefined && !isStatusCode(value, 0)) {
-                throw new TypeError(
-                  `MockAdapter route returned transportError status ${typeof value === 'number' ? String(value) : typeof value}; it is an integer from 0 to 999`,
-                );
-              }
-              // The flags too: the client reads anything but a boolean as unset, so a
-              // `'false'` would retry what the route said not to.
-              const isRetryableValue: unknown = options.isRetryable;
-              const wasDefinitelyNotSentValue: unknown =
-                options.wasDefinitelyNotSent;
-              const messageValue: unknown = options.message;
-              for (const [name, flag] of [
-                ['isRetryable', isRetryableValue],
-                ['wasDefinitelyNotSent', wasDefinitelyNotSentValue],
-              ] as const) {
-                if (flag !== undefined && typeof flag !== 'boolean') {
-                  throw new TypeError(
-                    `MockAdapter route returned transportError ${name} ${describeValue(flag)}; it is a boolean`,
-                  );
-                }
-              }
-              if (
-                messageValue !== undefined &&
-                typeof messageValue !== 'string'
-              ) {
-                throw new TypeError(
-                  `MockAdapter route returned transportError message ${describeValue(messageValue)}; it is a string`,
-                );
-              }
-              return {
-                status: value,
-                isRetryable: isRetryableValue as boolean | undefined,
-                wasDefinitelyNotSent: wasDefinitelyNotSentValue as
-                  boolean | undefined,
-                message: messageValue,
-              };
-            });
-          })
+        ? captureRead(() =>
+            asRouteMistake(() => readMockTransportError(routeTransportError)),
+          )
         : undefined;
 
     // --- 5. Delay ---
@@ -885,13 +837,13 @@ export class MockAdapter implements HTTPAdapter {
     // that keeps the status and headers, the body dropped. A simulated stream error
     // already loses the body, so it stands as the route asked.
     // By the client's own rule (see `isAnsweredBodyOverLimit`), so the mock and the
-    // client cannot disagree on which bodies the limit refuses.
-    const intendedByteLength =
-      intendedBody === null ? 0 : (readBinaryByteLength(intendedBody) ?? 0);
-    const isResponseTooLarge =
-      simulatedStreamErrorCode === undefined &&
-      intendedBody !== null &&
-      isAnsweredBodyOverLimit(intendedBody, maxResponseBytes);
+    // client cannot disagree on which bodies the limit refuses. Under a simulated stream
+    // error the body was never serialized, so `intendedBody` is `null` and within it.
+    const intendedByteLength = intendedBody?.byteLength ?? 0;
+    const isResponseTooLarge = isAnsweredBodyOverLimit(
+      intendedBody,
+      maxResponseBytes,
+    );
     const streamErrorCode: AdapterResponse['streamErrorCode'] =
       isResponseTooLarge ? 'response_too_large' : simulatedStreamErrorCode;
 
@@ -948,7 +900,8 @@ export class MockAdapter implements HTTPAdapter {
     // Binary responses are intentionally skipped — content-type for binary is
     // format-specific (image/png, application/pdf, etc.) so the handler is
     // responsible for setting it via `headers` when it matters.
-    // A HEAD response carries the content-type its GET would, body or no body.
+    // A HEAD response carries the content-type its GET would, body or no body: none for
+    // a status a GET answers with no body (a `204`, a `304`).
     const routeContentType: unknown = mockResponse.contentType;
     if (
       routeContentType !== undefined &&
@@ -964,11 +917,17 @@ export class MockAdapter implements HTTPAdapter {
       });
     }
 
+    // A body never serialized - a HEAD route's, or one under a simulated stream error - is
+    // labelled as the GET, or the answer without the error, would have sent it.
+    const isRouteBodyUnserialized =
+      routeMethod === 'HEAD' || simulatedStreamErrorCode !== undefined;
     const hasRouteBody =
       intendedBody !== null ||
-      ((routeMethod === 'HEAD' ||
-        (simulatedStreamErrorCode !== undefined &&
-          hasResponseBody(method, mockResponse.status))) &&
+      (isRouteBodyUnserialized &&
+        hasResponseBody(
+          routeMethod === 'HEAD' ? 'GET' : routeMethod,
+          mockResponse.status,
+        ) &&
         mockResponse.body !== undefined &&
         mockResponse.body !== null);
     if (!hasHeader(responseHeaders, 'content-type') && hasRouteBody) {
@@ -1013,15 +972,16 @@ export class MockAdapter implements HTTPAdapter {
     // adapters fail the body read before that point, so `progress: 1` here would
     // signal a completed download for a body that never arrived.
     if (streamErrorCode === undefined) {
-      guardedDownloadProgress?.(
-        completeProgressEvent(responseBody === null ? 0 : intendedByteLength),
-      );
+      guardedDownloadProgress?.(completeProgressEvent(intendedByteLength));
     }
 
     return {
       status: mockResponse.status,
+      // A `Location` resolves against the request URL as read against the mock's default
+      // base, as the client reads a mock request with no `baseURL`: driven straight at the
+      // adapter, `/start` answered with `Location: /next` reports `http://localhost/next`.
       ...derivedRedirectFields(
-        redirectBaseURL(requestURL),
+        parsedURL?.href ?? requestURL,
         mockResponse.status,
         normalizedResponseHeaders,
       ),
@@ -1061,25 +1021,98 @@ function parseMockURL(requestURL: string): URL | null {
 }
 
 /**
- * The URL a redirect's `Location` resolves against: the request URL, or - for a
- * path-only one driven straight at the adapter, which has no origin of its own - that
- * URL read against {@link MOCK_ADAPTER_DEFAULT_BASE_URL}, as the client reads a mock
- * request with no `baseURL`. So `/start` answered with `Location: /next` reports
- * `http://localhost/next`, as it does through the client.
+ * Whether `path`'s percent-encoding decodes, as the router decodes a path: through
+ * `decodeURI`, which refuses a `%` without two hex digits after it and escapes that are
+ * not UTF-8.
  */
-function redirectBaseURL(requestURL: string): string {
-  try {
-    new URL(requestURL);
-    return requestURL;
-  } catch {
-    // Path-only: read against the mock's default base below.
+function isDecodablePath(path: string): boolean {
+  if (!path.includes('%')) {
+    return true;
   }
 
   try {
-    return new URL(requestURL, MOCK_ADAPTER_DEFAULT_BASE_URL).href;
+    decodeURI(path);
+    return true;
   } catch {
-    return requestURL;
+    return false;
   }
+}
+
+/**
+ * A route's `transportError` - `true` or its options - read into the fields the failure
+ * goes out with. Each field read once, as the answer's own are (see
+ * `snapshotMockResponse`): otherwise a `status` getter that answers `495` to the check and
+ * `1000` to the response would pass one and send another. Each is held to its type here,
+ * as the route's mistake, so a getter that throws or a value of the wrong type is refused
+ * once rather than retried as the adapter's own failure.
+ */
+function readMockTransportError(transportError: unknown): {
+  status: number | undefined;
+  isRetryable: boolean | undefined;
+  wasDefinitelyNotSent: boolean | undefined;
+  message: string | undefined;
+} {
+  // A boolean or its options: `'yes'` would be read as `true`, and `0` as none.
+  if (
+    transportError !== true &&
+    (typeof transportError !== 'object' ||
+      transportError === null ||
+      Array.isArray(transportError))
+  ) {
+    throw new TypeError(
+      `MockAdapter route returned an unknown transportError (got ${describeValue(transportError)}); it is a boolean or its options`,
+    );
+  }
+
+  const options: MockTransportErrorOptions =
+    transportError === true ? {} : transportError;
+  assertKnownFields(
+    options,
+    fieldNames<MockTransportErrorOptions>({
+      status: true,
+      wasDefinitelyNotSent: true,
+      isRetryable: true,
+      message: true,
+    }),
+    'MockAdapter route transportError',
+  );
+
+  // Held to the rule the client holds an adapter's status to - an integer from 0 to 999 -
+  // here, as the route's mistake: unchecked, it would be refused later as the adapter's.
+  const status: unknown = options.status;
+  if (status !== undefined && !isStatusCode(status, 0)) {
+    throw new TypeError(
+      `MockAdapter route returned transportError status ${typeof status === 'number' ? String(status) : typeof status}; it is an integer from 0 to 999`,
+    );
+  }
+
+  // The flags too: the client reads anything but a boolean as unset, so a `'false'` would
+  // retry what the route said not to.
+  const isRetryable: unknown = options.isRetryable;
+  const wasDefinitelyNotSent: unknown = options.wasDefinitelyNotSent;
+  const message: unknown = options.message;
+  for (const [name, flag] of [
+    ['isRetryable', isRetryable],
+    ['wasDefinitelyNotSent', wasDefinitelyNotSent],
+  ] as const) {
+    if (flag !== undefined && typeof flag !== 'boolean') {
+      throw new TypeError(
+        `MockAdapter route returned transportError ${name} ${describeValue(flag)}; it is a boolean`,
+      );
+    }
+  }
+  if (message !== undefined && typeof message !== 'string') {
+    throw new TypeError(
+      `MockAdapter route returned transportError message ${describeValue(message)}; it is a string`,
+    );
+  }
+
+  return {
+    status,
+    isRetryable: isRetryable as boolean | undefined,
+    wasDefinitelyNotSent: wasDefinitelyNotSent as boolean | undefined,
+    message,
+  };
 }
 
 /**
@@ -1119,6 +1152,15 @@ function buildRoutes(
     path: string,
     handler: MockRouteHandler,
   ): void {
+    // Refused here, once: registered, a handler that is no function (a mistyped import)
+    // would fail every request to the route as a 500, with nothing saying why.
+    const candidate: unknown = handler;
+    if (typeof candidate !== 'function') {
+      throw new TypeError(
+        `MockAdapter route handler for ${method} ${typeof path === 'string' ? path : describeValue(path)} must be a function (got ${describeValue(candidate)})`,
+      );
+    }
+
     try {
       const entry: MockRouteEntry = { handler, pattern: path };
       router.on(method, path, noop, entry);
@@ -1447,7 +1489,7 @@ function extractFormData(
  */
 function requestBodyLength(
   body: unknown,
-  method: string,
+  upperMethod: string,
   formParts: ReadonlyArray<[string, FormDataEntryValue]> | undefined,
 ): number | undefined {
   if (typeof body === 'string') {
@@ -1468,7 +1510,7 @@ function requestBodyLength(
     return readBinaryByteLength(body) ?? undefined;
   }
 
-  return NO_DEFAULT_BODY_METHODS.has(asciiUppercase(method)) ? undefined : 0;
+  return NO_DEFAULT_BODY_METHODS.has(upperMethod) ? undefined : 0;
 }
 
 /** The methods Node's `http` sends no `content-length` for when they carry no body. */
@@ -1671,16 +1713,42 @@ function hasHeader(
   name: string,
 ): boolean {
   const lowerName = lowerCaseHeaderName(name);
-  // Set, as `normalizeAdapterResponseHeaders` reads a value: a `null` or `undefined` one,
-  // or a list holding nothing else, is no header.
-  return Object.keys(headers).some((k) => {
-    const value: unknown = headers[k];
-    return (
-      lowerCaseHeaderName(k) === lowerName &&
-      !isNullish(value) &&
-      (!Array.isArray(value) || value.some((item) => !isNullish(item)))
+  // Set, as every header normalizer reads a value: a `null` or `undefined` one, or a list
+  // holding nothing else, is no header. The values are the route's, checked already (see
+  // `assertRouteHeaderValue`), so converting them runs none of their code.
+  return Object.keys(headers).some(
+    (key) =>
+      lowerCaseHeaderName(key) === lowerName &&
+      presentHeaderValue(headers[key], ROUTE_HEADER_VALUE_LABEL) !== undefined,
+  );
+}
+
+/** What a route's header value is named as where its list is refused. */
+const ROUTE_HEADER_VALUE_LABEL = 'MockAdapter route response header value';
+
+/**
+ * Throw when a route's header value is not one a response carries: a string or a finite
+ * number, or a list of them - strings only for `set-cookie`, each item one line. A `null`
+ * or `undefined` value or item is no header, as the client reads one. Refused in the
+ * mock's own words, as every other route mistake is, before the client's normalizer
+ * would refuse it as the adapter's answer.
+ */
+function assertRouteHeaderValue(name: string, value: unknown): void {
+  const lowerName = lowerCaseHeaderName(name);
+  const isSetCookie = lowerName === 'set-cookie';
+  const items: unknown[] = Array.isArray(value) ? value : [value];
+
+  if (
+    items.some(
+      (item) =>
+        !isNullish(item) &&
+        (isSetCookie ? typeof item !== 'string' : !isAdapterHeaderValue(item)),
+    )
+  ) {
+    throw new TypeError(
+      `MockAdapter route returned a ${lowerName} header value that is not ${isSetCookie ? 'a string' : 'a string or finite number'}`,
     );
-  });
+  }
 }
 
 /** The message of every abort MockAdapter throws. */

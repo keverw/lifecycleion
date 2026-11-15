@@ -18,7 +18,10 @@ import * as zlib from 'node:zlib';
 import { NodeAdapter } from './node-adapter';
 import * as concatChunksModule from '../internal/concat-chunks';
 import { listenForStreamFailureSettled } from '../internal/stream-failure-settled';
-import { readTypedArrayByteOffset } from '../../internal/binary-view';
+import {
+  arrayBufferKindOf,
+  readTypedArrayByteOffset,
+} from '../../internal/binary-view';
 import { MAX_COPIED_ARRAY_LENGTH } from '../../internal/array-copy';
 import { isBuiltInNetworkSend } from '../internal/built-in-adapter';
 import type { NodeAdapterConfig } from './node-adapter';
@@ -29,6 +32,7 @@ import {
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
   EFFECTIVE_REQUEST_HEADERS_KEY,
   STREAM_ABORT_HEADERS_KEY,
@@ -380,6 +384,132 @@ test('an abort mid-stream destroys the sink once', async () => {
     expect(destroyCalls).toBe(1);
     expect(cleanups).toBe(1);
   } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("an abort mid-stream is the answer before the factory's signal fires", async () => {
+  // A cleanup listener on the factory's signal runs once the abort has answered, so a
+  // request failure it provokes - here a request error emitted from it - does not stand
+  // in for the abort, which carries the answer's status.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200);
+    res.write(Buffer.alloc(1024));
+    // Never ended: the abort is what stops it.
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const realRequest = http.request;
+  let sent: http.ClientRequest | undefined;
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    ...args: Parameters<typeof http.request>
+  ) => {
+    sent = realRequest(...args);
+    return sent;
+  }) as typeof http.request);
+  const controller = new AbortController();
+  const sink: WritableLike = {
+    write: (_chunk, callback) => {
+      setImmediate(() => {
+        callback?.(null);
+        controller.abort();
+      });
+      return true;
+    },
+    end: (callback) => {
+      callback?.();
+    },
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
+    destroy: () => {},
+  };
+  try {
+    let caught: unknown;
+    try {
+      await new NodeAdapter().send(
+        makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+          signal: controller.signal,
+          streamResponse: (_info, context) => {
+            context.signal.addEventListener('abort', () => {
+              sent?.emit('error', new Error('cleanup tore the socket down'));
+            });
+            return sink;
+          },
+        }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as Error).name).toBe('AbortError');
+    const tags = caught as Record<PropertyKey, unknown>;
+    expect(tags[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
+    expect(tags[STREAM_ABORT_STATUS_KEY]).toBe(200);
+  } finally {
+    requestSpy.mockRestore();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("an abort while a factory sets up is the answer before the factory's signal fires", async () => {
+  // As mid-stream: a request error the factory's cleanup listener emits once the abort
+  // has answered does not stand in for it, so the answer's status is kept.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200);
+    res.write(Buffer.alloc(16));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const realRequest = http.request;
+  let sent: http.ClientRequest | undefined;
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    ...args: Parameters<typeof http.request>
+  ) => {
+    sent = realRequest(...args);
+    return sent;
+  }) as typeof http.request);
+  const controller = new AbortController();
+  try {
+    let caught: unknown;
+    try {
+      await new NodeAdapter().send(
+        makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+          signal: controller.signal,
+          streamResponse: async (_info, context) => {
+            context.signal.addEventListener('abort', () => {
+              sent?.emit('error', new Error('cleanup tore the socket down'));
+            });
+            queueMicrotask(() => controller.abort());
+            await new Promise(() => {});
+            return null;
+          },
+        }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as Error).name).toBe('AbortError');
+    expect((caught as Error).message).toBe(
+      'Request aborted during streamResponse setup',
+    );
+    const tags = caught as Record<PropertyKey, unknown>;
+    expect(tags[STREAM_FACTORY_ERROR_FLAG]).toBe(true);
+    expect(tags[STREAM_ABORT_STATUS_KEY]).toBe(200);
+  } finally {
+    requestSpy.mockRestore();
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   }
@@ -2018,6 +2148,77 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     );
     expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     expect(errorText(outcome)).not.toContain(secret);
+  });
+
+  test('a URL on port 0 is refused before anything is sent, rather than sent to the default port', async () => {
+    // Node's and Bun's `http` read port 0 as no port at all, and would dial :80 or :443.
+    const requestSpies = [spyOn(http, 'request'), spyOn(https, 'request')];
+    try {
+      for (const [config, requestURL] of [
+        [{}, 'http://127.0.0.1:0/x'],
+        [{}, 'https://user:pass@api.test:00/x'],
+        [{ socketPath: '/tmp/test.sock' }, 'http://localhost:0/x'],
+      ] as const) {
+        const outcome = await new NodeAdapter(config)
+          .send({ requestURL, method: 'POST', headers: {}, body: 'payload' })
+          .then(
+            () => undefined,
+            (error: unknown) => error as Record<PropertyKey, unknown>,
+          );
+
+        expect(String(outcome?.message)).toBe(
+          'NodeAdapter cannot send a request to port 0',
+        );
+        expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      }
+
+      const builder = new HTTPClient({ adapter: new NodeAdapter() }).get(
+        'http://127.0.0.1:0/x',
+      );
+      await builder.send();
+
+      expect(builder.error?.code).toBe('adapter_error');
+
+      for (const spy of requestSpies) {
+        expect(spy).not.toHaveBeenCalled();
+      }
+    } finally {
+      for (const spy of requestSpies) {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  test('a streamResponse that is not a function is refused before anything is sent', async () => {
+    // Called only once a 2xx has arrived, such a value would fail a `POST` the server had
+    // already applied.
+    const requestSpy = spyOn(http, 'request');
+    try {
+      for (const streamResponse of [true, false, 'x', {}, 1]) {
+        const outcome = await new NodeAdapter()
+          .send({
+            requestURL: 'http://127.0.0.1:1/x',
+            method: 'POST',
+            headers: {},
+            body: 'payload',
+            streamResponse: streamResponse as unknown as undefined,
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error as Record<PropertyKey, unknown>,
+          );
+
+        expect(outcome).toBeInstanceOf(TypeError);
+        expect(String(outcome?.message)).toBe(
+          `NodeAdapter streamResponse must be a function (got ${typeof streamResponse})`,
+        );
+        expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      }
+
+      expect(requestSpy).not.toHaveBeenCalled();
+    } finally {
+      requestSpy.mockRestore();
+    }
   });
 
   test('materializes repeated Cookie headers before calling http.request', async () => {
@@ -3899,6 +4100,110 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       }
     });
   }
+
+  test('an upload a Connection: close answer ends is still settled when its source read ignores the cancel', async () => {
+    // The answer ends the upload at once, by destroying the request. A writer parked on a
+    // custom `stream()` whose reader ignores `cancel()` never hears of it, so the stall
+    // watchdog still watches it, and settles it at the end of the source grace - without
+    // a report, as the teardown was this adapter's own. The clock is moved to just short
+    // of the grace before the answer closes.
+    // On a socket the runtime has ended as the answer asked, and emitting `'close'` when
+    // destroyed, as a real request does.
+    const req = new MockClientRequest();
+    Object.assign(req, {
+      socket: { writableEnded: true, destroyed: false },
+      destroy() {
+        req.destroyed = true;
+        queueMicrotask(() => req.emit('close'));
+        return req;
+      },
+    });
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'text/plain',
+      'content-length': '2',
+      connection: 'close',
+    });
+    const realNow = performance.now.bind(performance);
+    let clockOffsetMS = 0;
+    const nowSpy = spyOn(performance, 'now').mockImplementation(
+      () => realNow() + clockOffsetMS,
+    );
+    let wasCancelled = false;
+    const streamSpy = spyOn(Blob.prototype, 'stream').mockImplementation(
+      () =>
+        ({
+          getReader: () => ({
+            read: () => new Promise<never>(() => {}),
+            cancel: () => {
+              wasCancelled = true;
+              return Promise.resolve();
+            },
+            releaseLock: () => {},
+          }),
+        }) as unknown as ReadableStream<Uint8Array<ArrayBuffer>>,
+    );
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          // Answered once the writer is parked on its source.
+          setTimeout(() => {
+            clockOffsetMS = UPLOAD_SOURCE_STALL_GRACE_MS - 300;
+            res.emit('data', Buffer.from('ok'));
+            res.emit('end');
+            res.emit('close');
+          }, 100);
+        });
+
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      const fd = new FormData();
+      fd.append('file', new Blob([new Uint8Array(8)]), 'stuck.bin');
+
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/upload',
+        method: 'POST',
+        headers: {},
+        body: fd,
+      });
+
+      expect(response.status).toBe(200);
+
+      const outcome = await Promise.race([
+        response.requestBodySettled,
+        new Promise<'hung'>((resolve) =>
+          setTimeout(() => resolve('hung'), 2_000),
+        ),
+      ]);
+
+      expect(wasCancelled).toBe(true);
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as Error).message).toBe(
+        'Request body source stopped answering after the response arrived',
+      );
+      expect(req.destroyed).toBe(true);
+      expect(reports).toHaveLength(0);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      streamSpy.mockRestore();
+      requestSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
 
   test('the stall watchdog leaves an upload of slow reads that each return bytes alone past the source grace', async () => {
     // The source grace runs from the first wait since the socket last accepted bytes, and
@@ -5867,6 +6172,80 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     },
   );
 
+  test('a sink with no listener-removal method handed over already failing has its error absorbed', async () => {
+    // It settles before `streamResponseBody` attaches its listeners, and it has no `off`
+    // or `removeListener` for the bounded absorber, so the permanent fan-out listener
+    // covers the error it emits on a `nextTick`.
+    const inner = new Writable({
+      write: (_chunk, _encoding, done) => done(),
+    });
+    const sink: WritableLike = {
+      write: (chunk: Uint8Array, callback?: (error?: Error | null) => void) =>
+        inner.write(chunk, callback),
+      end: (callback?: () => void) => {
+        inner.end(callback);
+        return sink;
+      },
+      on(event: 'drain' | 'error' | 'close', listener: () => void) {
+        inner.on(event, listener);
+        return sink;
+      },
+      once(event: 'drain' | 'error' | 'close', listener: () => void) {
+        inner.once(event, listener);
+        return sink;
+      },
+      destroy: () => {
+        inner.destroy();
+      },
+      get errored() {
+        return inner.errored;
+      },
+    } as unknown as WritableLike;
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        setImmediate(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown): void => {
+      uncaught.push(error);
+    };
+    process.on('uncaughtException', onUncaught);
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => {
+          inner.destroy(new Error('open failed'));
+          return sink;
+        },
+      });
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+
+      expect(uncaught).toEqual([]);
+      expect(response.streamErrorCode).toBe('stream_write_error');
+      expect(response.errorCause?.message).toBe('open failed');
+      expect(inner.listenerCount('error')).toBe(1);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      requestSpy.mockRestore();
+    }
+  });
+
   test('a sink destroyed with no error before it is handed an empty body fails the download as a write error', async () => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {
@@ -6564,6 +6943,124 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['0', 0],
+  ] as const)(
+    'a sink whose write returns %s is not paused for backpressure',
+    async (_label, returned) => {
+      // Only `false` is backpressure, as `pipe()` reads it: a hand-written sink that
+      // returns nothing emits no `'drain'`, and a pause would hold the download until
+      // the caller's signal.
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': '6',
+      });
+      const written: Buffer[] = [];
+      const writable = new EventEmitter() as unknown as WritableLike;
+      writable.write = ((chunk: Buffer) => {
+        written.push(chunk);
+        return returned;
+      }) as unknown as WritableLike['write'];
+      writable.end = (callback?: () => void) => {
+        callback?.();
+      };
+      writable.destroy = () => writable;
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            queueMicrotask(() => {
+              res.emit('data', Buffer.from('abc'));
+              res.emit('data', Buffer.from('def'));
+              res.emit('end');
+            });
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        const result = await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => writable,
+        });
+
+        expect(result.isStreamed).toBe(true);
+        expect(Buffer.concat(written).toString()).toBe('abcdef');
+        expect(res.pauseCalls).toBe(0);
+      } finally {
+        requestSpy.mockRestore();
+      }
+    },
+  );
+
+  test('a sink whose drain listener cannot be attached is not paused for backpressure', async () => {
+    // Its `on('drain', ...)` threw, so nothing would ever resume a paused response.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '6',
+    });
+    const written: Buffer[] = [];
+    class DrainlessSink extends EventEmitter {
+      public override on(
+        event: string | symbol,
+        listener: (...args: unknown[]) => void,
+      ): this {
+        if (event === 'drain') {
+          throw new Error('no drain here');
+        }
+        return super.on(event, listener);
+      }
+    }
+    const writable = new DrainlessSink() as unknown as WritableLike;
+    writable.write = (chunk) => {
+      written.push(chunk as Buffer);
+      return false;
+    };
+    writable.end = (callback?: () => void) => {
+      callback?.();
+    };
+    writable.destroy = () => writable;
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('abc'));
+            res.emit('data', Buffer.from('def'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const result = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(result.isStreamed).toBe(true);
+      expect(Buffer.concat(written).toString()).toBe('abcdef');
+      expect(res.pauseCalls).toBe(0);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('a writable that fails after a successful stream does not kill the process', async () => {
     // `cleanup` removes this request's own `onWritableError` on *every* settle path, so
     // were only the `write`/`end` failure paths to ask for the shared absorber, the
@@ -7182,6 +7679,32 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(res.isCancelled).toBe(true);
     expect(res.isFailed).toBe(true);
     expect(builder.error?.cancelReason).toBe('not enough disk space');
+  });
+
+  test("a streamResponse decline's reason is not an enumerable member of its AbortError", async () => {
+    let caught: unknown;
+    try {
+      await new NodeAdapter().send(
+        makeAdapterRequest(`${server.url}/api/binary`, {
+          streamResponse: () => ({
+            cancel: true as const,
+            reason: 'private reason',
+          }),
+        }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as Error).name).toBe('AbortError');
+    // Still carried for the client, which reads it as `cancelReason`.
+    expect(
+      (caught as Record<PropertyKey, unknown>)[STREAM_FACTORY_CANCEL_KEY],
+    ).toBe('private reason');
+    expect(Object.keys(caught as object)).not.toContain(
+      STREAM_FACTORY_CANCEL_KEY,
+    );
+    expect(JSON.stringify(caught)).not.toContain('private reason');
   });
 
   test('streamResponse is called on a 2xx with its real status, a resumed download among them', async () => {
@@ -8154,6 +8677,68 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(res.wasDefinitelyNotSent).toBe(true);
   });
 
+  test('a socketPath with no socket file there is still replayable', async () => {
+    // `connect ENOENT`: nothing was ever written.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node-adapter-sock-'));
+
+    try {
+      const res = await new NodeAdapter({
+        socketPath: path.join(dir, 'missing.sock'),
+      }).send({
+        requestURL: 'http://localhost/thing',
+        method: 'POST',
+        headers: {},
+        body: 'payload',
+      });
+
+      expect(res.status).toBe(0);
+      expect(res.isTransportError).toBe(true);
+      expect(res.errorCause).toMatchObject({ code: 'ENOENT' });
+      expect(res.wasDefinitelyNotSent).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a file system code proves nothing was sent only from the connect of a socketPath request', async () => {
+    // `EACCES` is a socket file this process may not open, as Node and Bun report it on
+    // `connect`. The same code from any other step, or on a request dialed over TCP, is
+    // not read as proof.
+    const outcomes: Array<boolean | undefined> = [];
+    for (const [socketPath, error] of [
+      ['/tmp/test.sock', { code: 'EACCES', syscall: 'connect' }],
+      ['/tmp/test.sock', { code: 'ENOENT', syscall: 'connect' }],
+      ['/tmp/test.sock', { code: 'EACCES', syscall: 'write' }],
+      [undefined, { code: 'ENOENT', syscall: 'connect' }],
+    ] as const) {
+      const req = new MockClientRequest();
+      const requestSpy = spyOn(http, 'request').mockImplementation(() => {
+        queueMicrotask(() => {
+          req.emit('error', Object.assign(new Error('failed'), error));
+        });
+        return req as unknown as http.ClientRequest;
+      });
+
+      try {
+        const res = await new NodeAdapter(
+          socketPath === undefined ? {} : { socketPath },
+        ).send({
+          requestURL: 'http://localhost/thing',
+          method: 'POST',
+          headers: {},
+          body: 'payload',
+        });
+
+        expect(res.isTransportError).toBe(true);
+        outcomes.push(res.wasDefinitelyNotSent);
+      } finally {
+        requestSpy.mockRestore();
+      }
+    }
+
+    expect(outcomes).toEqual([true, true, undefined, undefined]);
+  });
+
   // --- query params ---
 
   test('query params are serialized and echoed back', async () => {
@@ -8376,6 +8961,36 @@ describe('NodeAdapter.send() — low-level contract', () => {
     }
 
     expect(caught?.name).toBe('AbortError');
+  });
+
+  test('a pre-aborted signal opens no connection', async () => {
+    // Refused before the request is made: one made and destroyed at once still connects.
+    const controller = new AbortController();
+    controller.abort();
+    const requestSpy = spyOn(http, 'request');
+
+    try {
+      for (const body of [undefined, 'payload']) {
+        const outcome = await adapter
+          .send({
+            requestURL: `${server.url}/api/test`,
+            method: 'POST',
+            headers: {},
+            body,
+            signal: controller.signal,
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error as Error,
+          );
+
+        expect(outcome?.name).toBe('AbortError');
+      }
+
+      expect(requestSpy).not.toHaveBeenCalled();
+    } finally {
+      requestSpy.mockRestore();
+    }
   });
 
   test('upload progress fires to 100% for no-body request', async () => {
@@ -9313,6 +9928,87 @@ describe('NodeAdapter — crl option (normalization)', () => {
       '-----BEGIN X509 CRL-----\nAAAA\n',
     );
     expect(() => new NodeAdapter({ crl: truncated })).toThrow();
+  });
+
+  test('a CRL given as an ArrayBuffer is read as its bytes, as ca reads one', async () => {
+    // `await (await fetch(crlURL)).arrayBuffer()` hands over an `ArrayBuffer`.
+    const bufferOf = (text: string, isShared: boolean): ArrayBufferLike => {
+      const bytes = new TextEncoder().encode(text);
+      const memory = isShared
+        ? new SharedArrayBuffer(bytes.byteLength)
+        : new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(memory).set(bytes);
+      return memory;
+    };
+
+    for (const isShared of [false, true]) {
+      const memory = bufferOf(fixtures.crlEmpty, isShared);
+      // A view over shared memory too, which Bun's `tls` cannot be handed: a copy is.
+      for (const crl of [memory, new Uint8Array(memory)]) {
+        const single = await captureCRL({ crl });
+
+        expect(Buffer.isBuffer(single)).toBe(true);
+        expect((single as Buffer).toString('latin1')).toBe(fixtures.crlEmpty);
+        expect(
+          arrayBufferKindOf((single as Buffer).buffer) === 'SharedArrayBuffer',
+        ).toBe(false);
+      }
+
+      // A bundle in one is split, as it is in a Buffer, and so is one in a list.
+      const bundle = bufferOf(
+        fixtures.unrelatedCRL + fixtures.crlRevoked,
+        isShared,
+      );
+      for (const crl of [bundle, [bundle]]) {
+        const captured = await captureCRL({ crl });
+
+        expect(captured).toHaveLength(2);
+        expect(countCRLs(captured)).toBe(2);
+      }
+    }
+
+    // Read by its bytes, so DER in one is refused as it is in a Buffer.
+    expect(
+      () =>
+        new NodeAdapter({
+          crl: new Uint8Array([0x30, 0x82, 0x01, 0x2a]).buffer,
+        }),
+    ).toThrow('NodeAdapter crl must be PEM');
+  });
+
+  test('a CRL Buffer over shared memory is copied when it is answered from the cache', async () => {
+    // A Buffer passed through as itself, then the same bytes in shared memory: a cache
+    // hit, which passes the buffer now given on only when Bun's `tls` can take it.
+    const captured: unknown[] = [];
+    const spy = spyOnCRLRequests(captured);
+
+    try {
+      const own = Buffer.alloc(fixtures.crlEmpty.length);
+      own.write(fixtures.crlEmpty, 'latin1');
+      const shared = Buffer.from(new SharedArrayBuffer(own.byteLength));
+      own.copy(shared);
+      const config: NodeAdapterConfig = { crl: own };
+      const adapter = new NodeAdapter(config);
+      const request = {
+        requestURL: 'https://crl.test/api',
+        method: 'GET' as const,
+        headers: {},
+      };
+
+      await adapter.send(request);
+      config.crl = shared;
+      await adapter.send(request);
+
+      expect(captured[0]).toBe(own);
+      expect(Buffer.isBuffer(captured[1])).toBe(true);
+      expect((captured[1] as Buffer).equals(own)).toBe(true);
+      expect(
+        arrayBufferKindOf((captured[1] as Buffer).buffer) ===
+          'SharedArrayBuffer',
+      ).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('a DER Buffer is refused, since Node reads PEM CRLs only', () => {
@@ -10455,7 +11151,7 @@ describe('NodeAdapter upload finalization', () => {
   );
 });
 
-test.each(['aborted', 'addEventListener', 'setHeader'] as const)(
+test.each(['addEventListener', 'setHeader'] as const)(
   'destroys an allocated request when %s throws during synchronous setup',
   async (failureAt) => {
     const failure = new Error(`hostile ${failureAt}`);
@@ -10478,12 +11174,7 @@ test.each(['aborted', 'addEventListener', 'setHeader'] as const)(
       request as unknown as http.ClientRequest,
     );
     const signal = {
-      get aborted() {
-        if (failureAt === 'aborted') {
-          throw failure;
-        }
-        return false;
-      },
+      aborted: false,
       addEventListener: () => {
         if (failureAt === 'addEventListener') {
           throw failure;
@@ -10512,6 +11203,38 @@ test.each(['aborted', 'addEventListener', 'setHeader'] as const)(
     }
   },
 );
+
+test('a signal whose aborted read throws is refused before a request is made', async () => {
+  const failure = new Error('hostile aborted');
+  const requestSpy = spyOn(http, 'request');
+  const signal = {
+    get aborted() {
+      throw failure;
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  } as unknown as AbortSignal;
+  try {
+    let caught: unknown;
+    try {
+      await new NodeAdapter().send(
+        makeAdapterRequest('http://example.test', { body: 'body', signal }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+    // On a carrier, with the caller's own error as its cause, and the upload's outcome.
+    expect((caught as Error).cause).toBe(failure);
+    expect(
+      await (caught as Record<PropertyKey, Promise<unknown>>)[
+        REQUEST_BODY_SETTLED_KEY
+      ],
+    ).toBe(caught);
+    expect(requestSpy).not.toHaveBeenCalled();
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
 
 test('a response arriving after the signal aborted does not call the streamResponse factory', async () => {
   let respond: ((res: http.IncomingMessage) => void) | undefined;
@@ -10673,6 +11396,147 @@ test('a signal that reads as aborted without dispatching abort still settles a s
     expect(tags[STREAM_ABORT_HEADERS_KEY]).toEqual({ 'set-cookie': ['id=1'] });
     expect(request.destroyed).toBe(true);
     expect(factoryCalls).toBe(0);
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
+test.each([
+  ['dispatched before the answer arrived', 204],
+  ['dispatched before the answer arrived', 205],
+  ['read as aborted without dispatching', 204],
+  ['read as aborted without dispatching', 205],
+] as const)(
+  'a bodiless answer behind a signal %s (%d) reports no download progress',
+  async (how, status) => {
+    let respond: ((res: http.IncomingMessage) => void) | undefined;
+    const request = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      setHeader: () => {},
+      getHeaders: () => ({}),
+      end: () => {},
+      destroy() {
+        this.destroyed = true;
+        return this;
+      },
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(((
+      _options: unknown,
+      callback: (res: http.IncomingMessage) => void,
+    ) => {
+      respond = callback;
+      return request;
+    }) as unknown as typeof http.request);
+    const controller = new AbortController();
+    let isAborted = false;
+    const signal =
+      how === 'dispatched before the answer arrived'
+        ? controller.signal
+        : ({
+            get aborted() {
+              return isAborted;
+            },
+            addEventListener: () => {},
+            removeEventListener: () => {},
+          } as unknown as AbortSignal);
+    const progress: number[] = [];
+    const response = Object.assign(new EventEmitter(), {
+      statusCode: status,
+      headers: {},
+      complete: false,
+      destroy() {
+        return this;
+      },
+    });
+    try {
+      const sending = new NodeAdapter().send(
+        makeAdapterRequest('http://example.test', {
+          signal,
+          onDownloadProgress: (event) => {
+            progress.push(event.progress);
+          },
+        }),
+      );
+      // Sent, its abort listener on, before the signal aborts.
+      expect(respond).toBeDefined();
+      controller.abort();
+      isAborted = true;
+      // The answer arrives behind the abort, as one already parsed can.
+      respond?.(response as unknown as http.IncomingMessage);
+      response.emit('end');
+      response.emit('close');
+      const caught = await Promise.race([
+        sending.then(
+          () => 'resolved',
+          (error: unknown) => error,
+        ),
+        new Promise((resolve) => setTimeout(() => resolve('unsettled'), 500)),
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect((caught as Error).name).toBe('AbortError');
+      expect(progress).toEqual([]);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  },
+);
+
+test('an answer over maxResponseBytes behind a signal read as aborted is answered as the abort', async () => {
+  let respond: ((res: http.IncomingMessage) => void) | undefined;
+  const request = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    setHeader: () => {},
+    getHeaders: () => ({}),
+    end: () => {},
+    destroy() {
+      this.destroyed = true;
+      return this;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    _options: unknown,
+    callback: (res: http.IncomingMessage) => void,
+  ) => {
+    respond = callback;
+    return request;
+  }) as unknown as typeof http.request);
+  let isAborted = false;
+  // Reads as aborted, but never dispatches `abort`.
+  const signal = {
+    get aborted() {
+      return isAborted;
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  } as unknown as AbortSignal;
+  const response = Object.assign(new EventEmitter(), {
+    statusCode: 200,
+    headers: { 'content-length': '100' },
+    complete: false,
+    destroy() {
+      return this;
+    },
+  });
+  try {
+    const sending = new NodeAdapter().send(
+      makeAdapterRequest('http://example.test', {
+        signal,
+        maxResponseBytes: 10,
+      }),
+    );
+    expect(respond).toBeDefined();
+    isAborted = true;
+    respond?.(response as unknown as http.IncomingMessage);
+    const caught = await sending.then(
+      () => 'resolved',
+      (error: unknown) => error,
+    );
+
+    expect((caught as Error).name).toBe('AbortError');
+    expect(
+      (caught as Record<PropertyKey, unknown>)[STREAM_ABORT_STATUS_KEY],
+    ).toBe(200);
   } finally {
     requestSpy.mockRestore();
   }
@@ -11113,6 +11977,63 @@ test('a factory decline whose teardown throws still answers as the decline', asy
     // The decline's cancel, not the teardown's failure.
     expect((caught as Error).name).toBe('AbortError');
     expect(errorText(caught)).not.toContain('teardown refused');
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    isTornDown = false;
+    requestSpy.mockRestore();
+  }
+});
+
+test('a cancel whose teardown cannot read the request state still settles as the cancel', async () => {
+  // The abort listener tears the request down before it rejects. It runs from an
+  // `AbortSignal` event, where a throw out of that teardown would be an uncaught exception
+  // and the request would never settle.
+  let isTornDown = false;
+  const request = Object.assign(new EventEmitter(), {
+    setHeader: () => {},
+    getHeaders: () => ({}),
+    end: () => {},
+    destroy() {
+      return this;
+    },
+  });
+  Object.defineProperty(request, 'destroyed', {
+    get() {
+      if (isTornDown) {
+        throw new Error('teardown refused');
+      }
+      return false;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(
+    ((_options: unknown) => request) as unknown as typeof http.request,
+  );
+  const reports: unknown[] = [];
+  const onError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onError);
+  try {
+    const controller = new AbortController();
+    const sending = new NodeAdapter().send(
+      makeAdapterRequest('http://example.test', { signal: controller.signal }),
+    );
+    isTornDown = true;
+    controller.abort();
+
+    const outcome = await Promise.race([
+      sending.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+      new Promise<'hung'>((resolve) =>
+        setTimeout(() => resolve('hung'), 1_000),
+      ),
+    ]);
+
+    expect((outcome as Error).name).toBe('AbortError');
+    expect(reports).toHaveLength(0);
   } finally {
     globalThis.removeEventListener('error', onError);
     isTornDown = false;

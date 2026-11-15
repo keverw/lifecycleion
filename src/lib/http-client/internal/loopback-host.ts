@@ -1,4 +1,5 @@
 import { withoutTrailingDot } from '../../internal/ascii-text';
+
 /**
  * Whether a parsed URL's `hostname` names this machine, as browsers treat it as
  * potentially trustworthy: `localhost` and any name under it (a trailing dot aside),

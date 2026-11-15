@@ -8,7 +8,9 @@ import { forEachOwnIndex, readCopiedIndex } from '../internal/array-indices';
 import { toASCII } from 'tr46';
 import {
   HOST_TO_ASCII_OPTIONS,
+  canonicalizeBracketedIPv6Content,
   checkDNSLength,
+  isIPv6,
   toAsciiDots,
 } from '../domain-utils/helpers';
 import { describeValue } from '../internal/describe-value';
@@ -126,6 +128,14 @@ interface PreparedHost {
   normalized?: string;
 }
 
+/** What a `Set-Cookie` with a `Domain` has settled about that domain before it is stored. */
+interface KnownDomainScope {
+  /** The domain's site: its bucket. */
+  site: string;
+  /** Whether a cookie for the domain is kept for that host alone (see `isHostOnlyDomain`). */
+  isHostOnlyDomain: boolean;
+}
+
 interface ParsedCookie {
   name: string;
   value: string;
@@ -220,6 +230,18 @@ function copyCookie(cookie: Cookie): Cookie {
 
 /** RFC 6265 §5.2.2 delta-seconds: an optional `-`, then digits only. */
 const MAX_AGE_PATTERN = /^-?\d+$/;
+
+/**
+ * The URL schemes cookies are stored from and sent to, as browsers keep them: HTTP and
+ * the WebSocket schemes, which share HTTP's cookies. Any other (`ftp:`, `file:`, an app's
+ * own) neither stores nor is sent a cookie.
+ */
+const COOKIE_SCHEMES: ReadonlySet<string> = new Set([
+  'http:',
+  'https:',
+  'ws:',
+  'wss:',
+]);
 
 /** RFC 6265bis §5.6: a cookie whose name and value together pass this is ignored. */
 const MAX_COOKIE_NAME_VALUE_BYTES = 4096;
@@ -424,8 +446,8 @@ export class CookieJar {
    * does: written only where a bucket is created or deleted (`getOrCreateBucket`,
    * `deleteBucket`, `clearBuckets`), which are the only places `buckets` gains or loses a
    * key. Each key is filed under every name `namesAbove` gives for it, so the index holds
-   * one entry per dot of each key - 100,000 sites under `com` are 100,000 entries in one
-   * set.
+   * one entry per dot of each key, a trailing one aside - 100,000 sites under `com` are
+   * 100,000 entries in one set.
    */
   private bucketKeysUnder: Map<string, Set<string>> = new Map();
 
@@ -505,208 +527,7 @@ export class CookieJar {
    * validation and domain-suffix checks on top of the syntax check here.
    */
   public setCookie(cookie: CookieInput): boolean {
-    // Copied before any field is read, so every check below and the object that is stored
-    // see the same values: the argument is the caller's object and may carry accessors.
-    let input: CookieInput;
-
-    try {
-      input = { ...cookie };
-    } catch {
-      return false;
-    }
-
-    const rawDomain = input.domain ?? '';
-
-    if (typeof rawDomain !== 'string') {
-      return false;
-    }
-
-    const domain = this.normalizeStoredDomain(rawDomain);
-
-    if (domain === '') {
-      return false;
-    }
-
-    // The jar's own `Date`, read once by its time: the caller's stays theirs, so setting
-    // it later cannot move the stored expiry past the lifetime cap, and one made in
-    // another realm (a `vm` context, an iframe) is stored as a same-realm one.
-    if (input.expires !== undefined) {
-      try {
-        input.expires = new Date(Date.prototype.getTime.call(input.expires));
-      } catch {
-        return false;
-      }
-    }
-
-    // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
-    // creation: a cookie restored through `fromJSON` with a 10-year lifetime would
-    // otherwise keep it. Only an absent `createdAt` is now; a `null` is refused.
-    const now = Date.now();
-    const rawLastAccessedAt: unknown = input.lastAccessedAt;
-
-    // A finite time or absent, as `createdAt` is: one that is not would read as never used,
-    // or as used forever. A time later than now is now, so a restored jar cannot keep a
-    // cookie safe from the jar-wide limit for longer than 30 days from its restore.
-    if (
-      rawLastAccessedAt !== undefined &&
-      (typeof rawLastAccessedAt !== 'number' ||
-        !Number.isFinite(rawLastAccessedAt))
-    ) {
-      return false;
-    }
-
-    const lastAccessTime = Math.min(rawLastAccessedAt ?? now, now);
-    const lifetime = cookieLifetime(
-      input.createdAt === undefined ? now : input.createdAt,
-      input.maxAge,
-      input.expires?.getTime(),
-      now,
-    );
-
-    if (lifetime === null) {
-      return false;
-    }
-
-    const { createdAt } = lifetime;
-
-    // Booleans or absent: the send path reads `secure` and `hostOnly` as `true` or not,
-    // so a `secure: 'yes'` would be reported as set and still be sent over `http:`.
-    for (const flag of ['secure', 'hostOnly', 'httpOnly'] as const) {
-      const value: unknown = input[flag];
-      if (value !== undefined && typeof value !== 'boolean') {
-        return false;
-      }
-    }
-
-    // One of the three a `Set-Cookie` can store, or absent.
-    if (
-      input.sameSite !== undefined &&
-      input.sameSite !== 'Strict' &&
-      input.sameSite !== 'Lax' &&
-      input.sameSite !== 'None'
-    ) {
-      return false;
-    }
-
-    if (!this.hasWritableNameAndValue(input)) {
-      return false;
-    }
-
-    // A string or absent: anything else is a corrupt field, refused as a corrupt flag is,
-    // rather than read as the widest path.
-    if (input.path !== undefined && typeof input.path !== 'string') {
-      return false;
-    }
-
-    // Match the Set-Cookie path parser: an absent, empty, or non-absolute path uses the
-    // default root path. Besides keeping persisted/programmatic cookies canonical, this
-    // avoids retaining a path representation the send-side matcher never produces.
-    const path =
-      typeof input.path === 'string' && input.path.startsWith('/')
-        ? input.path
-        : '/';
-
-    // Read once: it runs the public-suffix lookup and an IP literal parse.
-    const isHostOnly = input.hostOnly === true || this.isHostOnlyDomain(domain);
-
-    // The prefix rules need no request URL, so they hold here too: a `__Host-session`
-    // with `hostOnly` cleared - a persisted jar tampered with - would otherwise be
-    // restored through `fromJSON` and sent to every subdomain, carrying a name that
-    // promises a server it was set host-only, over `https:`, at `/`.
-    if (
-      !this.hasValidNamePrefix({
-        name: input.name,
-        value: input.value,
-        secure: input.secure,
-        // `Domain` absent means host-only; on this path that is the `hostOnly` flag, or a
-        // domain that is stored host-only whatever it says (see below).
-        domain: isHostOnly ? undefined : domain,
-        path,
-      })
-    ) {
-      return false;
-    }
-    const site = this.siteFor(domain);
-
-    // The cookie's own fields only, so what is stored, listed by `getAllCookies()` and
-    // saved by `toJSON()` is a cookie and holds nothing else of the caller's.
-    const stored: Cookie = {
-      name: input.name,
-      value: input.value,
-      createdAt,
-      domain,
-      path,
-    };
-
-    for (const field of [
-      'hostOnly',
-      'expires',
-      'maxAge',
-      'secure',
-      'httpOnly',
-      'sameSite',
-    ] as const) {
-      this.copyIfPresent(input, stored, field);
-    }
-
-    // A domain cookie for a public suffix or an IP address is kept for that host alone, as
-    // a `Set-Cookie` naming the suffix or address from the host itself is (RFC 6265bis
-    // §5.5, and browsers for an address): stored host-only, and so filed under the same
-    // key as that `Set-Cookie`'s cookie, which replaces and deletes it. A jar saved under
-    // another suffix list can hold one, and any persisted jar can hold an address's
-    // `Domain=` cookie as a domain cookie.
-    if (isHostOnly) {
-      stored.hostOnly = true;
-    }
-
-    applyLifetime(stored, lifetime);
-
-    const key = this.cookieKey(
-      stored.name,
-      domain,
-      path,
-      stored.hostOnly === true,
-    );
-
-    // Already expired: not stored, and the stored cookie it names is deleted, as an
-    // expired `Set-Cookie` deletes it (RFC 6265 §5.3 step 11). `false`, so `fromJSON`
-    // counts it out of what it restored.
-    if (now >= lifetime.expiresAt) {
-      this.deleteStored(this.buckets.get(site), key);
-      this.pruneEmptyBucket(site);
-      return false;
-    }
-    // A replacement keeps the creation time of the cookie it replaces (RFC 6265 §5.3
-    // step 11.3), which orders the `Cookie` header; `createdAt` stays the new cookie's
-    // own, the base of its `Max-Age`.
-    // Not an expired one still waiting to be purged: it was already gone (§5.3 step 11
-    // reads the store, from which an expired cookie has been evicted), so the new cookie
-    // takes its own place. Judged at `now`, the time the new cookie is stored at.
-    const replaced = this.buckets.get(site)?.get(key);
-    const creationTime =
-      replaced === undefined || this.isExpired(replaced, now)
-        ? createdAt
-        : replaced.creationTime;
-
-    const bucket = this.getOrCreateBucket(site);
-
-    if (!bucket.has(key)) {
-      this.cookieCount++;
-    }
-
-    bucket.set(key, {
-      cookie: stored,
-      preparedDomain: this.prepareHost(domain),
-      creationTime,
-      lastAccess: ++this.accessClock,
-      lastAccessTime,
-      expiresAt: lifetime.expiresAt,
-    });
-    this.earliestAccessTime = Math.min(this.earliestAccessTime, lastAccessTime);
-
-    this.enforceLimits(site);
-
-    return this.buckets.get(site)?.has(key) === true;
+    return this.storeCookie(cookie);
   }
 
   /**
@@ -776,7 +597,9 @@ export class CookieJar {
 
   /**
    * Parses a Set-Cookie header string and stores the resulting cookie.
-   * The request URL is used to infer and validate the domain (PSL + suffix checks).
+   * The request URL is used to infer and validate the domain (PSL + suffix checks). A URL
+   * whose scheme is not `http:`, `https:`, `ws:` or `wss:` stores nothing, as browsers
+   * store nothing from one.
    *
    * @throws {TypeError} When `header` is not a string - one `Set-Cookie` line, not an
    *         array of them (see {@link processResponseHeaders}).
@@ -859,7 +682,8 @@ export class CookieJar {
    * Returns cookies applicable for the given URL (domain + path matching, unexpired).
    * Cookies with the Secure attribute are omitted unless the request is secure - `https:`
    * or `wss:`, or a loopback host over `http:` or `ws:`, as browsers count one (RFC 6265
-   * §5.4; see `isSecureRequest`).
+   * §5.4; see `isSecureRequest`). A URL whose scheme is not `http:`, `https:`, `ws:` or
+   * `wss:` is sent none, as browsers send none.
    *
    * Scans the URL and ancestor-domain buckets, including parents above nested
    * private suffixes, instead of scanning all cookies.
@@ -931,10 +755,13 @@ export class CookieJar {
    *   `clear('x.example.com', 'domain')` clears every `.com` cookie but those stored at
    *   or under a suffix still listed, such as `blogspot.com` and `app.blogspot.com`. With
    *   `uk` removed, `co.uk` is still a suffix, so `clear('x.co.uk', 'domain')` leaves
-   *   `y.co.uk`'s cookies and a `Domain=uk` one. A removed suffix named itself is cleared
-   *   whole, as a listed one is: `clear('uk', 'domain')` clears every `.uk` cookie, and
-   *   `clear('com', 'domain')` with `com` removed every `.com` one, `app.blogspot.com`'s
-   *   and `bucket.s3.amazonaws.com`'s included.
+   *   `y.co.uk`'s cookies and a `Domain=uk` one. A removed suffix named itself clears its
+   *   site, as a host under it does, and is cleared whole, as a listed one is:
+   *   `clear('uk', 'domain')` clears every `.uk` cookie, and `clear('com', 'domain')`
+   *   with `com` removed every `.com` one, `app.blogspot.com`'s and
+   *   `bucket.s3.amazonaws.com`'s included. With `s3.amazonaws.com` removed,
+   *   `clear('s3.amazonaws.com', 'domain')` clears every `amazonaws.com` cookie, as
+   *   `clear('bucket.s3.amazonaws.com', 'domain')` does.
    *
    * A `host` that is not a non-empty string, or a `scope` that is not one of the two,
    * throws: only a call with no arguments at all clears everything.
@@ -984,41 +811,29 @@ export class CookieJar {
     const site = this.siteFor(normalizedHost);
 
     if (scope === 'domain') {
-      // A removed suffix named itself is cleared as a listed one is, whole: the removal
-      // decides which hosts share cookies, not what clearing that name reaches, so
-      // `clear('uk', 'domain')` clears every `.uk` cookie with `uk` removed or not, and
-      // `clear('com', 'domain')` with `com` removed reaches `app.blogspot.com` too.
-      const isRemovedSuffixClear = this.isRemovedSuffix(normalizedHost);
-
-      // Otherwise the host's site, which is the one bucket: with `com` removed,
+      // The host's site, which is the one bucket: with `com` removed,
       // `clear('x.example.com', 'domain')` clears every cookie of the `com` site and
-      // leaves `app.blogspot.com`, a site of its own behind `blogspot.com`.
-      if (!isRemovedSuffixClear && !this.isPublicSuffix(site)) {
-        const count = this.buckets.get(site)?.size ?? 0;
-        this.deleteBucket(site);
-        this.cookieCount -= count;
-        return count;
-      }
-
-      const domain = isRemovedSuffixClear ? normalizedHost : site;
+      // leaves `app.blogspot.com`, a site of its own behind `blogspot.com`. A removed
+      // suffix named itself clears its site too, so it never clears less than a host
+      // under it: with `s3.amazonaws.com` removed, its site is `amazonaws.com`.
+      // A suffix named itself, listed or removed, also clears each site under it, as
+      // each is a bucket of its own - `clear('github.io', 'domain')` or
+      // `clear('localhost', 'domain')` clears them all, and `clear('com', 'domain')`
+      // with `com` removed reaches `app.blogspot.com` too. Those `bucketKeysUnder`
+      // files under it are taken as a list first, since deleting a bucket deletes its
+      // key from that index.
+      const keys =
+        this.isRemovedSuffix(normalizedHost) ||
+        this.isPublicSuffix(normalizedHost)
+          ? [site, ...(this.bucketKeysUnder.get(normalizedHost) ?? [])]
+          : [site];
       let count = 0;
 
-      // A suffix or bare name has no registrable part, so each site under it is a bucket
-      // of its own - `clear('github.io', 'domain')` or `clear('localhost', 'domain')`
-      // clears them all: its own and those `bucketKeysUnder` files under it, taken as a
-      // list first, since deleting a bucket deletes its key from that index.
-      for (const key of [domain, ...(this.bucketKeysUnder.get(domain) ?? [])]) {
+      for (const key of keys) {
         const size = this.buckets.get(key)?.size ?? 0;
         count += size;
         this.cookieCount -= size;
         this.deleteBucket(key);
-      }
-
-      // A removed suffix whose removal joined it to a site above - `co.uk` with `uk`
-      // removed as well, filed in `uk` - shares that bucket with the site's other names,
-      // and only the cookies stored at or under it are taken.
-      if (site !== domain) {
-        count += this.clearStoredWithin(site, domain);
       }
 
       return count;
@@ -1278,6 +1093,223 @@ export class CookieJar {
 
   // --- Private helpers ---
 
+  /**
+   * {@link setCookie}, with what {@link storeParsed} has already worked out for the
+   * cookie's normalized domain - its site, and whether it is kept for that host alone -
+   * so a `Set-Cookie` with a `Domain` looks neither up again.
+   */
+  private storeCookie(cookie: CookieInput, known?: KnownDomainScope): boolean {
+    // Copied before any field is read, so every check below and the object that is stored
+    // see the same values: the argument is the caller's object and may carry accessors.
+    let input: CookieInput;
+
+    try {
+      input = { ...cookie };
+    } catch {
+      return false;
+    }
+
+    const rawDomain = input.domain ?? '';
+
+    if (typeof rawDomain !== 'string') {
+      return false;
+    }
+
+    const domain = this.normalizeStoredDomain(rawDomain);
+
+    if (domain === '') {
+      return false;
+    }
+
+    // The jar's own `Date`, read once by its time: the caller's stays theirs, so setting
+    // it later cannot move the stored expiry past the lifetime cap, and one made in
+    // another realm (a `vm` context, an iframe) is stored as a same-realm one.
+    if (input.expires !== undefined) {
+      try {
+        input.expires = new Date(Date.prototype.getTime.call(input.expires));
+      } catch {
+        return false;
+      }
+    }
+
+    // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
+    // creation: a cookie restored through `fromJSON` with a 10-year lifetime would
+    // otherwise keep it. Only an absent `createdAt` is now; a `null` is refused.
+    const now = Date.now();
+    const rawLastAccessedAt: unknown = input.lastAccessedAt;
+
+    // A finite time or absent, as `createdAt` is: one that is not would read as never used,
+    // or as used forever. A time later than now is now, so a restored jar cannot keep a
+    // cookie safe from the jar-wide limit for longer than 30 days from its restore.
+    if (
+      rawLastAccessedAt !== undefined &&
+      (typeof rawLastAccessedAt !== 'number' ||
+        !Number.isFinite(rawLastAccessedAt))
+    ) {
+      return false;
+    }
+
+    const lastAccessTime = Math.min(rawLastAccessedAt ?? now, now);
+    const lifetime = cookieLifetime(
+      input.createdAt === undefined ? now : input.createdAt,
+      input.maxAge,
+      input.expires?.getTime(),
+      now,
+    );
+
+    if (lifetime === null) {
+      return false;
+    }
+
+    const { createdAt } = lifetime;
+
+    // Booleans or absent: the send path reads `secure` and `hostOnly` as `true` or not,
+    // so a `secure: 'yes'` would be reported as set and still be sent over `http:`.
+    for (const flag of ['secure', 'hostOnly', 'httpOnly'] as const) {
+      const value: unknown = input[flag];
+      if (value !== undefined && typeof value !== 'boolean') {
+        return false;
+      }
+    }
+
+    // One of the three a `Set-Cookie` can store, or absent.
+    if (
+      input.sameSite !== undefined &&
+      input.sameSite !== 'Strict' &&
+      input.sameSite !== 'Lax' &&
+      input.sameSite !== 'None'
+    ) {
+      return false;
+    }
+
+    if (!this.hasWritableNameAndValue(input)) {
+      return false;
+    }
+
+    // A string or absent: anything else is a corrupt field, refused as a corrupt flag is,
+    // rather than read as the widest path.
+    if (input.path !== undefined && typeof input.path !== 'string') {
+      return false;
+    }
+
+    // Match the Set-Cookie path parser: an absent, empty, or non-absolute path uses the
+    // default root path. Besides keeping persisted/programmatic cookies canonical, this
+    // avoids retaining a path representation the send-side matcher never produces.
+    const path =
+      typeof input.path === 'string' && input.path.startsWith('/')
+        ? input.path
+        : '/';
+
+    // Read once: it runs the public-suffix lookup and an IP literal parse.
+    const isHostOnly =
+      input.hostOnly === true ||
+      (known?.isHostOnlyDomain ?? this.isHostOnlyDomain(domain));
+
+    // The prefix rules need no request URL, so they hold here too: a `__Host-session`
+    // with `hostOnly` cleared - a persisted jar tampered with - would otherwise be
+    // restored through `fromJSON` and sent to every subdomain, carrying a name that
+    // promises a server it was set host-only, over `https:`, at `/`.
+    if (
+      !this.hasValidNamePrefix({
+        name: input.name,
+        value: input.value,
+        secure: input.secure,
+        // `Domain` absent means host-only; on this path that is the `hostOnly` flag, or a
+        // domain that is stored host-only whatever it says (see below).
+        domain: isHostOnly ? undefined : domain,
+        path,
+      })
+    ) {
+      return false;
+    }
+    const site = known?.site ?? this.siteFor(domain);
+
+    // The cookie's own fields only, so what is stored, listed by `getAllCookies()` and
+    // saved by `toJSON()` is a cookie and holds nothing else of the caller's.
+    const stored: Cookie = {
+      name: input.name,
+      value: input.value,
+      createdAt,
+      domain,
+      path,
+    };
+
+    for (const field of [
+      'hostOnly',
+      'expires',
+      'maxAge',
+      'secure',
+      'httpOnly',
+      'sameSite',
+    ] as const) {
+      this.copyIfPresent(input, stored, field);
+    }
+
+    // A domain cookie for a public suffix or an IP address is kept for that host alone, as
+    // a `Set-Cookie` naming the suffix or address from the host itself is (RFC 6265bis
+    // §5.5, and browsers for an address): stored host-only, and so filed under the same
+    // key as that `Set-Cookie`'s cookie, which replaces and deletes it. A jar saved under
+    // another suffix list can hold one, and any persisted jar can hold an address's
+    // `Domain=` cookie as a domain cookie.
+    if (isHostOnly) {
+      stored.hostOnly = true;
+    }
+
+    applyLifetime(stored, lifetime);
+
+    const key = this.cookieKey(
+      stored.name,
+      domain,
+      path,
+      stored.hostOnly === true,
+    );
+
+    // Already expired: not stored, and the stored cookie it names is deleted, as an
+    // expired `Set-Cookie` deletes it (RFC 6265 §5.3 step 11). `false`, so `fromJSON`
+    // counts it out of what it restored.
+    if (now >= lifetime.expiresAt) {
+      this.deleteStored(this.buckets.get(site), key);
+      this.pruneEmptyBucket(site);
+      return false;
+    }
+    // A replacement keeps the creation time of the cookie it replaces (RFC 6265 §5.3
+    // step 11.3), which orders the `Cookie` header; `createdAt` stays the new cookie's
+    // own, the base of its `Max-Age`.
+    // Not an expired one still waiting to be purged: it was already gone (§5.3 step 11
+    // reads the store, from which an expired cookie has been evicted), so the new cookie
+    // takes its own place. Judged at `now`, the time the new cookie is stored at.
+    const replaced = this.buckets.get(site)?.get(key);
+    const creationTime =
+      replaced === undefined || this.isExpired(replaced, now)
+        ? createdAt
+        : replaced.creationTime;
+
+    const bucket = this.getOrCreateBucket(site);
+
+    if (!bucket.has(key)) {
+      this.cookieCount++;
+    }
+
+    bucket.set(key, {
+      cookie: stored,
+      // `domain` is in its normal form already, so matching it normalizes nothing.
+      preparedDomain: {
+        host: domain,
+        canonicalIP: this.tryCanonicalIPLiteral(domain),
+        normalized: domain,
+      },
+      creationTime,
+      lastAccess: ++this.accessClock,
+      lastAccessTime,
+      expiresAt: lifetime.expiresAt,
+    });
+    this.earliestAccessTime = Math.min(this.earliestAccessTime, lastAccessTime);
+
+    this.enforceLimits(site);
+
+    return this.buckets.get(site)?.has(key) === true;
+  }
+
   /** {@link collectCookies} for a caller handing all of them over: they count as used. */
   private readCookies(url: string): StoredCookie[] {
     const cookies = this.collectCookies(url);
@@ -1317,6 +1349,10 @@ export class CookieJar {
       return [];
     }
 
+    if (!COOKIE_SCHEMES.has(requestScheme)) {
+      return [];
+    }
+
     // See `parseSetCookieHeader`: a host with a leading dot is no host's.
     if (hostname.startsWith('.')) {
       return [];
@@ -1336,10 +1372,7 @@ export class CookieJar {
 
     if (requestHost.canonicalIP === null) {
       for (const parent of namesAbove(site)) {
-        // A trailing dot ends the walk: `com.` has no name above it.
-        if (parent !== '') {
-          candidateBuckets.add(this.siteFor(parent));
-        }
+        candidateBuckets.add(this.siteFor(parent));
       }
     }
 
@@ -1637,29 +1670,6 @@ export class CookieJar {
     return cookie;
   }
 
-  /** Removes the cookies in `site`'s bucket stored for `domain` or a host under it. */
-  private clearStoredWithin(site: string, domain: string): number {
-    const bucket = this.buckets.get(site);
-
-    if (!bucket) {
-      return 0;
-    }
-
-    let count = 0;
-
-    for (const [key, stored] of bucket) {
-      const storedDomain = stored.preparedDomain.host;
-
-      if (storedDomain === domain || storedDomain.endsWith(`.${domain}`)) {
-        this.deleteStored(bucket, key);
-        count++;
-      }
-    }
-
-    this.pruneEmptyBucket(site);
-    return count;
-  }
-
   /**
    * Holds `site`, then the jar, to their limits after a store. See {@link CookieJar}.
    */
@@ -1877,6 +1887,10 @@ export class CookieJar {
       return;
     }
 
+    if (!COOKIE_SCHEMES.has(address.protocol)) {
+      return;
+    }
+
     const requestHostname = address.hostname;
 
     // A URL with no host (`file:///x`) has no one to set a cookie for. Nor does one whose
@@ -1919,6 +1933,8 @@ export class CookieJar {
     // the cookie is host-only, as Chrome and Firefox keep it, so it is the same cookie as
     // one the address sets with no `Domain=` - one replaces or deletes the other.
     let isIPHostOnly = false;
+    // The `Domain`'s scope as the checks below settle it, handed to `storeCookie`.
+    let known: KnownDomainScope | undefined;
 
     if (parsed.domain) {
       // An IP address may name only itself, written as the URL writes its host - an IPv6
@@ -1975,11 +1991,19 @@ export class CookieJar {
       // suffix must not grant a tenant scope over its parent, and a suffix still listed
       // beneath a removed one keeps its tenants off the removed name (`Domain=uk` from
       // `x.co.uk`, with `uk` removed and `co.uk` listed).
-      if (this.siteFor(requestHostname) !== this.siteFor(normalizedDomain)) {
+      const site = this.siteFor(normalizedDomain);
+
+      if (this.siteFor(requestHostname) !== site) {
         return;
       }
 
       domain = normalizedDomain;
+      // A public suffix or an IP address is the whole of `isHostOnlyDomain`, and each
+      // was settled above for this domain.
+      known = {
+        site,
+        isHostOnlyDomain: isPublicSuffixHostOnly || isIPHostOnly,
+      };
     } else {
       domain = requestHostname;
     }
@@ -2072,7 +2096,7 @@ export class CookieJar {
       cookie.sameSite = parsed.sameSite;
     }
 
-    this.setCookie(cookie);
+    this.storeCookie(cookie, known);
   }
 
   /**
@@ -2174,6 +2198,11 @@ export class CookieJar {
       return true;
     }
 
+    // An IP address is a site of its own, with no name above or below it a bucket can be.
+    if (preparedDomain.canonicalIP !== null) {
+      return false;
+    }
+
     for (const site of namesAbove(normalizedDomain)) {
       if (this.holdsSecureCookieOver(site, name, preparedDomain, path, now)) {
         return true;
@@ -2238,26 +2267,11 @@ export class CookieJar {
       return null;
     }
 
-    if (host.startsWith('[') && host.endsWith(']')) {
-      const inner = host.slice(1, -1);
-
-      if (!inner) {
-        return null;
-      }
-
-      try {
-        return this.unbracketHost(new URL(`http://[${inner}]/`).hostname);
-      } catch {
-        return null;
-      }
-    }
-
-    if (host.includes(':')) {
-      try {
-        return this.unbracketHost(new URL(`http://[${host}]/`).hostname);
-      } catch {
-        return null;
-      }
+    // Only hex digits, colons and dots between the brackets (see `isIPv6`): text that
+    // closes the bracket itself (`::1]/x@[::2`) or holds a tab the URL parser deletes
+    // (`[::\t1]`) would otherwise parse as another address once spliced into a URL.
+    if (isIPv6(host)) {
+      return canonicalizeBracketedIPv6Content(this.unbracketHost(host)) || null;
     }
 
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
@@ -2404,16 +2418,8 @@ export class CookieJar {
     const req = this.normalizedPreparedHost(requestHost);
     const cook = this.normalizedPreparedHost(cookieDomain);
 
-    if (req === cook) {
-      return true;
-    }
-
-    // Subdomain suffix rules apply to DNS names only, not IP literals.
-    if (req.includes(':') || cook.includes(':')) {
-      return false;
-    }
-
-    return req.endsWith('.' + cook);
+    // Neither is an IP literal (see above), and a normalized name holds no `:`.
+    return req === cook || req.endsWith('.' + cook);
   }
 
   private hostOnlyDomainMatches(
@@ -2462,14 +2468,15 @@ export class CookieJar {
 /**
  * The text after each dot in `name`, nearest first: the names it sits under, which
  * `CookieJar`'s `bucketKeysUnder` files a bucket key under and the Leave Secure Cookies
- * Alone check looks up. `name.endsWith(`.${parent}`)` holds for exactly these.
+ * Alone check looks up. `name.endsWith(`.${parent}`)` holds for exactly these, but for
+ * the empty text after a trailing dot, which names nothing: `com.` has no name above it.
  */
 function namesAbove(name: string): string[] {
   const names: string[] = [];
 
   for (
     let dot = name.indexOf('.');
-    dot !== -1;
+    dot !== -1 && dot !== name.length - 1;
     dot = name.indexOf('.', dot + 1)
   ) {
     names.push(name.slice(dot + 1));

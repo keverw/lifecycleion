@@ -252,23 +252,12 @@ function canonicalizeIPAddressLiteral(host: string): string | null {
     return null;
   }
 
+  // A bracketed host `isIPv6` refuses is no address: what the URL parser reads between
+  // brackets is hex digits, colons and dots alone, which `isIPv6` reads as it does. A
+  // tab, CR or LF inside is refused, not deleted as the URL parser deletes it: `[::\t1]`
+  // is no address, as `validateConfigEntry` says. Regular domain normalization then
+  // refuses the brackets.
   if (isBracketed) {
-    // A tab, CR or LF inside is refused, not deleted as the URL parser deletes it:
-    // `[::\t1]` is no address, as `validateConfigEntry` says.
-    if (/[\t\n\r]/.test(host)) {
-      return null;
-    }
-
-    try {
-      const hostname = new URL(`http://${host}/`).hostname;
-
-      if (isIPv6(hostname)) {
-        return asciiLowercase(hostname.replace(/^\[|\]$/g, ''));
-      }
-    } catch {
-      // Fall through to regular domain normalization, which refuses the brackets.
-    }
-
     return null;
   }
 
@@ -827,8 +816,6 @@ export type CompiledWildcardPattern =
       readonly fixedTail: readonly string[];
       /** {@link fixedTail} joined, for the public-suffix check of a match. */
       readonly tail: string;
-      /** For a `**.` pattern, the normalized name it sits on, which it never matches. */
-      readonly apex: string | undefined;
     };
 
 const GLOBAL_WILDCARD: CompiledWildcardPattern = { kind: 'global' };
@@ -873,12 +860,9 @@ export function compileWildcardPattern(
     kind: 'labels',
     leftLabels: labels.slice(0, fixedTailStart),
     fixedTail,
+    // A leading `**` takes at least one label, so `**.example.com` never matches
+    // `example.com` itself (see `matchesWildcardLabelsInternal`).
     tail: fixedTail.join('.'),
-    // "**." requires at least one label before the remainder, so a domain that
-    // exactly equals the remainder can never match (e.g., "**.example.com" ≠ "example.com").
-    apex: normalizedPattern.startsWith('**.')
-      ? normalizeDomain(normalizedPattern.slice(3))
-      : undefined,
   };
 }
 
@@ -930,10 +914,6 @@ export function matchesCompiledWildcard(
   // Do not wildcard-match IP addresses with non-global patterns; only exact IP matches
   // are supported elsewhere
   if (isIP ?? isIPAddress(normalizedDomain)) {
-    return false;
-  }
-
-  if (compiled.apex !== undefined && normalizedDomain === compiled.apex) {
     return false;
   }
 

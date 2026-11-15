@@ -5310,6 +5310,19 @@ test('a leading-bracket key is overridden', () => {
   expect(buildURL(undefined, '/a?[x]=1&y=2', { x: 2 })).toBe('/a?y=2&x=2');
 });
 
+test('a path pair is split at its first ]= as qs splits it, else at its first =', () => {
+  // `qs.parse('[a=b]=1')` sets `a=b`, `a[b=c]=1` sets `a`, and `x=[1]=2` sets `x=`.
+  expect(buildURL(undefined, '/a?[a=b]=1&y=2', { 'a=b': 2 })).toBe(
+    '/a?y=2&a%3Db=2',
+  );
+  expect(buildURL(undefined, '/a?[a=b]=1', { a: 2 })).toBe('/a?[a=b]=1&a=2');
+  expect(buildURL(undefined, '/a?a[b=c]=1&y=2', { a: 2 })).toBe('/a?y=2&a=2');
+  expect(buildURL(undefined, '/a?x=[1]=2', { x: 3 })).toBe('/a?x=[1]=2&x=3');
+  expect(buildURL(undefined, '/a?x=[1]=2&y=2', { 'x=': 3 })).toBe(
+    '/a?y=2&x%3D=3',
+  );
+});
+
 test('MockAdapter parity with a real server', async () => {
   const adapter = new MockAdapter();
   let seen: MockRequest | undefined;
@@ -8949,6 +8962,57 @@ test('a decode failure after the raw body ended reaches a pending stream setup',
     // Settled when decoding failed, not once the factory was done.
     expect(Date.now() - started).toBeLessThan(1_500);
   } finally {
+    server.close();
+  }
+}, 10_000);
+
+test('a decode failure has the same errorCause shape buffered, streamed and during stream setup', async () => {
+  // A gzip body cut short: decoding fails once the raw body ends.
+  const compressed = zlib.gzipSync('x'.repeat(4096));
+  const truncated = compressed.subarray(0, compressed.length - 8);
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-encoding': 'gzip' });
+    res.end(truncated);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  const sink = (): Writable =>
+    new Writable({
+      write(_chunk, _encoding, done) {
+        done();
+      },
+    });
+  try {
+    const shapes: Array<[string | undefined, boolean]> = [];
+    for (const streamResponse of [
+      undefined,
+      sink,
+      // Still opening its sink when decoding fails.
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        return sink();
+      },
+    ]) {
+      const response = await new NodeAdapter().send({
+        requestURL: url,
+        method: 'GET',
+        headers: {},
+        streamResponse,
+      });
+      expect(response.streamErrorCode).toBe('stream_response_error');
+      shapes.push([
+        response.errorCause?.message,
+        response.errorCause?.cause instanceof Error,
+      ]);
+    }
+
+    expect(shapes).toEqual([
+      ['Response stream error', true],
+      ['Response stream error', true],
+      ['Response stream error', true],
+    ]);
+  } finally {
+    server.closeAllConnections();
     server.close();
   }
 }, 10_000);

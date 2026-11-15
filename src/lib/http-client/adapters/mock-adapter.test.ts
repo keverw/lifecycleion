@@ -3528,3 +3528,221 @@ describe('MockAdapter - Cookie header trimming', () => {
     expect(seen).toEqual({ a: '1', b: value });
   });
 });
+
+describe('MockAdapter - long path parameters', () => {
+  test('a parameter up to 16 KiB matches its route, and one longer falls to the wildcard', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/u/:id', (req) => ({
+      status: 200,
+      body: { length: req.params.id.length },
+    }));
+    adapter.routes.get('/*', () => ({ status: 404, body: { wildcard: true } }));
+
+    for (const length of [101, 2000, 16 * 1024]) {
+      const response = await adapter.send(
+        makeAdapterRequest({ requestURL: `/u/${'a'.repeat(length)}` }),
+      );
+      expect(response.status).toBe(200);
+      expect(
+        JSON.parse(new TextDecoder().decode(response.body as Uint8Array)),
+      ).toEqual({
+        length,
+      });
+    }
+
+    const tooLong = await adapter.send(
+      makeAdapterRequest({ requestURL: `/u/${'a'.repeat(16 * 1024 + 1)}` }),
+    );
+    expect(tooLong.status).toBe(404);
+    expect(
+      JSON.parse(new TextDecoder().decode(tooLong.body as Uint8Array)),
+    ).toEqual({
+      wildcard: true,
+    });
+  });
+});
+
+describe('MockAdapter - a path whose percent-encoding does not decode', () => {
+  test('is answered 400, not routed to a parameter or wildcard route', async () => {
+    const adapter = new MockAdapter();
+    let routeRuns = 0;
+    adapter.routes.get('/u/:id', () => {
+      routeRuns++;
+      return { status: 200 };
+    });
+    adapter.routes.get('/*', () => {
+      routeRuns++;
+      return { status: 404, body: { wildcard: true } };
+    });
+
+    for (const requestURL of ['/%E0%A4%A', '/u/%E0%A4%A', '/u/%ZZ']) {
+      const response = await adapter.send(makeAdapterRequest({ requestURL }));
+      expect(response.status).toBe(400);
+      expect(
+        JSON.parse(new TextDecoder().decode(response.body as Uint8Array)),
+      ).toEqual({
+        message: 'Bad Request',
+      });
+    }
+
+    // A method with no routes at all is answered the same way.
+    const post = await adapter.send(
+      makeAdapterRequest({ requestURL: '/%E0%A4%A', method: 'POST' }),
+    );
+    expect(post.status).toBe(400);
+    expect(routeRuns).toBe(0);
+
+    // A well-formed escape is still routed.
+    const encoded = await adapter.send(
+      makeAdapterRequest({ requestURL: '/u/caf%C3%A9' }),
+    );
+    expect(encoded.status).toBe(200);
+    expect(routeRuns).toBe(1);
+  });
+
+  test('through the client, the 400 is the answer', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/*', () => ({ status: 404 }));
+
+    const response = await makeClient(adapter).get('/%E0%A4%A').send();
+
+    expect(response.status).toBe(400);
+  });
+});
+
+describe('MockAdapter - a HEAD route for a status that carries no body', () => {
+  test.each([204, 205, 304])(
+    'a %i HEAD answer is not labelled from the route body, as its GET is not',
+    async (status) => {
+      const adapter = new MockAdapter();
+      const route = () => ({ status, body: { a: 1 } });
+      adapter.routes.get('/x', route);
+      adapter.routes.head('/x', route);
+
+      const get = await adapter.send(makeAdapterRequest({ requestURL: '/x' }));
+      const head = await adapter.send(
+        makeAdapterRequest({ requestURL: '/x', method: 'HEAD' }),
+      );
+
+      expect(get.headers['content-type']).toBeUndefined();
+      expect(head.headers['content-type']).toBeUndefined();
+    },
+  );
+
+  test('a 200 HEAD answer is still labelled as its GET is', async () => {
+    const adapter = new MockAdapter();
+    const route = () => ({ status: 200, body: { a: 1 } });
+    adapter.routes.get('/x', route);
+    adapter.routes.head('/x', route);
+
+    const get = await adapter.send(makeAdapterRequest({ requestURL: '/x' }));
+    const head = await adapter.send(
+      makeAdapterRequest({ requestURL: '/x', method: 'head' }),
+    );
+
+    expect(get.headers['content-type']).toBe('application/json');
+    expect(head.headers['content-type']).toBe('application/json');
+  });
+});
+
+describe('MockAdapter - a route handler that is no function', () => {
+  test.each([
+    ['undefined', undefined],
+    ['a string', 'handler'],
+    ['an object', { status: 200 }],
+  ] as const)('%s is refused at registration', (_label, handler) => {
+    const adapter = new MockAdapter();
+
+    expect(() =>
+      adapter.routes.get('/nf', handler as unknown as () => { status: 200 }),
+    ).toThrow(/MockAdapter route handler for GET \/nf must be a function/);
+    expect(() =>
+      adapter.routes.on(
+        'lock',
+        '/nf',
+        handler as unknown as () => { status: 200 },
+      ),
+    ).toThrow(/MockAdapter route handler for LOCK \/nf must be a function/);
+  });
+
+  test('a refused handler registers nothing', async () => {
+    const adapter = new MockAdapter();
+    expect(() =>
+      adapter.routes.get('/nf', undefined as unknown as () => { status: 200 }),
+    ).toThrow(TypeError);
+
+    // The path is still free for a real handler.
+    adapter.routes.get('/nf', () => ({ status: 204 }));
+    const response = await adapter.send(
+      makeAdapterRequest({ requestURL: '/nf' }),
+    );
+    expect(response.status).toBe(204);
+  });
+});
+
+describe("MockAdapter - a route's header value that no response carries", () => {
+  test.each([
+    ['an object', { 'X-Bad': {} }, 'x-bad', 'a string or finite number'],
+    ['NaN', { 'x-bad': Number.NaN }, 'x-bad', 'a string or finite number'],
+    [
+      'an object in a list',
+      { 'x-bad': ['ok', {}] },
+      'x-bad',
+      'a string or finite number',
+    ],
+    [
+      'a number as a set-cookie line',
+      { 'Set-Cookie': [1] },
+      'set-cookie',
+      'a string',
+    ],
+  ] as const)(
+    '%s is refused as the route mistake, in the mock’s words',
+    async (_label, headers, name, expected) => {
+      const adapter = new MockAdapter();
+      let runs = 0;
+      adapter.routes.get('/h', () => {
+        runs++;
+        return {
+          status: 200,
+          headers: headers as unknown as Record<string, string>,
+        };
+      });
+
+      const rejection = (await adapter
+        .send(makeAdapterRequest({ requestURL: '/h' }))
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        )) as Error & Record<string, unknown>;
+
+      expect(rejection.message).toBe(
+        `MockAdapter route returned a ${name} header value that is not ${expected}`,
+      );
+      expect(rejection[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(runs).toBe(1);
+    },
+  );
+
+  test('a null or undefined value or item is no header, not a mistake', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/h', () => ({
+      status: 200,
+      headers: {
+        'x-none': null,
+        'x-gone': undefined,
+        'x-some': ['a', null, 'b'],
+        'content-length': 0,
+      } as unknown as Record<string, string>,
+    }));
+
+    const response = await adapter.send(
+      makeAdapterRequest({ requestURL: '/h' }),
+    );
+
+    expect(response.headers['x-none']).toBeUndefined();
+    expect(response.headers['x-gone']).toBeUndefined();
+    expect(response.headers['x-some']).toBe('a, b');
+    expect(response.headers['content-length']).toBe('0');
+  });
+});

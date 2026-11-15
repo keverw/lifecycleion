@@ -2,6 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
 import { NodeAdapter } from './node-adapter';
+import { listenForStreamFailureSettled } from '../internal/stream-failure-settled';
 import type { AdapterRequest, WritableLike } from '../types';
 
 test.each(['string', 'bytes', 'multipart'] as const)(
@@ -202,23 +203,32 @@ test('an unexpected response-task failure aborts the stream and frees the connec
     return originalSet.call(this, key, value);
   });
   let factorySignal: AbortSignal | undefined;
+  // The client is told the failure settled the request before the factory's signal fires,
+  // as for every other failure of a stream the factory started.
+  const order: string[] = [];
+  const request: AdapterRequest = {
+    requestURL: `http://127.0.0.1:${port}/slow`,
+    method: 'GET',
+    headers: {},
+    streamResponse: (_info, context) => {
+      factorySignal = context.signal;
+      context.signal.addEventListener('abort', () => {
+        order.push('factory signal');
+      });
+      return writable;
+    },
+  };
+  listenForStreamFailureSettled(request, () => {
+    order.push('client told');
+  });
   try {
-    const failure = await new NodeAdapter()
-      .send({
-        requestURL: `http://127.0.0.1:${port}/slow`,
-        method: 'GET',
-        headers: {},
-        streamResponse: (_info, context) => {
-          factorySignal = context.signal;
-          return writable;
-        },
-      })
-      .then(
-        () => undefined,
-        (error: unknown) => error,
-      );
+    const failure = await new NodeAdapter().send(request).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
     expect(failure).toBe(injected);
     expect(factorySignal?.aborted).toBe(true);
+    expect(order).toEqual(['client told', 'factory signal']);
     const deadline = Date.now() + 2000;
     while (closedResponses === 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -510,7 +520,7 @@ test('a response-task recovery that answers and then throws reports only what we
     destroy: () => {},
   };
   const injected = new Error('listener registry refused the writable');
-  const teardownFailure = new Error('destroyed getter refused');
+  const teardownFailure = new Error('stream signal refused');
   let isTeardownRefusing = false;
   const originalSet = Object.getOwnPropertyDescriptor(WeakMap.prototype, 'set')
     ?.value as (
@@ -529,37 +539,17 @@ test('a response-task recovery that answers and then throws reports only what we
     }
     return originalSet.call(this, key, value);
   });
-  const originalRequest = http.request.bind(http) as (
-    ...args: unknown[]
-  ) => http.ClientRequest;
-  const requestSpy = spyOn(http, 'request').mockImplementation(
-    (...args: unknown[]) => {
-      const created = originalRequest(...args);
-      let descriptor: PropertyDescriptor | undefined;
-      for (
-        let proto = Object.getPrototypeOf(created) as object | null;
-        proto && !descriptor?.get;
-        proto = Object.getPrototypeOf(proto) as object | null
-      ) {
-        descriptor = Object.getOwnPropertyDescriptor(proto, 'destroyed');
+  // The teardown fires the factory's stream signal, refused here.
+  const originalAbort = Object.getOwnPropertyDescriptor(
+    AbortController.prototype,
+    'abort',
+  )?.value as (this: AbortController, reason?: unknown) => void;
+  const abortSpy = spyOn(AbortController.prototype, 'abort').mockImplementation(
+    function (this: AbortController, reason?: unknown) {
+      if (isTeardownRefusing) {
+        throw teardownFailure;
       }
-      const readDestroyed = (target: http.ClientRequest): boolean =>
-        Boolean(descriptor?.get?.call(target));
-      Object.defineProperty(created, 'destroyed', {
-        configurable: true,
-        get(this: http.ClientRequest) {
-          if (isTeardownRefusing) {
-            throw teardownFailure;
-          }
-          return readDestroyed(this);
-        },
-        // Node assigns `destroyed` when the socket closes, which can be after this test
-        // ends: a getter alone would make that assignment throw out of its close listener.
-        set(this: http.ClientRequest, isDestroyed: boolean) {
-          descriptor?.set?.call(this, isDestroyed);
-        },
-      });
-      return created;
+      originalAbort.call(this, reason);
     },
   );
   const reports: unknown[] = [];
@@ -588,7 +578,7 @@ test('a response-task recovery that answers and then throws reports only what we
     isTeardownRefusing = false;
     globalThis.removeEventListener('error', onError);
     setSpy.mockRestore();
-    requestSpy.mockRestore();
+    abortSpy.mockRestore();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
