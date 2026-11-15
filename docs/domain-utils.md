@@ -238,7 +238,7 @@ Allowlist entries are trimmed of spaces, tabs, CRs and LFs, and blank ones are i
 - Exact origin entries may include a port: `https://example.com:8443`
 - Exact origin and bare-domain entries are normalized before comparison, including canonical IP literal handling
 - Exact origin or bare-domain entries that equal a public suffix such as `com` or `co.uk` are never matched - for a special scheme's origin; an opaque host (`foo://com`) is not a domain, and matches as written (see `normalizeOrigin`). Internal pseudo-TLDs such as `localhost`, `local`, `test`, and `internal` are handled separately and may be valid exact entries
-- Bare-domain entries such as `example.com` match an `http` or `https` origin of that hostname, either scheme and any port, as a host wildcard does. An origin of another scheme (`ftp://example.com`, `myapp://example.com`) needs an exact origin entry
+- Bare-domain entries such as `example.com` match an `http` or `https` origin of that hostname, either scheme and any port, as a host wildcard does. An origin of another scheme (`ftp://example.com`, `myapp://example.com`) needs an exact origin entry: an iOS Capacitor app sends `capacitor://localhost`, so `['localhost', 'capacitor://localhost']` allows both it and `http(s)://localhost` on any port
 - Wildcard entries may be:
   - host-only patterns such as `*.example.com` or `**.example.com`
   - protocol wildcards such as `https://*`
