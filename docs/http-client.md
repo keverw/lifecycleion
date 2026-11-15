@@ -1140,6 +1140,8 @@ const client = new HTTPClient({
 
 **Platform support:** Redirect following requires an adapter that can intercept 3xx responses before the browser handles them. `NodeAdapter` and `FetchAdapter` in server runtimes (Node.js, Bun) fully support it. `MockAdapter` supports it on any platform since responses are fully controlled. Browsers follow redirects transparently at the network layer, so `FetchAdapter` in a browser and `XHRAdapter` cannot intercept or limit them. The constructor throws if you combine `followRedirects: true` with these adapters.
 
+A `Location` with no fragment of its own takes the request's, as fetch's redirect does: `/start#sec` redirected to `/next` is followed and reported as `/next#sec`, in `requestURL`, `redirectHistory` and `detectedRedirectURL`, while `Location: /next#other` keeps `#other`. The fragment is never sent. A browser that follows a redirect itself for `XHRAdapter` reports the URL it landed on, which has no fragment.
+
 ### Method Rewriting Rules
 
 | Status   | Original method               | Redirect method |

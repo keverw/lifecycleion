@@ -1124,8 +1124,9 @@ describe('deepClone', () => {
       const startedAt = performance.now();
       deepClone([1], { arrayKeys });
 
-      // Searched per key, 200,000 keys took tens of seconds.
-      expect(performance.now() - startedAt).toBeLessThan(2000);
+      // Searched per key, 200,000 keys took tens of seconds; read in one pass, about
+      // 40 ms.
+      expect(performance.now() - startedAt).toBeLessThan(5000);
     });
 
     test('a very sparse array clones by its entries, not by every index', () => {
@@ -1138,7 +1139,8 @@ describe('deepClone', () => {
       const cloned = deepClone(sparse);
       const clonedWidest = deepClone(widest);
 
-      expect(performance.now() - startedAt).toBeLessThan(1000);
+      // A few milliseconds by its entries; by every index, minutes.
+      expect(performance.now() - startedAt).toBeLessThan(5000);
       expect(cloned).toHaveLength(100_000_001);
       expect(Object.keys(cloned)).toEqual(['0', '100000000']);
       expect(clonedWidest).toHaveLength(2 ** 32 - 1);

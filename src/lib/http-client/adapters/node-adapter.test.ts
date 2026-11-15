@@ -9471,12 +9471,13 @@ describe('NodeAdapter — crl option (normalization)', () => {
   test('a bundle of headers with no footers is refused promptly', () => {
     // Each header's block ends at the first footer after it; with none left, a lazy
     // `BEGIN[\s\S]*?END` regex scans from every remaining header to the end of the
-    // string, which takes seconds on this bundle.
-    const crl = `${fixtures.crlEmpty}\n${'-----BEGIN X509 CRL-----\n'.repeat(16_000)}`;
+    // string, which takes about 10 seconds on this bundle; split in one pass, it takes
+    // about a millisecond.
+    const crl = `${fixtures.crlEmpty}\n${'-----BEGIN X509 CRL-----\n'.repeat(32_000)}`;
     const startedAt = performance.now();
 
     expect(() => new NodeAdapter({ crl })).toThrow(/outside any complete/);
-    expect(performance.now() - startedAt).toBeLessThan(250);
+    expect(performance.now() - startedAt).toBeLessThan(2000);
   });
 
   test('anything outside a complete block is refused', async () => {

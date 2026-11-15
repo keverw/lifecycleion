@@ -17,6 +17,7 @@ import { copyArrayValue } from '../internal/array-copy';
 import { isFormData, isMethodlessFormData } from './internal/form-entries';
 import {
   MAX_PARAM_DEPTH,
+  exceedsParamDepth,
   PARAM_DEPTH_EXCEEDED_MESSAGE,
 } from './internal/param-check';
 import { readUnknownMember } from '../internal/read-member';
@@ -135,7 +136,7 @@ function snapshotParamValue(
 
   const source = value as Record<string, unknown>;
   const keys = Object.keys(source);
-  if (keys.length > 0 && depth + 1 > MAX_PARAM_DEPTH) {
+  if (exceedsParamDepth(keys.length, depth)) {
     throw new RangeError(PARAM_DEPTH_EXCEEDED_MESSAGE);
   }
 
@@ -1417,8 +1418,34 @@ export function locationText(value: string): string {
 }
 
 /**
+ * A redirect's `Location` resolved against the URL that was answered, carrying that URL's
+ * fragment over when `location` has none of its own, as the Fetch Standard's location
+ * URL does: `/next` answered for `/start#sec` points to `/next#sec`. A `Location` with a
+ * fragment of its own, even an empty one (`/next#`), keeps it. With no `base`, only an
+ * absolute `location` resolves. Throws as `new URL` does when it does not resolve.
+ */
+export function resolveRedirectLocation(
+  location: string,
+  base: string | URL | undefined,
+): URL {
+  const target = new URL(location, base);
+  const baseHref = base === undefined ? '' : new URL(base).href;
+  const fragmentAt = baseHref.indexOf('#');
+
+  // A serialized URL has a `#` only before its fragment, so this finds a fragment set
+  // even when it is empty, where `hash` reads `''` for both.
+  if (fragmentAt !== -1 && !target.href.includes('#')) {
+    // The setter drops the leading `#`, so a bare `#` gives an empty fragment.
+    target.hash = baseHref.slice(fragmentAt);
+  }
+
+  return target;
+}
+
+/**
  * Where a redirect's `Location` points, as `detectedRedirectURL` reports it: resolved
- * against the URL that was answered, without that URL's userinfo. A relative `Location`
+ * against the URL that was answered, taking its fragment when the `Location` has none
+ * ({@link resolveRedirectLocation}), without that URL's userinfo. A relative `Location`
  * names no credentials, so the caller's own are not copied into a field that reports the
  * server's target. Userinfo the server wrote into the `Location` itself is kept only on a
  * target of the request's own origin, and only when it is not the request URL's own
@@ -1445,7 +1472,7 @@ export function detectedRedirectTarget(
 
   let target: string;
   try {
-    target = new URL(locationText(location), base).href;
+    target = resolveRedirectLocation(locationText(location), base).href;
   } catch {
     return undefined;
   }

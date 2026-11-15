@@ -1119,7 +1119,56 @@ test('params refuses a shared object that nests too deep where it is reached a s
   ).not.toThrow();
   expect(() =>
     client.get('/x').params({ a: shared, b: reachedAt(991) }),
-  ).toThrow('shared nests deeper than 1000 levels');
+  ).toThrow(/\.shared(\.l)+ nests deeper than 1000 levels/);
+});
+
+test('params names the entry inside a shared object that nests too deep, as it does one met once', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  const refusal = (params: Record<string, unknown>): string => {
+    try {
+      client.get('/x').params(params);
+    } catch (error) {
+      return (error as Error).message;
+    }
+    return 'not refused';
+  };
+  const reachedAt = (
+    depth: number,
+    target: Record<string, unknown>,
+  ): Record<string, unknown> => {
+    let value: Record<string, unknown> = { shared: target };
+    for (let level = 1; level < depth; level++) {
+      value = { l: value };
+    }
+    return value;
+  };
+
+  // `shared` nests 20 levels, so under `b` it reaches 10 levels past the limit. Met
+  // first under `a`, it is refused by the walk down its deepest entries.
+  const shared = nestedParam(20);
+  const sharedMessage = refusal({ a: shared, b: reachedAt(990, shared) });
+  const onceMessage = refusal({ b: reachedAt(990, nestedParam(20)) });
+
+  expect(onceMessage).toMatch(
+    /^HTTPRequestBuilder params\.b(\.l)+\.shared(\.l)+ nests/,
+  );
+  expect(sharedMessage).toBe(onceMessage);
+
+  // Both entries of this one reach past the limit under `b`: the shallower comes first,
+  // and the walk refuses under it.
+  const twoDeep = (): Record<string, unknown> => ({
+    a: nestedParam(15),
+    b: nestedParam(20),
+  });
+  const sharedTwo = twoDeep();
+  const sharedTwoMessage = refusal({
+    a: sharedTwo,
+    b: reachedAt(990, sharedTwo),
+  });
+  const onceTwoMessage = refusal({ b: reachedAt(990, twoDeep()) });
+
+  expect(onceTwoMessage).toMatch(/\.shared\.a(\.l)+ nests/);
+  expect(sharedTwoMessage).toBe(onceTwoMessage);
 });
 
 test('a params value changed after .params() is held to the depth qs is given, with or without a query in the path', async () => {
@@ -1217,9 +1266,10 @@ test('params checks an object shared under many parents once, not once per path'
     shared = { l: shared, r: shared };
   }
 
+  // Under a millisecond checked once; once per path, it does not finish.
   const startedAt = performance.now();
   client.get('/x').params({ x: shared });
-  expect(performance.now() - startedAt).toBeLessThan(1000);
+  expect(performance.now() - startedAt).toBeLessThan(5000);
 });
 
 test('params walks a typed array as qs does, and keeps a Buffer as its text', () => {

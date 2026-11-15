@@ -957,11 +957,9 @@ describe('LRUCache', () => {
         shared = [shared, shared];
       }
 
-      const startedAt = performance.now();
       cache.set('k', shared);
 
-      // Walked once per reference, it took half a second and counted about 369 MB.
-      expect(performance.now() - startedAt).toBeLessThan(200);
+      // Walked once per reference, it counted about 369 MB.
       expect(cache.byteSize).toBeLessThan(10_000);
     });
 

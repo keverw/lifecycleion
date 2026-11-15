@@ -18,7 +18,7 @@ import {
 import { CookieJar } from './cookie-jar';
 import { markResponseStreamAbort } from './internal/adapter-error';
 import { startTestServer, type TestServer } from './test-helpers/test-server';
-import { scalarHeader } from './utils';
+import { derivedRedirectFields, scalarHeader } from './utils';
 import {
   DEFAULT_MAX_REDIRECTS,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
@@ -4908,6 +4908,69 @@ describe('HTTPClient — timeout resolution', () => {
 });
 
 describe('HTTPClient — redirect', () => {
+  // As fetch's location URL: a `Location` with no fragment takes the request's, and one
+  // with its own, even an empty one, keeps it.
+  test.each([
+    ['/r2', 'http://example.test/r2#sec'],
+    ['/r2#other', 'http://example.test/r2#other'],
+    ['/r2#', 'http://example.test/r2#'],
+    ['http://other.test/r2', 'http://other.test/r2#sec'],
+  ])(
+    'a followed Location of %s answered for /r1#sec goes to %s',
+    async (location, expected) => {
+      const sentURLs: string[] = [];
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (request: AdapterRequest): Promise<AdapterResponse> => {
+          sentURLs.push(request.requestURL);
+          const answer: AdapterResponse =
+            sentURLs.length === 1
+              ? { status: 302, headers: { location }, body: null }
+              : { status: 200, headers: {}, body: null };
+          return Promise.resolve(answer);
+        },
+      };
+
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+      });
+
+      const response = await client.get('/r1#sec').send();
+
+      expect(response.status).toBe(200);
+      expect(sentURLs).toEqual(['http://example.test/r1#sec', expected]);
+      expect(response.requestURL).toBe(expected);
+      expect(response.redirectHistory).toEqual([expected]);
+    },
+  );
+
+  test('an unfollowed redirect reports the Location with the request fragment', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          ...derivedRedirectFields(request.requestURL, 302, {
+            location: '/r2',
+          }),
+          headers: { location: '/r2' },
+          body: null,
+        }),
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: false,
+    });
+
+    const response = await client.get('/r1#sec').send();
+
+    expect(response.detectedRedirectURL).toBe('http://example.test/r2#sec');
+  });
+
   test('passes through detectedRedirectURL for relative redirect targets', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'node',

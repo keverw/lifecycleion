@@ -75,6 +75,7 @@ import {
   reportedRedirectTarget,
   derivedRedirectFields,
   detectedRedirectTarget,
+  resolveRedirectLocation,
   locationHeader,
   locationText,
   type AdapterRedirectFields,
@@ -1627,7 +1628,8 @@ export class BaseHTTPClient {
 
             // Resolved against the URL this hop was sent to, which is always an absolute
             // http(s) URL here: the initial, retry and redirect URLs are all refused before
-            // dispatch otherwise. A `Location` that does not resolve against it is kept as
+            // dispatch otherwise. It takes that URL's fragment when it has none of its own
+            // (`resolveRedirectLocation`). A `Location` that does not resolve is kept as
             // the raw string, recorded and handed to the interceptors below, and refused
             // as unsupported unless one rewrites it.
             let redirectURL: string;
@@ -1635,7 +1637,7 @@ export class BaseHTTPClient {
             let parsedRedirectURL: URL | undefined;
 
             try {
-              parsedRedirectURL = new URL(
+              parsedRedirectURL = resolveRedirectLocation(
                 location,
                 attemptResult.sentRequest.requestURL,
               );

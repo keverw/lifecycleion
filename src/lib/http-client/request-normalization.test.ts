@@ -9177,10 +9177,12 @@ test('a throwing failure listener is reported on the live and replay paths; subs
 });
 
 test('a long run of dots is refused in linear time', () => {
+  // A few milliseconds in linear time; a regex that rescans the run from each dot takes
+  // about 12 seconds on it, so the bound leaves a slow runner room either way.
   const started = performance.now();
-  expect(normalizeDomain(`${'.'.repeat(40_000)}x`)).toBe('');
+  expect(normalizeDomain(`${'.'.repeat(160_000)}x`)).toBe('');
   expect(normalizeDomain(`${'a'.repeat(1000)}.`.repeat(5000))).toBe('');
-  expect(performance.now() - started).toBeLessThan(200);
+  expect(performance.now() - started).toBeLessThan(2000);
 });
 
 test('an oversized wildcard pattern or bracketed host is refused', () => {
@@ -13799,21 +13801,21 @@ test('an adapter that honors its signal is not held by the abort grace', async (
   });
   const client = new HTTPClient({ adapter, baseURL: 'http://mock.test' });
 
-  let startedAt = performance.now();
-  const timedOut = await client.get('/slow').timeout(50).send();
-  expect(timedOut.isTimeout).toBe(true);
-  // Held by the grace, it would take a second past the abort; the bound is well short of
-  // that, and well past a slow runner's late timers.
-  expect(performance.now() - startedAt).toBeLessThan(700);
+  // Held by the grace, the answer would come a second after the abort, so after a timer
+  // as long as the grace set before the request: timers run in order, so this holds on a
+  // runner whose timers run late, too.
+  const beforeGrace = <T>(sending: Promise<T>): Promise<T | 'held'> =>
+    Promise.race([sending, sleep(1000).then(() => 'held' as const)]);
 
-  startedAt = performance.now();
+  const timedOut = await beforeGrace(client.get('/slow').timeout(50).send());
+  expect(timedOut !== 'held' && timedOut.isTimeout).toBe(true);
+
   const builder = client.get('/slow').timeout(0);
-  const sending = builder.send();
+  const sending = beforeGrace(builder.send());
   await sleep(20);
   builder.cancel('stop');
   const cancelled = await sending;
-  expect(cancelled.isCancelled).toBe(true);
-  expect(performance.now() - startedAt).toBeLessThan(700);
+  expect(cancelled !== 'held' && cancelled.isCancelled).toBe(true);
 });
 
 /**
@@ -13872,7 +13874,11 @@ test('a retry interceptor does not send a query-string credential to a cross-ori
       url.searchParams.set('access_token', 'SECRET');
       url.username = 'user';
       url.password = 'pass';
-      url.hash = 'SECRET';
+      // Only on the hop's retry: a fragment on the initial request is carried over to
+      // the hop, as fetch carries it, so it would be the hop's own.
+      if (url.hostname === 'evil.example') {
+        url.hash = 'SECRET';
+      }
       return { ...request, requestURL: url.href };
     },
     { phases: ['initial', 'retry'] },

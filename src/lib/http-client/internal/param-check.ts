@@ -7,6 +7,16 @@
  */
 export const MAX_PARAM_DEPTH = 1000;
 
+/**
+ * Whether an object at `depth` with `keyCount` entries nests past
+ * {@link MAX_PARAM_DEPTH}: its entries are a level below it, and `qs` refuses one only
+ * when there is an entry to put there. The rule both {@link assertSerializableParams} and `buildURL`'s snapshot
+ * hold a value to, so one passes both or neither.
+ */
+export function exceedsParamDepth(keyCount: number, depth: number): boolean {
+  return keyCount > 0 && depth + 1 > MAX_PARAM_DEPTH;
+}
+
 /** `qs`'s refusal of a value deeper than {@link MAX_PARAM_DEPTH}, in its own words. */
 export const PARAM_DEPTH_EXCEEDED_MESSAGE = `Input depth exceeded depth option of ${String(MAX_PARAM_DEPTH)}`;
 
@@ -92,7 +102,7 @@ function checkParamValue(
   const checkedHeight = walk.heights.get(value);
   if (checkedHeight !== undefined) {
     if (depth + checkedHeight > MAX_PARAM_DEPTH) {
-      throw depthRefusal(walk);
+      throw sharedDepthRefusal(value, depth, walk);
     }
     return checkedHeight;
   }
@@ -102,7 +112,7 @@ function checkParamValue(
   }
 
   const keys = Object.keys(value);
-  if (keys.length > 0 && depth + 1 > MAX_PARAM_DEPTH) {
+  if (exceedsParamDepth(keys.length, depth)) {
     throw depthRefusal(walk);
   }
 
@@ -119,6 +129,61 @@ function checkParamValue(
   walk.ancestors.delete(value);
   walk.heights.set(value, height);
   return height;
+}
+
+/**
+ * The depth refusal for `value`, an object already checked elsewhere and met again at
+ * `depth`, where its entries reach past {@link MAX_PARAM_DEPTH}: it follows, at each
+ * level, the first entry whose own entries reach past it, down to the one that nests
+ * too deep, so the refusal names the entry the walk would had it not met `value` before.
+ */
+function sharedDepthRefusal(
+  value: object,
+  depth: number,
+  walk: ParamWalk,
+): TypeError {
+  let current = value;
+
+  for (
+    let currentDepth = depth;
+    currentDepth < MAX_PARAM_DEPTH;
+    currentDepth++
+  ) {
+    const deeper = firstTooDeepEntry(current, currentDepth, walk);
+    if (deeper === undefined) {
+      // A `Proxy` that now answers otherwise: refused where the chain ends.
+      break;
+    }
+
+    walk.path.push(deeper.key);
+    current = deeper.value;
+  }
+
+  return depthRefusal(walk);
+}
+
+/**
+ * The first entry of `holder`, an object at `depth`, whose own entries reach past
+ * {@link MAX_PARAM_DEPTH}, by the heights the walk recorded.
+ */
+function firstTooDeepEntry(
+  holder: object,
+  depth: number,
+  walk: ParamWalk,
+): { key: string; value: object } | undefined {
+  for (const key of Object.keys(holder)) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(holder, key);
+    const value: unknown = descriptor?.value;
+    if (
+      (typeof value === 'object' || typeof value === 'function') &&
+      value !== null &&
+      depth + 1 + (walk.heights.get(value) ?? 0) > MAX_PARAM_DEPTH
+    ) {
+      return { key, value };
+    }
+  }
+
+  return undefined;
 }
 
 function depthRefusal(walk: ParamWalk): TypeError {
