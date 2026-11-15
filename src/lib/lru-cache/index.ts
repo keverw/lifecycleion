@@ -26,6 +26,13 @@ const CHECK_GAP = 128;
  */
 const MAX_SIZED_ARRAY_DEPTH = 1000;
 
+/**
+ * The default size estimate of what cannot be sized: a circular or too deeply nested
+ * array, one whose length or an entry cannot be read, and an object `JSON.stringify`
+ * throws on.
+ */
+const UNSIZED_VALUE_BYTES = 1000;
+
 /** The arrays one default size estimate has met (see `calculateSize`). */
 interface ArraySizing {
   /** Arrays being sized now, so one met inside itself is a cycle. */
@@ -503,7 +510,7 @@ export class LRUCache<K, V> {
       };
 
       if (sizing.visiting.has(value)) {
-        return 1000; // Fallback size for circular arrays
+        return UNSIZED_VALUE_BYTES; // Circular
       }
 
       // Met again - shared between two entries, say - it is one array, already counted:
@@ -514,7 +521,7 @@ export class LRUCache<K, V> {
       }
 
       if (depth >= MAX_SIZED_ARRAY_DEPTH) {
-        return 1000;
+        return UNSIZED_VALUE_BYTES;
       }
 
       sizing.visiting.add(value);
@@ -536,7 +543,7 @@ export class LRUCache<K, V> {
         try {
           length = readArrayLength(items, 'LRUCache value');
         } catch {
-          return 1000;
+          return UNSIZED_VALUE_BYTES;
         }
 
         let estimatedSize = 40;
@@ -591,7 +598,7 @@ export class LRUCache<K, V> {
               isOwn = holdsOwnIndex(items, index);
             }
           } catch {
-            return estimatedSize + 1000;
+            return estimatedSize + UNSIZED_VALUE_BYTES;
           }
 
           if (!isOwn) {
@@ -617,7 +624,7 @@ export class LRUCache<K, V> {
                     : 1,
                 );
               } catch {
-                return estimatedSize + 1000;
+                return estimatedSize + UNSIZED_VALUE_BYTES;
               }
 
               if (checkpoint !== undefined) {
@@ -632,18 +639,7 @@ export class LRUCache<K, V> {
 
           // Counted as held whether or not its read throws, as `deepClone` counts one.
           entries++;
-          let entry: unknown;
-
-          try {
-            entry = items[index];
-          } catch {
-            estimatedSize += 1000;
-            continue;
-          }
-
-          estimatedSize +=
-            primitiveSize(entry) ??
-            this.calculateSize(entry, sizing, depth + 1);
+          estimatedSize += this.entrySize(items, index, sizing, depth);
         }
 
         if (sparseFrom === undefined) {
@@ -656,7 +652,7 @@ export class LRUCache<K, V> {
         try {
           tail = indicesFrom(items, sparseFrom, length);
         } catch {
-          return estimatedSize + 1000;
+          return estimatedSize + UNSIZED_VALUE_BYTES;
         }
 
         for (const index of tail) {
@@ -667,25 +663,14 @@ export class LRUCache<K, V> {
           try {
             isOwn = Object.hasOwn(items, index);
           } catch {
-            return estimatedSize + 1000;
+            return estimatedSize + UNSIZED_VALUE_BYTES;
           }
 
           if (!isOwn) {
             continue;
           }
 
-          let entry: unknown;
-
-          try {
-            entry = items[index];
-          } catch {
-            estimatedSize += 1000;
-            continue;
-          }
-
-          estimatedSize +=
-            primitiveSize(entry) ??
-            this.calculateSize(entry, sizing, depth + 1);
+          estimatedSize += this.entrySize(items, index, sizing, depth);
         }
 
         return estimatedSize;
@@ -700,11 +685,32 @@ export class LRUCache<K, V> {
         return Math.max(jsonSize, 40); // At least 40 bytes for object overhead
       } catch {
         // Ignore JSON serialization errors for non-serializable objects
-        return 1000; // Fallback size for non-serializable objects
+        return UNSIZED_VALUE_BYTES; // Not serializable
       }
     }
 
     return 100; // Default fallback size
+  }
+
+  /**
+   * The default size estimate of `items[index]`, an entry of an array sized at `depth`:
+   * {@link UNSIZED_VALUE_BYTES} when its read throws.
+   */
+  private entrySize(
+    items: unknown[],
+    index: number,
+    sizing: ArraySizing,
+    depth: number,
+  ): number {
+    let entry: unknown;
+
+    try {
+      entry = items[index];
+    } catch {
+      return UNSIZED_VALUE_BYTES;
+    }
+
+    return primitiveSize(entry) ?? this.calculateSize(entry, sizing, depth + 1);
   }
 
   /**

@@ -1105,11 +1105,10 @@ function hasXMLHttpRequestGlobal(): boolean {
  * target does - a path (`/`, `./`, `../`), a query (`?`), a fragment (`#`) or
  * `scheme://` - so `/a, /b` sent twice is `/a`. A single value with a raw space
  * (`/files/Smith, John.pdf`) is kept whole. A single value with an unencoded `, /`,
- * `, ./`, `, ../`, `, ?`, `, #` or `, scheme://` in it (`/r?to=/a, /b`) is cut there too,
- * as is
- * one that is a target written twice (`a, a`): fetch and XHR join repeats into the same
- * text, so the two cannot be told apart. A server percent-encodes the space in such a
- * value.
+ * `, ./`, `, ../`, `, ?`, `, #` or `, scheme://` in it (`/r?to=/a, /b`) is cut there
+ * too, as is one that is a target written twice (`a, a`): fetch and XHR join repeats
+ * into the same text, so the two cannot be told apart. A server percent-encodes the
+ * space in such a value.
  */
 export function firstJoinedLocation(value: string): string {
   // The repeated unit is split as any value is: `/a, /b` sent twice is `/a`.
@@ -1124,7 +1123,7 @@ export function firstJoinedLocation(value: string): string {
 /**
  * The non-empty target `value` is two or more copies of, joined by `, `, or `undefined`.
  * Only a length that divides the value evenly is tried, each compared in place, copy by
- * copy, so a long header costs a few passes over it, not one per `, ` in it.
+ * copy, so a long header costs one pass over it per such length, not one per `, ` in it.
  */
 function repeatedTarget(value: string): string | undefined {
   const joined = `${value}, `;
@@ -1428,8 +1427,9 @@ export function resolveRedirectLocation(
   location: string,
   base: string | URL | undefined,
 ): URL {
-  const target = new URL(location, base);
-  const baseHref = base === undefined ? '' : new URL(base).href;
+  const baseURL = typeof base === 'string' ? new URL(base) : base;
+  const target = new URL(location, baseURL);
+  const baseHref = baseURL?.href ?? '';
   const fragmentAt = baseHref.indexOf('#');
 
   // A serialized URL has a `#` only before its fragment, so this finds a fragment set

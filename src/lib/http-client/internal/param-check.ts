@@ -10,11 +10,19 @@ export const MAX_PARAM_DEPTH = 1000;
 /**
  * Whether an object at `depth` with `keyCount` entries nests past
  * {@link MAX_PARAM_DEPTH}: its entries are a level below it, and `qs` refuses one only
- * when there is an entry to put there. The rule both {@link assertSerializableParams} and `buildURL`'s snapshot
- * hold a value to, so one passes both or neither.
+ * when there is an entry to put there. The rule both {@link assertSerializableParams} and
+ * `buildURL`'s snapshot hold a value to, so one passes both or neither.
  */
 export function exceedsParamDepth(keyCount: number, depth: number): boolean {
-  return keyCount > 0 && depth + 1 > MAX_PARAM_DEPTH;
+  return keyCount > 0 && reachesPastParamDepth(depth, 1);
+}
+
+/**
+ * Whether an object at `depth` whose deepest entry is `height` levels below it nests
+ * past {@link MAX_PARAM_DEPTH}.
+ */
+function reachesPastParamDepth(depth: number, height: number): boolean {
+  return depth + height > MAX_PARAM_DEPTH;
 }
 
 /** `qs`'s refusal of a value deeper than {@link MAX_PARAM_DEPTH}, in its own words. */
@@ -101,7 +109,7 @@ function checkParamValue(
 
   const checkedHeight = walk.heights.get(value);
   if (checkedHeight !== undefined) {
-    if (depth + checkedHeight > MAX_PARAM_DEPTH) {
+    if (reachesPastParamDepth(depth, checkedHeight)) {
       throw sharedDepthRefusal(value, depth, walk);
     }
     return checkedHeight;
@@ -177,7 +185,7 @@ function firstTooDeepEntry(
     if (
       (typeof value === 'object' || typeof value === 'function') &&
       value !== null &&
-      depth + 1 + (walk.heights.get(value) ?? 0) > MAX_PARAM_DEPTH
+      reachesPastParamDepth(depth + 1, walk.heights.get(value) ?? 0)
     ) {
       return { key, value };
     }
@@ -195,8 +203,51 @@ function depthRefusal(walk: ParamWalk): TypeError {
 
 function paramRefusal(walk: ParamWalk, problem: string): TypeError {
   return new TypeError(
-    `HTTPRequestBuilder params.${walk.path.join('.')} ${problem}, so it cannot be put in a query`,
+    `HTTPRequestBuilder params.${reportedParamPath(walk.path)} ${problem}, so it cannot be put in a query`,
   );
+}
+
+/** How many of a refused entry's leading keys its message names. */
+const REPORTED_LEADING_KEYS = 5;
+
+/** How many of a refused entry's trailing keys its message names, its own included. */
+const REPORTED_TRAILING_KEYS = 20;
+
+/** How many UTF-16 code units of each key a refusal names. */
+const REPORTED_KEY_LENGTH = 64;
+
+/**
+ * A refused entry's keys as its message names them, joined with `.`: a path that would
+ * leave out two or more keys by its first and last keys, with a count of those between,
+ * and a long key by its start and `...`, not splitting a surrogate pair, so the message
+ * stays short whatever the keys are.
+ */
+function reportedParamPath(path: readonly string[]): string {
+  const shortened = (key: string): string => {
+    if (key.length <= REPORTED_KEY_LENGTH) {
+      return key;
+    }
+
+    const lastUnit = key.charCodeAt(REPORTED_KEY_LENGTH - 1);
+    const end =
+      lastUnit >= 0xd800 && lastUnit <= 0xdbff
+        ? REPORTED_KEY_LENGTH - 1
+        : REPORTED_KEY_LENGTH;
+    return `${key.slice(0, end)}...`;
+  };
+  const omitted = path.length - REPORTED_LEADING_KEYS - REPORTED_TRAILING_KEYS;
+
+  if (omitted < 2) {
+    return path.map(shortened).join('.');
+  }
+
+  return [
+    ...path.slice(0, REPORTED_LEADING_KEYS),
+    `[${String(omitted)} more keys]`,
+    ...path.slice(-REPORTED_TRAILING_KEYS),
+  ]
+    .map(shortened)
+    .join('.');
 }
 
 /** Whether `value` is a `Buffer`, which `qs` sends as its text rather than walking it. */

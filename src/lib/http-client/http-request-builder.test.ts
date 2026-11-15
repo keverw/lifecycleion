@@ -1086,7 +1086,7 @@ test('params refuses a value nested deeper than qs is given, naming the key, wit
 
   // `a` is at depth 0, so its deepest entry, `v`, is at depth 1000 when it nests 1000.
   expect(() => client.get('/x').params({ a: nestedParam(1001) })).toThrow(
-    /^HTTPRequestBuilder params\.a(\.l)+ nests deeper than 1000 levels/,
+    /^HTTPRequestBuilder params\.a(\.l){4}\.\[976 more keys\](\.l){20} nests deeper than 1000 levels/,
   );
   expect(() => client.get('/x').params({ a: nestedParam(200_000) })).toThrow(
     'nests deeper than 1000 levels',
@@ -1099,6 +1099,65 @@ test('params refuses a value nested deeper than qs is given, naming the key, wit
     .params({ a: nestedParam(1000) })
     .send();
   expect(response.status).toBe(200);
+});
+
+test('a params refusal names a long path by its ends and a long key by its start', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  const longKey = 'k'.repeat(50);
+  let deep: Record<string, unknown> = { v: 1 };
+  for (let level = 0; level < 1000; level++) {
+    deep = { [longKey]: deep };
+  }
+
+  let message = '';
+  try {
+    client.get('/x').params({ a: deep });
+  } catch (error) {
+    message = (error as Error).message;
+  }
+
+  // Joined whole, the path is over 51,000 characters.
+  expect(message).toContain('.[976 more keys].');
+  expect(message.length).toBeLessThan(1500);
+
+  expect(() =>
+    client.get('/x').params({ ['x'.repeat(10_000)]: new Date(Number.NaN) }),
+  ).toThrow(
+    `HTTPRequestBuilder params.${'x'.repeat(64)}... is not a valid Date, so it cannot be put in a query`,
+  );
+});
+
+test('a params refusal shortens a path only to leave out two or more keys, and a key only past 64 code units', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  const refusedPath = (keys: string[]): string => {
+    let value: unknown = new Date(Number.NaN);
+    for (const key of [...keys].reverse()) {
+      value = { [key]: value };
+    }
+    try {
+      client.get('/x').params(value as Record<string, unknown>);
+    } catch (error) {
+      return (error as Error).message
+        .replace('HTTPRequestBuilder params.', '')
+        .replace(' is not a valid Date, so it cannot be put in a query', '');
+    }
+    return 'not refused';
+  };
+  const keys = (count: number): string[] =>
+    Array.from({ length: count }, (_, index) => `k${String(index)}`);
+
+  expect(refusedPath(keys(26))).toBe(keys(26).join('.'));
+  expect(refusedPath(keys(27))).toBe(
+    [...keys(5), '[2 more keys]', ...keys(27).slice(7)].join('.'),
+  );
+
+  const at64 = 'a'.repeat(64);
+  expect(refusedPath(['x', at64, 'y'])).toBe(`x.${at64}.y`);
+  expect(refusedPath(['x', `${at64}b`, 'y'])).toBe(`x.${at64}....y`);
+  // Not cut between the two halves of an emoji.
+  expect(refusedPath([`${'a'.repeat(63)}\u{1F600}`])).toBe(
+    `${'a'.repeat(63)}...`,
+  );
 });
 
 test('params refuses a shared object that nests too deep where it is reached a second time', () => {
@@ -1150,7 +1209,7 @@ test('params names the entry inside a shared object that nests too deep, as it d
   const onceMessage = refusal({ b: reachedAt(990, nestedParam(20)) });
 
   expect(onceMessage).toMatch(
-    /^HTTPRequestBuilder params\.b(\.l)+\.shared(\.l)+ nests/,
+    /^HTTPRequestBuilder params\.b(\.l){4}\.\[\d+ more keys\](\.l)+\.shared(\.l)+ nests/,
   );
   expect(sharedMessage).toBe(onceMessage);
 
