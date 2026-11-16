@@ -974,12 +974,15 @@ describe('RetryRunner', () => {
       };
 
       const runner = new RetryRunner(policy, operation);
+      const runStartedAt = Date.now();
       await runner.run(true);
+      const runElapsedMS = Date.now() - runStartedAt;
 
-      // After completion, should show the duration of the last attempt
+      // After completion, should show the duration of the last attempt, which lies
+      // inside the run measured around it
       const attemptTime = runner.attemptTimeTakenMS;
       expect(attemptTime).toBeGreaterThanOrEqual(20);
-      expect(attemptTime).toBeLessThan(1000); // Room for noisy CI timers
+      expect(attemptTime).toBeLessThanOrEqual(runElapsedMS);
 
       // Should remain stable
       await sleep(10);

@@ -10295,20 +10295,26 @@ describe('LifecycleManager - Signal Integration', () => {
         shutdownOptions: { timeoutMS: 30000 }, // Constructor default
       });
 
-      await lifecycle.registerComponent(
-        new SlowStopComponent(logger, 'slow', 2000),
-      );
+      const component = new SlowStopComponent(logger, 'slow', 2000);
+      let gracefulTimeouts = 0;
+      component.onGracefulStopTimeout = () => {
+        gracefulTimeouts++;
+      };
+      await lifecycle.registerComponent(component);
       await lifecycle.startAllComponents();
 
       const startTime = Date.now();
 
       // Call with short timeout (should timeout before 2000ms)
-      await lifecycle.stopAllComponents({ timeoutMS: 500 });
+      const result = await lifecycle.stopAllComponents({ timeoutMS: 500 });
 
       const duration = Date.now() - startTime;
 
-      // Should have timed out around 500ms, not waited full 2000ms or the class default of 30000ms
-      expect(duration).toBeLessThan(1000);
+      // Timed out by the 500 ms call timeout, not the constructor's 30000 ms, and settled
+      // before the component's own 1000 ms graceful timeout fired
+      expect(result.timedOut).toBe(true);
+      expect(result.reason).toBe('Shutdown timeout exceeded (500ms)');
+      expect(gracefulTimeouts).toBe(0);
       expect(duration).toBeGreaterThanOrEqual(490);
     });
 
@@ -10318,20 +10324,26 @@ describe('LifecycleManager - Signal Integration', () => {
         shutdownOptions: { timeoutMS: 500 }, // Short default
       });
 
-      await lifecycle.registerComponent(
-        new SlowStopComponent(logger, 'slow', 2000),
-      );
+      const component = new SlowStopComponent(logger, 'slow', 2000);
+      let gracefulTimeouts = 0;
+      component.onGracefulStopTimeout = () => {
+        gracefulTimeouts++;
+      };
+      await lifecycle.registerComponent(component);
       await lifecycle.startAllComponents();
 
       const startTime = Date.now();
 
       // Call without timeout parameter - should use constructor's 500ms default
-      await lifecycle.stopAllComponents();
+      const result = await lifecycle.stopAllComponents();
 
       const duration = Date.now() - startTime;
 
-      // Should have timed out around 500ms
-      expect(duration).toBeLessThan(1000);
+      // Timed out by the 500 ms default, before the component's own 1000 ms graceful
+      // timeout fired
+      expect(result.timedOut).toBe(true);
+      expect(result.reason).toBe('Shutdown timeout exceeded (500ms)');
+      expect(gracefulTimeouts).toBe(0);
       expect(duration).toBeGreaterThanOrEqual(490);
     });
 
@@ -10349,13 +10361,15 @@ describe('LifecycleManager - Signal Integration', () => {
       const startTime = Date.now();
 
       // Override with longer timeout - should wait longer than constructor's 100ms
-      await lifecycle.stopAllComponents({ timeoutMS: 600 });
+      const result = await lifecycle.stopAllComponents({ timeoutMS: 600 });
 
       const duration = Date.now() - startTime;
 
-      // Should have waited for component to stop (~300ms), not timed out at 100ms
+      // Should have waited for component to stop (~300ms), not timed out at 100ms, and
+      // returned once it stopped, before the 600 ms timer fired
       expect(duration).toBeGreaterThan(250);
-      expect(duration).toBeLessThan(700);
+      expect(result.success).toBe(true);
+      expect(result.timedOut).toBeUndefined();
 
       // Component should have stopped successfully
       expect(lifecycle.getRunningComponentCount()).toBe(0);
@@ -10394,21 +10408,29 @@ describe('LifecycleManager - Signal Integration', () => {
     test('should return shutdown_timeout code when bulk shutdown times out', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
-      await lifecycle.registerComponent(
-        new SlowStopComponent(logger, 'slow', 5000),
-      );
+      const component = new SlowStopComponent(logger, 'slow', 5000);
+      let gracefulTimeouts = 0;
+      component.onGracefulStopTimeout = () => {
+        gracefulTimeouts++;
+      };
+      await lifecycle.registerComponent(component);
       await lifecycle.startAllComponents();
 
       // Call with timeout that will expire during shutdown
+      const callStartedAt = Date.now();
       const result = await lifecycle.stopAllComponents({ timeoutMS: 50 });
+      const callElapsedMS = Date.now() - callStartedAt;
 
       // Should return shutdown_timeout code and timedOut flag
       // Note: success can be true if timeout expires before components stall
       expect(result.code).toBe('shutdown_timeout');
       expect(result.timedOut).toBe(true);
       expect(result.reason).toContain('Shutdown timeout exceeded');
+      // Settled by the 50 ms timer, before the component's own 1000 ms graceful timeout
+      // fired, and durationMS is the time this call took
+      expect(gracefulTimeouts).toBe(0);
       expect(result.durationMS).toBeGreaterThanOrEqual(50);
-      expect(result.durationMS).toBeLessThan(200);
+      expect(result.durationMS).toBeLessThanOrEqual(callElapsedMS);
     });
 
     test.each(['stopping', 'force-stopping'] as const)(
