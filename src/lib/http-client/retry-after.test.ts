@@ -70,6 +70,34 @@ describe('parseRetryAfterMS', () => {
     ['sun nov  8 12:00:30 2026', 30_000],
     // A leap second is the second after it.
     ['Sun, 08 Nov 2026 23:59:60 GMT', Date.UTC(2026, 10, 9) - NOW],
+    // The month before the day, a comma after the year, the time before the year.
+    ['Sun Nov 08 2026 12:00:30 GMT', 30_000],
+    ['Nov 08 2026 12:00:30 GMT', 30_000],
+    ['Sun, Nov 08 2026 12:00:30 GMT', 30_000],
+    ['Nov 8, 2026 12:00:30 GMT', 30_000],
+    ['Sun, Nov 08, 2026, 12:00:30 GMT', 30_000],
+    ['Sun, 08 Nov 2026, 12:00:30 GMT', 30_000],
+    ['Sun, 08 Nov 12:00:30 2026 GMT', 30_000],
+    ['Sun Nov 08 12:00:30 2026 GMT', 30_000],
+    ['Sun Nov 08 12:00:30 2026, GMT', 30_000],
+    ['Sun Nov  8 12:00:30 UTC 2026', 30_000],
+    ['Nov-08-2026 12:00:30 GMT', 30_000],
+    ['Sun Nov 08 2026 13:00:30 +0100', 30_000],
+    ['sun, nov 8, 2026 4:00:30 pst', 30_000],
+    // Each of a date's commas, joined with a second value, still reads the first.
+    ['Sun, Nov 08, 2026, 12:00:30 GMT, 5', 30_000],
+    ['Nov 8, 2026 12:00:30 GMT, 5', 30_000],
+    // An asctime date and a zone after a comma are one date, as got, ky and urllib3
+    // read it; a value of its own after the comma is a second value.
+    ['Sun Nov 08 07:00:30 2026, EST', 30_000],
+    ['Sun Nov  8 12:00:30 2026, 5', 30_000],
+    // Behind a day name and a space, a comma after a day first or a dashed year.
+    ['Sun, 08, Nov 2026 12:00:30 GMT', 30_000],
+    ['Sun 08, Nov 2026, 12:00:30 GMT', 30_000],
+    ['Sunday, 08, Nov 12:00:30 2026 GMT', 30_000],
+    ['Sun, 08-Nov-2026, 12:00:30 GMT', 30_000],
+    ['Sunday, 08-Nov-26, 12:00:30 GMT', 30_000],
+    ['Sun, Nov-08-2026, 12:00:30 GMT', 30_000],
   ])('%p asks for %p ms', (value, expected) => {
     expect(parseRetryAfterMS(value, NOW)).toBe(expected);
   });
@@ -110,6 +138,25 @@ describe('parseRetryAfterMS', () => {
     'Sun, 08 Nov 2026 24:00:00 GMT',
     // A date `Date.parse` reads, but no HTTP-date.
     '2026-11-08T12:00:30Z',
+    // Commas urllib3 reads only behind a day name and a space; a zone it reads apart
+    // from its offset.
+    'Sun,08, Nov 2026 12:00:30 GMT',
+    'Sun,08-Nov-2026, 12:00:30 GMT',
+    '08-Nov-2026, 12:00:30 GMT',
+    'Nov-08-2026, 12:00:30 GMT',
+    'Sun Nov 08 2026 12:00:30 GMT+0000',
+    'Sun Nov 08 2026 12:00:30 GMT+0000 (Coordinated Universal Time)',
+    // No zone, which `Date.parse` reads as local time; the year first; a comma after
+    // the time.
+    'Sun Nov 08 2026 12:00:30',
+    '2026 Nov 08 12:00:30 GMT',
+    'Nov 08 2026, 12:00:30, GMT',
+    // An asctime date with a zone after its comma that is not read: not read as GMT.
+    'Sun Nov  8 07:00:30 2026,EST',
+    'Sun Nov  8 07:00:30 2026 , EST',
+    'Sun Nov  8 07:00:30 2026, +01',
+    'Sun Nov  8 07:00:30 2026, GMT+0100',
+    'Sun Nov  8 07:00:30 2026, CET',
   ])('%p is unreadable', (value) => {
     expect(parseRetryAfterMS(value, NOW)).toBeUndefined();
   });
@@ -126,12 +173,19 @@ describe('parseRetryAfterMS', () => {
     ).toBe(0);
   });
 
-  test('a two-digit year in the spaced layout is read by the 50-year rule too', () => {
-    // 2070 is 44 years on from 2026: not more than 50, so not 1970.
-    expect(parseRetryAfterMS('Sun, 08 Nov 70 12:00:30 GMT', NOW)).toBe(
+  test("a two-digit year outside RFC 850's layout is read by RFC 5322's rule", () => {
+    // 00 to 49 are 20xx and 50 to 99 19xx, as `Date.parse` reads them.
+    expect(parseRetryAfterMS('Sun, 08 Nov 49 12:00:30 GMT', NOW)).toBe(
+      Date.UTC(2049, 10, 8, 12, 0, 30) - NOW,
+    );
+    expect(parseRetryAfterMS('Sun, 08 Nov 50 12:00:30 GMT', NOW)).toBe(0);
+    expect(parseRetryAfterMS('Nov 08 70 12:00:30 GMT', NOW)).toBe(0);
+    expect(parseRetryAfterMS('Nov-08-70 12:00:30 GMT', NOW)).toBe(0);
+    expect(parseRetryAfterMS('Sun, 08 Nov 26 12:00:30 GMT', NOW)).toBe(30_000);
+    // RFC 850's is read by RFC 9110's 50-year rule: 2070 is not more than 50 years on.
+    expect(parseRetryAfterMS('Sunday, 08-Nov-70 12:00:30 GMT', NOW)).toBe(
       Date.UTC(2070, 10, 8, 12, 0, 30) - NOW,
     );
-    expect(parseRetryAfterMS('Sun, 08 Nov 26 12:00:30 GMT', NOW)).toBe(30_000);
   });
 
   test('an RFC 850 year is chosen by the moment it names in its zone', () => {
