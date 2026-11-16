@@ -34,6 +34,14 @@ describe('parseRetryAfterMS', () => {
     ['Sunday, 08-Nov-26 12:00:30 GMT, 5', 30_000],
     ['Sun Nov  8 12:00:30 2026, Sun, 08 Nov 2026 12:00:30 GMT', 30_000],
     ['5, Sun, 08 Nov 2026 12:00:30 GMT', 5000],
+    // The near-misses got, ky and urllib3 read: any case, UTC or +0000, a one-digit day.
+    ['sun, 08 nov 2026 12:00:30 gmt', 30_000],
+    ['SUN, 08 NOV 2026 12:00:30 GMT', 30_000],
+    ['Sun, 08 Nov 2026 12:00:30 UTC', 30_000],
+    ['Sun, 08 Nov 2026 12:00:30 +0000', 30_000],
+    ['Sun, 8 Nov 2026 12:00:30 GMT', 30_000],
+    ['sunday, 8-nov-26 12:00:30 utc', 30_000],
+    ['sun nov  8 12:00:30 2026', 30_000],
     // A leap second is the second after it.
     ['Sun, 08 Nov 2026 23:59:60 GMT', Date.UTC(2026, 10, 9) - NOW],
   ])('%p asks for %p ms', (value, expected) => {
@@ -55,9 +63,12 @@ describe('parseRetryAfterMS', () => {
     'Sun, 08 Nov 2026 12:00:60 GMT',
     '1e3',
     'soon',
-    // Case-sensitive, as RFC 9110 defines it.
-    'sun, 08 Nov 2026 12:00:30 GMT',
-    'Sun, 08 nov 2026 12:00:30 GMT',
+    // A three-digit day, a zone other than GMT written as UTC or +0000.
+    'Sun, 008 Nov 2026 12:00:30 GMT',
+    'Sun, 08 Nov 2026 12:00:30 +0100',
+    'Sun, 08 Nov 2026 12:00:30 UT',
+    // A letter that folds into ASCII only under Unicode case mapping (a long s).
+    '\u017fun, 08 Nov 2026 12:00:30 GMT',
     // No such day or time.
     'Sat, 31 Feb 2026 12:00:00 GMT',
     'Sun, 08 Nov 2026 24:00:00 GMT',

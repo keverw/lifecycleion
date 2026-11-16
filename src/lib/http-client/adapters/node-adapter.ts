@@ -1920,35 +1920,35 @@ export class NodeAdapter implements HTTPAdapter {
             // A writer still running is left alone while it is getting anywhere; see
             // `watchForStalledUpload`. It ends the request when it finishes, and
             // `reportWriteErrorAfterResponse` destroys it if it fails.
-            //
-            // Except on a connection the answer said it would close: the runtime has
-            // ended its writing side as the answer ended (Node half-closes it, Bun closes
-            // it), so the upload cannot finish whatever the server reads. Ended now, as
-            // this adapter's own, rather than left for the watchdog to call it stalled
-            // five seconds on against a server that neither reads nor closes. The upload
-            // only: the response has all its bytes, and a decoded body may still be
-            // decoding them.
-            if (
-              isWritingBody &&
-              isAnswerClosingConnection(res, request.method) &&
-              (req.socket?.writableEnded === true ||
-                req.socket?.destroyed === true)
-            ) {
-              didTearDownAfterResponse = true;
-              destroyRequestQuietly(req);
+            if (isWritingBody) {
+              // Except on a connection the answer said it would close: the runtime has
+              // ended its writing side as the answer ended (Node half-closes it, Bun
+              // closes it), so the upload cannot finish whatever the server reads. Ended
+              // now, as this adapter's own, rather than left for the watchdog to call it
+              // stalled five seconds on against a server that neither reads nor closes.
+              // Settled first, with that reason, so a writer the destroy wakes, or one
+              // parked on a source read it does not wake - a custom `stream()` whose
+              // reader ignores `cancel()` - is not reported as failing otherwise. The
+              // upload only: the response has all its bytes, and a decoded body may still
+              // be decoding them. Not when this adapter already ended the connection - a
+              // body that failed to decode - whose own failure the upload reports.
+              if (
+                !isOwnTeardownAfterResponse() &&
+                isAnswerClosingConnection(res, request.method) &&
+                (req.socket?.writableEnded === true ||
+                  req.socket?.destroyed === true)
+              ) {
+                didTearDownAfterResponse = true;
+                settleBodyOutcome(
+                  new Error(
+                    'Request body upload ended: the answer closed the connection',
+                  ),
+                );
+                destroyRequestQuietly(req);
 
-              // Watched still: a writer parked on a source read that the destroy does not
-              // wake - a custom `stream()` whose reader ignores `cancel()` - would
-              // otherwise leave `requestBodySettled` open for good. One the destroy does
-              // wake settles first and stops the watch.
-              if (stallWatchdogTimer === undefined) {
-                watchForStalledUpload();
+                return;
               }
 
-              return;
-            }
-
-            if (isWritingBody) {
               // Once: a stray `205` arms it as it is answered (see
               // `answerAndDrainStray205`).
               if (stallWatchdogTimer === undefined) {
@@ -2845,7 +2845,12 @@ export class NodeAdapter implements HTTPAdapter {
               pendingStreamSetup?.failOnSocketError &&
               !pendingStreamSetup.isResponseComplete()
             ) {
-              pendingStreamSetup.failOnSocketError(normalizeError(error));
+              const failure = normalizeError(error);
+              // Reported as a failure the response side sees during setup is.
+              pendingStreamSetup.failOnSocketError(
+                failure,
+                makeResponseStreamError('Response stream error', failure),
+              );
 
               // And the upload failure reported, as it is below for a buffered body.
               if (upload.settle !== null) {
@@ -3054,6 +3059,13 @@ export class NodeAdapter implements HTTPAdapter {
             signal.removeEventListener('abort', onAbort);
           });
           answerAbort = onAbort;
+
+          // Aborted since the check before the request was made - by code that ran while
+          // it was (an instrumented `http.request`, say): its event has already fired.
+          if (readIsAborted()) {
+            onAbort();
+            return;
+          }
         }
 
         // 0% upload progress before any bytes leave the process, once a signal already

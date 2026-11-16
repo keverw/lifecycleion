@@ -5727,6 +5727,8 @@ test('a cancel from the final download event of a chunked body keeps its cookie;
 
   const single = new Headers({ location: '/files/Smith, John.pdf' });
   expect(extractFetchHeaders(single).location).toBe('/files/Smith, John.pdf');
+  const inQuery = new Headers({ location: '/search?q=red, /blue' });
+  expect(extractFetchHeaders(inQuery).location).toBe('/search?q=red, /blue');
   for (const [first, second] of [
     ['/a', '/b'],
     ['https://x.test/a', 'https://y.test/b'],

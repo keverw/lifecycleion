@@ -4101,12 +4101,11 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     });
   }
 
-  test('an upload a Connection: close answer ends is still settled when its source read ignores the cancel', async () => {
+  test('an upload a Connection: close answer ends is settled with that reason when its source read ignores the cancel', async () => {
     // The answer ends the upload at once, by destroying the request. A writer parked on a
-    // custom `stream()` whose reader ignores `cancel()` never hears of it, so the stall
-    // watchdog still watches it, and settles it at the end of the source grace - without
-    // a report, as the teardown was this adapter's own. The clock is moved to just short
-    // of the grace before the answer closes.
+    // custom `stream()` whose reader ignores `cancel()` never hears of it, so the upload
+    // is settled there, as the teardown ends it - not as a stall the watchdog finds a
+    // source grace later - and without a report, as the teardown was this adapter's own.
     // On a socket the runtime has ended as the answer asked, and emitting `'close'` when
     // destroyed, as a real request does.
     const req = new MockClientRequest();
@@ -4123,11 +4122,6 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       'content-length': '2',
       connection: 'close',
     });
-    const realNow = performance.now.bind(performance);
-    let clockOffsetMS = 0;
-    const nowSpy = spyOn(performance, 'now').mockImplementation(
-      () => realNow() + clockOffsetMS,
-    );
     let wasCancelled = false;
     const streamSpy = spyOn(Blob.prototype, 'stream').mockImplementation(
       () =>
@@ -4151,7 +4145,6 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           cb?.(res as unknown as http.IncomingMessage);
           // Answered once the writer is parked on its source.
           setTimeout(() => {
-            clockOffsetMS = UPLOAD_SOURCE_STALL_GRACE_MS - 300;
             res.emit('data', Buffer.from('ok'));
             res.emit('end');
             res.emit('close');
@@ -4193,7 +4186,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       expect(wasCancelled).toBe(true);
       expect(outcome).toBeInstanceOf(Error);
       expect((outcome as Error).message).toBe(
-        'Request body source stopped answering after the response arrived',
+        'Request body upload ended: the answer closed the connection',
       );
       expect(req.destroyed).toBe(true);
       expect(reports).toHaveLength(0);
@@ -4201,7 +4194,6 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       globalThis.removeEventListener('error', onError);
       streamSpy.mockRestore();
       requestSpy.mockRestore();
-      nowSpy.mockRestore();
     }
   });
 
@@ -4666,7 +4658,11 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       expect(response.status).toBe(200);
       expect(response.isStreamError).toBe(true);
       expect(response.streamErrorCode).toBe('stream_response_error');
-      expect(response.errorCause?.message).toContain('ECONNRESET');
+      // Reported as a failure the response side sees during setup is.
+      expect(response.errorCause?.message).toBe('Response stream error');
+      expect((response.errorCause?.cause as Error | undefined)?.message).toBe(
+        'read ECONNRESET',
+      );
       expect(req.destroyed).toBe(true);
 
       // The factory's sink arrives after the request is over, and is closed rather than
@@ -8963,6 +8959,40 @@ describe('NodeAdapter.send() — low-level contract', () => {
     expect(caught?.name).toBe('AbortError');
   });
 
+  test('a signal aborted while the request is made is answered as the abort', async () => {
+    // Its event fires before the adapter's listener is on it.
+    const controller = new AbortController();
+    const req = new MockClientRequest();
+    const requestSpy = spyOn(http, 'request').mockImplementation(() => {
+      controller.abort();
+      return req as unknown as http.ClientRequest;
+    });
+
+    try {
+      const outcome = await Promise.race([
+        adapter
+          .send({
+            requestURL: `${server.url}/api/test`,
+            method: 'GET',
+            headers: {},
+            signal: controller.signal,
+          })
+          .then(
+            () => 'answered',
+            (error: unknown) => error as Error,
+          ),
+        new Promise<'hung'>((resolve) =>
+          setTimeout(() => resolve('hung'), 2_000),
+        ),
+      ]);
+
+      expect((outcome as Error).name).toBe('AbortError');
+      expect(req.destroyed).toBe(true);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('a pre-aborted signal opens no connection', async () => {
     // Refused before the request is made: one made and destroyed at once still connects.
     const controller = new AbortController();
@@ -13048,6 +13078,55 @@ test('a whole compressed answer with Connection: close that arrives mid-upload k
     expect(response.status).toBe(200);
     expect(response.body?.length).toBe(plain.length);
     expect(await response.requestBodySettled).toBeInstanceOf(Error);
+  } finally {
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}, 30_000);
+
+test('an upload a Connection: close answer that fails to decode ends is not settled as the close', async () => {
+  // The answer is still arriving - its Content-Length is past what is sent - when the
+  // decoder fails and tears the connection down, so the upload is ended by this adapter,
+  // not by the answer's close.
+  const corrupt = Buffer.concat([
+    zlib.gzipSync(Buffer.from('ok')).subarray(0, 10),
+    Buffer.alloc(64, 0xff),
+  ]);
+  const sockets: Socket[] = [];
+  const server = net.createServer((socket) => {
+    sockets.push(socket);
+    let isAnswered = false;
+    socket.on('error', () => {});
+    socket.on('data', (data) => {
+      if (!isAnswered && data.toString('latin1').includes('\r\n\r\n')) {
+        isAnswered = true;
+        socket.write(
+          `HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: ${String(corrupt.length * 2)}\r\nConnection: close\r\n\r\n`,
+        );
+        socket.write(corrupt);
+        socket.pause();
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${String(port)}/upload`,
+      method: 'POST',
+      headers: {},
+      body: new Uint8Array(32 * 1024 * 1024),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+    const outcome = await response.requestBodySettled;
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).not.toBe(
+      'Request body upload ended: the answer closed the connection',
+    );
   } finally {
     for (const socket of sockets) {
       socket.destroy();

@@ -1318,7 +1318,7 @@ test('params checks a function as qs walks one, by its own keys', () => {
   expect(() => client.get('/x').params({ cb: () => 1 })).not.toThrow();
 });
 
-test('params refuses a Map, Set, WeakMap, WeakSet or URLSearchParams at any depth, whose entries qs would not write', () => {
+test('params refuses a Map, Set, WeakMap, WeakSet, URLSearchParams, Headers, FormData or Blob at any depth, whose entries or contents qs would not write', () => {
   const client = new HTTPClient({ adapter: new MockAdapter() });
   class TagSet extends Set<string> {}
   const otherRealmMap: unknown = runInNewContext('new Map([[1, 2]])');
@@ -1334,6 +1334,8 @@ test('params refuses a Map, Set, WeakMap, WeakSet or URLSearchParams at any dept
     [{ tags: new TagSet(['a']) }, 'params.tags is a Set'],
     [{ cb: Object.assign(() => 1, { m: new Map() }) }, 'params.cb.m is a Map'],
     [{ foreign: otherRealmMap }, 'params.foreign is a Map'],
+    [{ filter: new Headers({ a: '1' }) }, 'params.filter is a Headers'],
+    [{ form: { data: new FormData() } }, 'params.form.data is a FormData'],
   ];
 
   for (const [params, refusal] of cases) {
@@ -1344,11 +1346,38 @@ test('params refuses a Map, Set, WeakMap, WeakSet or URLSearchParams at any dept
     );
   }
 
+  for (const [params, refusal] of [
+    [{ file: new Blob(['x']) }, 'params.file is a Blob'],
+    [{ upload: [new File(['x'], 'a.txt')] }, 'params.upload.0 is a Blob'],
+  ] as const) {
+    expect(() => client.get('/x').params(params)).toThrow(
+      new TypeError(
+        `HTTPRequestBuilder ${refusal}, whose contents qs does not read, so it cannot be put in a query`,
+      ),
+    );
+  }
+
   // Only a value holding the collection's own state is one: an object that merely
   // inherits from its prototype is walked by its own keys, as qs walks it.
   expect(() =>
     client.get('/x').params({ fake: Object.create(Map.prototype) as object }),
   ).not.toThrow();
+});
+
+test('params checks a value against the collection types the runtime has', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  const original = globalThis.Headers;
+  const headers = new Headers({ a: '1' });
+
+  try {
+    Reflect.deleteProperty(globalThis, 'Headers');
+    expect(() => client.get('/x').params({ headers })).not.toThrow();
+    expect(() => client.get('/x').params({ ids: new Set([1]) })).toThrow(
+      'HTTPRequestBuilder params.ids is a Set',
+    );
+  } finally {
+    globalThis.Headers = original;
+  }
 });
 
 test('a nested function or keyless class instance in params writes nothing and clears the path key, as an empty object does', async () => {

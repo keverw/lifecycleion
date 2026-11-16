@@ -889,16 +889,16 @@ export class XHRAdapter implements HTTPAdapter {
               return;
             }
 
+            if (isBodilessAnswer(answer.status)) {
+              answerBodilessEarly(answer);
+              return;
+            }
+
             // Decided only on a real status: a `0` is an XHR that does not show the answer
             // yet (one outside a browser may report progress first), and its headers -
             // the `Content-Encoding` the decision reads - with it. Judged again on the
             // next event past the limit, and on `load`.
             if (answer.status !== 0) {
-              if (isBodilessAnswer(answer.status)) {
-                answerBodilessEarly(answer);
-                return;
-              }
-
               isBodyKnownUncoded = isKnownUncodedBody(answer, answeringURL);
 
               if (isBodyKnownUncoded) {

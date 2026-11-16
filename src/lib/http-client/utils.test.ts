@@ -1799,7 +1799,7 @@ describe('firstJoinedLocation', () => {
     expect(firstJoinedLocation('next, next, next')).toBe('next');
     expect(firstJoinedLocation('a, ./b')).toBe('a');
     expect(firstJoinedLocation('a, ?b=1')).toBe('a');
-    expect(firstJoinedLocation('page2#a, #b')).toBe('page2#a');
+    expect(firstJoinedLocation('page2, #b')).toBe('page2');
     // Not one part repeated, and not starting as a target: kept whole.
     expect(firstJoinedLocation('/files/Smith, John.pdf')).toBe(
       '/files/Smith, John.pdf',
@@ -1830,12 +1830,35 @@ describe('firstJoinedLocation', () => {
     expect(firstJoinedLocation('/r?to=a,/b')).toBe('/r?to=a,/b');
   });
 
-  test('cuts a single value with an unencoded `, /` in it, which reads as two joined', () => {
-    expect(firstJoinedLocation('/login?next=/a, /b')).toBe('/login?next=/a');
-    expect(firstJoinedLocation('/r?to=x, https://y.example/')).toBe('/r?to=x');
+  test('cuts a path with an unencoded `, /` in it, which reads as two joined', () => {
+    expect(firstJoinedLocation('/a, /b?x=1')).toBe('/a');
+    expect(firstJoinedLocation('/a, ?b=1')).toBe('/a');
+    expect(firstJoinedLocation('/a, https://y.example/?q')).toBe('/a');
+  });
+
+  test('keeps a `, ` followed by a path or scheme whole in a query or fragment', () => {
+    expect(firstJoinedLocation('/login?next=/a, /b')).toBe(
+      '/login?next=/a, /b',
+    );
+    expect(firstJoinedLocation('/search?q=red, /blue')).toBe(
+      '/search?q=red, /blue',
+    );
+    expect(
+      firstJoinedLocation('/login?return=https://app/x, https://app/y'),
+    ).toBe('/login?return=https://app/x, https://app/y');
+    expect(firstJoinedLocation('/r?to=x, https://y.example/')).toBe(
+      '/r?to=x, https://y.example/',
+    );
+    expect(firstJoinedLocation('page2#a, #b')).toBe('page2#a, #b');
     expect(firstJoinedLocation('/login?next=/a,%20/b')).toBe(
       '/login?next=/a,%20/b',
     );
+    // Sent twice, it is still the one target.
+    expect(firstJoinedLocation('/r?to=/a, /b, /r?to=/a, /b')).toBe(
+      '/r?to=/a, /b',
+    );
+    // Two different targets the first with a query read as one value.
+    expect(firstJoinedLocation('/a?x=1, /b')).toBe('/a?x=1, /b');
   });
 
   test('keeps a value whole where what follows `, ` is no path or scheme, joined or not', () => {

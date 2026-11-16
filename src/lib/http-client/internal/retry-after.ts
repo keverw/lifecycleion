@@ -2,7 +2,7 @@
  * `Retry-After` as the client reads it before a retry (RFC 9110 section 10.2.3).
  */
 
-import { trimHTTPWhitespace } from '../../internal/ascii-text';
+import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 
 /**
  * The retryable statuses whose `Retry-After` the client honors: `429 Too Many Requests`
@@ -31,29 +31,46 @@ const MONTHS = [
 
 const MONTH = `(${MONTHS.join('|')})`;
 const TIME = '(\\d{2}):(\\d{2}):(\\d{2})';
+/** `GMT`, or the same zone as a non-conforming server writes it. */
+const ZONE = '(?:GMT|UTC|\\+0000)';
 
-/** `Sun, 06 Nov 1994 08:49:37 GMT` - the preferred form. */
+/**
+ * `Sun, 06 Nov 1994 08:49:37 GMT` - the preferred form. Like the other two, matched
+ * ignoring ASCII case (without the `u` flag, `i` folds no other letter into ASCII), and
+ * here with a one-digit day too, as got, ky and urllib3 read one.
+ */
 const IMF_FIXDATE = new RegExp(
-  `^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\\d{2}) ${MONTH} (\\d{4}) ${TIME} GMT$`,
+  `^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\\d{1,2}) ${MONTH} (\\d{4}) ${TIME} ${ZONE}$`,
+  'i',
 );
 /** `Sunday, 06-Nov-94 08:49:37 GMT` - obsolete RFC 850, a two-digit year. */
 const RFC850_DATE = new RegExp(
-  `^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\\d{2})-${MONTH}-(\\d{2}) ${TIME} GMT$`,
+  `^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\\d{1,2})-${MONTH}-(\\d{2}) ${TIME} ${ZONE}$`,
+  'i',
 );
 /** `Sun Nov  6 08:49:37 1994` - obsolete asctime, in GMT though it says no zone. */
 const ASCTIME_DATE = new RegExp(
   `^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ${MONTH} ( \\d|\\d{2}) ${TIME} (\\d{4})$`,
+  'i',
 );
+
+/** The index of a month name matched ignoring case, from 0 for January. */
+function monthIndex(name: string): number {
+  const lower = asciiLowercase(name);
+  return MONTHS.findIndex((month) => asciiLowercase(month) === lower);
+}
 
 /**
  * How long a `Retry-After` value asks the client to wait, in milliseconds from `now` (an
  * epoch time), or `undefined` for a value that is neither form RFC 9110 defines: a whole
  * number of seconds (`120`), or an HTTP-date in any of its three forms, which a recipient
- * must accept - read as GMT, case-sensitively, as written, its day name not checked
- * against the date, as browsers' and most HTTP libraries' parsers do not check it. A date
- * already past asks for no wait (`0`). Trimmed of HTTP whitespace only. Anything else - a
- * fraction, a sign, a date in another format or spaced otherwise - is unreadable, and the
- * retry policy's own delay is used.
+ * must accept - read as GMT, its day name not checked against the date, as browsers'
+ * and most HTTP libraries' parsers do not check it. The near-misses got, ky and urllib3
+ * read are read too: names in any case, a `UTC` or `+0000` zone for `GMT`, and a one-digit
+ * day, so a server that asks for a wait in one is not retried sooner. A date already past
+ * asks for no wait (`0`). Trimmed of HTTP whitespace only. Anything else - a fraction, a
+ * sign, another zone, a date in another format or spaced otherwise - is unreadable, and
+ * the retry policy's own delay is used.
  *
  * Only the first value is read. A header seen twice reaches the client joined
  * (`120, 60`) from `fetch` and XHR, and as its first value from Node, which drops a
@@ -118,14 +135,8 @@ function parseHTTPDate(text: string, now: number): number | undefined {
     // `29-Feb-00` read as 2100, which has no 29 February, is no date, not 2000's.
     let fullYear = currentYear - (currentYear % 100) + +year + 100;
     while (
-      Date.UTC(
-        fullYear,
-        MONTHS.indexOf(month as (typeof MONTHS)[number]),
-        +day,
-        +hour,
-        +minute,
-        +second,
-      ) > limit
+      Date.UTC(fullYear, monthIndex(month), +day, +hour, +minute, +second) >
+      limit
     ) {
       fullYear -= 100;
     }
@@ -155,7 +166,7 @@ function utcTime(
   minute: number,
   second: number,
 ): number | undefined {
-  const month = MONTHS.indexOf(monthName as (typeof MONTHS)[number]);
+  const month = monthIndex(monthName);
 
   const isLeapSecond = hour === 23 && minute === 59 && second === 60;
 

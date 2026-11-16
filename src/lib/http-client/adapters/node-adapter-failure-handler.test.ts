@@ -491,7 +491,8 @@ test('a socket error during streamResponse setup behind a refusing signal still 
     const response = await pending;
     expect(response.status).toBe(200);
     expect(response.isStreamError).toBe(true);
-    expect(response.errorCause).toBe(reset);
+    expect(response.errorCause?.message).toBe('Response stream error');
+    expect(response.errorCause?.cause).toBe(reset);
     expect(factorySignal?.aborted).toBe(true);
   } finally {
     requestSpy.mockRestore();

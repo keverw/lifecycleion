@@ -1109,12 +1109,14 @@ function hasXMLHttpRequestGlobal(): boolean {
  * or proxy sent twice - or `Smith, John.pdf, Smith, John.pdf`) is that target. That
  * target, or the value, is then split only where what follows the `, ` starts as a URL
  * target does - a path (`/`, `./`, `../`), a query (`?`), a fragment (`#`) or
- * `scheme://` - so `/a, /b` sent twice is `/a`. A single value with a raw space
- * (`/files/Smith, John.pdf`) is kept whole. A single value with an unencoded `, /`,
- * `, ./`, `, ../`, `, ?`, `, #` or `, scheme://` in it (`/r?to=/a, /b`) is cut there
- * too, as is one that is a target written twice (`a, a`): fetch and XHR join repeats
- * into the same text, so the two cannot be told apart. A server percent-encodes the
- * space in such a value.
+ * `scheme://` - and only before its first `?` or `#`, so `/a, /b` sent twice is `/a`. A
+ * single value with a raw space (`/files/Smith, John.pdf`) is kept whole, as is one whose
+ * query or fragment holds such a `, ` (`/r?to=/a, /b`), which is followed as fetch
+ * follows it. A path with an unencoded `, /`, `, ./`, `, ../`, `, ?`, `, #` or
+ * `, scheme://` in it (`/a, /b`) is cut there, as is one that is a target written twice
+ * (`a, a`): fetch and XHR join repeats into the same text, so the two cannot be told
+ * apart. Two different targets the first of which has a query or fragment (`/a?x, /b`)
+ * are followed as one. A server percent-encodes the space in such a value.
  */
 export function firstJoinedLocation(value: string): string {
   // The repeated unit is split as any value is: `/a, /b` sent twice is `/a`.
@@ -1122,8 +1124,12 @@ export function firstJoinedLocation(value: string): string {
   const separator = candidate.search(
     /, (?:\/|\.\.?\/|\?|#|[a-z][a-z\d+.-]*:\/\/)/i,
   );
+  // A query or fragment can hold `, /` itself, so a `, ` past its start is kept.
+  const queryStart = candidate.search(/[?#]/);
 
-  return separator === -1 ? candidate : candidate.slice(0, separator);
+  return separator === -1 || (queryStart !== -1 && separator > queryStart)
+    ? candidate
+    : candidate.slice(0, separator);
 }
 
 /**

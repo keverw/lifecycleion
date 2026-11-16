@@ -36,9 +36,10 @@ export const PARAM_DEPTH_EXCEEDED_MESSAGE = `Input depth exceeded depth option o
  * body that cannot be copied is, rather than rejecting `send()` with `qs`'s own
  * `RangeError`: a `Date` (by `instanceof`, as `qs` tells one) that `toISOString`, the
  * call `qs` serializes it by, throws on, an object nested inside itself, an entry
- * deeper than {@link MAX_PARAM_DEPTH}, and a `Map`, `Set`, `WeakMap`, `WeakSet` or
- * `URLSearchParams`, whose entries are not own properties, so `qs` would write nothing
- * for one (see {@link collectionTypeOf}). Walks the own enumerable keys `qs` walks - an
+ * deeper than {@link MAX_PARAM_DEPTH}, and a `Map`, `Set`, `WeakMap`, `WeakSet`,
+ * `URLSearchParams`, `Headers`, `FormData` or `Blob` (a `File` included), whose entries
+ * or contents are not own properties, so `qs` would write nothing for one (see
+ * {@link collectionTypeOf}). Walks the own enumerable keys `qs` walks - an
  * object's, a function's and a typed array's, all but a `Buffer`'s, which `qs` sends as
  * its text - through data properties only, so no getter runs before `qs` reads it; a
  * getter's value, and a nested object changed after this call, are still read only by
@@ -57,6 +58,7 @@ export function assertSerializableParams(
     path: [],
     ancestors: new Set([params]),
     heights: new Map(),
+    collectionReads: undefined,
   };
 
   for (const key of Object.keys(params)) {
@@ -76,6 +78,8 @@ interface ParamWalk {
    * levels below it its deepest entry is.
    */
   readonly heights: Map<object, number>;
+  /** {@link COLLECTION_TYPES}' slot reads, looked up when the first value needs them. */
+  collectionReads: readonly CollectionRead[] | undefined;
 }
 
 /**
@@ -120,11 +124,11 @@ function checkParamValue(
   }
 
   // After the lookup: a collection is refused when first met, so it is never recorded.
-  const collectionType = collectionTypeOf(value);
-  if (collectionType !== undefined) {
+  const collection = collectionTypeOf(value, walk);
+  if (collection !== undefined) {
     throw paramRefusal(
       walk,
-      `is a ${collectionType}, whose entries qs does not read`,
+      `is a ${collection.name}, whose ${collection.held} qs does not read`,
     );
   }
 
@@ -153,30 +157,34 @@ function checkParamValue(
 }
 
 /**
- * The collections whose entries are not own properties, each by a member of its
- * prototype that reads its internal slot and throws for any other value.
+ * The values whose entries or contents are not own properties, each by a member of its
+ * prototype that reads its internal slot and throws for any other value, and what it
+ * holds there. `File` is a `Blob`.
  */
-const COLLECTION_TYPES: ReadonlyArray<readonly [string, string]> = [
-  ['Map', 'size'],
-  ['Set', 'size'],
-  ['WeakMap', 'has'],
-  ['WeakSet', 'has'],
-  ['URLSearchParams', 'has'],
+const COLLECTION_TYPES: ReadonlyArray<
+  readonly [name: string, member: string, held: string]
+> = [
+  ['Map', 'size', 'entries'],
+  ['Set', 'size', 'entries'],
+  ['WeakMap', 'has', 'entries'],
+  ['WeakSet', 'has', 'entries'],
+  ['URLSearchParams', 'has', 'entries'],
+  ['Headers', 'has', 'entries'],
+  ['FormData', 'has', 'entries'],
+  ['Blob', 'size', 'contents'],
 ];
 
-/**
- * The type of `value` when it is one of {@link COLLECTION_TYPES} - a subclass's instance,
- * or one from another realm, included - told by its internal slot, so an object that
- * only inherits from one of their prototypes, or a `Proxy` around one, is not one. `qs`
- * walks any other object by its own enumerable keys: a function or a class instance with
- * none writes nothing, as an empty `{}` does. A plain record or an array is not asked.
- */
-function collectionTypeOf(value: object): string | undefined {
-  if (Array.isArray(value) || isPlainRecord(value)) {
-    return undefined;
-  }
+interface CollectionRead {
+  readonly name: string;
+  readonly held: string;
+  readonly read: (...args: unknown[]) => unknown;
+}
 
-  for (const [name, member] of COLLECTION_TYPES) {
+/** The slot reads of the {@link COLLECTION_TYPES} this runtime has. */
+function lookUpCollectionReads(): CollectionRead[] {
+  const reads: CollectionRead[] = [];
+
+  for (const [name, member, held] of COLLECTION_TYPES) {
     const type: unknown = Reflect.get(globalThis, name);
     const prototype: unknown =
       typeof type === 'function' ? Reflect.get(type, 'prototype') : undefined;
@@ -186,13 +194,38 @@ function collectionTypeOf(value: object): string | undefined {
 
     const descriptor = Reflect.getOwnPropertyDescriptor(prototype, member);
     const read: unknown = descriptor?.get ?? descriptor?.value;
-    if (typeof read !== 'function') {
-      continue;
+    if (typeof read === 'function') {
+      reads.push({
+        name,
+        held,
+        read: read as (...args: unknown[]) => unknown,
+      });
     }
+  }
 
+  return reads;
+}
+
+/**
+ * The type of `value` when it is one of {@link COLLECTION_TYPES} - a subclass's instance,
+ * or one from another realm, included - told by its internal slot, so an object that
+ * only inherits from one of their prototypes, or a `Proxy` around one, is not one. `qs`
+ * walks any other object by its own enumerable keys: a function or a class instance with
+ * none writes nothing, as an empty `{}` does. A plain record or an array is not asked.
+ */
+function collectionTypeOf(
+  value: object,
+  walk: ParamWalk,
+): CollectionRead | undefined {
+  if (Array.isArray(value) || isPlainRecord(value)) {
+    return undefined;
+  }
+
+  walk.collectionReads ??= lookUpCollectionReads();
+  for (const collection of walk.collectionReads) {
     try {
-      Reflect.apply(read, value, [undefined]);
-      return name;
+      Reflect.apply(collection.read, value, [undefined]);
+      return collection;
     } catch {
       // Not this type: its slot is missing.
     }
