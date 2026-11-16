@@ -508,12 +508,43 @@ for (const key of ['sinks', 'diagnosticSinks'] as const) {
   test(`a sparse ${key} list is refused at its first hole, not walked`, () => {
     const list: unknown[] = [];
     list.length = 2 ** 24;
-    const startedAt = performance.now();
 
     expect(
       () => new Logger({ callProcessExit: false, [key]: list as never }),
     ).toThrow(`Logger ${key}[0] must be a sink`);
-    expect(performance.now() - startedAt).toBeLessThan(1000);
+
+    // Refused at index 0: no other index is asked about, by `in`, by an own-property
+    // check or by a read. Thrown, so a walk past the hole stops at the next index asked.
+    const touched: string[] = [];
+    const record = (index: string | symbol): void => {
+      if (typeof index === 'string' && /^\d+$/.test(index)) {
+        touched.push(index);
+
+        if (index !== '0') {
+          throw new Error(`asked about ${index}`);
+        }
+      }
+    };
+    const watched = new Proxy(list, {
+      has: (target, index) => {
+        record(index);
+        return Reflect.has(target, index);
+      },
+      getOwnPropertyDescriptor: (target, index) => {
+        record(index);
+        return Reflect.getOwnPropertyDescriptor(target, index);
+      },
+      get: (target, index, receiver) => {
+        record(index);
+        return Reflect.get(target, index, receiver) as unknown;
+      },
+    });
+
+    expect(
+      () => new Logger({ callProcessExit: false, [key]: watched as never }),
+    ).toThrow(`Logger ${key}[0] must be a sink`);
+    expect(touched.length).toBeGreaterThan(0);
+    expect(new Set(touched)).toEqual(new Set(['0']));
   });
 }
 
