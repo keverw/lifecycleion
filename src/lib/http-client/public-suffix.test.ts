@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { PublicSuffixResolver } from './public-suffix';
 
 describe('PublicSuffixResolver', () => {
@@ -52,17 +52,34 @@ describe('PublicSuffixResolver', () => {
   }, 30_000);
 
   test('a hostname of many labels is looked up past added suffixes in linear time', () => {
-    const resolver = new PublicSuffixResolver({ add: ['example.internal'] });
-    const labels = 'a.'.repeat(30_000);
-    const started = performance.now();
+    // Counted rather than timed: the characters of every candidate looked up among the
+    // added suffixes, for a host of n labels and one of 4n. Looking up every candidate,
+    // each as long as the labels left, that grows with the square of the label count;
+    // looking up only candidates no longer than the longest added suffix, it does not
+    // grow at all.
+    const lookedUpLength = (labelCount: number): number => {
+      const resolver = new PublicSuffixResolver({ add: ['example.internal'] });
+      const added = (resolver as unknown as { added: Set<string> }).added;
+      const isAdded = added.has.bind(added);
+      let length = 0;
+      spyOn(added, 'has').mockImplementation((name: string) => {
+        length += name.length;
+        return isAdded(name);
+      });
+      const labels = 'a.'.repeat(labelCount);
 
-    expect(resolver.registrableDomainFor(`${labels}com`)).toBe('a.com');
-    expect(resolver.registrableDomainFor(`${labels}x.example.internal`)).toBe(
-      'x.example.internal',
-    );
-    // Re-joining the labels for each candidate, this takes seconds; by offset, a few
-    // milliseconds.
-    expect(performance.now() - started).toBeLessThan(2000);
+      expect(resolver.registrableDomainFor(`${labels}com`)).toBe('a.com');
+      expect(resolver.registrableDomainFor(`${labels}x.example.internal`)).toBe(
+        'x.example.internal',
+      );
+
+      return length;
+    };
+
+    const atN = lookedUpLength(1_000);
+
+    expect(atN).toBeGreaterThan(0);
+    expect(lookedUpLength(4_000)).toBeLessThanOrEqual(4 * atN);
   });
 
   test('a removed ancestor above a suffix still listed leaves the registrable domain', () => {

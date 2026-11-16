@@ -1,4 +1,5 @@
 import { hostileRejections } from '../../internal/hostile-promise-test-utils';
+import { sleep } from '../../sleep';
 import { describe, expect, test, beforeAll, afterAll, spyOn } from 'bun:test';
 import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -10859,14 +10860,14 @@ describe('NodeAdapter — abort listeners are released when the request settles'
       // Resolved, but the upload is still outstanding: nothing has been released yet.
       expect(watched.counts()).toEqual({ added: 1, removed: 0 });
 
-      const startedAt = Date.now();
-
       watched.controller.abort();
 
       const outcome = await res.requestBodySettled;
 
+      // Ended by the abort: the watchdog would end it as a stall, in words of its own.
       expect(outcome).toBeInstanceOf(Error);
-      expect(Date.now() - startedAt).toBeLessThan(2000);
+      expect((outcome as Error).name).toBe('AbortError');
+      expect((outcome as Error).message).toBe('Request aborted');
 
       // Both sides have settled now, so the listener has been taken off.
       expect(watched.counts()).toEqual({ added: 1, removed: 1 });
@@ -11833,6 +11834,9 @@ test('a 205 whose bytes pass the limit is answered at once, and its connection l
   try {
     const { port } = server.address() as AddressInfo;
     const loaded: number[] = [];
+    // Held to the next window, the connection would close after this timer: it is set
+    // before the window's own, and timers run in the order they come due.
+    const nextWindow = sleep(5_000).then(() => 'next window' as const);
     const response = await new NodeAdapter().send({
       requestURL: `http://127.0.0.1:${port}/`,
       method: 'GET',
@@ -11847,15 +11851,12 @@ test('a 205 whose bytes pass the limit is answered at once, and its connection l
     expect(response.isStreamError).not.toBe(true);
     expect(response.body).toBeNull();
     expect(loaded.every((bytes) => bytes === 0)).toBe(true);
-
-    const startedAt = performance.now();
-    await closed;
-    expect(performance.now() - startedAt).toBeLessThan(4000);
+    expect(await Promise.race([closed, nextWindow])).not.toBe('next window');
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
-});
+}, 15_000);
 
 for (const ending of [
   'declares more than the limit',
@@ -13326,16 +13327,22 @@ test('a 205 with no length held open after its upload lets its connection go aft
   const raw = await listenRaw205('HTTP/1.1 205 Reset Content\r\n\r\n');
   try {
     const startedAt = performance.now();
-    const response = await new NodeAdapter().send({
-      requestURL: `http://127.0.0.1:${raw.port}/`,
-      method: 'POST',
-      headers: {},
-      body: 'x',
-    });
+    // Held until the connection is let go, the answer would come after this timer: it is
+    // set before the quiet window's own, and timers run in the order they come due.
+    const quietWindow = sleep(5_000).then(() => 'quiet window' as const);
+    const response = await Promise.race([
+      new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${raw.port}/`,
+        method: 'POST',
+        headers: {},
+        body: 'x',
+      }),
+      quietWindow,
+    ]);
 
-    expect(response.status).toBe(205);
-    expect(response.body).toBeNull();
-    expect(performance.now() - startedAt).toBeLessThan(1000);
+    expect(response).not.toBe('quiet window');
+    expect(response !== 'quiet window' && response.status).toBe(205);
+    expect(response !== 'quiet window' && response.body).toBeNull();
 
     while (raw.closedSockets() === 0) {
       await new Promise((resolve) => setTimeout(resolve, 50));

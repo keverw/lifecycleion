@@ -378,7 +378,7 @@ describe('URL userinfo removal', () => {
   });
 
   test('a refused URL with a long run of spaces inside it is cut in linear time', () => {
-    const spaces = ' '.repeat(60_000);
+    const spaces = ' '.repeat(120_000);
     const started = performance.now();
 
     expect(stripURLCredentials(`http://u:p@a${spaces}b/`)).toBe(
@@ -387,7 +387,10 @@ describe('URL userinfo removal', () => {
     expect(stripURLCredentials(` \u0001http://u:p@a${spaces}b/ `)).toBe(
       `http://@a${spaces}b/`,
     );
-    // Quadratic, as a regex trim was, this takes seconds; linear, about a millisecond.
+    // Linear, this takes about a millisecond. A quadratic trim, as an unanchored
+    // `[\u0000- ]+$` regex is on an inner run of spaces, takes about 16 seconds on
+    // these two, so the bound leaves a slow runner room either way. No count stands in
+    // for the clock: a regex does its work where no spy can see it.
     expect(performance.now() - started).toBeLessThan(2000);
   });
 

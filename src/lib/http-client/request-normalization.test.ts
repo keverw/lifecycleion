@@ -8965,7 +8965,10 @@ test('a decode failure after the raw body ended reaches a pending stream setup',
       baseURL,
       timeout: 0,
     });
-    const started = Date.now();
+    // Settled when decoding failed, not once the factory was done: waiting on the
+    // factory, the answer would come after this timer, which is set before the
+    // factory's own, as timers run in the order they come due.
+    const factoryDone = sleep(2_000).then(() => 'factory done' as const);
     const builder = client.get('/').streamResponse(async () => {
       await new Promise((resolve) => setTimeout(resolve, 2_000));
       return new Writable({
@@ -8974,10 +8977,10 @@ test('a decode failure after the raw body ended reaches a pending stream setup',
         },
       });
     });
-    await builder.send();
+    expect(await Promise.race([builder.send(), factoryDone])).not.toBe(
+      'factory done',
+    );
     expect(builder.error?.code).toBe('stream_response_error');
-    // Settled when decoding failed, not once the factory was done.
-    expect(Date.now() - started).toBeLessThan(1_500);
   } finally {
     server.close();
   }

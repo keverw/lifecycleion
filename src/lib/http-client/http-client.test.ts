@@ -1235,26 +1235,30 @@ describe('HTTPClient — basic HTTP methods', () => {
   });
 
   test('silence before the wait began counts toward the stall bound', async () => {
-    // The first arm always slept for the whole bound, so an upload that had gone quiet
-    // long before the early response arrived was given a further full bound from the
-    // moment the wait began. The clock is read on entry now: a hop that answers 200ms
-    // after dispatch and never reports progress has 200ms of silence already, and the
-    // wait under a 300ms bound expires about 100ms later, not 300ms. The margins are
-    // wide because a loaded runner adds latency; the old behaviour lands near 500ms.
+    // The stall clock is read on entry: a hop that answers 1900ms after dispatch and
+    // never reports progress has 1900ms of silence already, and the wait under a 2000ms
+    // bound expires about 100ms later, not 2000ms. The silence is put on the monotonic
+    // clock the wait reads rather than slept through: the adapter moves
+    // `performance.now()` 1900ms ahead before it answers.
+    const readClock = performance.now.bind(performance);
+    let silenceMS = 0;
+    const clock = spyOn(performance, 'now').mockImplementation(
+      () => readClock() + silenceMS,
+    );
     let hop = 0;
 
     const adapter: HTTPAdapter = {
       getType: () => 'fetch',
-      send: async (_request: AdapterRequest): Promise<AdapterResponse> => {
+      send: (_request: AdapterRequest): Promise<AdapterResponse> => {
         hop++;
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        silenceMS = 1900;
 
-        return {
+        return Promise.resolve({
           status: 307,
           headers: { location: '/again' },
           body: null,
           requestBodySettled: new Promise(() => {}),
-        };
+        });
       },
     };
 
@@ -1265,25 +1269,31 @@ describe('HTTPClient — basic HTTP methods', () => {
     globalThis.addEventListener('error', onGlobalError);
 
     try {
+      // A wait given a fresh bound on entry would answer 2000ms in, after this timer: it
+      // is set before the request, and timers run in the order they come due, so a
+      // runner whose timers fire late cannot reorder them.
+      const freshBound = sleep(2000).then(() => 'fresh bound' as const);
       const startedAt = Date.now();
-      const response = await new HTTPClient({
-        adapter,
-        baseURL: 'http://example.test',
-        followRedirects: true,
-        timeout: 300,
-      })
-        .post('/upload')
-        .json({ a: 1 })
-        .send();
+      const response = await Promise.race([
+        new HTTPClient({
+          adapter,
+          baseURL: 'http://example.test',
+          followRedirects: true,
+          timeout: 2000,
+        })
+          .post('/upload')
+          .json({ a: 1 })
+          .send(),
+        freshBound,
+      ]);
 
-      const elapsed = Date.now() - startedAt;
-
+      expect(response).not.toBe('fresh bound');
       expect(hop).toBe(1);
-      expect(response.isTimeout).toBe(true);
-      // One bound from dispatch, not one bound from the response: ~300ms, not ~500ms.
-      expect(elapsed).toBeGreaterThanOrEqual(280);
-      expect(elapsed).toBeLessThan(450);
+      expect(response !== 'fresh bound' && response.isTimeout).toBe(true);
+      // The rest of the bound is still waited out, not skipped.
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(90);
     } finally {
+      clock.mockRestore();
       globalThis.removeEventListener('error', onGlobalError);
     }
   });
@@ -4887,7 +4897,6 @@ describe('HTTPClient — timeout resolution', () => {
     globalThis.addEventListener('error', onGlobalError);
 
     try {
-      const startedAt = Date.now();
       const request = new HTTPClient({
         adapter,
         baseURL: 'http://example.test',
@@ -4897,7 +4906,6 @@ describe('HTTPClient — timeout resolution', () => {
         .post('/upload')
         .json({ a: 1 });
 
-      expect(Date.now() - startedAt).toBeLessThan(2000);
       expect(() => request.timeout(Number.NaN)).toThrow(TypeError);
       expect(hop).toBe(0);
       expect(reports).toHaveLength(0);
@@ -6967,14 +6975,17 @@ describe('HTTPClient — builder state', () => {
         }
       });
 
-    const start = Date.now();
-    const res = await builder.send();
-    const elapsed = Date.now() - start;
+    // Held for the delay, the answer would come after this timer: it is set before the
+    // delay's own, and timers run in the order they come due.
+    const res = await Promise.race([
+      builder.send(),
+      sleep(5000).then(() => 'held for the delay' as const),
+    ]);
 
-    expect(res.isCancelled).toBe(true);
-    expect(res.isFailed).toBe(true);
-    expect(elapsed).toBeLessThan(1000);
-  });
+    expect(res).not.toBe('held for the delay');
+    expect(res !== 'held for the delay' && res.isCancelled).toBe(true);
+    expect(res !== 'held for the delay' && res.isFailed).toBe(true);
+  }, 10_000);
 
   test('cancel during retry delay keeps requestBodySettled from the retried response', async () => {
     // The resolved-response retry path nulled `adapterResponse` on a cancel during the
@@ -7392,14 +7403,17 @@ describe('HTTPClient — builder state', () => {
         }
       });
 
-    const start = Date.now();
-    const res = await builder.send();
-    const elapsed = Date.now() - start;
+    // Held for the delay, the answer would come after this timer: it is set before the
+    // delay's own, and timers run in the order they come due.
+    const res = await Promise.race([
+      builder.send(),
+      sleep(5000).then(() => 'held for the delay' as const),
+    ]);
 
-    expect(res.isCancelled).toBe(true);
-    expect(res.isFailed).toBe(true);
-    expect(elapsed).toBeLessThan(1000);
-  });
+    expect(res).not.toBe('held for the delay');
+    expect(res !== 'held for the delay' && res.isCancelled).toBe(true);
+    expect(res !== 'held for the delay' && res.isFailed).toBe(true);
+  }, 10_000);
 });
 
 describe('HTTPClient — phase-aware interceptors', () => {

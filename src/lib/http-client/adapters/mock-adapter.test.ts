@@ -20,6 +20,7 @@ import type {
 } from '../types';
 import type { Cookie } from '../cookie-jar';
 import { hostileRejections } from '../../internal/hostile-promise-test-utils';
+import { sleep } from '../../sleep';
 
 function makeCookie(
   overrides: Partial<Cookie> & { name: string; value: string },
@@ -1697,29 +1698,35 @@ describe('MockAdapter.send() — low-level contract', () => {
   test('throws AbortError when signal fires during delay and resolves early', async () => {
     adapter.routes.get('/slow', () => ({ status: 200, delay: 1000 }));
     const controller = new AbortController();
-    const start = Date.now();
+    // Thrown before the delay completed: held for it, the answer would come after this
+    // timer, which is set before the delay's own, as timers run in the order they come
+    // due.
+    const delayDone = sleep(1000).then(() => 'delay done' as const);
     setTimeout(() => controller.abort(), 30);
 
-    let caught: Error | undefined;
-    try {
-      await adapter.send(
-        makeAdapterRequest({
-          requestURL: '/slow',
-          signal: controller.signal,
-        }),
-      );
-    } catch (error) {
-      caught = error as Error;
-    }
+    const outcome = await Promise.race([
+      adapter
+        .send(
+          makeAdapterRequest({
+            requestURL: '/slow',
+            signal: controller.signal,
+          }),
+        )
+        .then(
+          () => 'answered' as const,
+          (error: unknown) => error,
+        ),
+      delayDone,
+    ]);
 
-    expect(caught?.name).toBe('AbortError');
-    // Should have thrown well before the 1000ms delay completed
-    expect(Date.now() - start).toBeLessThan(400);
+    expect(outcome).not.toBe('delay done');
+    expect((outcome as Error).name).toBe('AbortError');
   });
 
   test('throws AbortError when signal fires while async handler is still pending', async () => {
-    // The handler stays pending until the test releases it - no dangling
-    // timer is left behind once the abort wins the race.
+    // The handler stays pending until the test releases it, after the send has
+    // settled: a send that waited on the handler would never settle. No dangling timer
+    // is left behind once the abort wins the race.
     let releaseHandler!: () => void;
     const handlerGate = new Promise<void>((resolve) => {
       releaseHandler = resolve;
@@ -1730,7 +1737,6 @@ describe('MockAdapter.send() — low-level contract', () => {
     });
 
     const controller = new AbortController();
-    const start = Date.now();
     setTimeout(() => controller.abort(), 30);
 
     let caught: Error | undefined;
@@ -1746,7 +1752,6 @@ describe('MockAdapter.send() — low-level contract', () => {
     }
 
     expect(caught?.name).toBe('AbortError');
-    expect(Date.now() - start).toBeLessThan(400);
 
     // Let the abandoned handler finish so nothing stays pending after the test.
     releaseHandler();
