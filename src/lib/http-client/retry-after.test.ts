@@ -34,7 +34,17 @@ describe('parseRetryAfterMS', () => {
     ['Sunday, 08-Nov-26 12:00:30 GMT, 5', 30_000],
     ['Sun Nov  8 12:00:30 2026, Sun, 08 Nov 2026 12:00:30 GMT', 30_000],
     ['5, Sun, 08 Nov 2026 12:00:30 GMT', 5000],
-    // The near-misses got, ky and urllib3 read: any case, UTC or +0000, a one-digit day.
+    // The near-misses got, ky and urllib3 read: any case, another zone, a one-digit day.
+    ['Sun, 08 Nov 2026 12:00:30 UT', 30_000],
+    ['Sun, 08 Nov 2026 12:00:30 Z', 30_000],
+    ['Sun, 08 Nov 2026 13:00:30 +0100', 30_000],
+    ['Sun, 08 Nov 2026 06:30:30 -0530', 30_000],
+    ['Sun, 08 Nov 2026 04:00:30 PST', 30_000],
+    ['Sun, 08 Nov 2026 05:00:30 pdt', 30_000],
+    ['Sun, 08 Nov 2026 07:00:30 EST', 30_000],
+    ['Sunday, 08-Nov-26 06:00:30 CST', 30_000],
+    // As Date.parse and urllib3 read it: 1 hour 60 minutes.
+    ['Sun, 08 Nov 2026 14:00:30 +0160', 30_000],
     ['sun, 08 nov 2026 12:00:30 gmt', 30_000],
     ['SUN, 08 NOV 2026 12:00:30 GMT', 30_000],
     ['Sun, 08 Nov 2026 12:00:30 UTC', 30_000],
@@ -63,17 +73,16 @@ describe('parseRetryAfterMS', () => {
     'Sun, 08 Nov 2026 12:00:60 GMT',
     '1e3',
     'soon',
-    // A three-digit day, a zone other than GMT written as UTC or +0000.
+    // A three-digit day; a zone Date.parse or urllib3 does not read.
     'Sun, 008 Nov 2026 12:00:30 GMT',
-    'Sun, 08 Nov 2026 12:00:30 +0100',
-    'Sun, 08 Nov 2026 12:00:30 UT',
+    'Sun, 08 Nov 2026 12:00:30 CET',
+    'Sun, 08 Nov 2026 12:00:30 AST',
+    'Sun, 08 Nov 2026 12:00:30 +01',
     // A letter that folds into ASCII only under Unicode case mapping (a long s).
     '\u017fun, 08 Nov 2026 12:00:30 GMT',
     // No such day or time.
     'Sat, 31 Feb 2026 12:00:00 GMT',
     'Sun, 08 Nov 2026 24:00:00 GMT',
-    // Not GMT.
-    'Sun, 08 Nov 2026 12:00:30 PST',
     // A date `Date.parse` reads, but no HTTP-date.
     '2026-11-08T12:00:30Z',
   ])('%p is unreadable', (value) => {
@@ -90,6 +99,15 @@ describe('parseRetryAfterMS', () => {
     expect(
       parseRetryAfterMS('Thursday, 31-Dec-76 00:00:00 GMT', newYear2026),
     ).toBe(0);
+  });
+
+  test('an RFC 850 year is chosen by the moment it names in its zone', () => {
+    // From 12:00Z, 50 years on is 2076-11-08 12:00Z: 13:00 +0200 is 11:00Z, inside it,
+    // and 11:00 -0200 is 13:00Z, past it.
+    expect(parseRetryAfterMS('Sunday, 08-Nov-76 13:00:00 +0200', NOW)).toBe(
+      Date.UTC(2076, 10, 8, 11) - NOW,
+    );
+    expect(parseRetryAfterMS('Sunday, 08-Nov-76 11:00:00 -0200', NOW)).toBe(0);
   });
 
   test('an RFC 850 year is read in the next century when that is within 50 years', () => {

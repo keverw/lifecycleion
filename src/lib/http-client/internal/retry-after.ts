@@ -31,13 +31,43 @@ const MONTHS = [
 
 const MONTH = `(${MONTHS.join('|')})`;
 const TIME = '(\\d{2}):(\\d{2}):(\\d{2})';
-/** `GMT`, or the same zone as a non-conforming server writes it. */
-const ZONE = '(?:GMT|UTC|\\+0000)';
+/**
+ * `GMT`, or another zone as a non-conforming server writes one: a name RFC 822 defines
+ * (`UT`, `Z`, the US zones), `UTC`, or a `+hhmm` / `-hhmm` offset - the zones
+ * `Date.parse` on Bun and Node, which got and ky read the header with, and urllib3 all
+ * read.
+ */
+const ZONE = '(GMT|UTC|UT|Z|[ECMP][SD]T|[+-]\\d{4})';
+
+/** Each RFC 822 US zone's offset from GMT, in hours. */
+const US_ZONE_OFFSETS: Readonly<Record<string, number>> = {
+  est: -5,
+  edt: -4,
+  cst: -6,
+  cdt: -5,
+  mst: -7,
+  mdt: -6,
+  pst: -8,
+  pdt: -7,
+};
+
+/** How far `zone`, as {@link ZONE} matched it, is ahead of GMT, in milliseconds. */
+function zoneOffsetMS(zone: string): number {
+  if (zone[0] === '+' || zone[0] === '-') {
+    const sign = zone[0] === '-' ? -1 : 1;
+    // Read as `Date.parse` and urllib3 read one: `+0160` is two hours.
+    const hours = Number(zone.slice(1, 3));
+    const minutes = Number(zone.slice(3, 5));
+    return sign * (hours * 60 + minutes) * 60_000;
+  }
+
+  return (US_ZONE_OFFSETS[asciiLowercase(zone)] ?? 0) * 3_600_000;
+}
 
 /**
  * `Sun, 06 Nov 1994 08:49:37 GMT` - the preferred form. Like the other two, matched
  * ignoring ASCII case (without the `u` flag, `i` folds no other letter into ASCII), and
- * here with a one-digit day too, as got, ky and urllib3 read one.
+ * here with a one-digit day and another zone too, as got, ky and urllib3 read one.
  */
 const IMF_FIXDATE = new RegExp(
   `^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\\d{1,2}) ${MONTH} (\\d{4}) ${TIME} ${ZONE}$`,
@@ -66,11 +96,12 @@ function monthIndex(name: string): number {
  * number of seconds (`120`), or an HTTP-date in any of its three forms, which a recipient
  * must accept - read as GMT, its day name not checked against the date, as browsers'
  * and most HTTP libraries' parsers do not check it. The near-misses got, ky and urllib3
- * read are read too: names in any case, a `UTC` or `+0000` zone for `GMT`, and a one-digit
- * day, so a server that asks for a wait in one is not retried sooner. A date already past
- * asks for no wait (`0`). Trimmed of HTTP whitespace only. Anything else - a fraction, a
- * sign, another zone, a date in another format or spaced otherwise - is unreadable, and
- * the retry policy's own delay is used.
+ * all read are read too: names in any case, a one-digit day, and a zone other than `GMT`
+ * (see {@link ZONE}), so a server that asks for a wait in one is not retried sooner. A
+ * date already past asks for no wait (`0`). Trimmed of HTTP whitespace only. Anything
+ * else - a fraction, a sign, a zone they do not all read the same way (`CET`, `AST`,
+ * `+01`), a date in another format (ISO 8601, which urllib3 does not read) or spaced
+ * otherwise - is unreadable, and the retry policy's own delay is used.
  *
  * Only the first value is read. A header seen twice reaches the client joined
  * (`120, 60`) from `fetch` and XHR, and as its first value from Node, which drops a
@@ -116,13 +147,13 @@ export function parseRetryAfterMS(
 function parseHTTPDate(text: string, now: number): number | undefined {
   let match = IMF_FIXDATE.exec(text);
   if (match) {
-    const [, day, month, year, hour, minute, second] = match;
-    return utcTime(+year, month, +day, +hour, +minute, +second);
+    const [, day, month, year, hour, minute, second, zone] = match;
+    return inZone(utcTime(+year, month, +day, +hour, +minute, +second), zone);
   }
 
   match = RFC850_DATE.exec(text);
   if (match) {
-    const [, day, month, year, hour, minute, second] = match;
+    const [, day, month, year, hour, minute, second, zone] = match;
     // The latest year with those two digits that is not more than 50 years from `now`,
     // as RFC 9110 reads one: one that appears more than 50 years ahead is the most recent
     // past year with those digits.
@@ -131,17 +162,22 @@ function parseHTTPDate(text: string, now: number): number | undefined {
     fiftyYearsOn.setUTCFullYear(currentYear + 50);
     const limit = fiftyYearsOn.getTime();
 
-    // The year is chosen by the moment it would name, then the date held to that year:
-    // `29-Feb-00` read as 2100, which has no 29 February, is no date, not 2000's.
+    // The year is chosen by the moment it would name, in its zone, then the date held
+    // to that year: `29-Feb-00` read as 2100, which has no 29 February, is no date, not
+    // 2000's.
     let fullYear = currentYear - (currentYear % 100) + +year + 100;
     while (
-      Date.UTC(fullYear, monthIndex(month), +day, +hour, +minute, +second) >
+      Date.UTC(fullYear, monthIndex(month), +day, +hour, +minute, +second) -
+        zoneOffsetMS(zone) >
       limit
     ) {
       fullYear -= 100;
     }
 
-    return utcTime(fullYear, month, +day, +hour, +minute, +second);
+    return inZone(
+      utcTime(fullYear, month, +day, +hour, +minute, +second),
+      zone,
+    );
   }
 
   match = ASCTIME_DATE.exec(text);
@@ -153,10 +189,16 @@ function parseHTTPDate(text: string, now: number): number | undefined {
   return undefined;
 }
 
+/** `time`, a date and time read as GMT, moved to the moment it names in `zone`. */
+function inZone(time: number | undefined, zone: string): number | undefined {
+  return time === undefined ? undefined : time - zoneOffsetMS(zone);
+}
+
 /**
- * The epoch time of a GMT date and time, or `undefined` for one that names no real
- * moment (`31 Feb`, `24:00:00`, `12:00:60`). A leap second, `23:59:60`, is read as the
- * second after it.
+ * The epoch time of a date and time read as GMT, or `undefined` for one that names no
+ * real moment (`31 Feb`, `24:00:00`, `12:00:60`). A leap second, `23:59:60`, is read as
+ * the second after it: judged on the time as written, before {@link inZone} moves one in
+ * another zone, as urllib3 accepts it in any zone.
  */
 function utcTime(
   year: number,
