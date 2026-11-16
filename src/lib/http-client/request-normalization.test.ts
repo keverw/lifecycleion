@@ -5323,6 +5323,21 @@ test('a path pair is split at its first ]= as qs splits it, else at its first ='
   );
 });
 
+test('a path pair with encoded brackets is keyed as qs keys it, brackets decoded first', () => {
+  // `qs` reads `%5B` and `%5D` as brackets before it splits a pair or decodes its key,
+  // so neither a malformed escape after one nor an encoded `]=` keeps the pair.
+  expect(buildURL('http://e.test', '/x?k%5B1%1', { k: 'NEW' })).toBe(
+    'http://e.test/x?k=NEW',
+  );
+  expect(buildURL('http://e.test', '/x?%5Ba=b%5D=1', { 'a=b': 'NEW' })).toBe(
+    'http://e.test/x?a%3Db=NEW',
+  );
+  // Lowercase escapes too.
+  expect(
+    buildURL('http://e.test', '/x?%5ba=b%5d=1&y=2', { 'a=b': 'NEW' }),
+  ).toBe('http://e.test/x?y=2&a%3Db=NEW');
+});
+
 test('MockAdapter parity with a real server', async () => {
   const adapter = new MockAdapter();
   let seen: MockRequest | undefined;

@@ -6,6 +6,7 @@ import {
   asciiLowercase,
   asciiUppercase,
   trimHTTPWhitespace,
+  trimWhere,
 } from '../internal/ascii-text';
 import { REDIRECT_STATUS_CODES } from './consts';
 import qs from 'qs';
@@ -159,7 +160,9 @@ function snapshotParamValue(
  * its first `]=` when it has one, after the `]` - so `[a=b]=1` sets `a=b` - and otherwise
  * at its first `=`.
  */
-function topLevelQueryKey(pair: string): string {
+function topLevelQueryKey(wirePair: string): string {
+  // `qs` reads an encoded bracket as a bracket before it splits or decodes a pair.
+  const pair = wirePair.replace(/%5B/gi, '[').replace(/%5D/gi, ']');
   const bracketEquals = pair.indexOf(']=');
   const end = bracketEquals === -1 ? pair.indexOf('=') : bracketEquals + 1;
   const rawKey = (end === -1 ? pair : pair.slice(0, end)).replace(/\+/g, ' ');
@@ -412,10 +415,9 @@ function withoutTextualUserinfo(url: string): string {
   // as `https://u:p@...` is. The pattern's own leading `\s*` goes further, past
   // whitespace the parser keeps (a no-break space): such a string is refused anyway, and
   // reading past it cuts its userinfo too.
-  const text = url
-    .replace(/[\t\n\r]/g, '')
-    // eslint-disable-next-line no-control-regex
-    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '');
+  // Trimmed by index: a regex's unanchored `+$` rescans an inner run of spaces from each
+  // of its positions, quadratic in a server's `Location`.
+  const text = trimWhere(url.replace(/[\t\n\r]/g, ''), (code) => code <= 0x20);
   const authority =
     /^(\s*(?:(?:https?|wss?|ftp|file):[/\\]*|(?:[a-z][a-z\d+.-]*:)?[/\\]{2}))([^/\\?#]*)/i.exec(
       text,

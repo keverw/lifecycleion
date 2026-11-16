@@ -2512,9 +2512,10 @@ function copySinkList(
 /**
  * Refuses, with a `TypeError` naming `label`, a value that is not a sink: an object (or a
  * function) with a `write` method - or, for a diagnostic sink, a `writeDiagnostic` one,
- * which it is handed every diagnostic through when it has one. Checked where a sink is
- * handed over, so a list with a hole or a value that cannot be written to fails there,
- * not once per entry on every log call.
+ * which it is handed every diagnostic through when it has one - whose `writeDiagnostic`,
+ * if it has one, is a method: a regular sink is handed diagnostics through it when no
+ * diagnostic sink is set. Checked where a sink is handed over, so a list with a hole or
+ * a value that cannot be written to fails there, not once per entry on every log call.
  */
 function assertLogSink(
   sink: unknown,
@@ -2536,7 +2537,7 @@ function assertLogSink(
   try {
     write = (sink as Partial<LogSink>).write;
     // eslint-disable-next-line @typescript-eslint/unbound-method -- only its type is read
-    writeDiagnostic = isDiagnostic ? (sink as LogSink).writeDiagnostic : null;
+    writeDiagnostic = (sink as LogSink).writeDiagnostic;
   } catch (error) {
     throw new TypeError(`${label} has a method that could not be read`, {
       cause: error,
@@ -2544,12 +2545,23 @@ function assertLogSink(
   }
 
   // A diagnostic sink is handed diagnostics through `writeDiagnostic` when it has one,
-  // and through `write` when it has none.
-  const writer = isNullish(writeDiagnostic) ? write : writeDiagnostic;
+  // and through `write` when it has none. A regular sink needs `write`, and is handed
+  // diagnostics the same way when no diagnostic sink is set, so a `writeDiagnostic` it
+  // has must be a method too.
+  const isWrittenThroughDiagnostic =
+    isDiagnostic && !isNullish(writeDiagnostic);
+  const writer = isWrittenThroughDiagnostic ? writeDiagnostic : write;
+  const name = isWrittenThroughDiagnostic ? 'writeDiagnostic' : 'write';
 
   if (typeof writer !== 'function') {
     throw new TypeError(
-      `${label} must be a sink with ${needs} (got ${isNullish(writeDiagnostic) ? 'write' : 'writeDiagnostic'}: ${describeValue(writer)})`,
+      `${label} must be a sink with ${needs} (got ${name}: ${describeValue(writer)})`,
+    );
+  }
+
+  if (!isNullish(writeDiagnostic) && typeof writeDiagnostic !== 'function') {
+    throw new TypeError(
+      `${label} must be a sink whose writeDiagnostic, when set, is a method (got writeDiagnostic: ${describeValue(writeDiagnostic)})`,
     );
   }
 }

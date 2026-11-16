@@ -377,6 +377,20 @@ describe('URL userinfo removal', () => {
     }
   });
 
+  test('a refused URL with a long run of spaces inside it is cut in linear time', () => {
+    const spaces = ' '.repeat(60_000);
+    const started = performance.now();
+
+    expect(stripURLCredentials(`http://u:p@a${spaces}b/`)).toBe(
+      `http://@a${spaces}b/`,
+    );
+    expect(stripURLCredentials(` \u0001http://u:p@a${spaces}b/ `)).toBe(
+      `http://@a${spaces}b/`,
+    );
+    // Quadratic, as a regex trim was, this takes seconds; linear, about a millisecond.
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   test('a URL the parser refuses has the userinfo of its authority cut as written', () => {
     // A `Location` with a port out of range or a broken IPv6 literal is still recorded
     // in the redirect history and reported, so its credentials must not be.

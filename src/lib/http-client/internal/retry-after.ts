@@ -179,18 +179,24 @@ const ASCTIME_DATE = new RegExp(
 );
 
 /**
- * How a value of its own begins - a number of seconds, or a date by its day, day name or
- * month - so that what follows an asctime date's comma is told apart from its zone.
+ * What may follow an asctime date's comma and leave it read as GMT: nothing, or a value of
+ * its own - a number of seconds, or a date begun by its day or a whole day or month name
+ * (`, Mon, 16 Nov ...` splits there as `Mon`). Anything else may be a zone the date was
+ * written in (`, CET`, `, NOVT`, `, GMT+0100 (CET)`), so the date is not read.
  */
-const VALUE_START = new RegExp(
-  `^[ \\t]*(?:\\d|${SHORT_DAYS}|${MONTHS.join('|')})`,
+const NEXT_VALUE = new RegExp(
+  `^[ \\t]*(?:$|\\d|(?:${[SHORT_DAYS, LONG_DAYS, ...LONG_MONTHS, ...MONTHS].join('|')})(?![a-z]))`,
   'i',
+);
+
+/** Each month's index, from 0 for January, by its name's first three letters, lowercase. */
+const MONTH_INDEXES: ReadonlyMap<string, number> = new Map(
+  MONTHS.map((month, index) => [asciiLowercase(month), index]),
 );
 
 /** The index of a month name {@link MONTH} matched, from 0 for January. */
 function monthIndex(name: string): number {
-  const short = asciiLowercase(name).slice(0, 3);
-  return MONTHS.findIndex((month) => asciiLowercase(month) === short);
+  return MONTH_INDEXES.get(asciiLowercase(name).slice(0, 3)) as number;
 }
 
 /**
@@ -249,12 +255,13 @@ export function parseRetryAfterMS(
       continue;
     }
 
-    // A zone after an asctime date's comma that ZONE does not read (`, CET`, `,EST`)
-    // leaves no date: the asctime alone, read as GMT, would name another moment.
+    // Anything after an asctime date's comma but nothing or a value of its own may be a
+    // zone ZONE does not read (`, CET`, `,EST`), and leaves no date: the asctime alone,
+    // read as GMT, would name another moment.
     if (
       count < pieces.length &&
       ASCTIME_DATE.test(text) &&
-      !VALUE_START.test(pieces[count])
+      !NEXT_VALUE.test(pieces[count])
     ) {
       return undefined;
     }
@@ -291,7 +298,9 @@ function parseHTTPDate(text: string, now: number): number | undefined {
  * read a fixed century in RFC 850's layout too: `Date.parse` by RFC 5322's rule, urllib3
  * `00` to `68` as 20xx, in any layout. So from 2026, `Date.parse` reads `50` to `76`
  * there as 19xx where the 50-year rule reads 20xx, and urllib3 reads `50` to `68` as 20xx
- * where RFC 5322's rule reads 19xx.
+ * where RFC 5322's rule reads 19xx. A four-digit year is read as written, as RFC 9110's
+ * `4DIGIT` reads it - `0026` is the year 26 - where both readers read one below 100 by
+ * their two-digit rule.
  */
 function momentOf(
   groups: Readonly<Record<string, string | undefined>>,

@@ -931,6 +931,26 @@ for (const value of [false, 0, '']) {
   });
 }
 
+test('a regular sink with a writeDiagnostic that is no method is refused where it is handed over', async () => {
+  // With no diagnostic sinks, the regular sinks are handed diagnostics through it.
+  const notAMethod = { write: () => {}, writeDiagnostic: 'oops' };
+  const message =
+    'must be a sink whose writeDiagnostic, when set, is a method (got writeDiagnostic: string)';
+
+  expect(
+    () => new Logger({ callProcessExit: false, sinks: [notAMethod as never] }),
+  ).toThrow(new TypeError(`Logger sinks[0] ${message}`));
+
+  const logger = new Logger({ callProcessExit: false });
+  expect(() => logger.addSink(notAMethod as never)).toThrow(
+    new TypeError(`Logger.addSink() sink ${message}`),
+  );
+  // A nullish one is none.
+  logger.addSink({ write: () => {}, writeDiagnostic: null } as never);
+  logger.addSink({ write: () => {}, writeDiagnostic: undefined });
+  await logger.close();
+});
+
 test('an ignored re-entrant close rejection is contained during shutdown', async () => {
   let calls = 0;
   const diagnostics: LoggerDiagnostic[] = [];

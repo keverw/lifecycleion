@@ -38,6 +38,20 @@ describe('PublicSuffixResolver', () => {
     );
   });
 
+  test('a hostname of many labels is looked up past added suffixes in linear time', () => {
+    const resolver = new PublicSuffixResolver({ add: ['example.internal'] });
+    const labels = 'a.'.repeat(30_000);
+    const started = performance.now();
+
+    expect(resolver.registrableDomainFor(`${labels}com`)).toBe('a.com');
+    expect(resolver.registrableDomainFor(`${labels}x.example.internal`)).toBe(
+      'x.example.internal',
+    );
+    // Re-joining the labels for each candidate, this takes seconds; by offset, a few
+    // milliseconds.
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   test('a removed ancestor above a suffix still listed leaves the registrable domain', () => {
     const resolver = new PublicSuffixResolver({
       add: ['corp.internal'],

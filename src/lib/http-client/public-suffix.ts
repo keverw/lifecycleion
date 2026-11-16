@@ -177,6 +177,8 @@ function normalizeList(
  */
 export class PublicSuffixResolver {
   private readonly added: ReadonlySet<string>;
+  /** The length of the longest name in {@link added}, so longer candidates are skipped. */
+  private readonly longestAddedLength: number;
   private readonly removed: ReadonlySet<string>;
 
   constructor(overrides?: PublicSuffixOverrides) {
@@ -200,6 +202,7 @@ export class PublicSuffixResolver {
     const added = normalizeList(overrides?.add, 'add');
     const removed = normalizeList(overrides?.remove, 'remove');
     this.added = new Set(added);
+    this.longestAddedLength = Math.max(0, ...added.map((name) => name.length));
     this.removed = new Set(removed);
 
     for (const [addIndex, suffix] of added.entries()) {
@@ -354,13 +357,27 @@ export class PublicSuffixResolver {
       // Only caller additions may narrow the bundled result. The hostname check would
       // find no suffix at all for an edge-hyphen host, and an added suffix above a
       // longer bundled one would then win.
-      const labels = normalized.split('.');
+      // Walked by offset, and a candidate looked up only once it is no longer than the
+      // longest added suffix, so a host of many labels costs time in its length, not its
+      // length squared.
       const bundledLength = bundled.publicSuffix?.split('.').length ?? 0;
-      for (let i = 0; i < labels.length; i++) {
-        const candidate = labels.slice(i).join('.');
-        if (this.added.has(candidate) && labels.length - i >= bundledLength) {
-          return i === 0 ? normalized : labels.slice(i - 1).join('.');
+      let labelCount = normalized.split('.').length;
+      let previous = -1;
+      let start = 0;
+      while (labelCount >= bundledLength) {
+        if (
+          normalized.length - start <= this.longestAddedLength &&
+          this.added.has(normalized.slice(start))
+        ) {
+          return previous === -1 ? normalized : normalized.slice(previous);
         }
+        const dot = normalized.indexOf('.', start);
+        if (dot === -1) {
+          break;
+        }
+        previous = start;
+        start = dot + 1;
+        labelCount--;
       }
     }
 

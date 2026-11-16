@@ -91,6 +91,13 @@ describe('parseRetryAfterMS', () => {
     // read it; a value of its own after the comma is a second value.
     ['Sun Nov 08 07:00:30 2026, EST', 30_000],
     ['Sun Nov  8 12:00:30 2026, 5', 30_000],
+    // Nothing after an asctime date's comma, or a date of its own begun by its day or
+    // month name: the asctime date is read as GMT.
+    ['Sun Nov  8 12:00:30 2026,', 30_000],
+    ['Sun Nov  8 12:00:30 2026, ', 30_000],
+    ['Sun Nov  8 12:00:30 2026, Mon, 09 Nov 2026 12:00:30 GMT', 30_000],
+    ['Sun Nov  8 12:00:30 2026, Nov 9, 2026 12:00:30 GMT', 30_000],
+    ['Sun Nov  8 12:00:30 2026, May', 30_000],
     // Behind a day name and a space, a comma after a day first or a dashed year.
     ['Sun, 08, Nov 2026 12:00:30 GMT', 30_000],
     ['Sun 08, Nov 2026, 12:00:30 GMT', 30_000],
@@ -157,6 +164,13 @@ describe('parseRetryAfterMS', () => {
     'Sun Nov  8 07:00:30 2026, +01',
     'Sun Nov  8 07:00:30 2026, GMT+0100',
     'Sun Nov  8 07:00:30 2026, CET',
+    // Zones that begin with a month name, and any other text that may be a zone.
+    'Sun Nov  8 07:00:30 2026, NOVT',
+    'Sun Nov  8 07:00:30 2026, MART',
+    'Sun Nov  8 11:00:30 2026, GMT+0100 (CET)',
+    'Sun Nov  8 11:00:30 2026, UTC +0100',
+    'Sun Nov  8 07:00:30 2026, America/New_York',
+    'Sun Nov  8 12:00:30 2026, retry later',
   ])('%p is unreadable', (value) => {
     expect(parseRetryAfterMS(value, NOW)).toBeUndefined();
   });
@@ -234,6 +248,9 @@ describe('parseRetryAfterMS', () => {
     const in1900 = Date.UTC(1900, 0, 1);
 
     expect(parseRetryAfterMS('Sat, 01 Jan 0050 00:00:00 GMT', in1900)).toBe(0);
+    // Not read as 2026: the year 26 is long past.
+    expect(parseRetryAfterMS('Sun, 08 Nov 0026 12:00:30 GMT', NOW)).toBe(0);
+    expect(parseRetryAfterMS('Sunday, 08-Nov-0026 12:00:30 GMT', NOW)).toBe(0);
     expect(parseRetryAfterMS('Mon, 01 Jan 1900 00:00:30 GMT', in1900)).toBe(
       30_000,
     );
