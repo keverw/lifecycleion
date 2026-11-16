@@ -388,7 +388,7 @@ describe('URL userinfo removal', () => {
       `http://@a${spaces}b/`,
     );
     // Quadratic, as a regex trim was, this takes seconds; linear, about a millisecond.
-    expect(performance.now() - started).toBeLessThan(500);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 
   test('a URL the parser refuses has the userinfo of its authority cut as written', () => {

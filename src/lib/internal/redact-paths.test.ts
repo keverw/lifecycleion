@@ -631,10 +631,27 @@ describe('redactMatchedPaths - shape of a masked container', () => {
     // an own index key past the end - so a claim in the tens of millions passed every
     // test and was then materialized, element by element, before anything could refuse
     // it. Answered without allocating for it, and fail-closed as every refusal here is.
-    const start = Date.now();
-
     expect(parseRedactPaths(new Array(50_000_000))).toBeNull();
-    expect(Date.now() - start).toBeLessThan(1_000);
+
+    // Refused on its claimed length alone: no element read and no keys listed.
+    const touched: PropertyKey[] = [];
+    const claiming = new Proxy(['password'], {
+      get: (_target, key) => {
+        if (key === 'length') {
+          return 50_000_000;
+        }
+        touched.push(key);
+        // Thrown, so a list that is read stops at its first element.
+        throw new Error(`read ${String(key)}`);
+      },
+      ownKeys: (target) => {
+        touched.push('ownKeys');
+        return Reflect.ownKeys(target);
+      },
+    });
+
+    expect(parseRedactPaths(claiming)).toBeNull();
+    expect(touched).toEqual([]);
 
     // Nothing a real configuration would hit.
     expect(parseRedactPaths(['password', 'token'])).toHaveLength(2);

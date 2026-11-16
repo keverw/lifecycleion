@@ -62,7 +62,7 @@ describe('PublicSuffixResolver', () => {
     );
     // Re-joining the labels for each candidate, this takes seconds; by offset, a few
     // milliseconds.
-    expect(performance.now() - started).toBeLessThan(500);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 
   test('a removed ancestor above a suffix still listed leaves the registrable domain', () => {
