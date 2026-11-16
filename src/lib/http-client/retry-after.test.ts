@@ -34,6 +34,22 @@ describe('parseRetryAfterMS', () => {
     ['Sunday, 08-Nov-26 12:00:30 GMT, 5', 30_000],
     ['Sun Nov  8 12:00:30 2026, Sun, 08 Nov 2026 12:00:30 GMT', 30_000],
     ['5, Sun, 08 Nov 2026 12:00:30 GMT', 5000],
+    // The RFC 5322 and RFC 850 layouts got, ky and urllib3 all read the same way.
+    ['Sun, 08-Nov-2026 12:00:30 GMT', 30_000],
+    ['Sun, 08-Nov-26 12:00:30 GMT', 30_000],
+    ['Sunday, 08 Nov 2026 12:00:30 GMT', 30_000],
+    ['08 Nov 2026 12:00:30 GMT', 30_000],
+    ['08-Nov-26 12:00:30 GMT', 30_000],
+    ['Sun,08 Nov 2026 12:00:30 GMT', 30_000],
+    ['Sun,   08 Nov 2026 12:00:30 GMT', 30_000],
+    ['Sun 08 Nov 2026 12:00:30 GMT', 30_000],
+    ['Sun, 08\tNov  2026  12:00:30 GMT', 30_000],
+    ['Sun, 08 November 2026 12:00:30 GMT', 30_000],
+    ['Sun, 08 Nov 26 12:00:30 GMT', 30_000],
+    ['Sun, 08 Nov 2026 12:01 GMT', 60_000],
+    ['Sun, 09 Nov 2026 2:00:30 GMT', 14 * 3_600_000 + 30_000],
+    // A date without a day name, joined with a second value, is read by the first.
+    ['08 Nov 2026 12:00:30 GMT, 5', 30_000],
     // The near-misses got, ky and urllib3 read: any case, another zone, a one-digit day.
     ['Sun, 08 Nov 2026 12:00:30 UT', 30_000],
     ['Sun, 08 Nov 2026 12:00:30 Z', 30_000],
@@ -64,9 +80,18 @@ describe('parseRetryAfterMS', () => {
     '1.5',
     '-1',
     '+5',
-    // Spaced otherwise than an IMF-fixdate is, after its comma.
-    'Sun,08 Nov 2026 12:00:30 GMT',
-    'Sun,   08 Nov 2026 12:00:30 GMT',
+    // Forms the readers got, ky and urllib3 use do not all read the same way.
+    'Sun , 08 Nov 2026 12:00:30 GMT',
+    'Sun08 Nov 2026 12:00:30 GMT',
+    'Sunday 08 Nov 2026 12:00:30 GMT',
+    'Sun, 08 Nov-2026 12:00:30 GMT',
+    'Sun, 08-Nov 2026 12:00:30 GMT',
+    'Sun, 08 Nov 2026 12:00:30',
+    // No such day name, a fraction, a three-digit hour, no space before the zone.
+    'Monsday, 08 Nov 2026 12:00:30 GMT',
+    'Sun, 08 Nov 2026 12:00:30.5 GMT',
+    'Sun, 08 Nov 2026 120:00:30 GMT',
+    'Sun, 08 Nov 2026 12:00:30GMT',
     // A first value that is unreadable is not passed over for a later one.
     'soon, 120',
     // A second past :59 is only a leap second at 23:59.
@@ -99,6 +124,14 @@ describe('parseRetryAfterMS', () => {
     expect(
       parseRetryAfterMS('Thursday, 31-Dec-76 00:00:00 GMT', newYear2026),
     ).toBe(0);
+  });
+
+  test('a two-digit year in the spaced layout is read by the 50-year rule too', () => {
+    // 2070 is 44 years on from 2026: not more than 50, so not 1970.
+    expect(parseRetryAfterMS('Sun, 08 Nov 70 12:00:30 GMT', NOW)).toBe(
+      Date.UTC(2070, 10, 8, 12, 0, 30) - NOW,
+    );
+    expect(parseRetryAfterMS('Sun, 08 Nov 26 12:00:30 GMT', NOW)).toBe(30_000);
   });
 
   test('an RFC 850 year is chosen by the moment it names in its zone', () => {

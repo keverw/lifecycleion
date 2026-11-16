@@ -29,8 +29,23 @@ const MONTHS = [
   'Dec',
 ] as const;
 
-const MONTH = `(${MONTHS.join('|')})`;
-const TIME = '(\\d{2}):(\\d{2}):(\\d{2})';
+const LONG_MONTHS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+] as const;
+
+/** A month name, short or long: `Nov` or `November`. */
+const MONTH = `(${[...LONG_MONTHS, ...MONTHS].join('|')})`;
 /**
  * `GMT`, or another zone as a non-conforming server writes one: a name RFC 822 defines
  * (`UT`, `Z`, the US zones), `UTC`, or a `+hhmm` / `-hhmm` offset - the zones
@@ -64,30 +79,50 @@ function zoneOffsetMS(zone: string): number {
   return (US_ZONE_OFFSETS[asciiLowercase(zone)] ?? 0) * 3_600_000;
 }
 
+const SHORT_DAYS = 'Mon|Tue|Wed|Thu|Fri|Sat|Sun';
+
 /**
- * `Sun, 06 Nov 1994 08:49:37 GMT` - the preferred form. Like the other two, matched
- * ignoring ASCII case (without the `u` flag, `i` folds no other letter into ASCII), and
- * here with a one-digit day and another zone too, as got, ky and urllib3 read one.
+ * A day name and what follows it: a long one with its comma, a short one with its comma
+ * or a space, as urllib3 reads one - it takes a first word without a comma as the date
+ * only when it is a short day name.
  */
-const IMF_FIXDATE = new RegExp(
-  `^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\\d{1,2}) ${MONTH} (\\d{4}) ${TIME} ${ZONE}$`,
-  'i',
-);
-/** `Sunday, 06-Nov-94 08:49:37 GMT` - obsolete RFC 850, a two-digit year. */
-const RFC850_DATE = new RegExp(
-  `^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\\d{1,2})-${MONTH}-(\\d{2}) ${TIME} ${ZONE}$`,
+const DAY_NAME =
+  '(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),[ \\t]*|' +
+  `(?:${SHORT_DAYS})(?:,[ \\t]*|[ \\t]+))`;
+
+/** Spaces and tabs, the whitespace RFC 5322 folds a date with. */
+const WS = '[ \\t]+';
+
+/**
+ * `Sun, 06 Nov 1994 08:49:37 GMT`, the preferred form, RFC 850's (`Sunday, 06-Nov-94`),
+ * and the near-misses got, ky and urllib3 all read the same way: no day name, a short
+ * one without its comma, runs of whitespace, a one-digit day or hour, a long month name,
+ * a two-digit year, no seconds, another zone (see {@link ZONE}), and RFC 850's long day
+ * name and dashes in either layout. Matched ignoring ASCII case (without the `u` flag,
+ * `i` folds no other letter into ASCII). urllib3 reads no space before the comma, and no
+ * mix of a space and a dash around the month, so neither is read here.
+ *
+ * A two-digit year is read by RFC 9110's 50-year rule in either layout, as an HTTP-date
+ * requires, where `Date.parse` and urllib3 each read a fixed century: they differ only
+ * for a year more than about 40 years from now (`70` is 2070, which they read as 1970).
+ */
+const DATE_TIME = new RegExp(
+  `^${DAY_NAME}?` +
+    `(\\d{1,2})(?:${WS}${MONTH}${WS}|-${MONTH}-)(\\d{4}|\\d{2})` +
+    `${WS}(\\d{1,2}):(\\d{2})(?::(\\d{2}))?${WS}${ZONE}$`,
   'i',
 );
 /** `Sun Nov  6 08:49:37 1994` - obsolete asctime, in GMT though it says no zone. */
 const ASCTIME_DATE = new RegExp(
-  `^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ${MONTH} ( \\d|\\d{2}) ${TIME} (\\d{4})$`,
+  `^(?:${SHORT_DAYS}) ${MONTH} ( \\d|\\d{2}) ` +
+    '(\\d{2}):(\\d{2}):(\\d{2}) (\\d{4})$',
   'i',
 );
 
-/** The index of a month name matched ignoring case, from 0 for January. */
+/** The index of a month name {@link MONTH} matched, from 0 for January. */
 function monthIndex(name: string): number {
-  const lower = asciiLowercase(name);
-  return MONTHS.findIndex((month) => asciiLowercase(month) === lower);
+  const short = asciiLowercase(name).slice(0, 3);
+  return MONTHS.findIndex((month) => asciiLowercase(month) === short);
 }
 
 /**
@@ -96,20 +131,21 @@ function monthIndex(name: string): number {
  * number of seconds (`120`), or an HTTP-date in any of its three forms, which a recipient
  * must accept - read as GMT, its day name not checked against the date, as browsers'
  * and most HTTP libraries' parsers do not check it. The near-misses got, ky and urllib3
- * all read are read too: names in any case, a one-digit day, and a zone other than `GMT`
- * (see {@link ZONE}), so a server that asks for a wait in one is not retried sooner. A
- * date already past asks for no wait (`0`). Trimmed of HTTP whitespace only. Anything
- * else - a fraction, a sign, a zone they do not all read the same way (`CET`, `AST`,
- * `+01`), a date in another format (ISO 8601, which urllib3 does not read) or spaced
- * otherwise - is unreadable, and the retry policy's own delay is used.
+ * all read the same way are read too (see {@link DATE_TIME}), so a server that asks for
+ * a wait in one is not retried sooner. A date already past asks for no wait (`0`).
+ * Trimmed of HTTP whitespace only. Anything else - a fraction, a sign, a zone they do
+ * not all read the same way (`CET`, `AST`, `+01`) or none, a day name that is no day's,
+ * a date that does not exist, a space before the comma, a space on one side of the month
+ * and a dash on the other, a date in another format (ISO 8601, which urllib3 does not
+ * read) - is unreadable, and the retry policy's own delay is used.
  *
  * Only the first value is read. A header seen twice reaches the client joined
  * (`120, 60`) from `fetch` and XHR, and as its first value from Node, which drops a
  * repeated `Retry-After` - as the client keeps the first of one an adapter hands over as
  * an array (see `normalizeAdapterResponseHeaders`) - so each runtime waits the same: the
  * first value, whether or not the others agree with it. Told apart by the commas between
- * them: an IMF-fixdate or RFC 850 date holds one, after its day name, so it spans the
- * first two comma-separated pieces; a number of seconds or an asctime date the first.
+ * them: a date with a comma after its day name spans the first two comma-separated
+ * pieces; a number of seconds, a date without one or an asctime date the first.
  *
  * An HTTP-date is measured from `now`, the client's clock, as got, ky and Python's urllib3
  * measure it - not from the response's `Date`, so a client clock behind or ahead of the
@@ -130,8 +166,7 @@ export function parseRetryAfterMS(
     return Number(first) * 1000;
   }
 
-  // Rejoined as it was written, so a date spaced otherwise than `Sun, 06 Nov ...` is not
-  // made into one that is.
+  // Rejoined as it was written, so the date read is the text the server sent.
   const at =
     (pieces.length > 1
       ? parseHTTPDate(trimHTTPWhitespace(`${pieces[0]},${pieces[1]}`), now)
@@ -145,71 +180,74 @@ export function parseRetryAfterMS(
 
 /** The epoch time an HTTP-date names, or `undefined` when `text` is not one. */
 function parseHTTPDate(text: string, now: number): number | undefined {
-  let match = IMF_FIXDATE.exec(text);
+  let match = DATE_TIME.exec(text);
   if (match) {
-    const [, day, month, year, hour, minute, second, zone] = match;
-    return inZone(utcTime(+year, month, +day, +hour, +minute, +second), zone);
-  }
-
-  match = RFC850_DATE.exec(text);
-  if (match) {
-    const [, day, month, year, hour, minute, second, zone] = match;
-    // The latest year with those two digits that is not more than 50 years from `now`,
-    // as RFC 9110 reads one: one that appears more than 50 years ahead is the most recent
-    // past year with those digits.
-    const currentYear = new Date(now).getUTCFullYear();
-    const fiftyYearsOn = new Date(now);
-    fiftyYearsOn.setUTCFullYear(currentYear + 50);
-    const limit = fiftyYearsOn.getTime();
-
-    // The year is chosen by the moment it would name, in its zone, then the date held
-    // to that year: `29-Feb-00` read as 2100, which has no 29 February, is no date, not
-    // 2000's.
-    let fullYear = currentYear - (currentYear % 100) + +year + 100;
-    while (
-      Date.UTC(fullYear, monthIndex(month), +day, +hour, +minute, +second) -
-        zoneOffsetMS(zone) >
-      limit
-    ) {
-      fullYear -= 100;
-    }
-
-    return inZone(
-      utcTime(fullYear, month, +day, +hour, +minute, +second),
-      zone,
-    );
+    const [, day, spacedMonth, dashedMonth, year, hour, minute, second, zone] =
+      match;
+    const month = monthIndex(spacedMonth ?? dashedMonth);
+    const offsetMS = zoneOffsetMS(zone);
+    const fullYear =
+      year.length === 2
+        ? centuryOf(
+            +year,
+            now,
+            (candidate) =>
+              Date.UTC(candidate, month, +day, +hour, +minute, +(second ?? 0)) -
+              offsetMS,
+          )
+        : +year;
+    const time = utcTime(fullYear, month, +day, +hour, +minute, +(second ?? 0));
+    return time === undefined ? undefined : time - offsetMS;
   }
 
   match = ASCTIME_DATE.exec(text);
   if (match) {
     const [, month, day, hour, minute, second, year] = match;
-    return utcTime(+year, month, +day, +hour, +minute, +second);
+    return utcTime(+year, monthIndex(month), +day, +hour, +minute, +second);
   }
 
   return undefined;
 }
 
-/** `time`, a date and time read as GMT, moved to the moment it names in `zone`. */
-function inZone(time: number | undefined, zone: string): number | undefined {
-  return time === undefined ? undefined : time - zoneOffsetMS(zone);
+/**
+ * The year a two-digit `year` names, as RFC 9110 reads one: the latest with those digits
+ * whose moment, by `momentIn`, is not more than 50 years from `now`, so one that appears
+ * more than 50 years ahead is the most recent past year with those digits. The year is
+ * chosen by the moment, in its zone, and the date then held to it: `29-Feb-00` read as
+ * 2100, which has no 29 February, is no date, not 2000's.
+ */
+function centuryOf(
+  year: number,
+  now: number,
+  momentIn: (fullYear: number) => number,
+): number {
+  const currentYear = new Date(now).getUTCFullYear();
+  const fiftyYearsOn = new Date(now);
+  fiftyYearsOn.setUTCFullYear(currentYear + 50);
+  const limit = fiftyYearsOn.getTime();
+
+  let fullYear = currentYear - (currentYear % 100) + year + 100;
+  while (momentIn(fullYear) > limit) {
+    fullYear -= 100;
+  }
+
+  return fullYear;
 }
 
 /**
  * The epoch time of a date and time read as GMT, or `undefined` for one that names no
  * real moment (`31 Feb`, `24:00:00`, `12:00:60`). A leap second, `23:59:60`, is read as
- * the second after it: judged on the time as written, before {@link inZone} moves one in
- * another zone, as urllib3 accepts it in any zone.
+ * the second after it: judged on the time as written, before its zone moves it, as
+ * urllib3 accepts it in any zone. `month` is from 0 for January.
  */
 function utcTime(
   year: number,
-  monthName: string,
+  month: number,
   day: number,
   hour: number,
   minute: number,
   second: number,
 ): number | undefined {
-  const month = monthIndex(monthName);
-
   const isLeapSecond = hour === 23 && minute === 59 && second === 60;
 
   if (hour > 23 || minute > 59 || (second > 59 && !isLeapSecond) || day < 1) {

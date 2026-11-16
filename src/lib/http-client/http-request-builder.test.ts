@@ -1318,7 +1318,7 @@ test('params checks a function as qs walks one, by its own keys', () => {
   expect(() => client.get('/x').params({ cb: () => 1 })).not.toThrow();
 });
 
-test('params refuses a Map, Set, WeakMap, WeakSet, URLSearchParams, Headers, FormData or Blob at any depth, whose entries or contents qs would not write', () => {
+test('params refuses a Map, Set, WeakMap, WeakSet, URLSearchParams, Headers, FormData, Blob or URL at any depth, whose entries or contents qs would not write', () => {
   const client = new HTTPClient({ adapter: new MockAdapter() });
   class TagSet extends Set<string> {}
   const otherRealmMap: unknown = runInNewContext('new Map([[1, 2]])');
@@ -1349,6 +1349,11 @@ test('params refuses a Map, Set, WeakMap, WeakSet, URLSearchParams, Headers, For
   for (const [params, refusal] of [
     [{ file: new Blob(['x']) }, 'params.file is a Blob'],
     [{ upload: [new File(['x'], 'a.txt')] }, 'params.upload.0 is a Blob'],
+    [{ next: new URL('https://x.test/p') }, 'params.next is a URL'],
+    [
+      { links: { self: new URL('https://x.test/') } },
+      'params.links.self is a URL',
+    ],
   ] as const) {
     expect(() => client.get('/x').params(params)).toThrow(
       new TypeError(
@@ -1377,6 +1382,69 @@ test('params checks a value against the collection types the runtime has', () =>
     );
   } finally {
     globalThis.Headers = original;
+  }
+});
+
+test('a URL is sent through its href', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/q', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const next = new URL('https://x.test/p');
+
+  const response = await client.get('/q').params({ next: next.href }).send();
+  expect(response.requestURL).toBe(
+    'http://api.test/q?next=https%3A%2F%2Fx.test%2Fp',
+  );
+});
+
+test('a collection type written in JavaScript is told by instanceof too, so an object that fits its member is not one', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  const originalBlob = globalThis.Blob;
+  const originalHeaders = globalThis.Headers;
+  // The shapes of React Native's Blob and whatwg-fetch's Headers: members that read a
+  // field rather than refuse what is not one.
+  class ScriptBlob {
+    public data = { size: 1 };
+    public get size(): number {
+      return this.data.size;
+    }
+  }
+  class ScriptHeaders {
+    public map: Record<string, string> = {};
+    public has(name: string): boolean {
+      return Object.prototype.hasOwnProperty.call(this.map, name);
+    }
+  }
+  class Filter {
+    public data = { size: 2 };
+    public map = {};
+  }
+  let getterReads = 0;
+  class Lazy {
+    public get data(): { size: number } {
+      getterReads++;
+      return { size: 1 };
+    }
+  }
+
+  try {
+    globalThis.Blob = ScriptBlob as unknown as typeof Blob;
+    globalThis.Headers = ScriptHeaders as unknown as typeof Headers;
+    expect(() =>
+      client.get('/x').params({ filter: new Filter() }),
+    ).not.toThrow();
+    // The member is not run against an object that is not one, so its getter is not read.
+    expect(() => client.get('/x').params({ lazy: new Lazy() })).not.toThrow();
+    expect(getterReads).toBe(0);
+    expect(() => client.get('/x').params({ file: new ScriptBlob() })).toThrow(
+      'HTTPRequestBuilder params.file is a Blob',
+    );
+    expect(() => client.get('/x').params({ h: new ScriptHeaders() })).toThrow(
+      'HTTPRequestBuilder params.h is a Headers',
+    );
+  } finally {
+    globalThis.Blob = originalBlob;
+    globalThis.Headers = originalHeaders;
   }
 });
 

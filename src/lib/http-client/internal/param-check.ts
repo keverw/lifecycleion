@@ -37,8 +37,8 @@ export const PARAM_DEPTH_EXCEEDED_MESSAGE = `Input depth exceeded depth option o
  * `RangeError`: a `Date` (by `instanceof`, as `qs` tells one) that `toISOString`, the
  * call `qs` serializes it by, throws on, an object nested inside itself, an entry
  * deeper than {@link MAX_PARAM_DEPTH}, and a `Map`, `Set`, `WeakMap`, `WeakSet`,
- * `URLSearchParams`, `Headers`, `FormData` or `Blob` (a `File` included), whose entries
- * or contents are not own properties, so `qs` would write nothing for one (see
+ * `URLSearchParams`, `Headers`, `FormData`, `Blob` (a `File` included) or `URL`, whose
+ * entries or contents are not own properties, so `qs` would write nothing for one (see
  * {@link collectionTypeOf}). Walks the own enumerable keys `qs` walks - an
  * object's, a function's and a typed array's, all but a `Buffer`'s, which `qs` sends as
  * its text - through data properties only, so no getter runs before `qs` reads it; a
@@ -172,12 +172,16 @@ const COLLECTION_TYPES: ReadonlyArray<
   ['Headers', 'has', 'entries'],
   ['FormData', 'has', 'entries'],
   ['Blob', 'size', 'contents'],
+  ['URL', 'href', 'contents'],
 ];
 
 interface CollectionRead {
   readonly name: string;
   readonly held: string;
+  readonly type: abstract new (...args: never[]) => unknown;
   readonly read: (...args: unknown[]) => unknown;
+  /** Whether `read` is the runtime's own, whose slot read refuses any other value. */
+  readonly isNative: boolean;
 }
 
 /** The slot reads of the {@link COLLECTION_TYPES} this runtime has. */
@@ -198,7 +202,11 @@ function lookUpCollectionReads(): CollectionRead[] {
       reads.push({
         name,
         held,
+        type: type as abstract new (...args: never[]) => unknown,
         read: read as (...args: unknown[]) => unknown,
+        isNative: Function.prototype.toString
+          .call(read)
+          .includes('[native code]'),
       });
     }
   }
@@ -209,7 +217,9 @@ function lookUpCollectionReads(): CollectionRead[] {
 /**
  * The type of `value` when it is one of {@link COLLECTION_TYPES} - a subclass's instance,
  * or one from another realm, included - told by its internal slot, so an object that
- * only inherits from one of their prototypes, or a `Proxy` around one, is not one. `qs`
+ * only inherits from one of their prototypes, or a `Proxy` around one, is not one. Where
+ * the type's member is written in JavaScript, it is told by `instanceof` and then its
+ * slot, so one from another realm is not told there. `qs`
  * walks any other object by its own enumerable keys: a function or a class instance with
  * none writes nothing, as an empty `{}` does. A plain record or an array is not asked.
  */
@@ -223,6 +233,14 @@ function collectionTypeOf(
 
   walk.collectionReads ??= lookUpCollectionReads();
   for (const collection of walk.collectionReads) {
+    // A member written in JavaScript - Node's, or a React Native or whatwg-fetch
+    // polyfill's - may read a field any object can have rather than refuse what is not
+    // one, so there the value must be an instance too: asked first, so the member never
+    // runs against an object that is not one, nor a getter of the caller's with it.
+    if (!collection.isNative && !(value instanceof collection.type)) {
+      continue;
+    }
+
     try {
       Reflect.apply(collection.read, value, [undefined]);
       return collection;
