@@ -2544,24 +2544,22 @@ function assertLogSink(
     });
   }
 
-  // A diagnostic sink is handed diagnostics through `writeDiagnostic` when it has one,
-  // and through `write` when it has none. A regular sink needs `write`, and is handed
-  // diagnostics the same way when no diagnostic sink is set, so a `writeDiagnostic` it
-  // has must be a method too.
-  const isWrittenThroughDiagnostic =
-    isDiagnostic && !isNullish(writeDiagnostic);
-  const writer = isWrittenThroughDiagnostic ? writeDiagnostic : write;
-  const name = isWrittenThroughDiagnostic ? 'writeDiagnostic' : 'write';
-
-  if (typeof writer !== 'function') {
-    throw new TypeError(
-      `${label} must be a sink with ${needs} (got ${name}: ${describeValue(writer)})`,
-    );
-  }
-
+  // A sink of either list is handed diagnostics through `writeDiagnostic` when it has
+  // one - a regular sink when no diagnostic sink is set - so one it has must be a method.
   if (!isNullish(writeDiagnostic) && typeof writeDiagnostic !== 'function') {
     throw new TypeError(
       `${label} must be a sink whose writeDiagnostic, when set, is a method (got writeDiagnostic: ${describeValue(writeDiagnostic)})`,
+    );
+  }
+
+  // A regular sink is handed entries through `write`, and a diagnostic sink with no
+  // `writeDiagnostic` its diagnostics.
+  if (
+    (!isDiagnostic || isNullish(writeDiagnostic)) &&
+    typeof write !== 'function'
+  ) {
+    throw new TypeError(
+      `${label} must be a sink with ${needs} (got write: ${describeValue(write)})`,
     );
   }
 }

@@ -3,6 +3,12 @@
  */
 
 import { asciiLowercase, trimHTTPWhitespace } from '../../internal/ascii-text';
+import {
+  LONG_MONTH_NAMES,
+  SHORT_MONTH_NAMES,
+  monthIndexOf,
+  utcMoment,
+} from './calendar-date';
 
 /**
  * The retryable statuses whose `Retry-After` the client honors: `429 Too Many Requests`
@@ -14,38 +20,8 @@ export const RETRY_AFTER_STATUS_CODES: ReadonlySet<number> = new Set([
   429, 503,
 ]);
 
-const MONTHS = [
-  'Jan',
-  'Feb',
-  'Mar',
-  'Apr',
-  'May',
-  'Jun',
-  'Jul',
-  'Aug',
-  'Sep',
-  'Oct',
-  'Nov',
-  'Dec',
-] as const;
-
-const LONG_MONTHS = [
-  'January',
-  'February',
-  'March',
-  'April',
-  'May',
-  'June',
-  'July',
-  'August',
-  'September',
-  'October',
-  'November',
-  'December',
-] as const;
-
 /** A month name, short or long: `Nov` or `November`. */
-const MONTH = `(?<month>${[...LONG_MONTHS, ...MONTHS].join('|')})`;
+const MONTH = `(?<month>${[...LONG_MONTH_NAMES, ...SHORT_MONTH_NAMES].join('|')})`;
 /**
  * `GMT`, or another zone as a non-conforming server writes one: a name RFC 822 defines
  * (`UT`, `Z`, the US zones), `UTC`, or a `+hhmm` / `-hhmm` offset - the zones
@@ -124,10 +100,14 @@ function dateLayout(
   return { pattern: new RegExp(`^${dayName}${layout}$`, 'i'), isRFC850 };
 }
 
-/** What follows a spaced date: the year and time in either order, and the zone. */
+/**
+ * What follows a spaced date: the year and time in either order, and the zone. After a
+ * year that follows the time, a comma may be followed by an offset with no space
+ * (`08:49:37 2026,+0500`), and by no other zone without one.
+ */
 const SPACED_RESTS = [
   `${YEAR},?${WS}${TIME}${WS}${ZONE}`,
-  `${TIME}${WS}${YEAR},?${WS}${ZONE}`,
+  `${TIME}${WS}${YEAR}(?:,?${WS}|,(?=[+-]))${ZONE}`,
   `${TIME}${WS}${ZONE}${WS}${YEAR}`,
 ];
 
@@ -142,7 +122,8 @@ const DASHED_REST = `${WS}${TIME}${WS}${ZONE}`;
  * RFC 850's long day name and dashes in either layout, the month before the day
  * (`Nov 06, 1994`, `Nov-06-1994`), a comma after a spaced year, the time before the
  * year, with the zone after the year or before it (`Nov 06 08:49:37 1994 GMT`,
- * `Nov 06 08:49:37 GMT 1994`), and, behind a {@link SPACED_DAY_NAME}, a comma after a
+ * `Nov 06 08:49:37 GMT 1994`) or an offset straight after the year's comma
+ * (`Nov 06 08:49:37 1994,+0500`), and, behind a {@link SPACED_DAY_NAME}, a comma after a
  * day that comes first or after a dashed year (`Sun, 06, Nov 1994`). urllib3 reads no
  * space before a comma and no mix of a space and a dash around the month, so neither is
  * read here.
@@ -185,19 +166,9 @@ const ASCTIME_DATE = new RegExp(
  * written in (`, CET`, `, NOVT`, `, GMT+0100 (CET)`), so the date is not read.
  */
 const NEXT_VALUE = new RegExp(
-  `^[ \\t]*(?:$|\\d|(?:${[SHORT_DAYS, LONG_DAYS, ...LONG_MONTHS, ...MONTHS].join('|')})(?![a-z]))`,
+  `^[ \\t]*(?:$|\\d|(?:${[SHORT_DAYS, LONG_DAYS, ...LONG_MONTH_NAMES, ...SHORT_MONTH_NAMES].join('|')})(?![a-z]))`,
   'i',
 );
-
-/** Each month's index, from 0 for January, by its name's first three letters, lowercase. */
-const MONTH_INDEXES: ReadonlyMap<string, number> = new Map(
-  MONTHS.map((month, index) => [asciiLowercase(month), index]),
-);
-
-/** The index of a month name {@link MONTH} matched, from 0 for January. */
-function monthIndex(name: string): number {
-  return MONTH_INDEXES.get(asciiLowercase(name).slice(0, 3)) as number;
-}
 
 /**
  * How long a `Retry-After` value asks the client to wait, in milliseconds from `now` (an
@@ -284,7 +255,7 @@ function parseHTTPDate(text: string, now: number): number | undefined {
   const groups = ASCTIME_DATE.exec(text)?.groups;
   if (groups) {
     const { year, month, day, hour, minute, second } = groups;
-    return utcTime(+year, monthIndex(month), +day, +hour, +minute, +second);
+    return utcTime(+year, monthIndexOf(month), +day, +hour, +minute, +second);
   }
 
   return undefined;
@@ -307,7 +278,7 @@ function momentOf(
   isRFC850: boolean,
   now: number,
 ): number | undefined {
-  const month = monthIndex(groups.month as string);
+  const month = monthIndexOf(groups.month as string);
   const offsetMS = zoneOffsetMS(groups.zone as string);
   const day = Number(groups.day);
   const hour = Number(groups.hour);
@@ -358,9 +329,9 @@ function centuryOf(
 
 /**
  * The epoch time of a date and time read as GMT, or `undefined` for one that names no
- * real moment (`31 Feb`, `24:00:00`, `12:00:60`). A leap second, `23:59:60`, is read as
- * the second after it: judged on the time as written, before its zone moves it, as
- * urllib3 accepts it in any zone. `month` is from 0 for January.
+ * real moment (see `utcMoment`). A leap second, `23:59:60`, is read as the second after
+ * it: judged on the time as written, before its zone moves it, as urllib3 accepts it in
+ * any zone. `month` is from 0 for January.
  */
 function utcTime(
   year: number,
@@ -370,21 +341,10 @@ function utcTime(
   minute: number,
   second: number,
 ): number | undefined {
-  const isLeapSecond = hour === 23 && minute === 59 && second === 60;
-
-  if (hour > 23 || minute > 59 || (second > 59 && !isLeapSecond) || day < 1) {
-    return undefined;
+  if (hour === 23 && minute === 59 && second === 60) {
+    const time = utcMoment(year, month, day, hour, minute, 59);
+    return time === undefined ? undefined : time + 1000;
   }
 
-  // `setUTCFullYear`, not `Date.UTC`, which reads a year below 100 as 19xx.
-  const date = new Date(0);
-  date.setUTCFullYear(year, month, day);
-  date.setUTCHours(hour, minute, isLeapSecond ? 59 : second);
-
-  // Rolled over into the next month: no such day.
-  if (date.getUTCMonth() !== month) {
-    return undefined;
-  }
-
-  return date.getTime() + (isLeapSecond ? 1000 : 0);
+  return utcMoment(year, month, day, hour, minute, second);
 }

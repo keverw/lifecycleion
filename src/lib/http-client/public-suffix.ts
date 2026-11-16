@@ -202,7 +202,13 @@ export class PublicSuffixResolver {
     const added = normalizeList(overrides?.add, 'add');
     const removed = normalizeList(overrides?.remove, 'remove');
     this.added = new Set(added);
-    this.longestAddedLength = Math.max(0, ...added.map((name) => name.length));
+    // A loop, not `Math.max(...)`: a list long enough passes validation and then
+    // overflows the call stack as spread arguments.
+    let longestAddedLength = 0;
+    for (const name of added) {
+      longestAddedLength = Math.max(longestAddedLength, name.length);
+    }
+    this.longestAddedLength = longestAddedLength;
     this.removed = new Set(removed);
 
     for (const [addIndex, suffix] of added.entries()) {
@@ -361,7 +367,15 @@ export class PublicSuffixResolver {
       // longest added suffix, so a host of many labels costs time in its length, not its
       // length squared.
       const bundledLength = bundled.publicSuffix?.split('.').length ?? 0;
-      let labelCount = normalized.split('.').length;
+      // Counted by its dots, without an array of its labels.
+      let labelCount = 1;
+      for (
+        let dot = normalized.indexOf('.');
+        dot !== -1;
+        dot = normalized.indexOf('.', dot + 1)
+      ) {
+        labelCount++;
+      }
       let previous = -1;
       let start = 0;
       while (labelCount >= bundledLength) {

@@ -25,6 +25,7 @@ import {
 } from '../internal/ascii-text';
 import { isNullish } from '../internal/is-nullish';
 import { isLoopbackHost } from './internal/loopback-host';
+import { monthIndexOf, utcMoment } from './internal/calendar-date';
 import {
   assertArrayLength,
   copyArrayValue,
@@ -275,20 +276,6 @@ const COOKIE_DATE_DELIMITER =
 const COOKIE_DATE_TIME = /^(\d{1,2}):(\d{1,2}):(\d{1,2})(?:\D.*)?$/;
 const COOKIE_DATE_DAY = /^(\d{1,2})(?:\D.*)?$/;
 const COOKIE_DATE_YEAR = /^(\d{2,4})(?:\D.*)?$/;
-const COOKIE_DATE_MONTHS = [
-  'jan',
-  'feb',
-  'mar',
-  'apr',
-  'may',
-  'jun',
-  'jul',
-  'aug',
-  'sep',
-  'oct',
-  'nov',
-  'dec',
-];
 
 /**
  * RFC 6265 §5.1.1's cookie-date algorithm: the time, day, month and year taken from the
@@ -317,9 +304,7 @@ function parseCookieDate(value: string): Date | undefined {
       continue;
     }
     if (month === undefined) {
-      const index = COOKIE_DATE_MONTHS.indexOf(
-        asciiLowercase(token.slice(0, 3)),
-      );
+      const index = monthIndexOf(token);
       if (index !== -1) {
         month = index;
         continue;
@@ -345,19 +330,13 @@ function parseCookieDate(value: string): Date | undefined {
     year += 2000;
   }
   const [hours, minutes, seconds] = time;
-  if (
-    day < 1 ||
-    day > 31 ||
-    year < 1601 ||
-    hours > 23 ||
-    minutes > 59 ||
-    seconds > 59
-  ) {
+  if (year < 1601) {
     return undefined;
   }
-  const date = new Date(Date.UTC(year, month, day, hours, minutes, seconds));
-  // A day the month does not have (31 February) is not a date.
-  return date.getUTCDate() === day ? date : undefined;
+  // A day the month does not have (31 February) is not a date, nor is a time past
+  // 23:59:59.
+  const moment = utcMoment(year, month, day, hours, minutes, seconds);
+  return moment === undefined ? undefined : new Date(moment);
 }
 
 /** Construction options for {@link CookieJar}. */

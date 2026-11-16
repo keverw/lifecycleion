@@ -38,6 +38,19 @@ describe('PublicSuffixResolver', () => {
     );
   });
 
+  test('a list of added suffixes too long to spread as arguments is accepted', () => {
+    // Two million: past what Bun's call stack takes as spread arguments.
+    const names = Array.from(
+      { length: 2_000_000 },
+      (_, index) => `n${String(index)}.test`,
+    );
+    const resolver = new PublicSuffixResolver({ add: names });
+
+    expect(resolver.registrableDomainFor('a.b.n1999999.test')).toBe(
+      'b.n1999999.test',
+    );
+  }, 30_000);
+
   test('a hostname of many labels is looked up past added suffixes in linear time', () => {
     const resolver = new PublicSuffixResolver({ add: ['example.internal'] });
     const labels = 'a.'.repeat(30_000);

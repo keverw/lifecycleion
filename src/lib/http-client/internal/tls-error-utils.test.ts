@@ -326,6 +326,32 @@ describe('isTLSCertificateError cause handling', () => {
     ).toBe(false);
   });
 
+  test.each([
+    'EE_KEY_TOO_SMALL',
+    'CA_KEY_TOO_SMALL',
+    'CA_MD_TOO_WEAK',
+    'INVALID_NON_CA',
+    'INVALID_EXTENSION',
+    'INVALID_POLICY_EXTENSION',
+    'NO_EXPLICIT_POLICY',
+    'IP_ADDRESS_MISMATCH',
+    'EMAIL_MISMATCH',
+  ])(
+    'an OpenSSL verification code with no CERT or CRL token, %s, is a certificate error on the error or its cause',
+    (code) => {
+      expect(isTLSCertificateError(makeError('verify failed', code))).toBe(
+        true,
+      );
+      expect(
+        isTLSCertificateError(
+          new Error('fetch failed', {
+            cause: makeError('verify failed', code),
+          }),
+        ),
+      ).toBe(true);
+    },
+  );
+
   test('a transport code outranks certificate wording in its message', () => {
     // Node interpolates the hostname into these messages, so a host named
     // `certificates.*` put /certificate/ in the message of an ordinary DNS

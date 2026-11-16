@@ -91,6 +91,11 @@ describe('parseRetryAfterMS', () => {
     // read it; a value of its own after the comma is a second value.
     ['Sun Nov 08 07:00:30 2026, EST', 30_000],
     ['Sun Nov  8 12:00:30 2026, 5', 30_000],
+    // An offset straight after the comma that follows a year after the time.
+    ['Sun Nov  8 17:00:30 2026,+0500', 30_000],
+    ['Sun Nov  8 07:00:30 2026,-0500', 30_000],
+    ['Sun, 08 Nov 17:00:30 2026,+0500', 30_000],
+    ['Nov 8, 17:00:30 2026,+0500', 30_000],
     // Nothing after an asctime date's comma, or a date of its own begun by its day or
     // month name: the asctime date is read as GMT.
     ['Sun Nov  8 12:00:30 2026,', 30_000],
@@ -164,6 +169,13 @@ describe('parseRetryAfterMS', () => {
     'Sun Nov  8 07:00:30 2026, +01',
     'Sun Nov  8 07:00:30 2026, GMT+0100',
     'Sun Nov  8 07:00:30 2026, CET',
+    // No zone but an offset straight after a year's comma, and no offset there after a
+    // year that comes before the time.
+    'Sun Nov  8 12:00:30 2026,GMT',
+    'Sun Nov  8 12:00:30 2026,UTC',
+    'Sun Nov  8 12:00:30 2026,Z',
+    'Sun Nov  8 17:00:30 2026,+05',
+    'Sun, 08 Nov 2026,+0500 17:00:30',
     // Zones that begin with a month name, and any other text that may be a zone.
     'Sun Nov  8 07:00:30 2026, NOVT',
     'Sun Nov  8 07:00:30 2026, MART',

@@ -548,7 +548,7 @@ test('a function with a write method is a sink, and a diagnostic sink may have o
       }),
   ).toThrow(
     new TypeError(
-      'Logger diagnosticSinks[0] must be a sink with a write() or writeDiagnostic() method (got writeDiagnostic: string)',
+      'Logger diagnosticSinks[0] must be a sink whose writeDiagnostic, when set, is a method (got writeDiagnostic: string)',
     ),
   );
   await logger.close();
@@ -926,7 +926,7 @@ for (const value of [false, 0, '']) {
           ],
         }),
     ).toThrow(
-      'Logger diagnosticSinks[0] must be a sink with a write() or writeDiagnostic() method (got writeDiagnostic:',
+      'Logger diagnosticSinks[0] must be a sink whose writeDiagnostic, when set, is a method (got writeDiagnostic:',
     );
   });
 }
