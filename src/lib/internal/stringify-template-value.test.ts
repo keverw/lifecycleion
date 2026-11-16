@@ -255,15 +255,22 @@ describe('stringifyTemplateValue on binary views', () => {
 
   test('a view larger than the allowance renders as a marker instead of decoding', () => {
     const big = Buffer.alloc(8_000_000, 0x41);
+    // `String(big)` calls the value's own `toString` first, so this counts every decode.
+    let decodes = 0;
 
-    const started = Date.now();
+    Object.defineProperty(big, 'toString', {
+      value(this: Buffer) {
+        decodes++;
+        return Buffer.prototype.toString.call(this);
+      },
+    });
+
     const rendered = stringifyTemplateValue(big);
-    const elapsed = Date.now() - started;
 
+    // The point is the work avoided, not only the text: decoding this cost eight megabytes
+    // before the marker, and the result was cut to nothing anyway.
+    expect(decodes).toBe(0);
     expect(rendered).toBe('<binary: Buffer, 8000000 bytes>');
-    // The point is the work avoided, not only the text: decoding this took about 200ms and
-    // eight megabytes before the marker, and the result was cut to nothing anyway.
-    expect(elapsed).toBeLessThan(200);
   });
 
   test('a view that fits the allowance is decoded as before', () => {
@@ -278,18 +285,24 @@ describe('stringifyTemplateValue on binary views', () => {
     // value is too big. Read through the intrinsic `%TypedArray%.prototype.byteLength`
     // getter, which reads the internal slot and cannot be overridden, a subclass claiming
     // `0` over twenty megabytes still takes the marker.
+    let decodes = 0;
+
     class Lying extends Uint8Array {
       public override get byteLength(): number {
         return 0;
+      }
+
+      public override toString(): string {
+        decodes++;
+        return super.toString();
       }
     }
 
     const lying = new Lying(20_000_000);
 
-    const started = Date.now();
     const rendered = stringifyTemplateValue(lying);
 
-    expect(Date.now() - started).toBeLessThan(200);
+    expect(decodes).toBe(0);
     expect(rendered).toBe('<binary: Lying, 20000000 bytes>');
   });
 

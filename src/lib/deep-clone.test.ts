@@ -1402,10 +1402,25 @@ describe('deepClone', () => {
         spread[index] = index;
       }
 
-      const startedAt = performance.now();
+      // Behind a `Proxy`, walked the same way, counting the indices the walk asks after:
+      // by its entries, one run of holes and the samples - about 65,000; by every index,
+      // all 2^28. Stopped past 2^20, so a walk by index fails here rather than running on.
+      let asked = 0;
+      const counted = new Proxy(spread, {
+        has: (target, key) => {
+          if (++asked > 2 ** 20) {
+            throw new Error('walked the array by index');
+          }
+
+          return Reflect.has(target, key);
+        },
+      });
+
+      expect(Object.keys(deepClone(counted))).toHaveLength(4096);
+      expect(asked).toBeLessThan(2 ** 20);
+
       const cloned = deepClone(spread);
 
-      expect(performance.now() - startedAt).toBeLessThan(1000);
       expect(Object.keys(cloned)).toHaveLength(4096);
       expect(cloned[2 ** 28 - 65_536]).toBe(2 ** 28 - 65_536);
     });

@@ -433,11 +433,14 @@ describe('CurlyBrackets', () => {
   });
 
   it('returns promptly for an unclosed placeholder followed by whitespace', () => {
-    const template = `{{${' '.repeat(500)}`;
+    // A regexp's backtracking has no count to observe, so the bound is time. One linear
+    // match over 3,000 spaces takes well under a millisecond; a pattern that retries
+    // every division of the whitespace takes about ten seconds on it.
+    const template = `{{${' '.repeat(3_000)}`;
     const startedAt = performance.now();
 
     expect(CurlyBrackets(template, {})).toBe(template);
-    expect(performance.now() - startedAt).toBeLessThan(250);
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
   });
 
   it('should stringify full arrays and plain objects as JSON', () => {
@@ -581,6 +584,16 @@ describe('CurlyBrackets - one budget across the whole template', () => {
     // the result to be cut to the marker and thrown away. The work is quadratic in the
     // template's placeholder count against one large param.
     const wide: Record<string, unknown> = {};
+    // Read once each time `wide` is rendered, so the count is the number of renders.
+    let wideRenders = 0;
+
+    Object.defineProperty(wide, 'counted', {
+      enumerable: true,
+      get: () => {
+        wideRenders++;
+        return 'value';
+      },
+    });
 
     for (let index = 0; index < 20_000; index++) {
       wide[`k${String(index)}`] = 'value';
@@ -589,18 +602,13 @@ describe('CurlyBrackets - one budget across the whole template', () => {
     const params = { big: 'x'.repeat(1_000_000), wide };
     const template = `{{big}}${'{{wide}}'.repeat(200)}`;
 
-    const startedAt = Date.now();
     const rendered = CurlyBrackets(template, params);
-    const elapsed = Date.now() - startedAt;
 
     expect(rendered).toContain('[max length exceeded]');
 
-    // Measured at 1.7 seconds when the exhausted placeholders still rendered, against
-    // roughly fifty milliseconds when they stop at the check - the whole of which is the
-    // one placeholder that legitimately renders. The bound sits between the two with room
-    // for a slow machine; the point is that the renders do not happen, not how fast they
-    // are.
-    expect(elapsed).toBeLessThan(600);
+    // `big` spends the whole budget, so every `{{wide}}` after it stops at the check
+    // without walking its value - the point is that the renders do not happen.
+    expect(wideRenders).toBe(0);
 
     // And the exhausted placeholders are not charged for a marker nobody budgeted, so the
     // total stays at the cap rather than creeping past it once per placeholder.

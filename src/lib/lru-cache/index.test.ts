@@ -1478,7 +1478,7 @@ describe('LRUCache', () => {
         has: () => true,
       });
       // Each caught at its hole and sized again, after every array before it was sized.
-      const value = Array.from({ length: 60_000 }, () => {
+      const value = Array.from({ length: 120_000 }, () => {
         const array: unknown[] = [1];
         array.length = 2;
         Object.setPrototypeOf(array, prototype);
@@ -1491,9 +1491,11 @@ describe('LRUCache', () => {
       const elapsedMS = performance.now() - startedAt;
 
       // 40 for the outer array, and 40 and 8 for its one number for each array in it.
-      expect(cache.byteSize).toBe(40 + 60_000 * 48);
-      // Linear in the arrays' count this is tens of milliseconds; quadratic, seconds.
-      expect(elapsedMS).toBeLessThan(1500);
+      expect(cache.byteSize).toBe(40 + 120_000 * 48);
+      // No count a caller can see tells the two apart - the prototype is asked the same
+      // questions either way - so the bound is time. Linear in the arrays' count this is
+      // under a tenth of a second; quadratic, over ten. The bound sits far from both.
+      expect(elapsedMS).toBeLessThan(4_000);
     }, 30_000);
 
     test("neither reads nor walks the holes a Proxy prototype's has answers for", () => {

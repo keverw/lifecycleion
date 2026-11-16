@@ -153,10 +153,16 @@ describe('describeContainer', () => {
       (_, index) => `k${String(index)}`,
     );
 
+    // Every entry read, so a walk or a copy over the list is seen here.
+    let entryReads = 0;
     const liar = new Proxy(
       {},
       {
         ownKeys: () => keys,
+        get: () => {
+          entryReads++;
+          return 1;
+        },
         // `Object.keys` asks after every key's enumerability, so the trap has to answer for
         // each of them - a real descriptor per key would be the very cost under test.
         getOwnPropertyDescriptor: () => ({
@@ -168,7 +174,6 @@ describe('describeContainer', () => {
       },
     );
 
-    const startedAt = Date.now();
     const shape = describeContainer(liar);
 
     expect(shape.kind).toBe('unreadable');
@@ -179,7 +184,7 @@ describe('describeContainer', () => {
     // Only the count travels, never the keys themselves: the error is what callers hand
     // to their failure handler, and a key is caller data.
     expect((shape as { error: Error }).error.message).not.toContain('k0');
-    expect(Date.now() - startedAt).toBeLessThan(10_000);
+    expect(entryReads).toBe(0);
   }, 15_000);
 });
 
