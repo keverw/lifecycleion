@@ -5034,9 +5034,9 @@ describe('jar limits', () => {
     expect(jar.getCookieHeaderString('https://example.com/')).toBe('b=1; a=1');
   });
 
-  test("a replacement's creation time later than its createdAt survives toJSON and fromJSON", () => {
-    // A clock stepped back between two `Set-Cookie`s: the replacement keeps `a`'s place,
-    // after `b`, though its own `createdAt` is earlier than both.
+  test('a creation time later than its createdAt survives toJSON and fromJSON', () => {
+    // A clock stepped back between `Set-Cookie`s: `b`, stored after `a`, is created after
+    // it, though its `createdAt` is earlier, and the replacement keeps `a`'s place.
     const start = Date.now() - 10_000;
     const url = 'https://example.com/';
     const jar = new CookieJar();
@@ -5046,12 +5046,54 @@ describe('jar limits', () => {
     jar.processResponseHeaders({ 'set-cookie': 'b=1' }, url);
     setSystemTime(new Date(start + 500));
     jar.processResponseHeaders({ 'set-cookie': 'a=2' }, url);
-    expect(jar.getCookieHeaderString(url)).toBe('b=1; a=2');
+    expect(jar.getCookieHeaderString(url)).toBe('a=2; b=1');
 
     const restored = new CookieJar();
     restored.fromJSON(jar.toJSON());
 
-    expect(restored.getCookieHeaderString(url)).toBe('b=1; a=2');
+    expect(restored.getCookieHeaderString(url)).toBe('a=2; b=1');
+  });
+
+  test('cookies stored in one millisecond keep their header order through toJSON and fromJSON', () => {
+    // Same-path cookies one response sets share a millisecond, and the header orders them
+    // by creation. A restore lists them least recently used first: their saved creation
+    // times, not that order, keep the header as it was - and which of two same-name
+    // cookies a server reads first.
+    const now = Date.now();
+    setSystemTime(new Date(now));
+    const jar = new CookieJar();
+    jar.processResponseHeaders(
+      {
+        'set-cookie': [
+          'a=1; Path=/',
+          'f=6; Path=/',
+          'i=9; Path=/; Secure',
+          'dup=dom; Path=/; Domain=example.com',
+          'dup=host; Path=/; Secure',
+        ],
+      },
+      'https://example.com/',
+    );
+    // A later plain-http read touches only the cookies that are not `Secure`.
+    setSystemTime(new Date(now + 1000));
+    jar.getCookieHeaderString('http://example.com/');
+
+    // Saved before the https read below, which would touch them all again.
+    const saved = jar.toJSON();
+    const header = 'a=1; f=6; i=9; dup=dom; dup=host';
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe(header);
+
+    const restored = new CookieJar();
+    restored.fromJSON(saved);
+
+    expect(restored.getCookieHeaderString('https://example.com/')).toBe(header);
+
+    // An emptied jar starts over: a cookie stored at the same instant again takes its own
+    // time, with no creation time left to come after.
+    jar.clear();
+    setSystemTime(new Date(now));
+    jar.processResponseHeaders({ 'set-cookie': 'z=1' }, 'https://example.com/');
+    expect(jar.toJSON().cookies[0]).not.toHaveProperty('firstCreatedAt');
   });
 
   test('eviction and toJSON order cookies by lastAccessedAt, then by when they were stored', () => {

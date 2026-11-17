@@ -34,11 +34,7 @@ import {
   parseContentLength,
   streamErrorAnswer,
 } from '../internal/response-limit';
-import {
-  arrayBufferKindOf,
-  isArrayBufferLike,
-  plainBytesView,
-} from '../../internal/binary-view';
+import { arrayBufferKindOf, plainBytesView } from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 import {
   blockedPortMessage,
@@ -1414,13 +1410,16 @@ function readResponseBody(
   }
 
   // Recognized without `instanceof`, which is realm-bound: a test shim's XHR may hand
-  // back a buffer made in another realm (see `isArrayBufferLike`).
+  // back a buffer made in another realm (see `arrayBufferKindOf`).
   const response: unknown = xhr.response;
   if (typeof response === 'object' && response !== null) {
+    // Which buffer it is, if one, told once through the intrinsic getters.
+    const bufferKind = arrayBufferKindOf(response);
+
     // Measured before any copy (through the intrinsic getters), so a body past the limit
     // is refused without being held twice.
     if (
-      (isArrayBufferLike(response) || ArrayBuffer.isView(response)) &&
+      (bufferKind !== undefined || ArrayBuffer.isView(response)) &&
       isAnsweredBodyOverLimit(response, maxResponseBytes)
     ) {
       return RESPONSE_TOO_LARGE;
@@ -1429,10 +1428,10 @@ function readResponseBody(
     // Wrapped as it is when it is a fixed `ArrayBuffer`, which the XHR hands over and no
     // one else writes; copied when it is shared or resizable, as the other adapters copy
     // a chunk over one, so no other code can change or resize the body once it is read.
-    if (isArrayBufferLike(response)) {
+    if (bufferKind !== undefined) {
       const bytes = new Uint8Array(response as ArrayBuffer);
       const isFixed =
-        arrayBufferKindOf(response) === 'ArrayBuffer' &&
+        bufferKind === 'ArrayBuffer' &&
         Reflect.get(ArrayBuffer.prototype, 'resizable', response) !== true;
       return isFixed ? bytes : bytes.slice();
     }

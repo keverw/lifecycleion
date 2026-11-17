@@ -10,6 +10,7 @@ import {
   HOST_TO_ASCII_OPTIONS,
   canonicalizeBracketedIPv6Content,
   checkDNSLength,
+  isIPv4,
   isIPv6,
   toAsciiDots,
 } from '../domain-utils/helpers';
@@ -38,6 +39,12 @@ import {
 
 /** {@link MAX_COOKIE_LIFETIME_SECONDS} in milliseconds. */
 const MAX_COOKIE_LIFETIME_MS = MAX_COOKIE_LIFETIME_SECONDS * 1000;
+
+/**
+ * How much later than the last one a cookie stored in the same millisecond is created (see
+ * `CookieJar.lastCreationTime`): a power of two, so the sum is exact at epoch-ms scale.
+ */
+const CREATION_TIME_STEP_MS = 2 ** -10;
 
 /** A cookie's expiry fields as the jar holds it to the lifetime cap. See {@link cookieLifetime}. */
 interface CookieLifetime {
@@ -180,12 +187,15 @@ export interface Cookie {
    */
   lastAccessedAt?: number;
   /**
-   * Epoch ms when a cookie of this name, domain and path was first stored, when a later
-   * one replaced it (RFC 6265 §5.3 step 11.3 keeps that time); it orders the `Cookie`
-   * header. Written by `toJSON` only where it differs from {@link createdAt}, so a
-   * restored jar orders its header as this one did; `setCookie` takes it as given, a time
-   * later than `createdAt` included, and as `createdAt` when absent. `getAllCookies`
-   * and the other reads leave it out.
+   * Epoch ms when a cookie of this name, domain and path was first stored, as the jar
+   * keeps it: kept by a later one that replaced it (RFC 6265 §5.3 step 11.3). A cookie
+   * stored now - a `Set-Cookie`, or `setCookie` with no `createdAt` - is created after
+   * every cookie in the jar, a fraction of a millisecond later where the clock reads no
+   * later, as browsers keep creation times unique. It orders the `Cookie` header. Written
+   * by `toJSON` only where it differs from {@link createdAt}, so a restored jar orders its
+   * header as this one did; `setCookie` takes it as given, a time later than `createdAt`
+   * included, and as `createdAt` when absent. `getAllCookies` and the other reads leave
+   * it out.
    */
   firstCreatedAt?: number;
 }
@@ -451,6 +461,14 @@ export class CookieJar {
 
   /** Counts stores and reads, so recency has a strict order within one millisecond. */
   private accessClock = 0;
+  /**
+   * The latest creation time a stored cookie has been given, since the jar was last
+   * emptied. A cookie stored now - one with no `createdAt` - is created after it, a fraction of a millisecond later where
+   * the clock reads no later, as Chromium and Firefox keep creation times unique: cookies
+   * one response sets keep their order in the `Cookie` header, and a restored jar,
+   * reading the saved times, keeps it too.
+   */
+  private lastCreationTime = -Infinity;
   /**
    * No stored cookie was last used before this, as Chromium's `earliest_access_time_`: a
    * lower bound, so the jar-wide limit skips its pass - a scan of the whole jar - on every
@@ -764,6 +782,7 @@ export class CookieJar {
       this.clearBuckets();
       this.cookieCount = 0;
       this.earliestAccessTime = Infinity;
+      this.lastCreationTime = -Infinity;
       return count;
     }
 
@@ -849,10 +868,14 @@ export class CookieJar {
   /**
    * Serializes copies of the stored cookies.
    *
-   * A replaced cookie's place in the `Cookie` header - its first creation time - is saved
-   * as `firstCreatedAt` where it differs from `createdAt`, so a restored jar orders the
-   * header as this one does; cookies that share one by the order listed here.
-   * Least recently used first, each cookie with the time it was last used as
+   * A cookie's place in the `Cookie` header - its creation time - is saved as
+   * `firstCreatedAt` where it differs from `createdAt`: a replaced cookie's first one, or
+   * the later one a cookie stored in the same millisecond as another is given (see
+   * {@link Cookie.firstCreatedAt}). So a restored jar orders the header as this one does;
+   * cookies that still share a creation time - ones `setCookie` was given the same
+   * `createdAt` - by payload order.
+   *
+   * Listed least recently used first, each cookie with the time it was last used as
    * `lastAccessedAt`: a restore orders recency by that time, and cookies that share one by
    * payload order, so a restored jar evicts as this one would and keeps the cookies used
    * in the last 30 days safe from its jar-wide limit, and only those.
@@ -1290,9 +1313,13 @@ export class CookieJar {
     // `createdAt`, or than now, where the jar that saved it held it so - a replacement
     // keeps the replaced cookie's time when the clock has stepped back since.
     const creationTime =
-      replaced === undefined || this.isExpired(replaced, now)
-        ? (rawFirstCreatedAt ?? createdAt)
-        : replaced.creationTime;
+      replaced !== undefined && !this.isExpired(replaced, now)
+        ? replaced.creationTime
+        : rawFirstCreatedAt !== undefined
+          ? rawFirstCreatedAt
+          : input.createdAt === undefined && createdAt <= this.lastCreationTime
+            ? this.lastCreationTime + CREATION_TIME_STEP_MS
+            : createdAt;
 
     const bucket = this.getOrCreateBucket(site);
 
@@ -1314,6 +1341,7 @@ export class CookieJar {
       expiresAt: lifetime.expiresAt,
     });
     this.earliestAccessTime = Math.min(this.earliestAccessTime, lastAccessTime);
+    this.lastCreationTime = Math.max(this.lastCreationTime, creationTime);
 
     this.enforceLimits(site);
 
@@ -2077,13 +2105,14 @@ export class CookieJar {
       return;
     }
 
-    const cookie: Cookie = {
+    // No `createdAt`: stored now, so the jar gives it a creation time of its own (see
+    // `lastCreationTime`).
+    const cookie: CookieInput = {
       name: parsed.name,
       value: parsed.value,
       domain,
       hostOnly: isHostOnly,
       path,
-      createdAt: Date.now(),
     };
 
     if (parsed.expires) {
@@ -2284,19 +2313,9 @@ export class CookieJar {
       return canonicalizeBracketedIPv6Content(this.unbracketHost(host)) || null;
     }
 
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
-      try {
-        const { hostname } = new URL(`http://${host}/`);
-        if (hostname !== host) {
-          return null;
-        }
-        return host;
-      } catch {
-        return null;
-      }
-    }
-
-    return null;
+    // Dotted decimal already in the form the URL parser writes it back in: `isIPv4`
+    // refuses a leading-zero octet, which the parser reads as octal.
+    return isIPv4(host) ? host : null;
   }
 
   private unbracketHost(host: string): string {

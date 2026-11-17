@@ -1,3 +1,4 @@
+import { invalidServerStatusError } from '../internal/status-code';
 import {
   describeRefusedHeader,
   dropTransportFramedHeaders,
@@ -358,6 +359,34 @@ export class FetchAdapter implements HTTPAdapter {
         wasRedirectDetected: true,
         headers: {},
         body: null,
+      };
+    }
+
+    // A status below 100 is none a server may send, though a runtime's `fetch` may hand
+    // one on (Bun's does, `000` as `0`, where Node's refuses the response): the response is
+    // malformed, and is answered as one a runtime could not read at all is - a transport
+    // error, its headers and cookies unread - rather than handed on for the client to
+    // refuse as this adapter's own invalid answer. Not a browser's opaque response, whose
+    // `0` hides the real status.
+    if (
+      Number.isInteger(status) &&
+      status >= 0 &&
+      status <= 99 &&
+      responseType !== 'opaque'
+    ) {
+      cancelBodyQuietly(readUnknownMember(response, 'body'));
+
+      // A cancellation stays a cancellation, as on the reads above.
+      if (isSignalAbortedQuietly(signal)) {
+        throw makeAbortError();
+      }
+
+      return {
+        status: 0,
+        isTransportError: true,
+        headers: {},
+        body: null,
+        errorCause: invalidServerStatusError(status),
       };
     }
 

@@ -10862,8 +10862,7 @@ describe('an answered response whose body cannot be decoded', () => {
     },
   );
 
-  test('a 3xx to be followed is not, and reports where it pointed', async () => {
-    // The redirect-phase response observers are handed its body, so it is read.
+  test('a 3xx not followed keeps where it pointed', async () => {
     const adapter = undecodableAdapter(
       302,
       { location: '/next' },
@@ -10874,7 +10873,7 @@ describe('an answered response whose body cannot be decoded', () => {
     );
     const request = new HTTPClient({
       adapter,
-      followRedirects: true,
+      followRedirects: false,
     }).get('https://example.com/');
     const response = await request.send();
 
@@ -10936,29 +10935,76 @@ test('an interceptor cancel reason that is not a string is dropped', async () =>
   expect(request.error?.cancelReason).toBeUndefined();
 });
 
-describe("a redirect whose body is no body is the adapter's malformed answer", () => {
-  // A body that is neither bytes nor a string is refused as the adapter\'s, as an invalid
-  // status is, on a redirect not followed as anywhere else.
-  test('with redirects off', async () => {
-    const adapter: HTTPAdapter = {
-      getType: () => 'mock',
-      send: () =>
-        Promise.resolve({
-          status: 302,
-          headers: { 'content-type': 'text/html', location: '/next' },
-          body: { notBytes: true } as unknown as Uint8Array,
-        }),
+describe('a redirect whose body is no body', () => {
+  // A body that is neither bytes nor a string is the adapter's malformed answer on a
+  // redirect not followed. One about to be followed is read as the bodiless 3xx it is
+  // followed as, as an oversized or undecodable body is: a browser never reads it.
+  function redirectThenOK(
+    body: unknown,
+  ): HTTPAdapter & { requestURLs: string[] } {
+    const adapter = {
+      requestURLs: [] as string[],
+      getType: () => 'mock' as const,
+      send: (request: AdapterRequest) => {
+        adapter.requestURLs.push(request.requestURL);
+        return Promise.resolve<AdapterResponse>(
+          adapter.requestURLs.length === 1
+            ? {
+                status: 302,
+                headers: { 'content-type': 'text/html', location: '/next' },
+                body: body as Uint8Array,
+              }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
     };
+    return adapter;
+  }
+
+  test.each([
+    ['a plain object', { notBytes: true }],
+    ['a Blob', new Blob(['moved'])],
+  ])('with %s, is followed when redirects are on', async (_name, body) => {
+    const adapter = redirectThenOK(body);
+    const bodies: unknown[] = [];
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addResponseObserver(
+      (response) => {
+        bodies.push(response.body);
+      },
+      { phases: ['redirect'] },
+    );
+    const request = client.get('https://example.com/');
+    const response = await request.send();
+
+    expect(adapter.requestURLs).toEqual([
+      'https://example.com/',
+      'https://example.com/next',
+    ]);
+    expect(request.error).toBeNull();
+    expect(response.status).toBe(200);
+    expect(response.wasRedirectFollowed).toBe(true);
+    // The redirect-phase observer sees the bodiless 3xx it was followed as.
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toBeNull();
+  });
+
+  test.each([
+    ['a plain object', { notBytes: true }],
+    ['a Blob', new Blob(['moved'])],
+  ])('with %s, is refused with redirects off', async (_name, body) => {
+    const adapter = redirectThenOK(body);
     const request = new HTTPClient({ adapter, followRedirects: false }).get(
       'https://example.com/',
     );
     const response = await request.send();
 
+    expect(adapter.requestURLs).toHaveLength(1);
     expect(request.error?.code).toBe('adapter_error');
     expect(response.status).toBe(302);
   });
 
-  test('past maxRedirects', async () => {
+  test('past maxRedirects, ends as the redirect limit, as an oversized body does', async () => {
     let sends = 0;
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -10983,7 +11029,7 @@ describe("a redirect whose body is no body is the adapter's malformed answer", (
     await request.send();
 
     expect(sends).toBe(2);
-    expect(request.error?.code).toBe('adapter_error');
+    expect(request.error?.code).toBe('redirect_loop');
   });
 });
 
@@ -11111,7 +11157,7 @@ describe('redirect fields agree whether the answer is read, undecodable or refus
   );
 });
 
-test('a followed 3xx whose body cannot be decoded keeps an earlier hop upload outcome', async () => {
+test('a hop after a followed 3xx whose body is invalid keeps the earlier hop upload outcome', async () => {
   const failure = new Error('upload cut');
   let sends = 0;
   const adapter: HTTPAdapter = {
@@ -11127,8 +11173,8 @@ test('a followed 3xx whose body cannot be decoded keeps an earlier hop upload ou
               requestBodySettled: Promise.resolve(failure),
             }
           : {
-              status: 302,
-              headers: { location: '/c', 'content-type': 'text/plain' },
+              status: 200,
+              headers: { 'content-type': 'text/plain' },
               body: { notBytes: true } as unknown as Uint8Array,
             },
       );

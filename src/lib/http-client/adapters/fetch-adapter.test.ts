@@ -97,6 +97,69 @@ describe('FetchAdapter', () => {
     expect(new FetchAdapter().getType()).toBe('fetch');
   });
 
+  test('a status below 100 is answered as a malformed response, its body let go', async () => {
+    // Bun's `fetch` hands a server's `099` on as `status: 99`, and `000` as a response
+    // with `status: 0`, where Node's refuses the response. Either way it is a transport
+    // error, its headers - and so its cookies - unread.
+    for (const status of [99, 0]) {
+      let isBodyCancelled = false;
+
+      (globalThis as any).fetch = () => {
+        const response = new Response(
+          new ReadableStream({
+            cancel() {
+              isBodyCancelled = true;
+            },
+          }),
+          { status: 200, headers: { 'set-cookie': 'a=b' } },
+        );
+
+        Object.defineProperty(response, 'status', { value: status });
+
+        return Promise.resolve(response);
+      };
+
+      const answer = await new FetchAdapter().send({
+        requestURL: 'https://local.test/odd',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(answer.status).toBe(0);
+      expect(answer.isTransportError).toBe(true);
+      expect(answer.headers).toEqual({});
+      expect(answer.errorCause?.message).toBe(
+        `Server answered with an invalid status code (got ${status})`,
+      );
+      expect(isBodyCancelled).toBe(true);
+    }
+
+    // A cancel that lands as the response does stays a cancel.
+    const controller = new AbortController();
+
+    (globalThis as any).fetch = () => {
+      const response = new Response('x', { status: 200 });
+      Object.defineProperty(response, 'status', { value: 99 });
+      controller.abort();
+
+      return Promise.resolve(response);
+    };
+
+    const failure = await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/odd',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect((failure as Error | null)?.name).toBe('AbortError');
+  });
+
   test('passes manual redirect, null signal, and body through to fetch', async () => {
     let capturedURL = '';
     let capturedInit: RequestInit | undefined;

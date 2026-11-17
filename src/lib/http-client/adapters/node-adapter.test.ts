@@ -15118,3 +15118,65 @@ test('a streamed body the connection cuts short with an upload still running rep
     requestSpy.mockRestore();
   }
 });
+
+test('a server status below 100 is answered as a malformed response, as an unreadable one is', async () => {
+  // Node's parser reads any three digits, so `099` reaches the adapter as `statusCode: 99`
+  // where `abc` fails to parse. Both are a malformed response: a retryable network error
+  // with status 0, never an answer the client refuses as the adapter's own.
+  const lines = ['HTTP/1.1 099 Odd', 'HTTP/1.1 000 Odd', 'HTTP/1.1 abc Odd'];
+  let sends = 0;
+  let line = lines[0];
+  const server = net.createServer((socket) => {
+    socket.once('data', () => {
+      sends++;
+      socket.end(`${line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
+    });
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+    });
+
+    for (const statusLine of lines) {
+      line = statusLine;
+      const response = await client.get(`http://127.0.0.1:${port}/`).send();
+
+      expect({
+        line,
+        status: response.status,
+        isNetworkError: response.isNetworkError,
+      }).toEqual({
+        line,
+        status: 0,
+        isNetworkError: true,
+      });
+    }
+
+    // Each retried once, as a network error on a GET is.
+    expect(sends).toBe(6);
+
+    line = lines[0];
+    const answer = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/`,
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(answer.isTransportError).toBe(true);
+    expect(answer.errorCause?.message).toBe(
+      'Server answered with an invalid status code (got 99)',
+    );
+  } finally {
+    await new Promise<void>((done) => {
+      server.close(() => done());
+    });
+  }
+});

@@ -173,7 +173,7 @@ import {
   isUnfilledRequestBody,
   serializesToNothing,
 } from './internal/request-body-copy';
-import { isStatusCode } from './internal/status-code';
+import { isAdapterStatus, isStatusCode } from './internal/status-code';
 import {
   bodyOnBodilessMethodMessage,
   forbiddenMethodMessage,
@@ -3469,7 +3469,7 @@ export class BaseHTTPClient {
                   }
                   didCallStreamFactory = true;
                   const announcedStatus = readUnknownMember(args[0], 'status');
-                  if (isStatusCode(announcedStatus, 100)) {
+                  if (isStatusCode(announcedStatus)) {
                     streamFactoryStatus = announcedStatus;
                   }
                   // Read on the way to the caller's factory, where a throw would replace
@@ -3734,7 +3734,7 @@ export class BaseHTTPClient {
         // Refused as the adapter's malformed answer - the answered request's non-retryable
         // adapter_error - rather than delivered as a success with no real status.
         const candidateStatus: unknown = adapterResponse.status;
-        if (!isStatusCode(candidateStatus, 0)) {
+        if (!isAdapterStatus(candidateStatus)) {
           throw new TypeError(
             `HTTPClient adapter answered with an invalid status (got ${typeof candidateStatus === 'number' ? String(candidateStatus) : typeof candidateStatus})`,
           );
@@ -3801,51 +3801,52 @@ export class BaseHTTPClient {
         // reading at the limit, but a custom adapter may hand over a body of any size, and
         // the limit is the client's promise, not only theirs.
         const answeredBody: unknown = adapterResponse.body;
-        // A bodiless answer (a `HEAD`, a `204`) has no body, as no adapter hands one
-        // over: a custom adapter's stray one there is dropped rather than delivered -
-        // and decoded - past the limit.
-        if (
-          adapterResponse.isStreamed !== true &&
-          answeredBody !== null &&
-          answeredBody !== undefined &&
-          !hasResponseBody(sentRequest.method, adapterResponse.status)
-        ) {
-          adapterResponse.body = null;
-        } else if (
-          adapterResponse.isStreamed !== true &&
-          // A failed answer's body is never delivered, so it keeps its own failure.
-          adapterResponse.isStreamError !== true &&
+        // A redirect about to be followed: a browser never reads a body it is about to
+        // leave, so nothing about that body can fail the redirect (see below).
+        const isRedirectToFollow =
+          this._config.followRedirects &&
           adapterResponse.isTransportError !== true &&
-          answeredBody !== null &&
-          answeredBody !== undefined &&
-          typeof answeredBody !== 'string' &&
-          (typeof answeredBody !== 'object' ||
-            (readBinaryByteLength(answeredBody) === null &&
-              !presentsAsBinary(answeredBody)))
-        ) {
-          // Bytes or a string, or nothing: anything else - a `Blob`, a plain object, a
-          // `true` - has no size to hold to `maxResponseBytes` and is no body the response
-          // is typed to carry, so it is refused as the adapter's malformed answer, as an
-          // invalid status is, whatever the content type. A value that presents as bytes
-          // but cannot be measured (a `Proxy` over bytes) is left to the limit below,
-          // which fails it closed under a finite one.
-          throw new TypeError(
-            `HTTPClient adapter answered with an invalid body (got ${typeof answeredBody === 'object' ? Object.prototype.toString.call(answeredBody) : typeof answeredBody})`,
-          );
-        } else if (
-          adapterResponse.isStreamError !== true &&
-          adapterResponse.isStreamed !== true &&
-          // A plain `ArrayBuffer` or a string too: outside the type, but `_buildResponse`
-          // delivers either, so they are bodies the limit must see.
-          isAnsweredBodyOverLimit(answeredBody, maxResponseBytes)
-        ) {
-          adapterResponse.body = null;
-          adapterResponse.isStreamError = true;
-          adapterResponse.streamErrorCode = 'response_too_large';
-          adapterResponse.errorCause = makeResponseTooLargeError(
-            maxResponseBytes,
-            false,
-          );
+          REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
+          locationHeader(adapterResponse.headers) !== undefined;
+
+        if (adapterResponse.isStreamed !== true && !isNullish(answeredBody)) {
+          if (!hasResponseBody(sentRequest.method, adapterResponse.status)) {
+            // A bodiless answer (a `HEAD`, a `204`) has no body, as no adapter hands one
+            // over: a custom adapter's stray one there is dropped rather than delivered -
+            // and decoded - past the limit.
+            adapterResponse.body = null;
+          } else if (
+            // A failed answer's body is never delivered, so it keeps its own failure.
+            adapterResponse.isStreamError !== true &&
+            adapterResponse.isTransportError !== true &&
+            !isAnsweredBodyValue(answeredBody)
+          ) {
+            // Bytes or a string: anything else - a `Blob`, a plain object, a `true` - has
+            // no size to hold to `maxResponseBytes` and is no body the response is typed
+            // to carry, so it is refused as the adapter's malformed answer, as an invalid
+            // status is, whatever the content type. Except on a redirect about to be
+            // followed, which is read as the bodiless 3xx it is followed as.
+            if (!isRedirectToFollow) {
+              throw new TypeError(
+                `HTTPClient adapter answered with an invalid body (got ${describeValue(answeredBody)})`,
+              );
+            }
+
+            adapterResponse.body = null;
+          } else if (
+            adapterResponse.isStreamError !== true &&
+            // A plain `ArrayBuffer` or a string too: outside the type, but `_buildResponse`
+            // delivers either, so they are bodies the limit must see.
+            isAnsweredBodyOverLimit(answeredBody, maxResponseBytes)
+          ) {
+            adapterResponse.body = null;
+            adapterResponse.isStreamError = true;
+            adapterResponse.streamErrorCode = 'response_too_large';
+            adapterResponse.errorCause = makeResponseTooLargeError(
+              maxResponseBytes,
+              false,
+            );
+          }
         }
 
         // A redirect about to be followed whose body only failed to decode - a server that
@@ -3854,13 +3855,7 @@ export class BaseHTTPClient {
         // says it is: a browser never reads a body it is about to leave, so neither can
         // fail it. Read as a bodiless 3xx from here on, so nothing of the failure reaches
         // the observers, the hop's error code, or a later hop's.
-        if (
-          this._config.followRedirects &&
-          adapterResponse.isTransportError !== true &&
-          REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
-          locationHeader(adapterResponse.headers) &&
-          isStatusOnlyStreamError(adapterResponse)
-        ) {
+        if (isRedirectToFollow && isStatusOnlyStreamError(adapterResponse)) {
           adapterResponse.body = null;
           delete adapterResponse.isStreamError;
           delete adapterResponse.streamErrorCode;
@@ -6102,6 +6097,22 @@ function describeRequestPath(value: unknown): string {
 }
 
 /**
+ * Whether an adapter's body is one the response can carry: bytes or a string. A value that
+ * presents as bytes but cannot be measured (a `Proxy` over bytes) counts, and is left to
+ * `isAnsweredBodyOverLimit`, which fails it closed under a finite limit. Read through the
+ * intrinsic getters and the prototype chain, never the value's own getters; a Proxy's
+ * `getPrototypeOf` trap runs, its throw caught.
+ */
+function isAnsweredBodyValue(body: unknown): boolean {
+  return (
+    typeof body === 'string' ||
+    (typeof body === 'object' &&
+      body !== null &&
+      (readBinaryByteLength(body) !== null || presentsAsBinary(body)))
+  );
+}
+
+/**
  * Whether a stream-error response failed only in its body, none of which reached the
  * caller, so its status is the whole answer: a body that failed to decode, or one past
  * `maxResponseBytes` that the adapter stopped reading - a `503` with an oversized
@@ -6266,7 +6277,7 @@ function getResponseStreamAbortInfo(
   const status = readUnknownMember(err, STREAM_ABORT_STATUS_KEY);
 
   // Held to the rule a resolved answer's status is: 0, or an integer from 100 to 999.
-  if (!isStatusCode(status, 0)) {
+  if (!isAdapterStatus(status)) {
     return undefined;
   }
 

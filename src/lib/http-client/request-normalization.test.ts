@@ -9869,6 +9869,47 @@ test('a non-binary body is refused as malformed; an unmeasurable binary one is h
   expect(unlimited.error?.code).not.toBe('response_too_large');
 });
 
+test("a refused adapter body's own getters and traps cannot replace the refusal", async () => {
+  // A throwing `Symbol.toStringTag` getter, or a Proxy whose every trap throws, would put
+  // its own throw - not an Error, here - in place of the client's refusal.
+  const tagged = {
+    get [Symbol.toStringTag](): string {
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      throw 'tag read';
+    },
+  };
+  const trap = (): never => {
+    // eslint-disable-next-line @typescript-eslint/only-throw-error
+    throw 'trap ran';
+  };
+  const proxy = new Proxy(
+    {},
+    { get: trap, getPrototypeOf: trap, has: trap, ownKeys: trap },
+  );
+
+  for (const body of [tagged, proxy]) {
+    const builder = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: {},
+            body: body as Uint8Array,
+          }),
+      },
+      baseURL: 'http://api.test',
+    }).get('/x');
+    await builder.send();
+
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.cause).toBeInstanceOf(TypeError);
+    expect((builder.error?.cause as Error).message).toBe(
+      'HTTPClient adapter answered with an invalid body (got object)',
+    );
+  }
+});
+
 test("a custom adapter's body that is neither bytes nor a string is refused, whatever its type", async () => {
   let sends = 0;
   const custom = (body: unknown) =>

@@ -90,7 +90,7 @@ import type {
 import { isErrorValue } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { readUnknownMember } from '../../internal/read-member';
-import { isStatusCode } from '../internal/status-code';
+import { isAdapterStatus, isStatusCode } from '../internal/status-code';
 import {
   isTimeoutValidationError,
   resolveTimeoutMS,
@@ -836,7 +836,7 @@ export class MockAdapter implements HTTPAdapter {
       // Read as `unknown`: a route's answer is the caller's, typed or not, and the check
       // narrows what it refuses.
       const status: unknown = mockResponse.status;
-      if (!isStatusCode(status, 100)) {
+      if (!isStatusCode(status)) {
         throw new TypeError(
           `MockAdapter route returned status ${typeof status === 'number' ? String(status) : typeof status}; a response status is an integer from 100 to 999 (use transportError for a network failure)`,
         );
@@ -1104,11 +1104,11 @@ function readMockTransportError(transportError: unknown): {
     'MockAdapter route transportError',
   );
 
-  // Held to the rule the client holds an adapter's status to - 0, or an integer from 100
-  // to 999 -
-  // here, as the route's mistake: unchecked, it would be refused later as the adapter's.
+  // Held here to the rule the client holds an adapter's status to - 0, or an integer from
+  // 100 to 999 - as the route's mistake: unchecked, it would be refused later as the
+  // adapter's.
   const status: unknown = options.status;
-  if (status !== undefined && !isStatusCode(status, 0)) {
+  if (status !== undefined && !isAdapterStatus(status)) {
     throw new TypeError(
       `MockAdapter route returned transportError status ${typeof status === 'number' ? String(status) : typeof status}; it is 0, or an integer from 100 to 999`,
     );
