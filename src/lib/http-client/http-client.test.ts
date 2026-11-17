@@ -1057,9 +1057,8 @@ describe('HTTPClient — basic HTTP methods', () => {
   test.each([303, 302, 301])(
     "a %d that drops a POST's body follows without waiting for the hop's upload",
     async (status) => {
-      // The next hop sends no body, so it puts nothing on the wire beside the upload.
-      // The upload is left to finish, as under a final answer: the server may still be
-      // reading it.
+      // The next hop sends no body, so it puts nothing on the wire beside the upload, and
+      // the upload the server answered is torn down as the redirect is followed.
       let hop = 0;
       const signals: AbortSignal[] = [];
       const nextHop: AdapterRequest[] = [];
@@ -1101,7 +1100,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       expect(hop).toBe(2);
       expect(nextHop[0].method).toBe('GET');
       expect(nextHop[0].body ?? null).toBeNull();
-      expect(signals[0].aborted).toBe(false);
+      expect(signals[0].aborted).toBe(true);
       // The bodied hop's outcome, carried onto the final response.
       expect(response.requestBodySettled).toBeDefined();
     },

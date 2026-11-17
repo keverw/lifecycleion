@@ -2194,13 +2194,18 @@ export class BaseHTTPClient {
             //
             // Only for a hop that sends a body: one a `303`, or a `301`/`302` that
             // rewrote a `POST`, left behind - or that the interceptors dropped - sends
-            // none beside the upload, so it follows at once. That upload is left to
-            // finish, as it is under a final answer: the server may still be reading it,
-            // and its outcome is carried onto the final response.
-            if (
-              adapterResponse.requestBodySettled !== undefined &&
-              sendsRequestBody(sanitizedRedirectRequest.body)
-            ) {
+            // none beside the upload, so it follows at once, and the upload, a body the
+            // server has answered and moved on from, is torn down as the redirect is
+            // followed, as a browser's redirect ends it. Its outcome is carried onto the
+            // final response.
+            const isUploadOutstanding =
+              adapterResponse.requestBodySettled !== undefined;
+            const isBodyResent = sendsRequestBody(
+              sanitizedRedirectRequest.body,
+            );
+            if (isUploadOutstanding && !isBodyResent) {
+              attemptResult.abortAttempt?.();
+            } else if (isUploadOutstanding) {
               const wait = await settleUploadBeforeNextDispatch(
                 adapterResponse.requestBodySettled,
                 cancelSignal,
