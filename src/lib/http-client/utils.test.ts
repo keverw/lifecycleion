@@ -1809,6 +1809,16 @@ test('serializeBody refuses a body whose prototype answers differently once it h
 });
 
 describe('firstJoinedLocation', () => {
+  test('an empty Location sent after one is dropped, as the first header is followed', () => {
+    expect(firstJoinedLocation('/a, ')).toBe('/a');
+    expect(firstJoinedLocation('/a, , ')).toBe('/a');
+    expect(firstJoinedLocation('/files/Smith, John.pdf, ')).toBe(
+      '/files/Smith, John.pdf',
+    );
+    // Nothing but empty ones: the value is left as it is, and names no target.
+    expect(firstJoinedLocation(', ')).toBe(', ');
+  });
+
   test('a header repeated whole, or a relative target that starts as one does, is split', () => {
     expect(firstJoinedLocation('next, next')).toBe('next');
     expect(firstJoinedLocation('?page=2, ?page=2')).toBe('?page=2');

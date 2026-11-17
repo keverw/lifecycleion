@@ -1,4 +1,7 @@
-import { invalidServerStatusError } from '../internal/status-code';
+import {
+  isMalformedServerStatus,
+  malformedStatusAnswer,
+} from '../internal/status-code';
 import {
   describeRefusedHeader,
   dropTransportFramedHeaders,
@@ -198,22 +201,7 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         didSettle = true;
-        // A status from 1 to 99 is none a server may send, though an XHR outside a browser
-        // may report one: the response is malformed, and is answered as one the XHR could
-        // not read at all is - a transport error - as the other adapters answer it. Every
-        // answer this adapter gives passes here, so none can carry one.
-        const { status } = response;
-        resolveSend(
-          Number.isInteger(status) && status >= 1 && status <= 99
-            ? {
-                status: 0,
-                isTransportError: true,
-                headers: {},
-                body: null,
-                errorCause: invalidServerStatusError(status),
-              }
-            : response,
-        );
+        resolveSend(response);
         removeAbortListener();
       };
       const reject = (reason: unknown): void => {
@@ -439,10 +427,45 @@ export class XHRAdapter implements HTTPAdapter {
         };
       };
 
-      /** The answer, read the first time there is one. */
+      /**
+       * Whether `status` is one no server may send - an XHR outside a browser may report
+       * one - and so ends the send where it is first read, before the headers or body are
+       * read or any of it reported (see `malformedStatusAnswer`), the XHR stopped - or, for
+       * a send the caller has cancelled, as that cancel. Settled once, whichever reads it.
+       */
+      const endOnMalformedStatus = (status: number): boolean => {
+        if (status === 0 || !isMalformedServerStatus(status)) {
+          return false;
+        }
+
+        if (isSignalAbortedQuietly(signal)) {
+          settleAborted(undefined);
+        } else {
+          // The server answered, so the upload ended, as with any answer; a cancel from
+          // that callback stays the cancel.
+          emitFinalUpload();
+
+          if (isSignalAbortedQuietly(signal)) {
+            settleAborted(undefined);
+          } else {
+            resolve(malformedStatusAnswer(status));
+          }
+        }
+
+        abortQuietly();
+
+        return true;
+      };
+
+      /** The answer, read the first time there is one (see `endOnMalformedStatus`). */
       const captureAnswer = (): AnsweredHeaders | undefined => {
         if (answeredAtHeaders === undefined && xhr.readyState >= 2) {
           const status = xhr.status;
+
+          if (endOnMalformedStatus(status)) {
+            return undefined;
+          }
+
           if (status > 0) {
             answeredAtHeaders = takeAnswer(status);
           }
@@ -985,7 +1008,17 @@ export class XHRAdapter implements HTTPAdapter {
           // response regardless of adapter.
           // Read before any progress callback, as everything this listener reports is: the
           // answer, captured once (see `answeredAtHeaders`).
-          const answer = captureAnswer() ?? takeAnswer();
+          const captured = captureAnswer();
+          // Read here for the first time by an XHR that showed no state before `load`.
+          const loadedStatus =
+            captured === undefined ? xhr.status : captured.status;
+
+          // Ended by the answer: a malformed status.
+          if (didSettle || endOnMalformedStatus(loadedStatus)) {
+            return;
+          }
+
+          const answer = captured ?? takeAnswer(loadedStatus);
 
           // A redirect is seen here only by an XHR that reported none of it before. The
           // final upload event fires before the body is read, so a refused body sees it

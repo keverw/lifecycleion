@@ -293,6 +293,19 @@ export function hasBufferTagInChain(value: object): boolean {
 }
 
 /**
+ * Whether `value`'s prototype chain holds a prototype whose own `Symbol.toStringTag` is
+ * `tag` - a built-in's, from any realm, under a subclass with a tag of its own - read off
+ * the prototypes as plain values, so no getter runs (a `Proxy`'s `getPrototypeOf` and
+ * `getOwnPropertyDescriptor` traps do). A chain that throws answers no.
+ */
+export function hasOwnToStringTagInChain(value: object, tag: string): boolean {
+  return someInPrototypeChain(
+    value,
+    (prototype) => ownToStringTag(prototype) === tag,
+  );
+}
+
+/**
  * Whether `matches` holds for some prototype in `value`'s chain, up to
  * {@link MAX_PROTOTYPE_DEPTH} of them; `false` if it throws.
  */
@@ -345,9 +358,9 @@ function isBinaryTag(tag: unknown, isViewIncluded: boolean): boolean {
  * claimed not to need - which is the one case a size check exists to catch.
  *
  * `null` - a value no getter recognizes (a `Proxy`, which has no internal slots), a host
- * without one of the intrinsics - means "no usable measurement", and every caller reads
- * that as "assume it does not fit", the way every other bound here fails closed on a
- * measurement it could not take. A detached buffer, or a view over one, measures `0`:
+ * without one of the intrinsics - means "no usable measurement", and every caller fails
+ * closed on it, the way every other bound here does on a measurement it could not take:
+ * as "assume it does not fit", or, for an HTTP adapter's body, as no body at all. A detached buffer, or a view over one, measures `0`:
  * the getters read it as empty, which is what it holds.
  */
 export function readBinaryByteLength(value: object): number | null {

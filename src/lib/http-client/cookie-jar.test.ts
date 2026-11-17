@@ -4739,11 +4739,42 @@ describe('jar limits', () => {
     expect(names(jar)).toHaveLength(3001);
   });
 
+  test('a restore past the jar-wide limit evicts the least recently used, whatever their creation order', () => {
+    // Listed by creation, as `toJSON` lists them, with the latest created the least
+    // recently used, all unused for 40 days: the restore's own eviction takes the stalest.
+    const now = Date.now();
+    setSystemTime(new Date(now));
+    const count = 3400;
+    const restored = new CookieJar();
+    restored.fromJSON({
+      cookies: Array.from({ length: count }, (_, index) => ({
+        name: `c${index}`,
+        value: 'v',
+        domain: `site${index}.test`,
+        path: '/',
+        createdAt: now - 50 * DAY_MS + index,
+        lastAccessedAt: now - 40 * DAY_MS - index * 1000,
+      })),
+    });
+
+    const kept = new Set(names(restored));
+    const evicted = Array.from({ length: count }, (_, index) => index).filter(
+      (index) => !kept.has(`c${index}`),
+    );
+
+    expect(evicted.length).toBeGreaterThan(0);
+    // Every cookie evicted was used less recently than every cookie kept.
+    expect(Math.min(...evicted)).toBe(count - evicted.length);
+  });
+
   test('a restored jar evicts in the order the saved one would', () => {
     const jar = new CookieJar();
     fill(jar, 1, { prefix: 'read', domain: 'a.example.com' });
     fill(jar, 1, { prefix: 'unread', domain: 'b.example.com' });
     fill(jar, 178, { prefix: 'filler', domain: 'c.example.com' });
+    // Read a millisecond on: a restore keeps recency by `lastAccessedAt`, and cookies
+    // that share one in the order it lists them, which is creation order.
+    setSystemTime(new Date(Date.now() + 1));
     expect(jar.getCookieHeaderString('https://a.example.com/')).toBe('read0=v');
 
     const restored = new CookieJar();
@@ -5002,7 +5033,7 @@ describe('jar limits', () => {
     expect(restored.getAllCookies()[0]).not.toHaveProperty('firstCreatedAt');
   });
 
-  test('a firstCreatedAt that is not a finite number is refused, and a later one is read as given', () => {
+  test('a firstCreatedAt that is not a finite number is refused, and one later than now is read as now', () => {
     const jar = new CookieJar();
     const createdAt = Date.now() - 1000;
     setSystemTime(new Date(createdAt + 1000));
@@ -5030,8 +5061,17 @@ describe('jar limits', () => {
       domain: 'example.com',
       createdAt: createdAt + 1000,
     });
-    // Placed by its `firstCreatedAt`, later than `b`'s creation and than now.
-    expect(jar.getCookieHeaderString('https://example.com/')).toBe('b=1; a=1');
+    // Placed at now, not a minute ahead: tied with `b`'s creation, so before it, as
+    // stored first. Read as given, it would come after `b`.
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1; b=1');
+    expect(
+      jar
+        .toJSON()
+        .cookies.map((cookie) => [cookie.name, cookie.firstCreatedAt]),
+    ).toEqual([
+      ['a', createdAt + 1000],
+      ['b', undefined],
+    ]);
   });
 
   test('a creation time later than its createdAt survives toJSON and fromJSON', () => {
@@ -5054,11 +5094,102 @@ describe('jar limits', () => {
     expect(restored.getCookieHeaderString(url)).toBe('a=2; b=1');
   });
 
+  test('same-name cookies that tie on creation time and path keep their order through a restore', () => {
+    // Host-only and domain `sid` share a `createdAt` and a path, so the header sends them
+    // in the order stored. Storing the host-only one again makes it the more recent, so a
+    // payload listed by recency would restore the domain one first.
+    const url = 'https://example.com/';
+    const createdAt = Date.now();
+    setSystemTime(new Date(createdAt));
+    const jar = new CookieJar();
+    jar.setCookie({
+      name: 'sid',
+      value: 'host',
+      domain: 'example.com',
+      hostOnly: true,
+      path: '/',
+      createdAt,
+    });
+    jar.setCookie({
+      name: 'sid',
+      value: 'domain',
+      domain: 'example.com',
+      path: '/',
+      createdAt,
+    });
+    setSystemTime(new Date(createdAt + 1000));
+    jar.setCookie({
+      name: 'sid',
+      value: 'host',
+      domain: 'example.com',
+      hostOnly: true,
+      path: '/',
+      createdAt,
+    });
+    expect(jar.getCookieFor('sid', url)?.value).toBe('host');
+
+    const restored = new CookieJar();
+    restored.fromJSON(jar.toJSON());
+
+    expect(restored.getCookieFor('sid', url)?.value).toBe('host');
+  });
+
+  test('a far-future firstCreatedAt is read as now, and a restore starts the creation clock over', () => {
+    // Neither a caller's value nor a discarded jar's can pin later cookies' creation ahead.
+    const url = 'https://example.com/';
+    const now = Date.now();
+    setSystemTime(new Date(now));
+    const jar = new CookieJar();
+    jar.setCookie({
+      name: 'x',
+      value: '1',
+      domain: 'example.com',
+      path: '/',
+      firstCreatedAt: 8e15,
+    });
+    jar.processResponseHeaders({ 'set-cookie': ['p=1', 'q=1', 'r=1'] }, url);
+
+    // Stored at the same instant, none ahead of now: no `firstCreatedAt` to save.
+    expect(
+      jar
+        .toJSON()
+        .cookies.map((cookie) => [cookie.name, cookie.firstCreatedAt]),
+    ).toEqual([
+      ['x', undefined],
+      ['p', undefined],
+      ['q', undefined],
+      ['r', undefined],
+    ]);
+
+    // A jar that held a creation time a day ahead - its clock stepped back since - is
+    // emptied by a restore, which leaves nothing of it to come after.
+    setSystemTime(new Date(now + DAY_MS));
+    jar.processResponseHeaders({ 'set-cookie': 'late=1' }, url);
+    setSystemTime(new Date(now));
+    jar.fromJSON({ cookies: [] });
+    jar.processResponseHeaders({ 'set-cookie': 'A=1' }, url);
+    jar.setCookie({
+      name: 'B',
+      value: '1',
+      domain: 'example.com',
+      path: '/',
+      createdAt: now,
+    });
+    jar.parseSetCookieHeader('C=1', url);
+
+    expect(jar.getCookieHeaderString(url)).toBe('A=1; B=1; C=1');
+    expect(
+      jar
+        .toJSON()
+        .cookies.every((cookie) => cookie.firstCreatedAt === undefined),
+    ).toBe(true);
+  });
+
   test('cookies stored in one millisecond keep their header order through toJSON and fromJSON', () => {
     // Same-path cookies one response sets share a millisecond, and the header orders them
-    // by creation. A restore lists them least recently used first: their saved creation
-    // times, not that order, keep the header as it was - and which of two same-name
-    // cookies a server reads first.
+    // by creation. A later read touches some of them, so recency would order them
+    // differently: the payload lists them by creation, which keeps the header as it was -
+    // and which of two same-name cookies a server reads first.
     const now = Date.now();
     setSystemTime(new Date(now));
     const jar = new CookieJar();
@@ -5087,6 +5218,14 @@ describe('jar limits', () => {
     restored.fromJSON(saved);
 
     expect(restored.getCookieHeaderString('https://example.com/')).toBe(header);
+    // Ordered without a fractional time: every saved time is a whole millisecond.
+    expect(
+      saved.cookies.every(
+        (cookie) =>
+          cookie.firstCreatedAt === undefined ||
+          Number.isInteger(cookie.firstCreatedAt),
+      ),
+    ).toBe(true);
 
     // An emptied jar starts over: a cookie stored at the same instant again takes its own
     // time, with no creation time left to come after.
@@ -5096,7 +5235,7 @@ describe('jar limits', () => {
     expect(jar.toJSON().cookies[0]).not.toHaveProperty('firstCreatedAt');
   });
 
-  test('eviction and toJSON order cookies by lastAccessedAt, then by when they were stored', () => {
+  test('eviction orders cookies by lastAccessedAt, then by when they were stored; toJSON lists them by creation', () => {
     const now = Date.now();
     setSystemTime(new Date(now));
     const cookie = (name: string, lastAccessedAt?: number) => ({
@@ -5124,7 +5263,7 @@ describe('jar limits', () => {
         .toJSON()
         .cookies.map(({ name }) => name)
         .slice(0, 2),
-    ).toEqual(['stale', 'filler0']);
+    ).toEqual(['usedNow', 'stale']);
 
     fill(jar, 1, { prefix: 'new' });
 

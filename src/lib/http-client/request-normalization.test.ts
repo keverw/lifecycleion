@@ -2326,6 +2326,37 @@ test('a builder whose send() rejects is left failed, not sending', async () => {
   );
 });
 
+test('an AbortSignal subclass with a tag of its own is taken, as signal() and as the signal option', async () => {
+  // A browser's `TaskSignal` is one: an `AbortSignal` tagged `[object TaskSignal]`.
+  const TaskSignalPrototype = Object.create(AbortSignal.prototype, {
+    [Symbol.toStringTag]: { value: 'TaskSignal' },
+  }) as AbortSignal;
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  for (const send of [
+    (signal: AbortSignal) => client.get('/x').signal(signal).send(),
+    (signal: AbortSignal) => client.get('/x', { signal }).send(),
+  ]) {
+    const controller = new AbortController();
+    Object.setPrototypeOf(controller.signal, TaskSignalPrototype);
+    expect(Object.prototype.toString.call(controller.signal)).toBe(
+      '[object TaskSignal]',
+    );
+
+    const pending = send(controller.signal);
+    controller.abort();
+    const response = await pending;
+
+    expect(response.isCancelled).toBe(true);
+  }
+
+  expect(() =>
+    client.get('/x').signal(Object.create(null) as AbortSignal),
+  ).toThrow('HTTPRequestBuilder signal must be an AbortSignal');
+});
+
 test('a nullish signal() clears the signal, as the signal option and the other setters read one', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({ status: 200, body: 'ok' }));
@@ -9807,7 +9838,7 @@ test('a params value is read once, so the override check and the query agree', a
   expect(reads).toBe(1);
 });
 
-test('a body no getter can measure fails closed; one reporting 0 bytes is still delivered', async () => {
+test('a body no getter can measure is refused as malformed; one reporting 0 bytes is still delivered', async () => {
   const proxied = new Proxy(new Uint8Array(1000), {});
 
   const custom = (body: unknown) =>
@@ -9826,7 +9857,7 @@ test('a body no getter can measure fails closed; one reporting 0 bytes is still 
     });
   const refused = custom(proxied).get('/x');
   await refused.send();
-  expect(refused.error?.code).toBe('response_too_large');
+  expect(refused.error?.code).toBe('adapter_error');
 
   class SaysEmpty extends Uint8Array {
     public override get byteLength(): number {
@@ -9839,7 +9870,7 @@ test('a body no getter can measure fails closed; one reporting 0 bytes is still 
   expect(delivered.body).not.toBeNull();
 });
 
-test('a non-binary body is refused as malformed; an unmeasurable binary one is held only under a finite limit', async () => {
+test('a non-binary body is refused as malformed, and so is an unmeasurable one, whatever the limit', async () => {
   const custom = (
     body: unknown,
     maxResponseBytes: number,
@@ -9863,10 +9894,46 @@ test('a non-binary body is refused as malformed; an unmeasurable binary one is h
   await parsed.send();
   expect(parsed.error?.code).toBe('adapter_error');
 
-  const proxied = new Proxy(new Uint8Array(1000), {});
-  const unlimited = custom(proxied, Infinity).get('/x');
-  await unlimited.send();
-  expect(unlimited.error?.code).not.toBe('response_too_large');
+  // Nor delivered with no limit: a value that only inherits from a view's prototype has
+  // no bytes to deliver.
+  for (const body of [
+    new Proxy(new Uint8Array(1000), {}),
+    Object.create(Uint8Array.prototype) as object,
+  ]) {
+    const unlimited = custom(body, Infinity).get('/x');
+    const response = await unlimited.send();
+    expect(response.isFailed).toBe(true);
+    expect(unlimited.error?.code).toBe('adapter_error');
+  }
+});
+
+test("a custom adapter's transport error keeps its own failure whatever its body's size", async () => {
+  // Its body is never delivered, so the limit has nothing to hold to it.
+  const certError = new Error('certificate has expired');
+
+  for (const body of [new Uint8Array(1), new Uint8Array(2)]) {
+    const builder = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            status: 495,
+            headers: {},
+            body,
+            isTransportError: true,
+            isRetryable: false,
+            errorCause: certError,
+          }),
+      },
+      baseURL: 'http://api.test',
+      maxResponseBytes: 1,
+    }).get('/x');
+    const response = await builder.send();
+
+    expect(builder.error?.code).toBe('network_error');
+    expect(builder.error?.cause).toBe(certError);
+    expect(response.body).toBeNull();
+  }
 });
 
 test("a refused adapter body's own getters and traps cannot replace the refusal", async () => {
@@ -10078,7 +10145,7 @@ test("a cookie seeded hostOnly is replaced by the server's host-only Set-Cookie"
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('s=2');
 });
 
-test('an unmeasurable body presenting as bytes from any realm is refused; an empty string is no body', async () => {
+test('an unmeasurable body presenting as bytes from any realm is refused as malformed; an empty string is no body', async () => {
   const custom = (body: unknown, contentType = 'application/octet-stream') =>
     new HTTPClient({
       adapter: {
@@ -10100,7 +10167,7 @@ test('an unmeasurable body presenting as bytes from any realm is refused; an emp
   ]) {
     const builder = custom(body).get('/x');
     await builder.send();
-    expect(builder.error?.code).toBe('response_too_large');
+    expect(builder.error?.code).toBe('adapter_error');
   }
 
   const empty = await custom('', 'application/json').get('/x').send();

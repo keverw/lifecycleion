@@ -101,8 +101,9 @@ describe('FetchAdapter', () => {
     // Bun's `fetch` hands a server's `099` on as `status: 99`, and `000` as a response
     // with `status: 0`, where Node's refuses the response. Either way it is a transport
     // error, its headers - and so its cookies - unread.
-    for (const status of [99, 0]) {
+    for (const status of [99, 0, 1000, 99.5]) {
       let isBodyCancelled = false;
+      const uploads: number[] = [];
 
       (globalThis as any).fetch = () => {
         const response = new Response(
@@ -121,10 +122,17 @@ describe('FetchAdapter', () => {
 
       const answer = await new FetchAdapter().send({
         requestURL: 'https://local.test/odd',
-        method: 'GET',
+        method: 'POST',
         headers: {},
+        body: 'abc',
+        onUploadProgress: (event) => {
+          uploads.push(event.progress);
+        },
       });
 
+      // The server answered, so the upload ended, as on every answered path: from the
+      // starting 0 to done.
+      expect(uploads).toEqual([0, 1]);
       expect(answer.status).toBe(0);
       expect(answer.isTransportError).toBe(true);
       expect(answer.headers).toEqual({});
@@ -3302,6 +3310,114 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     });
 
     expect(decoder.decode(response.body as Uint8Array)).toBe('héllo');
+  });
+
+  test('a body whose iterator cannot be had leaves no listener on the signal', async () => {
+    const controller = new AbortController();
+    let listeners = 0;
+    const add = controller.signal.addEventListener.bind(controller.signal);
+    const remove = controller.signal.removeEventListener.bind(
+      controller.signal,
+    );
+    controller.signal.addEventListener = ((...args: Parameters<typeof add>) => {
+      listeners++;
+      add(...args);
+    }) as typeof add;
+    controller.signal.removeEventListener = ((
+      ...args: Parameters<typeof remove>
+    ) => {
+      listeners--;
+      remove(...args);
+    }) as typeof remove;
+
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body: {
+          [Symbol.asyncIterator]: () => {
+            throw new TypeError('no iterator');
+          },
+        },
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+
+    const answer = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+      signal: controller.signal,
+    });
+
+    expect(answer.isStreamError).toBe(true);
+    expect(listeners).toBe(0);
+  });
+
+  test("an iterated body left early settles without waiting on the iterator's return()", async () => {
+    // A polyfill's iterator whose `return()` never settles: past the limit, or aborted
+    // as a chunk arrives, the send still answers at once, and asks it to return.
+    const controller = new AbortController();
+    let returnCalls = 0;
+    const body = (yieldChunk: () => void) => ({
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          yieldChunk();
+          return Promise.resolve({
+            done: false,
+            value: new Uint8Array([1, 2]),
+          });
+        },
+        return: () => {
+          returnCalls++;
+          return new Promise<never>(() => {});
+        },
+      }),
+    });
+    const send = (yieldChunk: () => void, signal?: AbortSignal) => {
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          type: 'basic',
+          headers: new Headers(),
+          body: body(yieldChunk),
+          arrayBuffer: () => Promise.reject(new Error('not read whole')),
+        });
+
+      return new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1,
+        ...(signal ? { signal } : {}),
+      });
+    };
+    // Only to tell a hang from an answer: an answer arrives before it either way.
+    const settles = <T>(promise: Promise<T>) =>
+      Promise.race([
+        promise.then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        ),
+        new Promise<'hung'>((resolve) =>
+          setTimeout(() => resolve('hung'), 2000),
+        ),
+      ]);
+
+    const tooLarge = await settles(send(() => {}));
+    expect(tooLarge).not.toBe('hung');
+    expect(
+      (tooLarge as { value: { streamErrorCode?: string } }).value
+        .streamErrorCode,
+    ).toBe('response_too_large');
+
+    const aborted = await settles(
+      send(() => controller.abort(), controller.signal),
+    );
+    expect(aborted).not.toBe('hung');
+    expect((aborted as { error: Error }).error.name).toBe('AbortError');
+    expect(returnCalls).toBe(2);
   });
 
   test('a body whose Symbol.asyncIterator throws when read is read whole through arrayBuffer()', async () => {

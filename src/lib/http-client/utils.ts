@@ -1120,11 +1120,15 @@ function hasXMLHttpRequestGlobal(): boolean {
  * `, scheme://` in it (`/a, /b`) is cut there, as is one that is a target written twice
  * (`a, a`): fetch and XHR join repeats into the same text, so the two cannot be told
  * apart. Two different targets the first of which has a query or fragment (`/a?x, /b`)
- * are followed as one. A server percent-encodes the space in such a value.
+ * are followed as one. A server percent-encodes the space in such a value. An empty
+ * `Location` sent after one (`/a, `) is dropped first, as the first header is the one
+ * followed where repeats are kept apart.
  */
 export function firstJoinedLocation(value: string): string {
+  const withoutEmptyRepeats = value.replace(/(?:, )+$/, '');
+  const joined = withoutEmptyRepeats === '' ? value : withoutEmptyRepeats;
   // The repeated unit is split as any value is: `/a, /b` sent twice is `/a`.
-  const candidate = repeatedTarget(value) ?? value;
+  const candidate = repeatedTarget(joined) ?? joined;
   const separator = candidate.search(
     /, (?:\/|\.\.?\/|\?|#|[a-z][a-z\d+.-]*:\/\/)/i,
   );

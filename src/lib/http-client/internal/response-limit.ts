@@ -11,10 +11,7 @@ import {
 import { validateMaxResponseBytes } from '../consts';
 import type { AdapterRequest, AdapterResponse } from '../types';
 import { derivedRedirectFields } from '../utils';
-import {
-  presentsAsBinary,
-  readBinaryByteLength,
-} from '../../internal/binary-view';
+import { readBinaryByteLength } from '../../internal/binary-view';
 import { utf8ByteLength } from './utf8-length';
 import { headerListTokens } from './header-utils';
 import { contentCodings } from './content-codings';
@@ -171,18 +168,13 @@ export function parseContentLength(
 }
 
 /**
- * Whether a body a custom adapter or a MockAdapter route handed over is past
- * `maxResponseBytes`: bytes as their internal slot measures them - a view or buffer of
- * any kind, from any realm, not the size the value reports - and a string as its UTF-8
- * length, counted only when its UTF-16 length alone cannot tell (never fewer bytes than
- * units, at most three per unit). Under a finite limit, a value that presents as bytes by
- * its prototype chain but that no intrinsic getter can measure (a `Proxy` over bytes) is
- * taken as over it, failing closed as `readBinaryByteLength` asks. Anything else has no
- * size: the client refuses such a body before asking (an adapter's malformed answer), so
- * it is never delivered past the limit. The limit is a backstop against an oversized
- * answer, not against an adapter disguising its own bytes - a `Proxy` whose prototype
- * trap lies is the adapter's own doing, and a `Proxy` cannot be told apart from what it
- * claims to be.
+ * Whether a body handed over - a string from a custom adapter, MockAdapter's serialized
+ * bytes, an XHR's buffer or view - is past `maxResponseBytes`: bytes as their internal
+ * slot measures them - a view or buffer of any kind, from any realm, not the size the
+ * value reports - and a string as its UTF-8 length, counted only when its UTF-16 length
+ * alone cannot tell (never fewer bytes than units, at most three per unit). Anything else
+ * has no size: the client refuses such a body before asking (an adapter's malformed
+ * answer), so it is never delivered past the limit.
  */
 export function isAnsweredBodyOverLimit(
   body: unknown,
@@ -190,9 +182,7 @@ export function isAnsweredBodyOverLimit(
 ): boolean {
   if (typeof body === 'object' && body !== null) {
     const byteLength = readBinaryByteLength(body);
-    return byteLength === null
-      ? Number.isFinite(maxBytes) && presentsAsBinary(body)
-      : byteLength > maxBytes;
+    return byteLength !== null && byteLength > maxBytes;
   }
 
   if (typeof body !== 'string' || body.length * 3 <= maxBytes) {

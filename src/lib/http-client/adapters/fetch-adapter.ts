@@ -1,4 +1,7 @@
-import { invalidServerStatusError } from '../internal/status-code';
+import {
+  isMalformedServerStatus,
+  malformedStatusAnswer,
+} from '../internal/status-code';
 import {
   describeRefusedHeader,
   dropTransportFramedHeaders,
@@ -362,32 +365,21 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
-    // A status below 100 is none a server may send, though a runtime's `fetch` may hand
-    // one on (Bun's does, `000` as `0`, where Node's refuses the response): the response is
-    // malformed, and is answered as one a runtime could not read at all is - a transport
-    // error, its headers and cookies unread - rather than handed on for the client to
-    // refuse as this adapter's own invalid answer. Not a browser's opaque response, whose
-    // `0` hides the real status.
-    if (
-      Number.isInteger(status) &&
-      status >= 0 &&
-      status <= 99 &&
-      responseType !== 'opaque'
-    ) {
+    // A status no server may send, which a runtime's `fetch` may hand on (Bun's passes
+    // `099` as `99` and `000` as `0`, where Node's refuses the response): answered as one a
+    // runtime could not read at all is (see `malformedStatusAnswer`), its body let go. Not
+    // a browser's opaque response, whose `0` hides the real status. The server answered,
+    // so the upload ended, as on every other answered path.
+    if (isMalformedServerStatus(status) && responseType !== 'opaque') {
       cancelBodyQuietly(readUnknownMember(response, 'body'));
+      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
 
       // A cancellation stays a cancellation, as on the reads above.
       if (isSignalAbortedQuietly(signal)) {
         throw makeAbortError();
       }
 
-      return {
-        status: 0,
-        isTransportError: true,
-        headers: {},
-        body: null,
-        errorCause: invalidServerStatusError(status),
-      };
+      return malformedStatusAnswer(status);
     }
 
     // Fire 100% upload progress (fetch has no real per-chunk progress). Download progress
@@ -710,9 +702,45 @@ async function readBodyWithin(
   throwIfAborted();
 
   const stopWatching = letGoOnAbort(signal, letGo);
+  // Driven by hand rather than by `for await`, which leaving early waits on the iterator's
+  // `return()`: a polyfill's iterator may never settle it, and the answer here - past the
+  // limit, aborted, a chunk refused - does not depend on when it lets go. Called, not
+  // awaited, its rejection observed, as `cancel` is.
+  let iterator: AsyncIterator<unknown> | undefined;
+  // Set once the iterator has ended itself - done, or a `next()` that failed - so it is
+  // not asked to `return()`, as `for await` does not ask one.
+  let isIteratorEnded = false;
 
   try {
-    for await (const value of source) {
+    // In the `try`, so an iterator that cannot be had still lets the signal go.
+    iterator = source[Symbol.asyncIterator]();
+
+    for (;;) {
+      let value: unknown;
+
+      try {
+        const step: unknown = await iterator.next();
+
+        if (typeof step !== 'object' || step === null) {
+          throw new TypeError(
+            'FetchAdapter response body iterator answered with a non-object',
+          );
+        }
+
+        const result = step as IteratorResult<unknown>;
+
+        // Read as `for await` reads it: any truthy `done` ends the body.
+        if (result.done) {
+          isIteratorEnded = true;
+          break;
+        }
+
+        value = result.value;
+      } catch (error) {
+        isIteratorEnded = true;
+        throw error;
+      }
+
       throwIfAborted();
 
       const chunk =
@@ -767,7 +795,24 @@ async function readBodyWithin(
 
     return concatChunks(chunks, loadedBytes);
   } finally {
+    if (iterator !== undefined && !isIteratorEnded) {
+      endIteratorQuietly(iterator);
+    }
+
     stopWatching();
+  }
+}
+
+/** Asks an iterator left early to `return()`, without waiting on it or minding a refusal. */
+function endIteratorQuietly(iterator: AsyncIterator<unknown>): void {
+  try {
+    const returned: unknown = iterator.return?.();
+
+    if (isObjectLike(returned)) {
+      observeRejection(adoptPromise(returned), noop);
+    }
+  } catch {
+    // An iterator whose `return` throws has nothing more to let go of.
   }
 }
 

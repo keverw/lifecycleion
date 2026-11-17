@@ -1,7 +1,7 @@
 import { framingRefusedHeaderMessage } from '../internal/transport-refusal';
 import {
   invalidServerStatusError,
-  isStatusCode,
+  isMalformedServerStatus,
 } from '../internal/status-code';
 import {
   asciiLowercase,
@@ -1965,12 +1965,23 @@ export class NodeAdapter implements HTTPAdapter {
             return;
           }
 
-          // A status below 100 is none a server may send: the response is malformed, as a
-          // status line Node's parser cannot read is, and is answered as that one is - a
-          // transport error - rather than handed on for the client to refuse as this
-          // adapter's own invalid answer.
-          if (!isStatusCode(res.statusCode)) {
-            answerTransportError(invalidServerStatusError(res.statusCode));
+          // A status no server may send (see `isMalformedServerStatus`): the response is
+          // malformed, as a status line Node's parser cannot read is, and is answered as
+          // that one is - a transport error - rather than handed on for the client to
+          // refuse as this adapter's own invalid answer.
+          // A response with no status at all is as malformed.
+          if (
+            res.statusCode === undefined ||
+            isMalformedServerStatus(res.statusCode)
+          ) {
+            // The abort path first, as `req.on('error')` gives it priority: a cancel that
+            // landed as the answer did stays the cancel.
+            if (readIsAborted()) {
+              answerAbortRead();
+            } else {
+              answerTransportError(invalidServerStatusError(res.statusCode));
+            }
+
             destroyRequestQuietly(req);
 
             return;

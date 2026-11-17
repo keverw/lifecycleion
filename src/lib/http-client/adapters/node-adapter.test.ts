@@ -15180,3 +15180,43 @@ test('a server status below 100 is answered as a malformed response, as an unrea
     });
   }
 });
+
+test('a server status below 100 on a request whose signal reads aborted stays the cancel', async () => {
+  // A signal that reads `aborted` without having dispatched `abort` - the case
+  // `readIsAborted` exists for - as the server answers `099`.
+  const controller = new AbortController();
+  const server = net.createServer((socket) => {
+    socket.once('data', () => {
+      Object.defineProperty(controller.signal, 'aborted', { value: true });
+      socket.end(
+        'HTTP/1.1 099 Odd\r\nContent-Length: 0\r\nConnection: close\r\n\r\n',
+      );
+    });
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const outcome = await new NodeAdapter()
+      .send({
+        requestURL: `http://127.0.0.1:${port}/`,
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+      })
+      .then(
+        (answer) => answer,
+        (error: unknown) => error,
+      );
+
+    expect((outcome as Error).name).toBe('AbortError');
+  } finally {
+    await new Promise<void>((done) => {
+      server.close(() => done());
+    });
+  }
+});

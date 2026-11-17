@@ -40,12 +40,6 @@ import {
 /** {@link MAX_COOKIE_LIFETIME_SECONDS} in milliseconds. */
 const MAX_COOKIE_LIFETIME_MS = MAX_COOKIE_LIFETIME_SECONDS * 1000;
 
-/**
- * How much later than the last one a cookie stored in the same millisecond is created (see
- * `CookieJar.lastCreationTime`): a power of two, so the sum is exact at epoch-ms scale.
- */
-const CREATION_TIME_STEP_MS = 2 ** -10;
-
 /** A cookie's expiry fields as the jar holds it to the lifetime cap. See {@link cookieLifetime}. */
 interface CookieLifetime {
   createdAt: number;
@@ -188,14 +182,14 @@ export interface Cookie {
   lastAccessedAt?: number;
   /**
    * Epoch ms when a cookie of this name, domain and path was first stored, as the jar
-   * keeps it: kept by a later one that replaced it (RFC 6265 §5.3 step 11.3). A cookie
-   * stored now - a `Set-Cookie`, or `setCookie` with no `createdAt` - is created after
-   * every cookie in the jar, a fraction of a millisecond later where the clock reads no
-   * later, as browsers keep creation times unique. It orders the `Cookie` header. Written
-   * by `toJSON` only where it differs from {@link createdAt}, so a restored jar orders its
-   * header as this one did; `setCookie` takes it as given, a time later than `createdAt`
-   * included, and as `createdAt` when absent. `getAllCookies` and the other reads leave
-   * it out.
+   * keeps it: kept by a later one that replaced it (RFC 6265 §5.3 step 11.3), and, for a
+   * cookie stored now - a `Set-Cookie`, or `setCookie` with no `createdAt` - no earlier
+   * than any cookie stored since the jar was last emptied, so one stored after the clock
+   * stepped back still comes after them. It orders the `Cookie` header. Written by `toJSON` only where it
+   * differs from {@link createdAt}, so a restored jar orders its header as this one did;
+   * `setCookie` takes it as given, a time later than `createdAt` included, a time later
+   * than now as now, and as `createdAt` when absent. `getAllCookies` and the other reads
+   * leave it out.
    */
   firstCreatedAt?: number;
 }
@@ -221,6 +215,11 @@ interface StoredCookie {
   preparedDomain: PreparedHost;
   /** When the cookie's identity was first stored; orders the `Cookie` header. */
   creationTime: number;
+  /**
+   * The jar's creation clock when the identity was first stored: orders cookies that share
+   * a `creationTime` - the ones a response sets in one millisecond - as stored.
+   */
+  creationOrder: number;
   /** The jar's access clock when the cookie was last stored or read; orders eviction. */
   lastAccess: number;
   /** Epoch ms when the cookie was last stored or read; see {@link SAFE_FROM_JAR_LIMIT_MS}. */
@@ -235,6 +234,15 @@ interface StoredCookie {
  */
 function byLeastRecentlyUsed(a: StoredCookie, b: StoredCookie): number {
   return a.lastAccessTime - b.lastAccessTime || a.lastAccess - b.lastAccess;
+}
+
+/**
+ * Orders stored cookies by creation, as the `Cookie` header orders cookies of one path
+ * length: by creation time, then, for cookies created in the same millisecond, by the order
+ * they were stored in.
+ */
+function byCreation(a: StoredCookie, b: StoredCookie): number {
+  return a.creationTime - b.creationTime || a.creationOrder - b.creationOrder;
 }
 
 /** A copy of a stored cookie, its `expires` a `Date` of its own. */
@@ -461,12 +469,13 @@ export class CookieJar {
 
   /** Counts stores and reads, so recency has a strict order within one millisecond. */
   private accessClock = 0;
+  /** Counts first stores, so creation has a strict order within one millisecond. */
+  private creationClock = 0;
   /**
    * The latest creation time a stored cookie has been given, since the jar was last
-   * emptied. A cookie stored now - one with no `createdAt` - is created after it, a fraction of a millisecond later where
-   * the clock reads no later, as Chromium and Firefox keep creation times unique: cookies
-   * one response sets keep their order in the `Cookie` header, and a restored jar,
-   * reading the saved times, keeps it too.
+   * emptied. A cookie stored now - one with no `createdAt` - is created no earlier, as
+   * browsers keep creation times in step with the order cookies are stored in: one stored
+   * after the clock stepped back still sorts after those before it in the `Cookie` header.
    */
   private lastCreationTime = -Infinity;
   /**
@@ -868,17 +877,17 @@ export class CookieJar {
   /**
    * Serializes copies of the stored cookies.
    *
-   * A cookie's place in the `Cookie` header - its creation time - is saved as
-   * `firstCreatedAt` where it differs from `createdAt`: a replaced cookie's first one, or
-   * the later one a cookie stored in the same millisecond as another is given (see
-   * {@link Cookie.firstCreatedAt}). So a restored jar orders the header as this one does;
-   * cookies that still share a creation time - ones `setCookie` was given the same
-   * `createdAt` - by payload order.
+   * Listed in creation order, the order the `Cookie` header sends cookies of one path
+   * length in, each with its creation time saved as `firstCreatedAt` where it differs
+   * from `createdAt` (a replaced cookie's first one, or a time the clock had stepped back
+   * from; see {@link Cookie.firstCreatedAt}). A restore stores them in that order, so
+   * cookies created in the same millisecond keep their place in the header.
    *
-   * Listed least recently used first, each cookie with the time it was last used as
-   * `lastAccessedAt`: a restore orders recency by that time, and cookies that share one by
-   * payload order, so a restored jar evicts as this one would and keeps the cookies used
-   * in the last 30 days safe from its jar-wide limit, and only those.
+   * Each cookie carries the time it was last used as `lastAccessedAt`: a restore orders
+   * recency by that time, and cookies that share one by payload order, so a restored jar
+   * keeps the cookies used in the last 30 days safe from its jar-wide limit, and only
+   * those, and evicts the least recently used first - during the restore too, which
+   * stores them least recently used first.
    */
   public toJSON(): CookieJarJSON {
     const stored: StoredCookie[] = [];
@@ -887,7 +896,7 @@ export class CookieJar {
       stored.push(...bucket.values());
     }
 
-    stored.sort(byLeastRecentlyUsed);
+    stored.sort(byCreation);
 
     return {
       cookies: stored.map((entry) => ({
@@ -1099,14 +1108,35 @@ export class CookieJar {
     this.clearBuckets();
     this.cookieCount = 0;
     this.earliestAccessTime = Infinity;
+    this.lastCreationTime = -Infinity;
 
-    for (const cookie of prepared) {
-      this.setCookie(cookie);
+    // Stored least recently used first, so each eviction pass the limits run as the jar
+    // fills sees the stalest cookies first, as the saved jar's would; each keeps its place
+    // in the payload, its creation order, as the order it was created in.
+    const now = Date.now();
+    const recency = (cookie: Cookie): number => {
+      const lastAccessedAt: unknown = cookie.lastAccessedAt;
+      return typeof lastAccessedAt === 'number' && lastAccessedAt < now
+        ? lastAccessedAt
+        : now;
+    };
+    const firstOrder = this.creationClock;
+    this.creationClock += prepared.length;
+    const byRecency = prepared
+      .map((cookie, index) => ({
+        cookie,
+        creationOrder: firstOrder + index + 1,
+      }))
+      .sort((a, b) => recency(a.cookie) - recency(b.cookie));
+
+    for (const { cookie, creationOrder } of byRecency) {
+      this.storeCookie(cookie, undefined, creationOrder);
     }
 
-    // What the jar holds once every entry is stored, not each entry `setCookie` took: a
-    // later entry of the same identity replaces an earlier one, or deletes it when it has
-    // expired, and neither leaves two cookies behind.
+    // What the jar holds once every entry is stored, not each entry `setCookie` took: an
+    // entry of the same identity stored after another - the more recently used, or the
+    // later of two used at once - replaces it, or deletes it when it has expired, and
+    // neither leaves two cookies behind.
     return this.cookieCount;
   }
 
@@ -1117,7 +1147,11 @@ export class CookieJar {
    * cookie's normalized domain - its site, and whether it is kept for that host alone -
    * so a `Set-Cookie` with a `Domain` looks neither up again.
    */
-  private storeCookie(cookie: CookieInput, known?: KnownDomainScope): boolean {
+  private storeCookie(
+    cookie: CookieInput,
+    known?: KnownDomainScope,
+    restoredCreationOrder?: number,
+  ): boolean {
     // Copied before any field is read, so every check below and the object that is stored
     // see the same values: the argument is the caller's object and may carry accessors.
     let input: CookieInput;
@@ -1308,18 +1342,24 @@ export class CookieJar {
     // reads the store, from which an expired cookie has been evicted), so the new cookie
     // takes its own place. Judged at `now`, the time the new cookie is stored at.
     const replaced = this.buckets.get(site)?.get(key);
+    const isReplacing =
+      replaced !== undefined && !this.isExpired(replaced, now);
     // With none in force, a restored cookie's own first creation (see `firstCreatedAt`),
-    // read as given: it only orders the `Cookie` header, and may be later than
-    // `createdAt`, or than now, where the jar that saved it held it so - a replacement
-    // keeps the replaced cookie's time when the clock has stepped back since.
-    const creationTime =
-      replaced !== undefined && !this.isExpired(replaced, now)
-        ? replaced.creationTime
-        : rawFirstCreatedAt !== undefined
-          ? rawFirstCreatedAt
-          : input.createdAt === undefined && createdAt <= this.lastCreationTime
-            ? this.lastCreationTime + CREATION_TIME_STEP_MS
-            : createdAt;
+    // which may be later than `createdAt`: a time later than now is now, as `createdAt`'s
+    // is, so no payload can set the jar's creation clock ahead (see `lastCreationTime`).
+    // Cookies a restore so places in one millisecond keep the order it stores them in.
+    // A cookie stored now is created no earlier than any before it.
+    const creationTime = isReplacing
+      ? replaced.creationTime
+      : rawFirstCreatedAt !== undefined
+        ? Math.min(rawFirstCreatedAt, now)
+        : input.createdAt === undefined
+          ? Math.max(createdAt, this.lastCreationTime)
+          : createdAt;
+    // A restored cookie's from its place in the payload (see `fromJSON`).
+    const creationOrder = isReplacing
+      ? replaced.creationOrder
+      : (restoredCreationOrder ?? ++this.creationClock);
 
     const bucket = this.getOrCreateBucket(site);
 
@@ -1336,6 +1376,7 @@ export class CookieJar {
         normalized: domain,
       },
       creationTime,
+      creationOrder,
       lastAccess: ++this.accessClock,
       lastAccessTime,
       expiresAt: lifetime.expiresAt,
@@ -1466,7 +1507,7 @@ export class CookieJar {
         return pathLengthDelta;
       }
 
-      return a.creationTime - b.creationTime;
+      return byCreation(a, b);
     });
 
     return result;
@@ -2105,7 +2146,7 @@ export class CookieJar {
       return;
     }
 
-    // No `createdAt`: stored now, so the jar gives it a creation time of its own (see
+    // No `createdAt`: stored now, so created no earlier than any cookie before it (see
     // `lastCreationTime`).
     const cookie: CookieInput = {
       name: parsed.name,

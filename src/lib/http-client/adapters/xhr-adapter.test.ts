@@ -444,27 +444,90 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('a status from 1 to 99 is answered as a malformed response', async () => {
+  test('a status no server may send ends the send where it is first read', async () => {
     // An XHR outside a browser may report one; the other adapters answer it the same way.
-    const promise = new XHRAdapter().send({
+    // Ended before the headers or body are read or a download reported, the XHR stopped.
+    for (const [status, at] of [
+      [99, 'headers'],
+      [50, 'load'],
+      [1000, 'load'],
+    ] as const) {
+      const downloads: number[] = [];
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/odd',
+        method: 'GET',
+        headers: {},
+        onDownloadProgress: (event) => {
+          downloads.push(event.progress);
+        },
+      });
+
+      if (at === 'headers') {
+        lastXHR.simulateHeadersReceived(status, 'set-cookie: a=b\r\n');
+      } else {
+        lastXHR.status = status;
+        lastXHR.getAllResponseHeadersResult = 'set-cookie: a=b\r\n';
+        lastXHR.response = textBody('ok');
+        lastXHR.simulateLoad();
+      }
+
+      const answer = await promise;
+
+      expect(answer.status).toBe(0);
+      expect(answer.isTransportError).toBe(true);
+      expect(answer.headers).toEqual({});
+      expect(answer.errorCause?.message).toBe(
+        `Server answered with an invalid status code (got ${status})`,
+      );
+      expect(downloads).toEqual([]);
+      expect(lastXHR.abortCalled).toBe(true);
+    }
+
+    // The server answered, so the upload ended, as with any answer.
+    for (const at of ['headers', 'load'] as const) {
+      const uploads: number[] = [];
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/odd',
+        method: 'POST',
+        headers: {},
+        body: 'abc',
+        onUploadProgress: (event) => {
+          uploads.push(event.progress);
+        },
+      });
+
+      if (at === 'headers') {
+        lastXHR.simulateHeadersReceived(99);
+      } else {
+        lastXHR.status = 99;
+        lastXHR.simulateLoad();
+      }
+
+      expect((await promise).isTransportError).toBe(true);
+      expect(uploads).toEqual([0, 1]);
+    }
+
+    // A send the caller cancelled stays the cancel.
+    const controller = new AbortController();
+    const cancelled = new XHRAdapter().send({
       requestURL: 'https://api.test/odd',
       method: 'GET',
       headers: {},
+      signal: controller.signal,
     });
-
+    lastXHR.abort = () => {
+      lastXHR.abortCalled = true;
+    };
     lastXHR.status = 99;
-    lastXHR.getAllResponseHeadersResult = 'set-cookie: a=b\r\n';
-    lastXHR.response = textBody('ok');
+    lastXHR.readyState = 4;
+    Object.defineProperty(controller.signal, 'aborted', { value: true });
     lastXHR.simulateLoad();
 
-    const answer = await promise;
-
-    expect(answer.status).toBe(0);
-    expect(answer.isTransportError).toBe(true);
-    expect(answer.headers).toEqual({});
-    expect(answer.errorCause?.message).toBe(
-      'Server answered with an invalid status code (got 99)',
+    const failure = await cancelled.then(
+      () => null,
+      (error: unknown) => error,
     );
+    expect((failure as Error | null)?.name).toBe('AbortError');
   });
 
   test('sets responseType to arraybuffer', async () => {

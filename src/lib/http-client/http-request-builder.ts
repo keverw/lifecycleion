@@ -1,6 +1,7 @@
 import { isSignalAbortedQuietly } from './internal/request-fields';
 import { assertCancelReason } from './request-tracker';
 import { isNullish } from '../internal/is-nullish';
+import { hasOwnToStringTagInChain } from '../internal/binary-view';
 import { describeValue } from '../internal/describe-value';
 import { generateID } from '../id-helpers';
 import { validateMaxResponseBytes, validateRequestTimeoutMS } from './consts';
@@ -102,6 +103,26 @@ const clientSendFns = new WeakSet<object>();
 export function clientSendFn(sendFn: SendFn<unknown>): SendFn<unknown> {
   clientSendFns.add(sendFn);
   return sendFn;
+}
+
+/**
+ * Whether `value` is an `AbortSignal`: tagged as one, a subclass of this realm's, or one
+ * whose chain holds a prototype tagged as one - another realm's subclass included.
+ */
+function isAbortSignal(value: object): boolean {
+  if (Object.prototype.toString.call(value) === '[object AbortSignal]') {
+    return true;
+  }
+
+  try {
+    if (typeof AbortSignal === 'function' && value instanceof AbortSignal) {
+      return true;
+    }
+  } catch {
+    // A Proxy whose trap throws: told by its chain below, which answers no.
+  }
+
+  return hasOwnToStringTagInChain(value, 'AbortSignal');
 }
 
 /**
@@ -317,14 +338,16 @@ export class HTTPRequestBuilder<T = unknown> {
       return this;
     }
     // Refused now when it plainly is not one: it is composed with the client's own signal,
-    // which needs an `AbortSignal`. Checked by its built-in tag rather than `instanceof`,
-    // so another realm's (an iframe's) signal and a polyfill's are accepted, as composing them
-    // accepts them. A value that only claims the tag rejects `send()` instead, at setup.
+    // which needs an `AbortSignal`. Checked by its built-in tag rather than `instanceof`
+    // alone, so another realm's (an iframe's) signal and a polyfill's are accepted, as
+    // composing them accepts them - and a subclass with a tag of its own (a browser's
+    // `TaskSignal`) by the `AbortSignal` prototype in its chain. A value that only claims
+    // the tag rejects `send()` instead, at setup.
     const candidate: unknown = abortSignal;
     if (
       typeof candidate !== 'object' ||
       candidate === null ||
-      Object.prototype.toString.call(candidate) !== '[object AbortSignal]'
+      !isAbortSignal(candidate)
     ) {
       throw new TypeError(
         `HTTPRequestBuilder signal must be an AbortSignal (got ${describeValue(candidate)})`,

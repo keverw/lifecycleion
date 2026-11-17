@@ -155,10 +155,7 @@ import {
   isAnsweredBodyOverLimit,
   makeResponseTooLargeError,
 } from './internal/response-limit';
-import {
-  presentsAsBinary,
-  readBinaryByteLength,
-} from '../internal/binary-view';
+import { readBinaryByteLength } from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
   parseRetryAfterMS,
@@ -392,7 +389,10 @@ interface AnsweredResponse extends AdapterRedirectFields {
  * The redirect fields of a response the adapter resolved, reported as the adapter gave
  * them - as for any healthy response, and every built-in adapter resolves them - whether
  * the response was then read, could not be decoded, or failed in the cookie jar. A target
- * is reported only beside a detected redirect, as a read answer reports one.
+ * is reported only beside a detected redirect, as a read answer reports one. The rule is
+ * kept here as well as where the answer is read (`_dispatchRequestAttempts`) because an
+ * answer that fails there - its header record refused - is reported before that drop runs,
+ * with its flag still unset.
  */
 function adapterRedirectFields(
   adapterFields: AdapterRedirectFields,
@@ -3792,7 +3792,8 @@ export class BaseHTTPClient {
         }
         // A target belongs to a detected redirect only: one named beside an answer that
         // is none - a `200`, or a flag the adapter set `false` - is dropped rather than
-        // reported against `wasRedirectDetected: false`.
+        // reported against `wasRedirectDetected: false`. `adapterRedirectFields` keeps the
+        // same rule for an answer that failed before reaching here.
         if (adapterResponse.wasRedirectDetected !== true) {
           delete adapterResponse.detectedRedirectURL;
         }
@@ -3810,22 +3811,28 @@ export class BaseHTTPClient {
           locationHeader(adapterResponse.headers) !== undefined;
 
         if (adapterResponse.isStreamed !== true && !isNullish(answeredBody)) {
+          // Measured once, by the internal slot (see `answeredBodySizeOf`).
+          const answeredBodySize = answeredBodySizeOf(answeredBody);
+
           if (!hasResponseBody(sentRequest.method, adapterResponse.status)) {
             // A bodiless answer (a `HEAD`, a `204`) has no body, as no adapter hands one
             // over: a custom adapter's stray one there is dropped rather than delivered -
             // and decoded - past the limit.
             adapterResponse.body = null;
-          } else if (
-            // A failed answer's body is never delivered, so it keeps its own failure.
-            adapterResponse.isStreamError !== true &&
-            adapterResponse.isTransportError !== true &&
-            !isAnsweredBodyValue(answeredBody)
-          ) {
-            // Bytes or a string: anything else - a `Blob`, a plain object, a `true` - has
-            // no size to hold to `maxResponseBytes` and is no body the response is typed
-            // to carry, so it is refused as the adapter's malformed answer, as an invalid
-            // status is, whatever the content type. Except on a redirect, which is read
-            // as the bodiless 3xx it is followed or refused as.
+          } else if (adapterResponse.isTransportError === true) {
+            // A transport failure's body is never delivered, so it is dropped, and the
+            // answer keeps its own failure (and cause), whatever the body's size or type.
+            adapterResponse.body = null;
+          } else if (adapterResponse.isStreamError === true) {
+            // A stream error keeps its own failure too: its body is never delivered.
+          } else if (answeredBodySize === null) {
+            // Bytes or a string, measured: anything else - a `Blob`, a plain object, a
+            // `true`, a `Proxy` over bytes or a value that only inherits from a view's
+            // prototype - has no size to hold to `maxResponseBytes` and is no body the
+            // response is typed to carry, so it is refused as the adapter's malformed
+            // answer, as an invalid status is, whatever the content type or the limit.
+            // Except on a redirect, which is read as the bodiless 3xx it is followed or
+            // refused as.
             if (!isRedirectAnswer) {
               throw new TypeError(
                 `HTTPClient adapter answered with an invalid body (got ${describeValue(answeredBody)})`,
@@ -3834,10 +3841,11 @@ export class BaseHTTPClient {
 
             adapterResponse.body = null;
           } else if (
-            adapterResponse.isStreamError !== true &&
             // A plain `ArrayBuffer` or a string too: outside the type, but `_buildResponse`
             // delivers either, so they are bodies the limit must see.
-            isAnsweredBodyOverLimit(answeredBody, maxResponseBytes)
+            answeredBodySize === 'string'
+              ? isAnsweredBodyOverLimit(answeredBody, maxResponseBytes)
+              : answeredBodySize > maxResponseBytes
           ) {
             adapterResponse.body = null;
             adapterResponse.isStreamError = true;
@@ -6101,19 +6109,19 @@ function describeRequestPath(value: unknown): string {
 }
 
 /**
- * Whether an adapter's body is one the response can carry: bytes or a string. A value that
- * presents as bytes but cannot be measured (a `Proxy` over bytes) counts, and is left to
- * `isAnsweredBodyOverLimit`, which fails it closed under a finite limit. Read through the
- * intrinsic getters and the prototype chain, never the value's own getters; a Proxy's
- * `getPrototypeOf` trap runs, its throw caught.
+ * An adapter's body as the response can carry it: `'string'` for text, the byte length of
+ * bytes - a view or buffer of any kind, from any realm, measured by its internal slot
+ * through the intrinsic getters, so none of the value's own code runs - or `null` for
+ * anything else, a value that only presents as bytes included.
  */
-function isAnsweredBodyValue(body: unknown): boolean {
-  return (
-    typeof body === 'string' ||
-    (typeof body === 'object' &&
-      body !== null &&
-      (readBinaryByteLength(body) !== null || presentsAsBinary(body)))
-  );
+function answeredBodySizeOf(body: unknown): number | 'string' | null {
+  if (typeof body === 'string') {
+    return 'string';
+  }
+
+  return typeof body === 'object' && body !== null
+    ? readBinaryByteLength(body)
+    : null;
 }
 
 /**
