@@ -140,6 +140,10 @@ export interface AdapterResponse {
    *   HTTPClient routing as FetchAdapter. A real 3xx the XHR hands over
    *   unfollowed (no `Location` in a browser, or an XHR that does not follow)
    *   sets it from the status, as FetchAdapter does.
+   *
+   * A custom adapter that leaves it unset has it derived by the client from the status
+   * and `Location`, as the built-in adapters derive theirs, together with
+   * `detectedRedirectURL` when that is unset too.
    */
   wasRedirectDetected?: boolean;
   /**

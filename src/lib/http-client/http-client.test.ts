@@ -684,6 +684,33 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect((settled as Error).message).toContain('upload blew up');
   });
 
+  test('reads a `requestBodySettled` fulfilled with null as a completed upload', async () => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          // A plain-JS adapter's "no error".
+          requestBodySettled: Promise.resolve(null) as unknown as Promise<
+            Error | undefined
+          >,
+        }),
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.requestBodySettled).toBeDefined();
+    expect(await response.requestBodySettled).toBeUndefined();
+  });
+
   test('a cancelled bodied request carries the upload outcome, not a silent success', async () => {
     // The hole this closes: a cancel settles with no adapter response, so the field was
     // omitted - and `await undefined` is `undefined`, which is the documented value for an
@@ -1026,6 +1053,59 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(settledAt).toBeGreaterThan(0);
     expect(secondHopStartedAt).toBeGreaterThanOrEqual(settledAt);
   });
+
+  test.each([303, 302, 301])(
+    "a %d that drops a POST's body follows without waiting for the hop's upload",
+    async (status) => {
+      // The next hop sends no body, so it puts nothing on the wire beside the upload.
+      // The upload is left to finish, as under a final answer: the server may still be
+      // reading it.
+      let hop = 0;
+      const signals: AbortSignal[] = [];
+      const nextHop: AdapterRequest[] = [];
+
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (request: AdapterRequest): Promise<AdapterResponse> => {
+          hop++;
+          signals.push(request.signal as AbortSignal);
+
+          if (hop === 1) {
+            return Promise.resolve({
+              status,
+              headers: { location: '/next' },
+              body: null,
+              // Never settles: waiting on it would end the request at the timeout.
+              requestBodySettled: new Promise(() => {}),
+            });
+          }
+
+          nextHop.push(request);
+
+          return Promise.resolve({ status: 200, headers: {}, body: null });
+        },
+      };
+
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+        timeout: 1000,
+      })
+        .post('/upload')
+        .json({ a: 1 })
+        .send();
+
+      expect(response.status).toBe(200);
+      expect(response.isTimeout).toBe(false);
+      expect(hop).toBe(2);
+      expect(nextHop[0].method).toBe('GET');
+      expect(nextHop[0].body ?? null).toBeNull();
+      expect(signals[0].aborted).toBe(false);
+      // The bodied hop's outcome, carried onto the final response.
+      expect(response.requestBodySettled).toBeDefined();
+    },
+  );
 
   test('a cancel during that wait is not held for the upload', async () => {
     const controller = new AbortController();
@@ -5443,6 +5523,41 @@ describe('HTTPClient — redirect', () => {
     const res = await client.get('https://api.example/start').send();
 
     expect(res.isCancelled).toBe(true);
+  });
+
+  test('a custom adapter silent on redirect fields has them read from the status and Location', async () => {
+    let hop = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> => {
+        hop++;
+
+        const answer: AdapterResponse =
+          hop === 1
+            ? { status: 302, headers: { location: '/next' }, body: null }
+            : { status: 200, headers: {}, body: null };
+
+        return Promise.resolve(answer);
+      },
+    };
+
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    const seen: Array<{ detected: boolean; url: string | undefined }> = [];
+
+    client.addResponseObserver(
+      (response) => {
+        seen.push({
+          detected: response.wasRedirectDetected,
+          url: response.detectedRedirectURL,
+        });
+      },
+      { phases: ['redirect'] },
+    );
+
+    const res = await client.get('https://api.example/start').send();
+
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([{ detected: true, url: 'https://api.example/next' }]);
   });
 
   test('same-origin redirect preserves caller-supplied Cookie header without a jar', async () => {

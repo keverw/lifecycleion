@@ -1296,6 +1296,15 @@ export class BaseHTTPClient {
           // `finalRequest`, not from what the interceptors returned. (The chain answers a
           // cancel itself for an interceptor that cancelled and then threw.)
           if (!cancelSignal.aborted) {
+            // The interceptor's request may be what failed - a `requestURL` getter that
+            // throws - so its URL is read best-effort, falling back to the request's own,
+            // rather than turning this into a `request_setup_error`. Read once, for the
+            // response, the error and the error observers' request alike.
+            const failedRequestURL = readStringMember(
+              initialRequestCandidate,
+              'requestURL',
+              url,
+            );
             const response = this._buildResponse<T>({
               adapterResponse: null,
               requestID,
@@ -1303,14 +1312,7 @@ export class BaseHTTPClient {
               wasTimeout: false,
               adapterType: this._adapterType,
               initialURL: url,
-              // The interceptor's request may be what failed - a `requestURL` getter
-              // that throws - so its URL is read best-effort, falling back to the
-              // request's own, rather than turning this into a `request_setup_error`.
-              requestURL: readStringMember(
-                initialRequestCandidate,
-                'requestURL',
-                url,
-              ),
+              requestURL: failedRequestURL,
               redirectHistory: [],
               isNetworkErrorOverride: false,
             });
@@ -1346,7 +1348,7 @@ export class BaseHTTPClient {
                 attemptLimits,
                 requestID,
                 // The URL the response and error name, so a host filter agrees with them.
-                { fallbackURL: url },
+                { reportedURL: failedRequestURL },
                 // A body that failed to copy is not read a second time; it is reported as it
                 // came.
                 initialBodyCopy.didFail ? 'unbuildable' : undefined,
@@ -1438,8 +1440,19 @@ export class BaseHTTPClient {
         // retry raises it to the delay the policy waits then anyway, without its jitter
         // (`baseDelayMS`): a `Retry-After` within it is no reason to give up, and read
         // without the jitter the same answer on the same retry is always retried or
-        // always not.
-        const maxRetryAfterMS = retryPolicyOptions?.maxRetryAfterMS ?? 0;
+        // always not. With no policy there is no retry for it to cap.
+        let maxRetryAfterMS = 0;
+        if (retryPolicyOptions) {
+          const resolvedCap = retryPolicyOptions.maxRetryAfterMS;
+          // The snapshot always resolves it; a policy that reached here without it would
+          // otherwise cap every `Retry-After` at the policy's own delay.
+          if (typeof resolvedCap !== 'number') {
+            throw new TypeError(
+              'HTTPClient retryPolicy reached dispatch without a resolved maxRetryAfterMS',
+            );
+          }
+          maxRetryAfterMS = resolvedCap;
+        }
 
         // --- Main request + redirect loop ---
         //
@@ -2178,7 +2191,16 @@ export class BaseHTTPClient {
             // the caller cancels. Raced against the cancel signal so a caller who gives up
             // is not held for it. Only the adapter's word is waited on: a hop that threw
             // has no socket left to wait for.
-            if (adapterResponse.requestBodySettled !== undefined) {
+            //
+            // Only for a hop that sends a body: one a `303`, or a `301`/`302` that
+            // rewrote a `POST`, left behind - or that the interceptors dropped - sends
+            // none beside the upload, so it follows at once. That upload is left to
+            // finish, as it is under a final answer: the server may still be reading it,
+            // and its outcome is carried onto the final response.
+            if (
+              adapterResponse.requestBodySettled !== undefined &&
+              sendsRequestBody(sanitizedRedirectRequest.body)
+            ) {
               const wait = await settleUploadBeforeNextDispatch(
                 adapterResponse.requestBodySettled,
                 cancelSignal,
@@ -3255,6 +3277,8 @@ export class BaseHTTPClient {
       // What the snapshot of a failed setup may reuse: the bodies once built, or
       // `unbuildable` while building them is what is under way.
       let knownBodies: AttemptBodies | 'unbuildable' | undefined;
+      // Whether this attempt has a body to send, read once; see `sendsRequestBody`.
+      let isBodySent: boolean;
       try {
         // Only a host change explicitly selects a new credential destination.
         // Editing a redirected URL's path, query or fragment must not authorize the
@@ -3284,6 +3308,7 @@ export class BaseHTTPClient {
         );
         knownBodies = attemptBodies;
         sentBody = attemptBodies.sentBody;
+        isBodySent = sendsRequestBody(sentBody);
         params.sentBody.value = attemptRequest.body;
         sentRequest = this._buildAttemptRequest(attemptRequest, attemptBodies, {
           requestID,
@@ -3304,10 +3329,9 @@ export class BaseHTTPClient {
         );
       }
 
-      // Whether this attempt has a body to send, read once; see `sendsRequestBody`.
-      const isBodySent = sendsRequestBody(sentBody);
-      // And it is the response's from here, whether or not it reports one: an upload
-      // whose fate the adapter never told is not an earlier attempt's that it did.
+      // A bodied attempt's upload is the response's from here, whether or not it reports
+      // one: an upload whose fate the adapter never told is not an earlier attempt's that
+      // it did.
       if (isBodySent) {
         params.latestUpload.outcome = undefined;
       }
@@ -3401,15 +3425,16 @@ export class BaseHTTPClient {
         // Read once, before the request is built as a call reads it, and called as read:
         // whether the body is copied for it is decided by the function handed it.
         const send: unknown = Reflect.get(adapter, 'send');
-        isBuiltInNodeSend =
-          this._adapterType === 'node' && isBuiltInNetworkSend(adapter, send);
+        // Told once, for the stream factory's timeout and the body the adapter is handed.
+        const isBuiltInSend = isBuiltInNetworkSend(adapter, send);
+        isBuiltInNodeSend = this._adapterType === 'node' && isBuiltInSend;
         const adapterRequest: AdapterRequest = {
           requestURL: sentRequest.requestURL,
           method: sentRequest.method,
           // Its own copy, arrays too: an adapter that changes one in place reaches
           // neither the request observers are handed nor the next attempt.
           headers: copyHeaderRecord(sentRequest.headers),
-          body: adapterRequestBody(adapter, send, sentBody),
+          body: adapterRequestBody(isBuiltInSend, sentBody),
           signal: attemptSignal,
           // Forward the builder's streaming factory to each adapter attempt.
           // NodeAdapter invokes it only for a 2xx response with a body, letting the caller
@@ -3732,6 +3757,23 @@ export class BaseHTTPClient {
         }
         adapterResponse.headers = normalizeAdapterResponseHeaders(headers);
         answeredHeaders = adapterResponse.headers;
+        // A custom adapter that says nothing of a redirect has its answer read as the
+        // built-in adapters read theirs, from the status and `Location`, so a `3xx` is
+        // reported as detected whether or not it is followed.
+        if (adapterResponse.wasRedirectDetected === undefined) {
+          const derived = derivedRedirectFields(
+            sentRequest.requestURL,
+            adapterResponse.status,
+            adapterResponse.headers,
+          );
+          adapterResponse.wasRedirectDetected = derived.wasRedirectDetected;
+          if (
+            adapterResponse.detectedRedirectURL === undefined &&
+            derived.detectedRedirectURL !== undefined
+          ) {
+            adapterResponse.detectedRedirectURL = derived.detectedRedirectURL;
+          }
+        }
 
         // Held to `maxResponseBytes` here as well as in the adapter: the built-in ones stop
         // reading at the limit, but a custom adapter may hand over a body of any size, and
@@ -5964,16 +6006,16 @@ function buildAttemptBodies(
 /**
  * The body an adapter is handed: a copy taken for this attempt, so an adapter that changes
  * or transfers what it was handed leaves the request's own body - the next attempt's, and
- * a replay's - alone. Bytes are the request's own when `send` is a built-in network
- * adapter's, which copies them as it is called (see `isBuiltInNetworkSend`); a form is
- * copied for every adapter, as NodeAdapter reads its entries while the upload runs.
+ * a replay's - alone. Bytes are the request's own when the `send` called is a built-in
+ * network adapter's (`isBuiltInSend`), which copies them as it is called (see
+ * `isBuiltInNetworkSend`); a form is copied for every adapter, as NodeAdapter reads its
+ * entries while the upload runs.
  */
 function adapterRequestBody(
-  adapter: HTTPAdapter,
-  send: unknown,
+  isBuiltInSend: boolean,
   body: AttemptRequest['body'],
 ): AdapterRequest['body'] {
-  if (isRequestBodyBytes(body) && isBuiltInNetworkSend(adapter, send)) {
+  if (isRequestBodyBytes(body) && isBuiltInSend) {
     return body;
   }
 
@@ -6283,10 +6325,11 @@ function adoptRequestBodySettled(
   }
   // Stabilized in the reaction that publishes the Error at this public API boundary,
   // so the adapter's value never settles a promise itself. Only a fulfilment may answer
-  // `undefined` (the upload completed): a rejection is always a failure, so a rejection
-  // reason of `undefined` is normalized to an Error like any other reason.
+  // that the upload completed - with `undefined`, or the `null` a plain-JS adapter may
+  // use for "no error": a rejection is always a failure, so a rejection reason of
+  // `undefined` is normalized to an Error like any other reason.
   return pending.then(
-    ({ value }) => (value === undefined ? undefined : stableUploadError(value)),
+    ({ value }) => (isNullish(value) ? undefined : stableUploadError(value)),
     (error: unknown) => stableUploadError(error),
   );
 }

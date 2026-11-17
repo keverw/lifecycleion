@@ -375,6 +375,8 @@ nothing - an empty string, no bytes, a form with no entries - is no body here.
 Redirect-phase observers see that hop's outcome.
 
 Before following a redirect or retrying, the client waits for a reported upload outcome.
+A redirect whose next hop sends no body - a `303`, or a `301`/`302` that rewrote a `POST`
+to `GET` - follows without waiting, since nothing goes out beside the upload.
 Cancellation ends the wait. The request's `timeout` bounds inactivity during this wait,
 including silence since dispatch. Upload-progress reports restart that inactivity clock:
 the client hands an adapter an `onUploadProgress` for every request with a body to watch
@@ -392,6 +394,13 @@ must settle it and honor cancellation.
 A `null` or omitted request timeout inherits the client timeout. Explicit `NaN` or another non-number
 throws before dispatch; finite negative values and either infinity retain the documented
 disabled-timeout behavior. Do not pass an expired `deadline - Date.now()` directly: a zero or negative result disables the timer, rather than timing out immediately. Check whether the deadline has passed before sending the request.
+
+An upload is not cut short because the server answered: the server may still be reading
+it. One still running when the request moves on or ends at an answered attempt is left to
+finish - under a final answer, a redirect that follows without waiting (above), and a
+redirect the client does not follow (`redirect_disabled`, `redirect_loop`) or fails to set
+up - and its outcome is carried onto the response. A cancel while the request is still
+running tears it down, and so does a deadline on the wait above.
 
 `NodeAdapter` also watches uploads left running after an early response closes. It checks
 socket progress at roughly five-second intervals and allows pending multipart source reads
@@ -800,7 +809,10 @@ interface ErrorObserverFilter {
 }
 ```
 
-Include `'retry'` in `phases` to also run when an attempt that ended in an error will be retried - the adapter threw, or the attempt timed out. A transport failure the adapter reports as a response - a refused connection on any built-in adapter, or a `MockAdapter` `transportError` - is a `status: 0` response, and reaches response observers in the `retry` phase instead:
+Include `'retry'` in `phases` to also run when an attempt that ended in an error will be retried - the adapter threw, or the attempt timed out. A transport failure the adapter reports as a response - a refused connection on any built-in adapter, or a `MockAdapter` `transportError` - is a `status: 0` response, and reaches response observers in the `retry` phase instead.
+So does a retried answer whose buffered body was past `maxResponseBytes` (a `503` with an
+oversized page), with `isFailed: true` and `isStreamError: true`: it reaches the error
+observers, as `response_too_large`, only when no retry follows:
 
 ```typescript
 client.addErrorObserver(
@@ -2064,6 +2076,16 @@ Since the client treats anything other than `false` as retryable, an unset value
 | `retry_after_too_long`  | A `429` or `503` asked, by `Retry-After`, for a longer wait than `maxRetryAfterMS` (at least the policy's own delay for that retry, without its jitter) |
 
 It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place. In those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped. It is also absent when the attempt ends as an `adapter_error` that stopped a planned retry - a response whose body could not be decoded, or whose `Set-Cookie` the jar could not store: the request failed, and the error code says why. A retry already suppressed for one of the reasons above keeps its reason when the body then cannot be decoded, and the request still ends as that `adapter_error`.
+
+`willRetry: true` announces a retry before its backoff and before the wait for the
+attempt's upload to settle (see
+[Uploads That Outlive the Response](#uploads-that-outlive-the-response)), and the request's
+state reads `waiting_for_retry` from then on. The retry can still be given up on: a cancel
+during either wait, or the upload wait reaching its deadline, ends the request with no
+further `onAttemptStart` or `onAttemptEnd`, since no attempt ran. The request's final
+response and error are its outcome, and supersede the announcement. A retry-phase
+interceptor that cancels or fails ends the retry's own attempt, which reports its
+`onAttemptEnd` with `willRetry: false`.
 
 The built-in real transport adapters do not currently produce `adapter_veto`: their
 TLS-certificate veto uses status `495`, which is already non-retryable. `MockAdapter`
