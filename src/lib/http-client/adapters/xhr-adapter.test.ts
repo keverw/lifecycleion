@@ -444,6 +444,29 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('a status from 1 to 99 is answered as a malformed response', async () => {
+    // An XHR outside a browser may report one; the other adapters answer it the same way.
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/odd',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 99;
+    lastXHR.getAllResponseHeadersResult = 'set-cookie: a=b\r\n';
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+
+    const answer = await promise;
+
+    expect(answer.status).toBe(0);
+    expect(answer.isTransportError).toBe(true);
+    expect(answer.headers).toEqual({});
+    expect(answer.errorCause?.message).toBe(
+      'Server answered with an invalid status code (got 99)',
+    );
+  });
+
   test('sets responseType to arraybuffer', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

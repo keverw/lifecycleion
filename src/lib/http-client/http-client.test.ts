@@ -10878,8 +10878,9 @@ describe('an answered response whose body cannot be decoded', () => {
     const response = await request.send();
 
     expect(adapter.sends).toBe(1);
-    expect(request.error?.code).toBe('adapter_error');
-    expect(response.status).toBe(302);
+    // Ended at the redirect, as one with a readable body is: its body is never delivered.
+    expect(request.error?.code).toBe('redirect_disabled');
+    expect(response.status).toBe(0);
     expect(response.wasRedirectDetected).toBe(true);
     expect(response.detectedRedirectURL).toBe('https://example.com/next');
   });
@@ -10936,9 +10937,9 @@ test('an interceptor cancel reason that is not a string is dropped', async () =>
 });
 
 describe('a redirect whose body is no body', () => {
-  // A body that is neither bytes nor a string is the adapter's malformed answer on a
-  // redirect not followed. One about to be followed is read as the bodiless 3xx it is
-  // followed as, as an oversized or undecodable body is: a browser never reads it.
+  // A redirect's body is never delivered, followed or not, so one that is neither bytes
+  // nor a string is read as the bodiless 3xx it is followed or refused as, as an
+  // oversized or undecodable body is: a browser never shows it.
   function redirectThenOK(
     body: unknown,
   ): HTTPAdapter & { requestURLs: string[] } {
@@ -10992,17 +10993,21 @@ describe('a redirect whose body is no body', () => {
   test.each([
     ['a plain object', { notBytes: true }],
     ['a Blob', new Blob(['moved'])],
-  ])('with %s, is refused with redirects off', async (_name, body) => {
-    const adapter = redirectThenOK(body);
-    const request = new HTTPClient({ adapter, followRedirects: false }).get(
-      'https://example.com/',
-    );
-    const response = await request.send();
+  ])(
+    'with %s, ends as redirect_disabled with redirects off',
+    async (_name, body) => {
+      const adapter = redirectThenOK(body);
+      const request = new HTTPClient({ adapter, followRedirects: false }).get(
+        'https://example.com/',
+      );
+      const response = await request.send();
 
-    expect(adapter.requestURLs).toHaveLength(1);
-    expect(request.error?.code).toBe('adapter_error');
-    expect(response.status).toBe(302);
-  });
+      expect(adapter.requestURLs).toHaveLength(1);
+      expect(request.error?.code).toBe('redirect_disabled');
+      expect(response.status).toBe(0);
+      expect(response.detectedRedirectURL).toBe('https://example.com/next');
+    },
+  );
 
   test('past maxRedirects, ends as the redirect limit, as an oversized body does', async () => {
     let sends = 0;

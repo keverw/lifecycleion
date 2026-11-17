@@ -3801,10 +3801,10 @@ export class BaseHTTPClient {
         // reading at the limit, but a custom adapter may hand over a body of any size, and
         // the limit is the client's promise, not only theirs.
         const answeredBody: unknown = adapterResponse.body;
-        // A redirect about to be followed: a browser never reads a body it is about to
-        // leave, so nothing about that body can fail the redirect (see below).
-        const isRedirectToFollow =
-          this._config.followRedirects &&
+        // A redirect, whose body is never delivered: one followed is left unread, as a
+        // browser leaves it, and one not followed ends as a synthetic status-0 answer
+        // (`unfollowedRedirectAnswer`), as a browser's manual redirect shows none.
+        const isRedirectAnswer =
           adapterResponse.isTransportError !== true &&
           REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
           locationHeader(adapterResponse.headers) !== undefined;
@@ -3824,9 +3824,9 @@ export class BaseHTTPClient {
             // Bytes or a string: anything else - a `Blob`, a plain object, a `true` - has
             // no size to hold to `maxResponseBytes` and is no body the response is typed
             // to carry, so it is refused as the adapter's malformed answer, as an invalid
-            // status is, whatever the content type. Except on a redirect about to be
-            // followed, which is read as the bodiless 3xx it is followed as.
-            if (!isRedirectToFollow) {
+            // status is, whatever the content type. Except on a redirect, which is read
+            // as the bodiless 3xx it is followed or refused as.
+            if (!isRedirectAnswer) {
               throw new TypeError(
                 `HTTPClient adapter answered with an invalid body (got ${describeValue(answeredBody)})`,
               );
@@ -3855,7 +3855,11 @@ export class BaseHTTPClient {
         // says it is: a browser never reads a body it is about to leave, so neither can
         // fail it. Read as a bodiless 3xx from here on, so nothing of the failure reaches
         // the observers, the hop's error code, or a later hop's.
-        if (isRedirectToFollow && isStatusOnlyStreamError(adapterResponse)) {
+        if (
+          this._config.followRedirects &&
+          isRedirectAnswer &&
+          isStatusOnlyStreamError(adapterResponse)
+        ) {
           adapterResponse.body = null;
           delete adapterResponse.isStreamError;
           delete adapterResponse.streamErrorCode;

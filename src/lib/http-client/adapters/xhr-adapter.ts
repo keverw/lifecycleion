@@ -1,3 +1,4 @@
+import { invalidServerStatusError } from '../internal/status-code';
 import {
   describeRefusedHeader,
   dropTransportFramedHeaders,
@@ -197,7 +198,22 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         didSettle = true;
-        resolveSend(response);
+        // A status from 1 to 99 is none a server may send, though an XHR outside a browser
+        // may report one: the response is malformed, and is answered as one the XHR could
+        // not read at all is - a transport error - as the other adapters answer it. Every
+        // answer this adapter gives passes here, so none can carry one.
+        const { status } = response;
+        resolveSend(
+          Number.isInteger(status) && status >= 1 && status <= 99
+            ? {
+                status: 0,
+                isTransportError: true,
+                headers: {},
+                body: null,
+                errorCause: invalidServerStatusError(status),
+              }
+            : response,
+        );
         removeAbortListener();
       };
       const reject = (reason: unknown): void => {
