@@ -1253,11 +1253,12 @@ export class NodeAdapter implements HTTPAdapter {
           didResponseBodyDestroyResponse?.() === true;
 
         /**
-         * Whether the answer ended the upload: it said it would close the connection - see
-         * `isAnswerClosingConnection` - and the connection's writing side is gone, ended as
-         * the answer ended (Node half-closes it, Bun closes it) or destroyed. An upload that
-         * fails then was stopped by the close the answer asked for, which ends it as surely
-         * as this adapter's own teardown does, and is not reported to the host either.
+         * Whether the answer ended the upload: it said it would close the connection -
+         * see `isAnswerClosingConnection` - and the connection's writing side is gone,
+         * ended as the answer ended (Node half-closes it, Bun closes it) or destroyed.
+         * An upload that fails then was stopped by the close the answer asked for,
+         * which ends it as surely as this adapter's own teardown does, and is not
+         * reported to the host either.
          */
         const isUploadEndedByAnswer = (): boolean =>
           isAnswerClosingConnection(receivedResponse, request.method) &&
@@ -2678,8 +2679,8 @@ export class NodeAdapter implements HTTPAdapter {
                 );
               } catch {
                 // No way to schedule the windows, so nothing would bound the read: the
-                // connection is let go now, as a quiet window would let it go, and the
-                // abort listeners with it once the answer below settles.
+                // connection is let go now, as a quiet window would let it go, its abort
+                // listeners with it.
                 letGoOfConnection();
               }
 

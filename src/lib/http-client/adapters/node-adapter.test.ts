@@ -14695,7 +14695,10 @@ test('an ended upload that never flushes behind an answered 205 lets its connect
   }
 });
 
-/** Makes every five-second timer NodeAdapter arms throw, as a timer that cannot be scheduled. */
+/**
+ * Makes every five-second timer NodeAdapter arms throw, as a timer that cannot be
+ * scheduled.
+ */
 function refuseGraceWindows(): () => void {
   const realSetTimeout = globalThis.setTimeout;
   const spy = spyOn(globalThis, 'setTimeout').mockImplementation(((

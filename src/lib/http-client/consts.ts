@@ -323,9 +323,8 @@ export const UPLOAD_STALL_GRACE_MS = 5_000;
  * is no upload, and up to twenty from the writer's end, as a window counts only once it
  * began with the writer done - one whose body has ended counts, flushed or not, so a
  * server that stops reading it does not hold the connection. A quiet window lets it go
- * sooner. The bytes are ones the
- * status says are not there, so this is room for a server that sends a short stray body
- * slowly, not for one that streams.
+ * sooner. The bytes are ones the status says are not there, so this is room for a
+ * server that sends a short stray body slowly, not for one that streams.
  */
 export const STRAY_205_DRAIN_WINDOWS = 3;
 
