@@ -3751,3 +3751,231 @@ describe("MockAdapter - a route's header value that no response carries", () => 
     expect(response.headers['content-length']).toBe('0');
   });
 });
+
+describe('MockAdapter - route answers it refuses or sets aside', () => {
+  const retryPolicy = {
+    strategy: 'fixed' as const,
+    maxRetryAttempts: 2,
+    delayMS: 1,
+  };
+
+  test("a route answer whose own keys cannot be read is refused once, as the route's mistake", async () => {
+    const adapter = new MockAdapter();
+    let runs = 0;
+    adapter.routes.get('/keys', () => {
+      runs++;
+      return new Proxy(
+        { status: 200 },
+        {
+          ownKeys() {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error -- a route's own throw, of any value
+            throw 'keys unreadable';
+          },
+        },
+      );
+    });
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://mock.test',
+      retryPolicy,
+    });
+
+    const builder = client.get('/keys');
+    const response = await builder.send();
+
+    expect(response.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(runs).toBe(1);
+  });
+
+  test("a route answer whose own keys throw the route's error refuses it on a carrier, leaving that error untagged", async () => {
+    const adapter = new MockAdapter();
+    const routeError = new Error('keys unreadable');
+    adapter.routes.get(
+      '/keys',
+      () =>
+        new Proxy(
+          { status: 200 },
+          {
+            ownKeys() {
+              throw routeError;
+            },
+          },
+        ),
+    );
+
+    const rejection = await adapter
+      .send(makeAdapterRequest({ requestURL: '/keys' }))
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<string, unknown>,
+      );
+
+    expect(rejection?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(rejection?.cause).toBe(routeError);
+    expect(
+      Object.hasOwn(routeError, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG),
+    ).toBe(false);
+  });
+
+  test.each([[[]], [[{ status: 200 }]]])(
+    'a route that returns the array %p returned no MockResponse',
+    async (answer) => {
+      const adapter = new MockAdapter();
+      adapter.routes.get('/list', () => answer as never);
+
+      const rejection = await adapter
+        .send(makeAdapterRequest({ requestURL: '/list' }))
+        .then(
+          () => undefined,
+          (error: unknown) => error as Error & Record<string, unknown>,
+        );
+
+      expect(rejection).toBeInstanceOf(TypeError);
+      expect(rejection?.message).toBe(
+        'MockAdapter route for GET /list returned no MockResponse (got an array)',
+      );
+      expect(rejection?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    },
+  );
+
+  test("a wait refusal raised by another MockAdapter the route called is the route's failure, for onHandlerError", async () => {
+    const inner = new MockAdapter();
+    inner.routes.get('/inner', () => ({ status: 200 }));
+    // Read as not aborted, but refuses a listener: the inner adapter's wait refuses it.
+    const unlistenable = {
+      aborted: false,
+      addEventListener() {
+        throw new Error('no listeners');
+      },
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+    const handled: unknown[] = [];
+    const outer = new MockAdapter({
+      onHandlerError: (_request, error) => {
+        handled.push(error);
+        return { status: 502 };
+      },
+    });
+    outer.routes.get('/outer', async () => {
+      await inner.send(
+        makeAdapterRequest({ requestURL: '/inner', signal: unlistenable }),
+      );
+      return { status: 200 };
+    });
+
+    const response = await outer.send(
+      makeAdapterRequest({ requestURL: '/outer' }),
+    );
+
+    expect(response.status).toBe(502);
+    expect(handled).toHaveLength(1);
+    expect((handled[0] as Error).message).toBe('no listeners');
+  });
+
+  test('an unknown streamError is refused after the delay, as a bad header is: a cancel during the delay is the cancel', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/bogus', () => ({
+      status: 200,
+      delay: 60_000,
+      streamError: 'bogus' as never,
+    }));
+    const controller = new AbortController();
+
+    const outcome = adapter
+      .send(
+        makeAdapterRequest({ requestURL: '/bogus', signal: controller.signal }),
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+    // On a timer, after every microtask the route's answer takes: a refusal made before
+    // the delay would have rejected first.
+    setTimeout(() => controller.abort(), 0);
+
+    expect((await outcome)?.name).toBe('AbortError');
+  });
+
+  test.each([
+    ['with no delay', { status: 200 }],
+    ['beside a transportError', { status: 200, transportError: true }],
+  ])('an unknown streamError is still refused, %s', async (_label, answer) => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/bogus', () => ({
+      ...answer,
+      streamError: 'bogus' as never,
+    }));
+
+    const rejection = await adapter
+      .send(makeAdapterRequest({ requestURL: '/bogus' }))
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error & Record<string, unknown>,
+      );
+
+    expect(rejection?.message).toContain('unknown streamError');
+    expect(rejection?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+  });
+
+  test.each([
+    ['GET', 204],
+    ['GET', 205],
+    ['GET', 304],
+    ['HEAD', 200],
+  ])(
+    'a %s answered %d with streamError is delivered whole: it has no body to fail',
+    async (method, status) => {
+      const adapter = new MockAdapter();
+      adapter.routes.on(method, '/none', () => ({
+        status,
+        headers: { 'x-a': '1' },
+        streamError: true,
+      }));
+      const downloads: number[] = [];
+
+      const response = await adapter.send(
+        makeAdapterRequest({
+          requestURL: '/none',
+          method,
+          onDownloadProgress: ({ progress }) => downloads.push(progress),
+        }),
+      );
+
+      expect(response.status).toBe(status);
+      expect(response.headers['x-a']).toBe('1');
+      expect(response.body).toBeNull();
+      expect(response.isStreamError).toBeUndefined();
+      expect(response.streamErrorCode).toBeUndefined();
+      expect(downloads).toEqual([1]);
+    },
+  );
+
+  test.each([['application/octet-stream'], [undefined]])(
+    "a route handed binary bytes (content-type %p) gets a copy, not the caller's buffer",
+    async (contentType) => {
+      const adapter = new MockAdapter();
+      const seen: number[][] = [];
+      adapter.routes.post('/bytes', (request) => {
+        const bytes = request.body as Uint8Array;
+        seen.push([...bytes]);
+        bytes[0] = 9;
+        return { status: 200 };
+      });
+      const callerBytes = new Uint8Array([1, 2, 3]);
+
+      await adapter.send(
+        makeAdapterRequest({
+          requestURL: '/bytes',
+          method: 'POST',
+          headers:
+            contentType === undefined ? {} : { 'content-type': contentType },
+          body: callerBytes,
+        }),
+      );
+
+      expect(seen).toEqual([[1, 2, 3]]);
+      expect([...callerBytes]).toEqual([1, 2, 3]);
+    },
+  );
+});

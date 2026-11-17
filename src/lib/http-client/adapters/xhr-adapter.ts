@@ -15,10 +15,10 @@ import {
 import {
   connectRefusal,
   defineHiddenTags,
-  markNonRetryableAdapterError,
   makeAbortError,
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
+  nonRetryableRefusal,
   unsendableBrowserBodyRefusal,
 } from '../internal/adapter-error';
 import {
@@ -34,7 +34,7 @@ import {
   parseContentLength,
   streamErrorAnswer,
 } from '../internal/response-limit';
-import { isArrayBufferLike } from '../../internal/binary-view';
+import { isArrayBufferLike, plainBytesView } from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 import {
   blockedPortMessage,
@@ -121,18 +121,18 @@ export class XHRAdapter implements HTTPAdapter {
       throw dispatchedURL;
     }
 
+    // Read once, for the three refusals below that hold in a browser only.
+    const isBrowser = isBrowserEnvironment();
+
     // A browser's XHR fails a request to a port the Fetch Standard blocks on every
     // attempt, as an opaque network error: refused here, as part of the URL, in
     // FetchAdapter's words. In a browser only: a non-browser XHR may reach it.
-    const blockedPort = isBrowserEnvironment()
-      ? fetchBlockedPort(dispatchedURL)
-      : undefined;
+    const blockedPort = isBrowser ? fetchBlockedPort(dispatchedURL) : undefined;
     if (blockedPort !== undefined) {
-      const refusal = new TypeError(
+      throw nonRetryableRefusal(
+        TypeError,
         blockedPortMessage('XHRAdapter', blockedPort),
       );
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
     }
 
     // XHR sends a plain object as `[object Object]` and a number as its text: refused, as
@@ -151,10 +151,11 @@ export class XHRAdapter implements HTTPAdapter {
     // A browser's XHR refuses a TRACE or TRACK at `open`, on every attempt: refused here,
     // in the words `HTTPClient` and FetchAdapter use. In a browser only, as the client
     // refuses one: a non-browser XHR (React Native, a shim) may send it.
-    if (isForbiddenBrowserMethod(upperMethod) && isBrowserEnvironment()) {
-      const refusal = new Error(forbiddenMethodMessage('XHRAdapter', method));
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
+    if (isBrowser && isForbiddenBrowserMethod(upperMethod)) {
+      throw nonRetryableRefusal(
+        Error,
+        forbiddenMethodMessage('XHRAdapter', method),
+      );
     }
 
     // A browser's XHR drops a GET or HEAD body - the XHR standard sends those bodiless - so
@@ -163,16 +164,15 @@ export class XHRAdapter implements HTTPAdapter {
     // serializes to nothing over as `null`. In a browser only: a non-browser XHR (React
     // Native, a shim) may send the body.
     if (
+      isBrowser &&
       isBodilessMethod(upperMethod) &&
       requestBody !== null &&
-      requestBody !== undefined &&
-      isBrowserEnvironment()
+      requestBody !== undefined
     ) {
-      const refusal = new Error(
+      throw nonRetryableRefusal(
+        Error,
         bodyOnBodilessMethodMessage('xhr', upperMethod),
       );
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
     }
 
     /** Takes the abort listener off the signal; set once it is on. */
@@ -275,7 +275,6 @@ export class XHRAdapter implements HTTPAdapter {
         // Chrome's `DOMException` quotes the value - a token, in an `authorization`. A
         // browser refuses a name only when it is not a token, but an XHR outside one may
         // refuse a token name too, so with a token the part refused is not claimed.
-        //
         dropTransportFramedHeaders(headers, requestBody);
         for (const [name, value] of requestHeaderPairs(headers)) {
           try {
@@ -537,10 +536,10 @@ export class XHRAdapter implements HTTPAdapter {
           : binaryBodyByteLength !== 0);
 
       // The one final upload event, on every way the request ends with an answer, a refused
-      // one too, and however the upload ends: the bytes the browser
-      // reported, or the body's own size where it reported none - `0` for an empty
-      // string, as FetchAdapter reports it - not a stand-in `1`. Answers whether the send
-      // is still pending after it: that callback may cancel, which ends it.
+      // one too, and however the upload ends: the bytes the browser reported, or the
+      // body's own size where it reported none - `0` for an empty string, as FetchAdapter
+      // reports it - not a stand-in `1`. Answers whether the send is still pending after
+      // it: that callback may cancel, which ends it.
       const emitFinalUpload = (): boolean => {
         if (didSettle || didFireUpload100 || !guardedUploadProgress) {
           return !didSettle;
@@ -597,8 +596,9 @@ export class XHRAdapter implements HTTPAdapter {
       // body of no bytes has no upload to report on: its final event, `0` bytes, fires when
       // the request ends.
       try {
-        const upload: XMLHttpRequestUpload | null | undefined =
-          guardedUploadProgress && hasBytesToSend ? xhr.upload : undefined;
+        const upload: XMLHttpRequestUpload | null | undefined = hasBytesToSend
+          ? xhr.upload
+          : undefined;
 
         if (upload) {
           upload.addEventListener(
@@ -681,6 +681,22 @@ export class XHRAdapter implements HTTPAdapter {
         abortQuietly();
       };
 
+      /**
+       * The gate every exit over an answer passes first: a redirect the browser followed
+       * ends the send as that redirect, whatever the exit was about to report, and any
+       * other answer ends the upload (see `emitFinalUpload`). Answers whether the send is
+       * still pending after it - a cancel from that final upload callback ends it, as the
+       * cancel over the answer.
+       */
+      const endUploadWithAnswer = (answer: AnsweredHeaders): boolean => {
+        if (answer.redirectURL !== undefined) {
+          settleFollowedRedirect(answer.redirectURL);
+          return false;
+        }
+
+        return emitFinalUpload();
+      };
+
       // --- Download progress ---
 
       // Real per-chunk download progress, where FetchAdapter reports only the terminal
@@ -700,16 +716,11 @@ export class XHRAdapter implements HTTPAdapter {
         answer: AnsweredHeaders,
         settle: () => void,
       ): void => {
-        if (answer.redirectURL !== undefined) {
-          settleFollowedRedirect(answer.redirectURL);
-          return;
-        }
-
-        // A cancel from that upload callback ends the send as the cancel over `answer`,
-        // kept first for an XHR that showed it only to this read (one that reports no
-        // change of state).
+        // A cancel from the final upload callback ends the send as the cancel over
+        // `answer`, kept first for an XHR that showed it only to this read (one that
+        // reports no change of state).
         answeredAtHeaders ??= answer;
-        if (!emitFinalUpload()) {
+        if (!endUploadWithAnswer(answer)) {
           return;
         }
 
@@ -773,14 +784,8 @@ export class XHRAdapter implements HTTPAdapter {
        * `Content-Length` is the `GET`'s.
        */
       const onAnswered = (answer: AnsweredHeaders): void => {
-        if (answer.redirectURL !== undefined) {
-          settleFollowedRedirect(answer.redirectURL);
-          return;
-        }
-
-        // A cancel from that upload callback may have ended the send.
         if (
-          !emitFinalUpload() ||
+          !endUploadWithAnswer(answer) ||
           !Number.isFinite(maxResponseBytes) ||
           !hasResponseBody(method, answer.status)
         ) {
@@ -876,6 +881,9 @@ export class XHRAdapter implements HTTPAdapter {
             event.loaded > maxResponseBytes &&
             isBodyKnownUncoded === undefined
           ) {
+            // Read and acted on again, not taken from `answeredSoFar`: an answer whose read
+            // threw above may read now, and is then kept, so an `error` after it is the
+            // stream error over it. Read uncached only where it still cannot be.
             const answer = readAndActOnAnswer() ?? takeAnswer();
 
             // Ended by the answer, read for the first time here.
@@ -961,22 +969,18 @@ export class XHRAdapter implements HTTPAdapter {
           // Read before any progress callback, as everything this listener reports is: the
           // answer, captured once (see `answeredAtHeaders`).
           const answer = captureAnswer() ?? takeAnswer();
-          const redirectURL = answer.redirectURL;
-          // Seen here only by an XHR that reported none of it before.
-          if (redirectURL !== undefined) {
-            settleFollowedRedirect(redirectURL);
+
+          // A redirect is seen here only by an XHR that reported none of it before. The
+          // final upload event fires before the body is read, so a refused body sees it
+          // too. A cancel from that upload callback, which `onAbort` leaves to this
+          // listener, ends the send as the cancel over the answer, as FetchAdapter and
+          // MockAdapter end one, rather than answering as though nothing had cancelled it
+          // - and before the body is copied for nothing.
+          if (!endUploadWithAnswer(answer)) {
             return;
           }
 
           const { status, headers: responseHeaders } = answer;
-
-          // Before the body is read, so a refused body sees it too. A cancel from that upload
-          // callback, which `onAbort` leaves to this listener, ends the send as the cancel
-          // over the answer, as FetchAdapter and MockAdapter end one, rather than answering
-          // as though nothing had cancelled it - and before the body is copied for nothing.
-          if (!emitFinalUpload()) {
-            return;
-          }
 
           if (isSignalAbortedQuietly(signal)) {
             // With the answer read here, for an XHR that reported none of it before - an
@@ -1000,7 +1004,7 @@ export class XHRAdapter implements HTTPAdapter {
                 responseHeaders,
                 'stream_response_error',
                 new TypeError(
-                  'XHRAdapter response body was neither an ArrayBuffer nor text',
+                  'XHRAdapter response body was neither bytes nor text',
                 ),
               ),
             );
@@ -1067,28 +1071,17 @@ export class XHRAdapter implements HTTPAdapter {
         // body, so it is the stream error FetchAdapter reports for one - a redirect the
         // browser had followed reported as the redirect, as on `load`.
         if (answeredAtHeaders !== undefined) {
-          const {
-            status,
-            headers: answeredHeaders,
-            redirectURL,
-          } = answeredAtHeaders;
-
-          if (redirectURL !== undefined) {
-            settleFollowedRedirect(redirectURL);
-            return;
-          }
-
-          // Ended with the answer already, where it was acted on as it was read: ended here
-          // as on every answered exit all the same.
-          if (!emitFinalUpload()) {
+          // The upload ended with the answer already, where it was acted on as it was
+          // read: ended here as on every answered exit all the same.
+          if (!endUploadWithAnswer(answeredAtHeaders)) {
             return;
           }
 
           resolve(
             streamErrorAnswer(
               answeringURL,
-              status,
-              answeredHeaders,
+              answeredAtHeaders.status,
+              answeredAtHeaders.headers,
               'stream_response_error',
               new Error('XHR network error'),
             ),
@@ -1146,18 +1139,15 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         // A redirect the send is already ending at, whether or not `answer` shows it.
-        const redirectURL = followedRedirectURL ?? answer?.redirectURL;
-        if (redirectURL !== undefined) {
-          settleFollowedRedirect(redirectURL);
+        if (followedRedirectURL !== undefined) {
+          settleFollowedRedirect(followedRedirectURL);
           return;
         }
 
-        if (answer !== undefined) {
-          // An answer, as on `load`: the upload ended with it, wherever the download got to.
-          // A cancel from that upload callback ended it already.
-          if (!emitFinalUpload()) {
-            return;
-          }
+        // An answer, as on `load`: the upload ended with it, wherever the download got to.
+        // A cancel from that upload callback ended the send already.
+        if (answer !== undefined && !endUploadWithAnswer(answer)) {
+          return;
         }
 
         const abortError = isBrowserTimeout
@@ -1228,9 +1218,9 @@ export class XHRAdapter implements HTTPAdapter {
       // `InvalidStateError` or a body it cannot read (a buffer detached since it was
       // checked) - network failures arrive as events - and an XHR outside a browser may
       // throw for its own reasons; each fails the same way on every attempt, so it is
-      // refused as non-retryable - unless the request was
-      // cancelled as it was handed over, which stays the cancel, as FetchAdapter keeps one
-      // that lands while `fetch` dispatches.
+      // refused as non-retryable - unless the request was cancelled as it was handed
+      // over, which stays the cancel, as FetchAdapter keeps one that lands while `fetch`
+      // dispatches.
       try {
         didSend = true;
         // A `string`, a `Uint8Array` (a BufferSource) and a `FormData` are all
@@ -1307,11 +1297,19 @@ function isKnownUncodedBody(
 
 /**
  * The origin of the page or worker running the request, which a browser holds a response
- * to for CORS: its global's `origin` (`'null'` in a sandboxed frame, which matches none),
- * else its `location`'s. The page is the scope whose `location` a relative request URL
- * falls back to when the document has no base URL of its own (see `findBrowserPage`); a
- * `<base href>` can resolve the URL elsewhere, but the origin is still that page's.
- * `undefined` where there is no page, or it names no origin, as outside a browser.
+ * to for CORS. Its `location`'s, which a page's script cannot replace, except where the
+ * global's own `origin` is the one that differs by right: `'null'` in a sandboxed frame,
+ * which matches none, or the creator's origin in a document whose URL names none
+ * (`about:blank`, `about:srcdoc`), whose `location` reads `'null'`. Any other `origin`
+ * that differs from the `location`'s is not taken: the global's `origin` is
+ * replaceable, so a classic script's `var origin = '…'` rewrites it, and read as the
+ * page's it would make an `http:` page look `https:` (see `isOnHTTPSPage`). A `location`
+ * that names no origin, as a shim's may not, leaves the global's.
+ *
+ * The page is the scope whose `location` a relative request URL falls back to when the
+ * document has no base URL of its own (see `findBrowserPage`); a `<base href>` can
+ * resolve the URL elsewhere, but the origin is still that page's. `undefined` where there
+ * is no page, or it names no origin, as outside a browser.
  */
 function readPageOrigin(
   page: BrowserPage | undefined = findBrowserPage(),
@@ -1320,15 +1318,17 @@ function readPageOrigin(
     return undefined;
   }
 
-  const origin = readUnknownMember(page.scope, 'origin');
-
-  if (typeof origin === 'string') {
-    return origin;
-  }
-
+  const scopeOrigin = readUnknownMember(page.scope, 'origin');
   const locationOrigin = readUnknownMember(page.location, 'origin');
 
-  return typeof locationOrigin === 'string' ? locationOrigin : undefined;
+  if (typeof locationOrigin !== 'string') {
+    return typeof scopeOrigin === 'string' ? scopeOrigin : undefined;
+  }
+
+  return typeof scopeOrigin === 'string' &&
+    (scopeOrigin === 'null' || locationOrigin === 'null')
+    ? scopeOrigin
+    : locationOrigin;
 }
 
 /**
@@ -1411,21 +1411,30 @@ function readResponseBody(
   // Recognized without `instanceof`, which is realm-bound: a test shim's XHR may hand
   // back a buffer made in another realm (see `isArrayBufferLike`).
   const response: unknown = xhr.response;
-  if (
-    typeof response === 'object' &&
-    response !== null &&
-    isArrayBufferLike(response)
-  ) {
-    return new Uint8Array(response as ArrayBuffer);
+  if (typeof response === 'object' && response !== null) {
+    if (isArrayBufferLike(response)) {
+      return new Uint8Array(response as ArrayBuffer);
+    }
+
+    // A view rather than the buffer itself - happy-dom answers `responseType =
+    // 'arraybuffer'` with a `Uint8Array`, and a shim may hand over a Node `Buffer` -
+    // from any realm (`ArrayBuffer.isView` reads the internal slot). Copied: a `Buffer`
+    // may be a slice of a pooled slab, whose other bytes are not this body's.
+    if (ArrayBuffer.isView(response)) {
+      return plainBytesView(response).slice();
+    }
   }
 
-  // An XHR outside a browser may not honor `responseType`; its text is taken as UTF-8 bytes,
-  // as FetchAdapter takes a polyfilled body's. A browser answers `null` only when it could
-  // not allocate the buffer.
-  if (typeof response === 'string') {
-    return isAnsweredBodyOverLimit(response, maxResponseBytes)
+  // An XHR outside a browser may not honor `responseType`: a string `response`, or none at
+  // all and the body in `responseText` (the `xmlhttprequest` package has no `response`),
+  // is taken as UTF-8 bytes, as FetchAdapter takes a polyfilled body's. Only where
+  // `response` is `undefined`: a browser reads it as `null` when it could not allocate the
+  // buffer, and throws for `responseText` under `'arraybuffer'`.
+  const text: unknown = response === undefined ? xhr.responseText : response;
+  if (typeof text === 'string') {
+    return isAnsweredBodyOverLimit(text, maxResponseBytes)
       ? RESPONSE_TOO_LARGE
-      : new TextEncoder().encode(response);
+      : new TextEncoder().encode(text);
   }
 
   return RESPONSE_UNREADABLE;

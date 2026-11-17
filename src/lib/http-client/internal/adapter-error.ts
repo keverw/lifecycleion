@@ -207,6 +207,21 @@ export function unsendableBodyError(adapterName: string): TypeError {
 }
 
 /**
+ * A fresh `ErrorClass` with `message`, tagged non-retryable (see
+ * {@link markNonRetryableAdapterError}): an adapter's refusal in its own words, of a
+ * request that fails the same way on every attempt. For an error the caller may have
+ * thrown, use {@link nonRetryableAdapterErrorFrom}.
+ */
+export function nonRetryableRefusal<E extends Error>(
+  ErrorClass: new (message: string) => E,
+  message: string,
+): E {
+  const refusal = new ErrorClass(message);
+  markNonRetryableAdapterError(refusal);
+  return refusal;
+}
+
+/**
  * Tag a terminal adapter configuration failure so `HTTPClient` reports it as a
  * non-retryable `adapter_error` rather than retrying it as a network error.
  */

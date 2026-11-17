@@ -815,6 +815,90 @@ describe('XHRAdapter', () => {
     },
   );
 
+  test.each([
+    ['a Uint8Array, as happy-dom answers', () => new Uint8Array([104, 105])],
+    [
+      'a view into a larger buffer, as a pooled Buffer is',
+      () => new Uint8Array([0, 104, 105, 0]).subarray(1, 3),
+    ],
+    [
+      'a DataView',
+      () => new DataView(new Uint8Array([0, 104, 105]).buffer, 1, 2),
+    ],
+    [
+      "another realm's Uint8Array",
+      () =>
+        vm.runInNewContext(
+          'new Uint8Array([104, 105])',
+        ) as Uint8Array<ArrayBuffer>,
+    ],
+  ])(
+    'a response handed over as %s is read as a copy of its bytes',
+    async (_label, makeView) => {
+      const view = makeView();
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/view',
+        method: 'GET',
+        headers: {},
+      });
+      lastXHR.status = 200;
+      lastXHR.response = view;
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.isStreamError).toBeUndefined();
+      expect(response.body).toBeInstanceOf(Uint8Array);
+      expect([...(response.body ?? [])]).toEqual([104, 105]);
+      // Its own buffer, holding the body's bytes alone, not the view's.
+      expect(response.body?.buffer).not.toBe(view.buffer);
+      expect(response.body?.buffer.byteLength).toBe(2);
+    },
+  );
+
+  test('an XHR with no response reads the body from responseText, held to the limit', async () => {
+    const send = (maxResponseBytes: number) => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/text',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes,
+      });
+      lastXHR.status = 200;
+      lastXHR.response = undefined;
+      Object.defineProperty(lastXHR, 'responseText', { value: 'héllo' });
+      lastXHR.simulateLoad();
+      return promise;
+    };
+
+    const response = await send(100);
+    expect(response.isStreamError).toBeUndefined();
+    expect(new TextDecoder().decode(response.body ?? undefined)).toBe('héllo');
+
+    expect((await send(5)).streamErrorCode).toBe('response_too_large');
+  });
+
+  test('responseText is not read where the response is null, as a browser reads none', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/text',
+      method: 'GET',
+      headers: {},
+    });
+    lastXHR.status = 200;
+    lastXHR.response = null;
+    let didReadText = false;
+    Object.defineProperty(lastXHR, 'responseText', {
+      get() {
+        didReadText = true;
+        return 'unused';
+      },
+    });
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.streamErrorCode).toBe('stream_response_error');
+    expect(didReadText).toBe(false);
+  });
+
   test('a bodiless answer does not read the response, whatever it holds', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/none',
@@ -2554,6 +2638,79 @@ describe('XHRAdapter', () => {
         }),
     );
 
+    expect(response.wasRedirectDetected).toBe(false);
+    expect(response.status).toBe(200);
+  });
+
+  test('an http: page whose global origin a script replaced is still an http: page: a redirect to https: is not read as an upgrade', async () => {
+    // A classic script's `var origin = 'https://app.test'` on an `http:` page: the
+    // global's `origin` is replaceable, its `location` is not.
+    const response = await withGlobal(
+      'location',
+      { href: 'http://app.test/', origin: 'http://app.test' },
+      async () =>
+        await withGlobal('origin', 'https://app.test', async () => {
+          const promise = new XHRAdapter().send({
+            requestURL: 'http://api.test/data',
+            method: 'GET',
+            headers: {},
+          });
+
+          lastXHR.status = 200;
+          lastXHR.response = textBody('ok');
+          lastXHR.responseURL = 'https://api.test/data';
+          lastXHR.simulateLoad();
+
+          return await promise;
+        }),
+    );
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.status).toBe(0);
+    expect(response.detectedRedirectURL).toBe('https://api.test/data');
+  });
+
+  test("a replaced global origin does not make a cross-origin response read as the page's own", async () => {
+    // Same-origin with the page, a missing `Content-Encoding` would prove the body
+    // uncoded, and it would be stopped mid-download; cross-origin, it is left to `load`.
+    const result = await withGlobal(
+      'location',
+      { href: 'https://app.test/', origin: 'https://app.test' },
+      async () =>
+        await withGlobal(
+          'origin',
+          'https://api.test',
+          async () => await sendPastLimitWithoutCoding('https://api.test/big'),
+        ),
+    );
+
+    // The 1,000 bytes loaded are within the limit.
+    expect(result.abortCalled).toBe(false);
+    expect(result.streamErrorCode).toBeUndefined();
+  });
+
+  test("a document whose URL names no origin (about:srcdoc) takes its global's, the creator's", async () => {
+    const response = await withGlobal(
+      'location',
+      { href: 'about:srcdoc', origin: 'null' },
+      async () =>
+        await withGlobal('origin', 'https://app.test', async () => {
+          const promise = new XHRAdapter().send({
+            requestURL: 'http://api.test/data',
+            method: 'GET',
+            headers: {},
+          });
+
+          lastXHR.status = 200;
+          lastXHR.response = textBody('ok');
+          lastXHR.responseURL = 'https://api.test/data';
+          lastXHR.simulateLoad();
+
+          return await promise;
+        }),
+    );
+
+    // An `https:` page's frame: the browser upgraded the request.
     expect(response.wasRedirectDetected).toBe(false);
     expect(response.status).toBe(200);
   });
