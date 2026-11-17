@@ -1374,6 +1374,10 @@ describe('MockAdapter.send() — low-level contract', () => {
       { expect: '100-continue' },
       'MockAdapter does not wait for 100 Continue; an Expect request header is not supported',
     ],
+    [
+      { trailer: 'x-checksum' },
+      'MockAdapter sends no trailer fields; a Trailer request header is not supported',
+    ],
   ])(
     'a %p request header is refused before the route runs, as NodeAdapter refuses it',
     async (headers, message) => {

@@ -317,11 +317,13 @@ export const STREAM_FAILURE_SETTLED_LISTENER_KEY = Symbol.for(
 export const UPLOAD_STALL_GRACE_MS = 5_000;
 
 /**
- * How many whole {@link UPLOAD_STALL_GRACE_MS} windows with nothing being uploaded
+ * How many whole {@link UPLOAD_STALL_GRACE_MS} windows with the upload's writer done
  * NodeAdapter reads and drops the bytes behind an answered `205` for before it lets the
  * connection go, however steadily they arrive: fifteen seconds from the answer when there
- * is no upload, and up to twenty from an upload's end, as a window counts only once it
- * began with the upload done. A quiet window lets it go sooner. The bytes are ones the
+ * is no upload, and up to twenty from the writer's end, as a window counts only once it
+ * began with the writer done - one whose body has ended counts, flushed or not, so a
+ * server that stops reading it does not hold the connection. A quiet window lets it go
+ * sooner. The bytes are ones the
  * status says are not there, so this is room for a server that sends a short stray body
  * slowly, not for one that streams.
  */

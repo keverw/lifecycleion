@@ -136,7 +136,7 @@ export function fetchRefusedHeaderMessage(
 /**
  * Request headers NodeAdapter refuses by name, each with why, for it and for MockAdapter,
  * which mirrors it: both frame the body themselves with a `Content-Length`, switch no
- * protocols and wait for no `100 Continue`.
+ * protocols, wait for no `100 Continue` and send no trailer section.
  */
 const FRAMING_REFUSED_HEADERS: ReadonlyMap<string, string> = new Map([
   [
@@ -150,6 +150,10 @@ const FRAMING_REFUSED_HEADERS: ReadonlyMap<string, string> = new Map([
   [
     'expect',
     'does not wait for 100 Continue; an Expect request header is not supported',
+  ],
+  [
+    'trailer',
+    'sends no trailer fields; a Trailer request header is not supported',
   ],
 ]);
 

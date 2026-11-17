@@ -4,6 +4,7 @@ import * as http from 'node:http';
 import { NodeAdapter } from './node-adapter';
 import { listenForStreamFailureSettled } from '../internal/stream-failure-settled';
 import type { AdapterRequest, WritableLike } from '../types';
+import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
 
 test.each(['string', 'bytes', 'multipart'] as const)(
   '%s upload whose signal refuses its abort-state read fails with the write error',
@@ -226,7 +227,14 @@ test('an unexpected response-task failure aborts the stream and frees the connec
       () => undefined,
       (error: unknown) => error,
     );
-    expect(failure).toBe(injected);
+    // Not retried, its sink having been handed the response: carried on a
+    // non-retryable error, the failure itself its cause.
+    expect((failure as Error).cause).toBe(injected);
+    expect(
+      (failure as Record<PropertyKey, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
     expect(factorySignal?.aborted).toBe(true);
     expect(order).toEqual(['client told', 'factory signal']);
     const deadline = Date.now() + 2000;
@@ -571,7 +579,14 @@ test('a response-task recovery that answers and then throws reports only what we
         () => undefined,
         (error: unknown) => error,
       );
-    expect(failure).toBe(injected);
+    // Not retried, its sink having been handed the response: carried on a
+    // non-retryable error, the failure itself its cause.
+    expect((failure as Error).cause).toBe(injected);
+    expect(
+      (failure as Record<PropertyKey, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(reports).toHaveLength(1);
     expect((reports[0] as Error).cause).toBe(teardownFailure);

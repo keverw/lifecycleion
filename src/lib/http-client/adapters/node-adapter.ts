@@ -633,6 +633,11 @@ export class NodeAdapter implements HTTPAdapter {
     // `adapter_error`, a `FormData` one as a transport failure, retried and failing the
     // same each time), and a bodiless one would go out chunked rather than with no
     // length - and RFC 9110 has no `100-continue` on a request without content anyway.
+    //
+    // Nor `Trailer`: Node allows one only on a chunked message, so with the
+    // `Content-Length` set here the first body write throws (`ERR_HTTP_TRAILER_INVALID`),
+    // which would surface as a transport failure retried the same each time, before the
+    // server is reached - and a bodiless request fails the same way at `end()`.
     const refusalMessage = framingRefusedHeaderMessage(
       'NodeAdapter',
       Object.keys(request.headers),
@@ -1137,6 +1142,13 @@ export class NodeAdapter implements HTTPAdapter {
         /** The response, once it has arrived; see `reportWriteErrorAfterResponse`. */
         let receivedResponse: http.IncomingMessage | undefined;
         /**
+         * The request's last `'error'` once the response had arrived - a parser error in
+         * the body (`HPE_INVALID_CHUNK_SIZE`), a reset - kept as the cause of a body that
+         * then fails with none of its own: the runtime reports such a failure on the
+         * request, and the response may see only `'aborted'` or `'close'`.
+         */
+        let requestErrorAfterResponse: Error | undefined;
+        /**
          * Lets go of a decoded response body - its decoders and the response under it - when
          * the request no longer wants it: a cancel, a timeout, a teardown. Without it, a
          * small compressed body that had arrived whole would go on inflating after the
@@ -1241,6 +1253,19 @@ export class NodeAdapter implements HTTPAdapter {
           didResponseBodyDestroyResponse?.() === true;
 
         /**
+         * Whether the answer ended the upload: it said it would close the connection - see
+         * `isAnswerClosingConnection` - and the connection's writing side is gone, ended as
+         * the answer ended (Node half-closes it, Bun closes it) or destroyed. An upload that
+         * fails then was stopped by the close the answer asked for, which ends it as surely
+         * as this adapter's own teardown does, and is not reported to the host either.
+         */
+        const isUploadEndedByAnswer = (): boolean =>
+          isAnswerClosingConnection(receivedResponse, request.method) &&
+          (req.destroyed ||
+            req.socket?.writableEnded === true ||
+            req.socket?.destroyed === true);
+
+        /**
          * Destroy an upload the server has stopped reading, once the response is in.
          *
          * The two cases an early response splits into look identical from here for the first
@@ -1271,9 +1296,12 @@ export class NodeAdapter implements HTTPAdapter {
          *
          * The source grace runs from the first wait since the socket last accepted bytes,
          * not from each read, so reads that answer with nothing do not keep a source in it.
-         * While the writer is waiting, the next look comes no later than that grace's end,
-         * so an upload whose source has stopped is settled when the grace runs out, not on
-         * whichever regular look comes after it.
+         * Waits from before the response count, as they do for the client's inactivity
+         * clock: a read already outstanding for a whole grace when the watchdog starts is
+         * stuck rather than slow, and is settled at the first look. While the writer is
+         * waiting, the next look comes no later than that grace's end, so an upload whose
+         * source has stopped is settled when the grace runs out, not on whichever regular
+         * look comes after it.
          */
         const watchForStalledUpload = (): void => {
           let bytesAtLastTick = uploadedBytesSeen;
@@ -1410,10 +1438,17 @@ export class NodeAdapter implements HTTPAdapter {
           };
 
           const arm = (delayMS = UPLOAD_STALL_GRACE_MS): void => {
-            const timer = setTimeout(
-              tick,
-              Math.min(delayMS, sourceGraceLeftMS()),
-            );
+            let timer: ReturnType<typeof setTimeout>;
+
+            try {
+              timer = setTimeout(tick, Math.min(delayMS, sourceGraceLeftMS()));
+            } catch {
+              // No way to schedule the next look, so the upload is left to its writer,
+              // which ends or fails it on its own. Not thrown: this runs from the
+              // response's `'close'` and from this watchdog's own timer, where a throw
+              // is an uncaught exception.
+              return;
+            }
 
             // Never a reason for the process to stay up: the response has already been
             // delivered by the time this is armed.
@@ -1630,6 +1665,25 @@ export class NodeAdapter implements HTTPAdapter {
         const readIsAborted = (): boolean =>
           isSignalAbortedQuietly(request.signal);
 
+        /**
+         * Answer an abort {@link readIsAborted} found, as the request's abort listener
+         * answers one dispatched: an answer that arrived is kept with its status and
+         * headers, so its `Set-Cookie` is still stored, and a stream setup's factory
+         * signal fires. A signal that reads as aborted without dispatching `abort` would
+         * otherwise fail the request with a bare `AbortError` and leave that answer held.
+         * The listener is on before anything can fail, so the fallback is for completeness.
+         */
+        const answerAbortRead = (): void => {
+          if (answerAbort !== undefined) {
+            answerAbort();
+
+            return;
+          }
+
+          failRequest(makeAbortError());
+          destroyRequestQuietly(req);
+        };
+
         const observeTaskFailure = (
           task: Promise<void>,
           onFailure: (error: unknown) => void,
@@ -1763,18 +1817,12 @@ export class NodeAdapter implements HTTPAdapter {
           // waiting.
           settleBodyOutcome(failure);
 
-          // Not reported when the answer said it would close the connection - `Connection:
-          // close`, HTTP/1.0 without keep-alive, or a body with no length of its own - and
-          // the connection is gone: the
-          // runtime closed it as the answer asked, which ends the upload as surely as this
-          // adapter's own teardown does. An nginx `413` with `Connection: close` would
-          // otherwise report every upload it refused. A failure of its own on a connection
-          // still up - a body source that did not match its size - is still reported.
-          const isClosedAsAnswered =
-            isAnswerClosingConnection(receivedResponse, request.method) &&
-            (req.destroyed || req.socket?.destroyed === true);
-
-          if (!isClosedAsAnswered) {
+          // Not reported when the answer ended the upload (see `isUploadEndedByAnswer`),
+          // whether or not its response has closed yet: an nginx `413` with `Connection:
+          // close` would otherwise report every upload it refused. A failure of its own on
+          // a connection still up - a body source that did not match its size - is still
+          // reported.
+          if (!isUploadEndedByAnswer()) {
             try {
               // Rendered for the console rung, the convention every other `reportToHost`
               // caller follows. Without it that rung is handed the raw `Error`, and a
@@ -1900,6 +1948,18 @@ export class NodeAdapter implements HTTPAdapter {
         // cannot make it async directly. We use a void IIFE that routes any
         // unhandled rejections back to the outer promise's reject.
         const req = (requestForCleanup = httpModule.request(options, (res) => {
+          // A `101` is a protocol switch whatever headers come with it. One without an
+          // `Upgrade` header reaches here as a response rather than through `'upgrade'`
+          // (see `onSocketHandover`), and is refused the same way: what follows it on the
+          // connection is not HTTP this adapter can read. Answered before the teardown,
+          // so nothing the destroy sets off can answer in its place.
+          if (res.statusCode === 101) {
+            failRequest(protocolSwitchRefusal());
+            destroyRequestQuietly(req);
+
+            return;
+          }
+
           didReceiveResponse = true;
           receivedResponse = res;
 
@@ -1923,24 +1983,18 @@ export class NodeAdapter implements HTTPAdapter {
             // `watchForStalledUpload`. It ends the request when it finishes, and
             // `reportWriteErrorAfterResponse` destroys it if it fails.
             if (isWritingBody) {
-              // Except on a connection the answer said it would close: the runtime has
-              // ended its writing side as the answer ended (Node half-closes it, Bun
-              // closes it), so the upload cannot finish whatever the server reads. Ended
-              // now, as this adapter's own, rather than left for the watchdog to call it
-              // stalled five seconds on against a server that neither reads nor closes.
-              // Settled first, with that reason, so a writer the destroy wakes, or one
-              // parked on a source read it does not wake - a custom `stream()` whose
-              // reader ignores `cancel()` - is not reported as failing otherwise. The
-              // upload only: the response has all its bytes, and a decoded body may still
-              // be decoding them. Not when this adapter already ended the connection - a
-              // body that failed to decode - whose own failure the upload reports.
-              if (
-                !isOwnTeardownAfterResponse() &&
-                isAnswerClosingConnection(res, request.method) &&
-                (req.socket?.writableEnded === true ||
-                  req.socket?.destroyed === true)
-              ) {
-                didTearDownAfterResponse = true;
+              // Except once the answer has ended the upload (see `isUploadEndedByAnswer`):
+              // it cannot finish whatever the server reads. Ended now rather than left for
+              // the watchdog to call it stalled five seconds on against a server that
+              // neither reads nor closes. Settled first, with that reason, so a writer the
+              // destroy wakes, or one parked on a source read it does not wake - a custom
+              // `stream()` whose reader ignores `cancel()` - is not reported as failing
+              // otherwise; the writer's own failure that follows meets the same predicate
+              // in `reportWriteErrorAfterResponse`. The upload only: the response has all
+              // its bytes, and a decoded body may still be decoding them. Not when this
+              // adapter already ended the connection - a body that failed to decode -
+              // whose own failure the upload reports.
+              if (!isOwnTeardownAfterResponse() && isUploadEndedByAnswer()) {
                 settleBodyOutcome(
                   new Error(
                     'Request body upload ended: the answer closed the connection',
@@ -2354,14 +2408,32 @@ export class NodeAdapter implements HTTPAdapter {
                 // The factory's signal after the settle, as every teardown that runs
                 // caller code is: a cleanup listener that cancels the request cannot
                 // stand in for the failure. The teardown run first, under its guard.
+                //
+                // The teardown is this adapter's own for a sink that failed or a body
+                // that failed to decode, as it is during the setup. A response the
+                // connection cut short - a reset, a parser error - is the connection
+                // failing on its own, and an upload still running on it is reported as
+                // it is for a buffered body.
+                const { cause } = streamResult;
+                if (
+                  streamResult.code === 'stream_response_error' &&
+                  cause.cause === undefined &&
+                  requestErrorAfterResponse !== undefined
+                ) {
+                  cause.cause = requestErrorAfterResponse;
+                }
+                const isConnectionFailure =
+                  streamResult.code === 'stream_response_error' &&
+                  !(
+                    cause.cause instanceof Error && isDecodeFailure(cause.cause)
+                  );
                 settleStreamFailure(
-                  tearDownAfterResponse,
+                  isConnectionFailure
+                    ? releaseConnectionAfterResponse
+                    : tearDownAfterResponse,
                   () => {
                     settleResponse(
-                      streamErrorResponse(
-                        streamResult.code,
-                        streamResult.cause,
-                      ),
+                      streamErrorResponse(streamResult.code, cause),
                     );
                   },
                   abortStream,
@@ -2496,10 +2568,11 @@ export class NodeAdapter implements HTTPAdapter {
               const isPastLimit = (): boolean =>
                 isDeclaredPastLimit || drainedBytes > maxResponseBytes;
 
+              // Unset until the windows are armed, and for good when they cannot be.
+              let stopDrainWatch: (() => void) | undefined;
+
               const stopDraining = (): void => {
-                // Not yet assigned only before this function returns, when nothing has
-                // called this yet: every caller is an event or a timer.
-                stopDrainWatch();
+                stopDrainWatch?.();
                 req.off('finish', letGoIfPastLimit);
 
                 if (isDrainingAnsweredResponse) {
@@ -2525,11 +2598,20 @@ export class NodeAdapter implements HTTPAdapter {
                 }
               }
 
-              // Read at each window's end, so a window counts as quiet only when the upload
-              // was already done as it began - not one it ran through until just before its
+              // Whether the writer is done with the body: nothing being uploaded, or the
+              // request ended with its last bytes not yet flushed. Those bytes may never
+              // flush - a server that stopped reading - and the stall watchdog does not
+              // watch an ended request, so the windows such an upload runs through count
+              // toward the drain's cap; only a quiet window and the limit wait for them.
+              const isWriterDone = (): boolean =>
+                !isUploading() || req.writableEnded;
+
+              // Read at each window's end, so a window counts only when the upload was
+              // already done as it began - not one it ran through until just before its
               // end.
               let wasUploadingAtLastTick = isUploading();
-              // Whole windows run with nothing being uploaded, quiet or not.
+              let wasWriterDoneAtLastTick = isWriterDone();
+              // Whole windows run with the writer done, quiet or not.
               let windowsAfterUpload = 0;
 
               body.on('data', (chunk: Buffer) => {
@@ -2546,46 +2628,60 @@ export class NodeAdapter implements HTTPAdapter {
               body.on('close', stopDraining);
               req.on('finish', letGoIfPastLimit);
 
-              const stopDrainWatch = watchGraceWindows(
-                (didProgress) => {
-                  if (!isDrainingAnsweredResponse) {
-                    return false;
-                  }
+              try {
+                stopDrainWatch = watchGraceWindows(
+                  (didProgress) => {
+                    if (!isDrainingAnsweredResponse) {
+                      return false;
+                    }
 
-                  // Torn down already, by a teardown or the peer: nothing left to read.
-                  if (req.destroyed) {
-                    stopDraining();
+                    // Torn down already, by a teardown or the peer: nothing left to read.
+                    if (req.destroyed) {
+                      stopDraining();
 
-                    return false;
-                  }
+                      return false;
+                    }
 
-                  const isStillUploading = isUploading();
+                    const isStillUploading = isUploading();
+                    const isStillWriterDone = isWriterDone();
 
-                  if (!isStillUploading && isPastLimit()) {
-                    letGoOfConnection();
-
-                    return false;
-                  }
-
-                  if (!isStillUploading && !wasUploadingAtLastTick) {
-                    windowsAfterUpload++;
-
-                    if (
-                      !didProgress ||
-                      windowsAfterUpload >= STRAY_205_DRAIN_WINDOWS
-                    ) {
+                    if (!isStillUploading && isPastLimit()) {
                       letGoOfConnection();
 
                       return false;
                     }
-                  }
 
-                  wasUploadingAtLastTick = isStillUploading;
+                    if (isStillWriterDone && wasWriterDoneAtLastTick) {
+                      windowsAfterUpload++;
 
-                  return true;
-                },
-                () => drainedBytes,
-              );
+                      const isQuietAfterUpload =
+                        !didProgress &&
+                        !isStillUploading &&
+                        !wasUploadingAtLastTick;
+
+                      if (
+                        isQuietAfterUpload ||
+                        windowsAfterUpload >= STRAY_205_DRAIN_WINDOWS
+                      ) {
+                        letGoOfConnection();
+
+                        return false;
+                      }
+                    }
+
+                    wasUploadingAtLastTick = isStillUploading;
+                    wasWriterDoneAtLastTick = isStillWriterDone;
+
+                    return true;
+                  },
+                  () => drainedBytes,
+                );
+              } catch {
+                // No way to schedule the windows, so nothing would bound the read: the
+                // connection is let go now, as a quiet window would let it go, and the
+                // abort listeners with it once the answer below settles.
+                letGoOfConnection();
+              }
 
               if (isUploading() && stallWatchdogTimer === undefined) {
                 watchForStalledUpload();
@@ -2747,7 +2843,10 @@ export class NodeAdapter implements HTTPAdapter {
               settleResponse(
                 streamErrorResponse(
                   'stream_response_error',
-                  makeResponseStreamError(message, cause),
+                  makeResponseStreamError(
+                    message,
+                    cause ?? requestErrorAfterResponse,
+                  ),
                 ),
               );
             };
@@ -2780,7 +2879,14 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            failRequest(normalizeError(error));
+            // Not retried once a factory's stream is in play, as `settleStreamFailure`
+            // does not retry the failure such a throw takes the place of: the factory was
+            // called, and its sink may hold part of the body.
+            failRequest(
+              abortResponseStream === undefined
+                ? normalizeError(error)
+                : nonRetryableAdapterErrorFrom(error),
+            );
 
             // Every exit the task means to take tears down what it opened. This one - a
             // throw out of code with no `catch` of its own - tears them down here, so the
@@ -2810,11 +2916,7 @@ export class NodeAdapter implements HTTPAdapter {
           } catch {
             // The failure below is what the caller needs to see.
           }
-          const refusal = new TypeError(
-            'NodeAdapter received a protocol switch it cannot read',
-          );
-          markNonRetryableAdapterError(refusal);
-          failRequest(refusal);
+          failRequest(protocolSwitchRefusal());
         };
         req.on('upgrade', onSocketHandover);
 
@@ -2824,8 +2926,7 @@ export class NodeAdapter implements HTTPAdapter {
           // guarded: this runs as an emitter listener, where a throw is an uncaught
           // exception and the request never settles. See `readIsAborted`.
           if (readIsAborted()) {
-            const abortErr = makeAbortError();
-            failRequest(abortErr);
+            answerAbortRead();
             return;
           }
 
@@ -2846,6 +2947,8 @@ export class NodeAdapter implements HTTPAdapter {
           // Reported rather than dropped, and the request torn down once the response has
           // been consumed: see `reportWriteErrorAfterResponse`.
           if (didReceiveResponse) {
+            requestErrorAfterResponse = normalizeError(error);
+
             // Except in the one window where the response side has nobody listening yet:
             // see `pendingStreamSetup`.
             if (
@@ -3005,9 +3108,11 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            // Below, the body is released once the request has settled: releasing a
-            // decoded one destroys the response, whose `'aborted'` - emitted at once - the
-            // stream setup's own listener would otherwise answer first, as a stream error.
+            // Below, the request is destroyed and the body released once the request has
+            // settled: destroying the request ends the response, and releasing a decoded
+            // body destroys it, and a runtime may emit the response's `'aborted'` or
+            // `'close'` at once - which the stream setup's own listener would otherwise
+            // answer first, as a stream error.
 
             // An answer whose body is buffering, or whose stream setup has not called
             // its factory yet: an abort of the response either way - not a failure of a
@@ -3021,7 +3126,6 @@ export class NodeAdapter implements HTTPAdapter {
               const { status, headers } = unreadAnswer;
               const isBuffering = unreadAnswer === activeBufferedResponse;
               activeBufferedResponse = undefined;
-              destroyRequestQuietly(req);
               failRequest(
                 makeResponseStreamAbortError(
                   req,
@@ -3033,6 +3137,7 @@ export class NodeAdapter implements HTTPAdapter {
                     : 'Request aborted before the streamResponse factory was called',
                 ),
               );
+              destroyRequestQuietly(req);
               setupToAbort?.abort();
               releaseResponseBody?.();
               return;
@@ -3040,7 +3145,6 @@ export class NodeAdapter implements HTTPAdapter {
 
             if (setupToAbort) {
               const { status, headers } = setupToAbort;
-              destroyRequestQuietly(req);
               const abortErr = makeAbortError(
                 'Request aborted during streamResponse setup',
               );
@@ -3050,6 +3154,7 @@ export class NodeAdapter implements HTTPAdapter {
                   headers,
                 }),
               );
+              destroyRequestQuietly(req);
               setupToAbort.abort();
               releaseResponseBody?.();
               return;
@@ -3077,8 +3182,16 @@ export class NodeAdapter implements HTTPAdapter {
 
         // 0% upload progress before any bytes leave the process, once a signal already
         // aborted has been refused above: no upload starts for it. One that cancels here
-        // reaches the listener above, which destroys the request.
+        // reaches the listener above, which destroys the request - or, for a signal that
+        // reads as aborted without dispatching `abort`, is answered here as that listener
+        // answers it.
         reportUploadProgress({ loaded: 0, total: 0, progress: 0 });
+
+        if (readIsAborted()) {
+          answerAbortRead();
+
+          return;
+        }
 
         if (req.destroyed) {
           return;
@@ -3100,10 +3213,7 @@ export class NodeAdapter implements HTTPAdapter {
           // Read guarded, as `req.on('error')` reads it, so the write failure is reported
           // below rather than escaping to `observeTaskFailure`. See `readIsAborted`.
           if (readIsAborted()) {
-            destroyRequestQuietly(req);
-
-            const abortErr = makeAbortError();
-            failRequest(abortErr);
+            answerAbortRead();
 
             return;
           }
@@ -3483,6 +3593,10 @@ async function streamResponseBody(
       // wait on a `'drain'` it never emits.
       let canContinue: unknown;
       handedBytes += chunk.length;
+      // Marked before the write, and cleared below unless it asks for a pause: a sink that
+      // returns `false` may emit `'drain'` from inside `write`, before it returns, and
+      // `onWritableDrain` must see that the pause it undoes has been asked for.
+      isPaused = true;
 
       try {
         canContinue = writable.write(chunk, (error) => {
@@ -3545,11 +3659,13 @@ async function streamResponseBody(
       // Pausing a stream whose resume path has been dismantled is wrong regardless of
       // who cleans up after it, and so is pausing one that never had it: see
       // `hasDrainChannel`.
-      if (canContinue === false && hasDrainChannel && !isSettled) {
+      // And not once the `'drain'` that answers it has come, from inside the `write`.
+      if (canContinue === false && hasDrainChannel && !isSettled && isPaused) {
         // Writable signalled backpressure — pause the readable until the
         // drain event fires (handled above) to keep memory bounded.
-        isPaused = true;
         res.pause();
+      } else {
+        isPaused = false;
       }
     };
 
@@ -3702,6 +3818,14 @@ async function streamResponseBody(
     attachWritableListener(writable, 'error', onWritableError);
     attachWritableListener(writable, 'close', onWritableClose);
     stopSignal.addEventListener('abort', onStop, { once: true });
+
+    // Stopped already, by caller code that ran in the setup above - a sink's getter that
+    // cancels the request: the signal fired before `onStop` was on it, and will not fire
+    // again.
+    if (stopSignal.aborted) {
+      onStop();
+      return;
+    }
 
     res.on('data', onResponseData);
     res.on('end', onResponseEnd);
@@ -5196,6 +5320,11 @@ function optionRefusal(message: string): TypeError {
   const error = new TypeError(message);
   markNonRetryableAdapterError(error);
   return error;
+}
+
+/** The refusal of a `101` the server sent: a protocol switch this adapter cannot read. */
+function protocolSwitchRefusal(): TypeError {
+  return optionRefusal('NodeAdapter received a protocol switch it cannot read');
 }
 
 /**
