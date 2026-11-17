@@ -20,8 +20,14 @@ export const RETRY_AFTER_STATUS_CODES: ReadonlySet<number> = new Set([
   429, 503,
 ]);
 
+/**
+ * The month names, short or long, as one alternation: the long ones first, so `November`
+ * is matched whole rather than as `Nov` and a remainder.
+ */
+const MONTH_NAMES = [...LONG_MONTH_NAMES, ...SHORT_MONTH_NAMES].join('|');
+
 /** A month name, short or long: `Nov` or `November`. */
-const MONTH = `(?<month>${[...LONG_MONTH_NAMES, ...SHORT_MONTH_NAMES].join('|')})`;
+const MONTH = `(?<month>${MONTH_NAMES})`;
 /**
  * `GMT`, or another zone as a non-conforming server writes one: a name RFC 822 defines
  * (`UT`, `Z`, the US zones), `UTC`, or a `+hhmm` / `-hhmm` offset - the zones
@@ -166,13 +172,13 @@ const ASCTIME_DATE = new RegExp(
  * written in (`, CET`, `, NOVT`, `, GMT+0100 (CET)`), so the date is not read.
  */
 const NEXT_VALUE = new RegExp(
-  `^[ \\t]*(?:$|\\d|(?:${[SHORT_DAYS, LONG_DAYS, ...LONG_MONTH_NAMES, ...SHORT_MONTH_NAMES].join('|')})(?![a-z]))`,
+  `^[ \\t]*(?:$|\\d|(?:${SHORT_DAYS}|${LONG_DAYS}|${MONTH_NAMES})(?![a-z]))`,
   'i',
 );
 
 /** A month name as a whole word and a four-digit year, at the start of a comma piece. */
 const MONTH_AND_YEAR = new RegExp(
-  `^[ \\t]*(?:${[...LONG_MONTH_NAMES, ...SHORT_MONTH_NAMES].join('|')})[ \\t]+\\d{4}(?!\\d)`,
+  `^[ \\t]*(?:${MONTH_NAMES})[ \\t]+\\d{4}(?!\\d)`,
   'i',
 );
 

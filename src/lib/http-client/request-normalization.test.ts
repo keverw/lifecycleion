@@ -9839,7 +9839,7 @@ test('a body no getter can measure fails closed; one reporting 0 bytes is still 
   expect(delivered.body).not.toBeNull();
 });
 
-test('a non-binary body is not held to the limit; an unmeasurable binary one only under a finite limit', async () => {
+test('a non-binary body is refused as malformed; an unmeasurable binary one is held only under a finite limit', async () => {
   const custom = (
     body: unknown,
     maxResponseBytes: number,
@@ -9861,12 +9861,148 @@ test('a non-binary body is not held to the limit; an unmeasurable binary one onl
 
   const parsed = custom({ parsed: true }, 10).get('/x');
   await parsed.send();
-  expect(parsed.error).toBeNull();
+  expect(parsed.error?.code).toBe('adapter_error');
 
   const proxied = new Proxy(new Uint8Array(1000), {});
   const unlimited = custom(proxied, Infinity).get('/x');
   await unlimited.send();
   expect(unlimited.error?.code).not.toBe('response_too_large');
+});
+
+test("a custom adapter's body that is neither bytes nor a string is refused, whatever its type", async () => {
+  let sends = 0;
+  const custom = (body: unknown) =>
+    new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () => {
+          sends++;
+          return Promise.resolve({
+            status: 200,
+            headers: {},
+            body: body as Uint8Array,
+          });
+        },
+      },
+      baseURL: 'http://api.test',
+      maxResponseBytes: 10,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+
+  for (const body of [true, 42, { a: 1 }, new Blob(['x'.repeat(100)])]) {
+    sends = 0;
+    const builder = custom(body).get('/x');
+    const response = await builder.send();
+    expect(response.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('adapter_error');
+    // Not retried: the answer is the adapter's own mistake.
+    expect(sends).toBe(1);
+  }
+
+  for (const body of [new Uint8Array([1, 2]), new ArrayBuffer(2), 'ok']) {
+    const response = await custom(body).get('/x').send();
+    expect(response.isFailed).toBe(false);
+    expect(response.body).not.toBeNull();
+  }
+
+  // A failed answer's body is never delivered, so the answer keeps its own failure.
+  for (const [failure, code] of [
+    [{ status: 502, isTransportError: true }, 'network_error'],
+    [
+      {
+        status: 200,
+        isStreamError: true,
+        streamErrorCode: 'stream_response_error',
+      },
+      'stream_response_error',
+    ],
+  ] as const) {
+    const builder = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            headers: {},
+            body: { a: 1 } as unknown as Uint8Array,
+            ...failure,
+          }),
+      },
+      baseURL: 'http://api.test',
+    }).get('/x');
+    await builder.send();
+    expect(builder.error?.code).toBe(code);
+  }
+});
+
+test("a custom adapter's redirect target is dropped beside an answer that is no redirect", async () => {
+  for (const flags of [{}, { wasRedirectDetected: false }]) {
+    const response = await new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: {},
+            body: null,
+            detectedRedirectURL: 'https://x.example/',
+            ...flags,
+          }),
+      },
+      baseURL: 'http://api.test',
+    })
+      .get('/x')
+      .send();
+
+    expect(response.wasRedirectDetected).toBe(false);
+    expect(response.detectedRedirectURL).toBeUndefined();
+  }
+
+  // So with a header record the client refuses, whose answer is still reported.
+  const refused = await new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: new Headers() as unknown as Record<string, string>,
+          body: null,
+          wasRedirectDetected: false,
+          detectedRedirectURL: 'https://x.example/',
+        }),
+    },
+    baseURL: 'http://api.test',
+  })
+    .get('/x')
+    .send();
+  expect(refused.isFailed).toBe(true);
+  expect(refused.wasRedirectDetected).toBe(false);
+  expect(refused.detectedRedirectURL).toBeUndefined();
+});
+
+test('an adapter status from 1 to 99 is refused; 0 is still a request that got no response', async () => {
+  const custom = (status: number) =>
+    new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () => Promise.resolve({ status, headers: {}, body: null }),
+      },
+      baseURL: 'http://api.test',
+    });
+
+  for (const status of [1, 99]) {
+    const builder = custom(status).get('/x');
+    const response = await builder.send();
+    expect(response.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('adapter_error');
+  }
+
+  const none = custom(0).get('/x');
+  await none.send();
+  expect(none.error?.code).toBe('network_error');
+
+  expect(() =>
+    custom(0).addResponseObserver(() => {}, { statusCodes: [99] }),
+  ).toThrow('is not 0 or an integer status from 100 to 999');
 });
 
 test("a custom adapter's string body with a JSON type is parsed as text", async () => {

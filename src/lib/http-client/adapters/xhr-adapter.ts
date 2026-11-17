@@ -61,6 +61,7 @@ import {
   findBrowserPage,
   type BrowserPage,
   isBrowserEnvironment,
+  isAmbiguousSetCookieLine,
   isCrossOrigin,
   keepFirstJoinedLocation,
   resolveBrowserDispatchURL,
@@ -1520,7 +1521,12 @@ function parseXHRResponseHeaders(
       // array so callers never need to split on commas (which are valid inside
       // cookie values). Guarded by the XHR spec in standard browsers, but kept
       // for correctness in legacy environments or platforms with non-standard
-      // XHR implementations.
+      // XHR implementations. A line such an XHR joined from several is dropped, as
+      // FetchAdapter drops one (see `isAmbiguousSetCookieLine`).
+      if (isAmbiguousSetCookieLine(value)) {
+        continue;
+      }
+
       const existing = result['set-cookie'];
 
       if (existing === undefined) {

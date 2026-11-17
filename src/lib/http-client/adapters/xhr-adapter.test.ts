@@ -2041,6 +2041,32 @@ describe('XHRAdapter', () => {
     ]);
   });
 
+  test('drops a set-cookie line joined from several cookies, keeping a date comma', async () => {
+    // An XHR outside a browser may join repeated `Set-Cookie`s with commas: such a line
+    // cannot be split safely, and kept whole it would give `sid` the other's `Path`.
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.getAllResponseHeadersResult =
+      'set-cookie: sid=abc; Path=/; HttpOnly, role=user; Path=/admin\r\n' +
+      'set-cookie: theme=dark; Expires=Wed, 21 Oct 2037 07:28:00 GMT\r\n' +
+      'set-cookie: lang=en\r\n';
+    lastXHR.simulateLoad();
+
+    const response = await promise;
+
+    expect(response.headers['set-cookie']).toEqual([
+      'theme=dark; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
+      'lang=en',
+    ]);
+  });
+
   test('returns null body for HEAD requests', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

@@ -1188,6 +1188,18 @@ export function keepFirstJoinedLocation(
 }
 
 /**
+ * Whether a `Set-Cookie` line may hold several cookies a runtime joined with commas: a
+ * comma before another `name=value`. Such a comma may be a cookie boundary, a valid part
+ * of a `Path` or extension attribute, or an invalid cookie-value octet a permissive server
+ * sent, so the line cannot be read safely: splitting it can invent cookies or broaden
+ * their scope, and keeping it whole can apply one cookie's attributes to another. An
+ * ordinary `Expires` date's comma has no `=` before the next delimiter, and is not one.
+ */
+export function isAmbiguousSetCookieLine(line: string): boolean {
+  return /,[^;,]*=/.test(line);
+}
+
+/**
  * Converts a Headers object (from fetch) into AdapterResponse headers.
  * `set-cookie` is extracted as `string[]` via `getSetCookie()` — the Fetch API
  * would otherwise incorrectly comma-join multiple Set-Cookie values.
@@ -1221,16 +1233,11 @@ export function extractFetchHeaders(
       result['set-cookie'] = setCookies;
     }
   } else {
-    // Legacy Headers implementations can combine cookie lines. A comma before
-    // another name=value may be a cookie boundary, a valid part of a Path or
-    // extension attribute, or an invalid cookie-value octet accepted by a
-    // permissive server. Reject that ambiguous header: splitting can invent
-    // cookies or broaden their scope, and keeping it can apply one cookie's
-    // attributes to another. Ordinary Expires date commas do not contain an '='
-    // before the next delimiter and remain intact.
+    // Legacy Headers implementations can combine cookie lines: an ambiguous one is
+    // dropped (see `isAmbiguousSetCookieLine`).
     const raw = headers.get('set-cookie');
 
-    if (raw && !/,[^;,]*=/.test(raw)) {
+    if (raw && !isAmbiguousSetCookieLine(raw)) {
       result['set-cookie'] = [raw];
     }
   }

@@ -1173,6 +1173,65 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(outcome?.message).toBe('socket hang up');
   });
 
+  test('a 303 never tears down an upload whose outcome has already settled', async () => {
+    // The hop's upload settles a varying number of microtask hops after the answer, so
+    // some runs reach the teardown before it and some after. Whenever the attempt is
+    // torn down, the outcome it reported must still be pending: an upload whose outcome
+    // has settled is known to be over.
+    let aborts = 0;
+    for (let hops = 0; hops <= 12; hops++) {
+      let hop = 0;
+      let observed: Promise<Error | undefined> | undefined;
+      let wasSettledAtAbort: boolean | undefined;
+      let didAbort = false;
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (request: AdapterRequest): Promise<AdapterResponse> => {
+          hop++;
+          if (hop > 1) {
+            return Promise.resolve({ status: 200, headers: {}, body: null });
+          }
+          request.signal?.addEventListener('abort', () => {
+            didAbort = true;
+            wasSettledAtAbort =
+              observed !== undefined && Bun.peek(observed) !== observed;
+          });
+          let settled: Promise<undefined> = Promise.resolve(undefined);
+          for (let i = 0; i < hops; i++) {
+            settled = settled.then(() => undefined);
+          }
+          return Promise.resolve({
+            status: 303,
+            headers: { location: '/next' },
+            body: null,
+            requestBodySettled: settled,
+          });
+        },
+      };
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+      });
+      client.addResponseObserver(
+        (response) => {
+          observed = response.requestBodySettled;
+        },
+        { phases: ['redirect'] },
+      );
+
+      const response = await client.post('/upload').json({ a: 1 }).send();
+
+      expect(response.status).toBe(200);
+      expect(observed).toBeDefined();
+      expect(wasSettledAtAbort ?? false).toBe(false);
+      aborts += didAbort ? 1 : 0;
+    }
+    // Some runs reached the teardown first, so the check was put to the test.
+    expect(aborts).toBeGreaterThan(0);
+    expect(aborts).toBeLessThan(13);
+  });
+
   test("a 303 after the hop's upload settled leaves that attempt's signal alone", async () => {
     // The server read the whole body and then answered: there is no upload to tear down.
     let hop = 0;
@@ -10877,10 +10936,10 @@ test('an interceptor cancel reason that is not a string is dropped', async () =>
   expect(request.error?.cancelReason).toBeUndefined();
 });
 
-describe('a redirect whose undecodable body is discarded', () => {
-  // The body of a refused redirect, or of one past `maxRedirects`, is never read, so it
-  // is never decoded and cannot turn the redirect outcome into an adapter_error.
-  test('is redirect_disabled when redirects are off', async () => {
+describe("a redirect whose body is no body is the adapter's malformed answer", () => {
+  // A body that is neither bytes nor a string is refused as the adapter\'s, as an invalid
+  // status is, on a redirect not followed as anywhere else.
+  test('with redirects off', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
       send: () =>
@@ -10895,11 +10954,11 @@ describe('a redirect whose undecodable body is discarded', () => {
     );
     const response = await request.send();
 
-    expect(request.error?.code).toBe('redirect_disabled');
-    expect(response.wasRedirectDetected).toBe(true);
+    expect(request.error?.code).toBe('adapter_error');
+    expect(response.status).toBe(302);
   });
 
-  test('is redirect_loop past maxRedirects', async () => {
+  test('past maxRedirects', async () => {
     let sends = 0;
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -10924,7 +10983,7 @@ describe('a redirect whose undecodable body is discarded', () => {
     await request.send();
 
     expect(sends).toBe(2);
-    expect(request.error?.code).toBe('redirect_loop');
+    expect(request.error?.code).toBe('adapter_error');
   });
 });
 

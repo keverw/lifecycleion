@@ -1104,12 +1104,13 @@ function readMockTransportError(transportError: unknown): {
     'MockAdapter route transportError',
   );
 
-  // Held to the rule the client holds an adapter's status to - an integer from 0 to 999 -
+  // Held to the rule the client holds an adapter's status to - 0, or an integer from 100
+  // to 999 -
   // here, as the route's mistake: unchecked, it would be refused later as the adapter's.
   const status: unknown = options.status;
   if (status !== undefined && !isStatusCode(status, 0)) {
     throw new TypeError(
-      `MockAdapter route returned transportError status ${typeof status === 'number' ? String(status) : typeof status}; it is an integer from 0 to 999`,
+      `MockAdapter route returned transportError status ${typeof status === 'number' ? String(status) : typeof status}; it is 0, or an integer from 100 to 999`,
     );
   }
 

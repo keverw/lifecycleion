@@ -178,7 +178,8 @@ export function parseContentLength(
  * units, at most three per unit). Under a finite limit, a value that presents as bytes by
  * its prototype chain but that no intrinsic getter can measure (a `Proxy` over bytes) is
  * taken as over it, failing closed as `readBinaryByteLength` asks. Anything else has no
- * size, and is not held to the limit. The limit is a backstop against an oversized
+ * size: the client refuses such a body before asking (an adapter's malformed answer), so
+ * it is never delivered past the limit. The limit is a backstop against an oversized
  * answer, not against an adapter disguising its own bytes - a `Proxy` whose prototype
  * trap lies is the adapter's own doing, and a `Proxy` cannot be told apart from what it
  * claims to be.

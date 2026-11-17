@@ -159,6 +159,8 @@ export interface AdapterResponse {
    * A custom adapter's value is held to the same userinfo rule by the client - so one
    * resolved against the request URL, credentials and all, does not report them - and
    * one that is not a string is dropped (the target is then derived from `Location`).
+   * One beside an answer that is no detected redirect - `wasRedirectDetected` set or
+   * derived `false` - is dropped too.
    */
   detectedRedirectURL?: string;
   /**

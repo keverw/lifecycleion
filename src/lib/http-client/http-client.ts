@@ -155,7 +155,10 @@ import {
   isAnsweredBodyOverLimit,
   makeResponseTooLargeError,
 } from './internal/response-limit';
-import { readBinaryByteLength } from '../internal/binary-view';
+import {
+  presentsAsBinary,
+  readBinaryByteLength,
+} from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
   parseRetryAfterMS,
@@ -388,17 +391,20 @@ interface AnsweredResponse extends AdapterRedirectFields {
 /**
  * The redirect fields of a response the adapter resolved, reported as the adapter gave
  * them - as for any healthy response, and every built-in adapter resolves them - whether
- * the response was then read, could not be decoded, or failed in the cookie jar.
+ * the response was then read, could not be decoded, or failed in the cookie jar. A target
+ * is reported only beside a detected redirect, as a read answer reports one.
  */
 function adapterRedirectFields(
   adapterFields: AdapterRedirectFields,
 ): AdapterRedirectFields {
   const { wasRedirectDetected, detectedRedirectURL } = adapterFields;
 
-  return {
-    wasRedirectDetected: wasRedirectDetected ?? false,
-    ...(detectedRedirectURL !== undefined ? { detectedRedirectURL } : {}),
-  };
+  return wasRedirectDetected === true
+    ? {
+        wasRedirectDetected,
+        ...(detectedRedirectURL !== undefined ? { detectedRedirectURL } : {}),
+      }
+    : { wasRedirectDetected: false };
 }
 
 /**
@@ -3784,6 +3790,12 @@ export class BaseHTTPClient {
             adapterResponse.detectedRedirectURL = derived.detectedRedirectURL;
           }
         }
+        // A target belongs to a detected redirect only: one named beside an answer that
+        // is none - a `200`, or a flag the adapter set `false` - is dropped rather than
+        // reported against `wasRedirectDetected: false`.
+        if (adapterResponse.wasRedirectDetected !== true) {
+          delete adapterResponse.detectedRedirectURL;
+        }
 
         // Held to `maxResponseBytes` here as well as in the adapter: the built-in ones stop
         // reading at the limit, but a custom adapter may hand over a body of any size, and
@@ -3799,6 +3811,27 @@ export class BaseHTTPClient {
           !hasResponseBody(sentRequest.method, adapterResponse.status)
         ) {
           adapterResponse.body = null;
+        } else if (
+          adapterResponse.isStreamed !== true &&
+          // A failed answer's body is never delivered, so it keeps its own failure.
+          adapterResponse.isStreamError !== true &&
+          adapterResponse.isTransportError !== true &&
+          answeredBody !== null &&
+          answeredBody !== undefined &&
+          typeof answeredBody !== 'string' &&
+          (typeof answeredBody !== 'object' ||
+            (readBinaryByteLength(answeredBody) === null &&
+              !presentsAsBinary(answeredBody)))
+        ) {
+          // Bytes or a string, or nothing: anything else - a `Blob`, a plain object, a
+          // `true` - has no size to hold to `maxResponseBytes` and is no body the response
+          // is typed to carry, so it is refused as the adapter's malformed answer, as an
+          // invalid status is, whatever the content type. A value that presents as bytes
+          // but cannot be measured (a `Proxy` over bytes) is left to the limit below,
+          // which fails it closed under a finite one.
+          throw new TypeError(
+            `HTTPClient adapter answered with an invalid body (got ${typeof answeredBody === 'object' ? Object.prototype.toString.call(answeredBody) : typeof answeredBody})`,
+          );
         } else if (
           adapterResponse.isStreamError !== true &&
           adapterResponse.isStreamed !== true &&
@@ -6232,7 +6265,7 @@ function getResponseStreamAbortInfo(
 ): { status: number; headers: Record<string, string | string[]> } | undefined {
   const status = readUnknownMember(err, STREAM_ABORT_STATUS_KEY);
 
-  // Held to the rule a resolved answer's status is: an integer from 0 to 999.
+  // Held to the rule a resolved answer's status is: 0, or an integer from 100 to 999.
   if (!isStatusCode(status, 0)) {
     return undefined;
   }
@@ -6309,9 +6342,9 @@ function withRequestBodySettled<T>(
 }
 
 /**
- * The upload outcomes this client adopted that have settled, recorded as each settles; see
- * `adoptRequestBodySettled`. Read without waiting, so a redirect whose upload has just
- * finished may not be in it yet, which is answered as an upload still going.
+ * The upload outcomes this client adopted that have settled, each recorded in the reaction
+ * that settles it (see `adoptRequestBodySettled`), so an outcome is in it exactly once it
+ * has settled.
  */
 const settledUploadOutcomes = new WeakSet<Promise<Error | undefined>>();
 
@@ -6341,11 +6374,17 @@ function adoptRequestBodySettled(
   // that the upload completed - with `undefined`, or the `null` a plain-JS adapter may
   // use for "no error": a rejection is always a failure, so a rejection reason of
   // `undefined` is normalized to an Error like any other reason.
-  const outcome = pending.then(
-    ({ value }) => (isNullish(value) ? undefined : stableUploadError(value)),
-    (error: unknown) => stableUploadError(error),
+  // Recorded as settled in the same reaction, before it returns the value that settles
+  // `outcome`, so no reader can find it settled and not yet recorded.
+  const settle = (failure: Error | undefined): Error | undefined => {
+    settledUploadOutcomes.add(outcome);
+    return failure;
+  };
+  const outcome: Promise<Error | undefined> = pending.then(
+    ({ value }) =>
+      settle(isNullish(value) ? undefined : stableUploadError(value)),
+    (error: unknown) => settle(stableUploadError(error)),
   );
-  void outcome.then(() => settledUploadOutcomes.add(outcome));
   return outcome;
 }
 

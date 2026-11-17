@@ -42,11 +42,11 @@ const FILTER_LISTS: Record<
   bodyContainsKeys: { entryType: 'string' },
   statusCodes: {
     entryType: 'number',
-    // An answer's status is an integer from 0 to 999; no other number is one.
+    // An answer's status is 0, or an integer from 100 to 999; no other number is one.
     checkNumber: (entry) =>
       isStatusCode(entry, 0)
         ? undefined
-        : 'is not an integer status from 0 to 999',
+        : 'is not 0 or an integer status from 100 to 999',
   },
   contentTypes: { entryType: 'string', allowed: ['json', 'text', 'binary'] },
   contentTypeHeaders: {

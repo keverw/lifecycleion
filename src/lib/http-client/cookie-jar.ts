@@ -184,7 +184,7 @@ export interface Cookie {
    * one replaced it (RFC 6265 §5.3 step 11.3 keeps that time); it orders the `Cookie`
    * header. Written by `toJSON` only where it differs from {@link createdAt}, so a
    * restored jar orders its header as this one did; `setCookie` takes it as given, a time
-   * later than `createdAt` as `createdAt`, and as `createdAt` when absent. `getAllCookies`
+   * later than `createdAt` included, and as `createdAt` when absent. `getAllCookies`
    * and the other reads leave it out.
    */
   firstCreatedAt?: number;
@@ -1286,10 +1286,12 @@ export class CookieJar {
     // takes its own place. Judged at `now`, the time the new cookie is stored at.
     const replaced = this.buckets.get(site)?.get(key);
     // With none in force, a restored cookie's own first creation (see `firstCreatedAt`),
-    // never later than its `createdAt`.
+    // read as given: it only orders the `Cookie` header, and may be later than
+    // `createdAt`, or than now, where the jar that saved it held it so - a replacement
+    // keeps the replaced cookie's time when the clock has stepped back since.
     const creationTime =
       replaced === undefined || this.isExpired(replaced, now)
-        ? Math.min(rawFirstCreatedAt ?? createdAt, createdAt)
+        ? (rawFirstCreatedAt ?? createdAt)
         : replaced.creationTime;
 
     const bucket = this.getOrCreateBucket(site);
