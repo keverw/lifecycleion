@@ -179,6 +179,15 @@ export interface Cookie {
    * and as now when absent. `getAllCookies` and the other reads leave it out.
    */
   lastAccessedAt?: number;
+  /**
+   * Epoch ms when a cookie of this name, domain and path was first stored, when a later
+   * one replaced it (RFC 6265 §5.3 step 11.3 keeps that time); it orders the `Cookie`
+   * header. Written by `toJSON` only where it differs from {@link createdAt}, so a
+   * restored jar orders its header as this one did; `setCookie` takes it as given, a time
+   * later than `createdAt` as `createdAt`, and as `createdAt` when absent. `getAllCookies`
+   * and the other reads leave it out.
+   */
+  firstCreatedAt?: number;
 }
 
 /**
@@ -466,8 +475,8 @@ export class CookieJar {
    * included) or is an `Invalid Date`, or a `maxAge` or `createdAt` that is not a
    * finite number. Such a cookie would compare
    * `now` against `NaN` in the expiry check, never be found expired, and be sent for
-   * the life of the jar - see {@link fromJSON}. A `lastAccessedAt` that is not a finite
-   * number is refused too.
+   * the life of the jar - see {@link fromJSON}. A `lastAccessedAt` or `firstCreatedAt`
+   * that is not a finite number is refused too.
    *
    * Also returns false for a name or value that cannot be written into a `Cookie` header
    * as one cookie-pair: a name that holds `=`, `;` or a control character other than a
@@ -840,9 +849,9 @@ export class CookieJar {
   /**
    * Serializes copies of the stored cookies.
    *
-   * A replaced cookie's place in the `Cookie` header - its first creation time - is not
-   * saved: after a restore, cookies of equal path length are ordered by `createdAt`, and
-   * those that share one by the order listed here.
+   * A replaced cookie's place in the `Cookie` header - its first creation time - is saved
+   * as `firstCreatedAt` where it differs from `createdAt`, so a restored jar orders the
+   * header as this one does; cookies that share one by the order listed here.
    * Least recently used first, each cookie with the time it was last used as
    * `lastAccessedAt`: a restore orders recency by that time, and cookies that share one by
    * payload order, so a restored jar evicts as this one would and keeps the cookies used
@@ -861,6 +870,9 @@ export class CookieJar {
       cookies: stored.map((entry) => ({
         ...copyCookie(entry.cookie),
         lastAccessedAt: entry.lastAccessTime,
+        ...(entry.creationTime === entry.cookie.createdAt
+          ? {}
+          : { firstCreatedAt: entry.creationTime }),
       })),
     };
   }
@@ -1005,6 +1017,11 @@ export class CookieJar {
         delete cookie.lastAccessedAt;
       }
 
+      // Absent, so the cookie's own `createdAt` places it in the `Cookie` header.
+      if ((cookie.firstCreatedAt as unknown) === null) {
+        delete cookie.firstCreatedAt;
+      }
+
       // Above zero only: a `maxAge` of zero or less has expired whenever it started, and
       // deletes its stored twin as `setCookie` has it.
       if (
@@ -1129,6 +1146,16 @@ export class CookieJar {
     }
 
     const lastAccessTime = Math.min(rawLastAccessedAt ?? now, now);
+    const rawFirstCreatedAt: unknown = input.firstCreatedAt;
+
+    if (
+      rawFirstCreatedAt !== undefined &&
+      (typeof rawFirstCreatedAt !== 'number' ||
+        !Number.isFinite(rawFirstCreatedAt))
+    ) {
+      return false;
+    }
+
     const lifetime = cookieLifetime(
       input.createdAt === undefined ? now : input.createdAt,
       input.maxAge,
@@ -1258,9 +1285,11 @@ export class CookieJar {
     // reads the store, from which an expired cookie has been evicted), so the new cookie
     // takes its own place. Judged at `now`, the time the new cookie is stored at.
     const replaced = this.buckets.get(site)?.get(key);
+    // With none in force, a restored cookie's own first creation (see `firstCreatedAt`),
+    // never later than its `createdAt`.
     const creationTime =
       replaced === undefined || this.isExpired(replaced, now)
-        ? createdAt
+        ? Math.min(rawFirstCreatedAt ?? createdAt, createdAt)
         : replaced.creationTime;
 
     const bucket = this.getOrCreateBucket(site);

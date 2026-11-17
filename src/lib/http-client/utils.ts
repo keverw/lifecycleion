@@ -1002,9 +1002,9 @@ export function assertSupportedAdapterRuntimeAndConfig(
   // A string, checked on every runtime, not only where it must be absolute: a `URL`
   // object would pass `new URL()` here and then fail every request at `endsWith`. And no
   // query or fragment - a path is appended to it, so `/v1?key=abc` would send `/users`
-  // inside the query.
+  // inside the query. `null` is unset, as it is for the options around it.
   const baseURL: unknown = config.baseURL;
-  if (baseURL !== undefined) {
+  if (!isNullish(baseURL)) {
     if (typeof baseURL !== 'string') {
       throw new TypeError(
         `HTTPClient baseURL must be a string (got ${describeValue(baseURL)})`,
@@ -1018,7 +1018,7 @@ export function assertSupportedAdapterRuntimeAndConfig(
   }
 
   if (
-    config.baseURL !== undefined &&
+    !isNullish(config.baseURL) &&
     requiresAbsoluteBaseURL(adapterType, isBrowserRuntime)
   ) {
     assertValidBaseURL(config.baseURL);

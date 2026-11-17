@@ -91,6 +91,10 @@ describe('parseRetryAfterMS', () => {
     // read it; a value of its own after the comma is a second value.
     ['Sun Nov 08 07:00:30 2026, EST', 30_000],
     ['Sun Nov  8 12:00:30 2026, 5', 30_000],
+    // A number of seconds and a second value that is a date of its own, month first.
+    ['120, Nov 15, 2026 12:01:00 GMT', 120_000],
+    ['120,November 15, 2026 12:01:00 GMT', 120_000],
+    ['16, Nov 15, 2026 12:01:00 GMT', 16_000],
     // An offset straight after the comma that follows a year after the time.
     ['Sun Nov  8 17:00:30 2026,+0500', 30_000],
     ['Sun Nov  8 07:00:30 2026,-0500', 30_000],

@@ -534,7 +534,8 @@ export class BaseHTTPClient {
 
     this._config = {
       adapter: this._adapter,
-      baseURL: snapshot.baseURL,
+      // `null` is no base URL, as an omitted one is.
+      baseURL: snapshot.baseURL ?? undefined,
       // Copied, as `retryPolicy` is: names lowercased and unset values dropped, read
       // once here rather than on every request, so changing the object afterwards does
       // not reach this client - or its sub-clients, which would share it.
@@ -993,7 +994,6 @@ export class BaseHTTPClient {
         requestID,
         wasCancelled: true,
         wasTimeout: false,
-        adapterType: this._adapterType,
         initialURL: interceptedRequest.requestURL,
         requestURL: interceptedRequest.requestURL,
         redirectHistory: [],
@@ -1310,7 +1310,6 @@ export class BaseHTTPClient {
               requestID,
               wasCancelled: false,
               wasTimeout: false,
-              adapterType: this._adapterType,
               initialURL: url,
               requestURL: failedRequestURL,
               redirectHistory: [],
@@ -1391,7 +1390,6 @@ export class BaseHTTPClient {
             requestID,
             wasCancelled: true,
             wasTimeout: false,
-            adapterType: this._adapterType,
             initialURL: url,
             requestURL: url,
             redirectHistory: [],
@@ -1572,7 +1570,6 @@ export class BaseHTTPClient {
               // reclassify the error code on whether the body happened to
               // finish. See docs/http-client.md.
               wasTimeout: false,
-              adapterType: this._adapterType,
               initialURL: initialRequestURL,
               requestURL: attemptResult.sentRequest.requestURL,
               redirectHistory,
@@ -1614,7 +1611,6 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
@@ -1646,7 +1642,6 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
@@ -1748,7 +1743,6 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: true,
                 wasTimeout: false,
-                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: hopFromURL,
                 redirectHistory,
@@ -1778,7 +1772,6 @@ export class BaseHTTPClient {
               requestID,
               wasCancelled: false,
               wasTimeout: false,
-              adapterType: this._adapterType,
               initialURL: initialRequestURL,
               requestURL: attemptResult.sentRequest.requestURL,
               redirectHistory,
@@ -1844,7 +1837,6 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL,
                 redirectHistory: [...redirectHistory, requestURL],
@@ -2079,7 +2071,6 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: true,
                 wasTimeout: false,
-                adapterType: this._adapterType,
                 initialURL: initialRequestURL,
                 requestURL: cancelledRequestURL,
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
@@ -2198,16 +2189,31 @@ export class BaseHTTPClient {
             // server has answered and moved on from, is torn down as the redirect is
             // followed, as a browser's redirect ends it. Its outcome is carried onto the
             // final response.
-            const isUploadOutstanding =
-              adapterResponse.requestBodySettled !== undefined;
+            const hopUpload = adapterResponse.requestBodySettled;
             const isBodyResent = sendsRequestBody(
               sanitizedRedirectRequest.body,
             );
-            if (isUploadOutstanding && !isBodyResent) {
-              attemptResult.abortAttempt?.();
-            } else if (isUploadOutstanding) {
+            if (hopUpload !== undefined && !isBodyResent) {
+              // An upload already over - the server read the body and then answered -
+              // has nothing to tear down, and its attempt's signal is left alone.
+              if (!(await isSettledByNextTask(hopUpload))) {
+                attemptResult.abortAttempt?.();
+                // The failure the teardown leaves names it, so the final response's
+                // `requestBodySettled` is told from a cancel or a transport failure.
+                if (latestUpload.outcome === hopUpload) {
+                  latestUpload.outcome = hopUpload.then((failure) =>
+                    failure === undefined
+                      ? undefined
+                      : new Error(
+                          'Request body upload ended: a redirect was followed',
+                          { cause: failure },
+                        ),
+                  );
+                }
+              }
+            } else if (hopUpload !== undefined) {
               const wait = await settleUploadBeforeNextDispatch(
-                adapterResponse.requestBodySettled,
+                hopUpload,
                 cancelSignal,
                 timeout,
                 () => lastUploadActivityAt(uploadActivity),
@@ -2250,7 +2256,6 @@ export class BaseHTTPClient {
                   requestID,
                   wasCancelled: wait === 'cancelled',
                   wasTimeout: wait === 'deadline',
-                  adapterType: this._adapterType,
                   initialURL: initialRequestURL,
                   requestURL: redirectedRequestURL,
                   redirectHistory,
@@ -2273,7 +2278,6 @@ export class BaseHTTPClient {
             requestID,
             wasCancelled,
             wasTimeout,
-            adapterType: this._adapterType,
             initialURL: initialRequestURL,
             requestURL: attemptResult.sentRequest.requestURL,
             redirectHistory,
@@ -2323,7 +2327,6 @@ export class BaseHTTPClient {
             requestID,
             wasCancelled: isCancelled,
             wasTimeout: false,
-            adapterType: this._adapterType,
             initialURL: initialRequestURL,
             requestURL:
               currentInterceptedRequest?.requestURL ?? initialRequestURL,
@@ -2376,7 +2379,6 @@ export class BaseHTTPClient {
           requestID,
           wasCancelled: true,
           wasTimeout: false,
-          adapterType: this._adapterType,
           initialURL: initialRequestURL,
           requestURL: response.requestURL,
           // The response's own: a hop that failed after it was recorded carries it.
@@ -4014,7 +4016,6 @@ export class BaseHTTPClient {
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,
-                adapterType: this._adapterType,
                 initialURL,
                 requestURL: sentRequest.requestURL,
                 redirectHistory,
@@ -4690,7 +4691,6 @@ export class BaseHTTPClient {
               requestID,
               wasCancelled: false,
               wasTimeout: didTimeoutThisAttempt,
-              adapterType: this._adapterType,
               initialURL,
               requestURL: sentRequest.requestURL,
               redirectHistory,
@@ -4908,7 +4908,6 @@ export class BaseHTTPClient {
     requestID: string;
     wasCancelled: boolean;
     wasTimeout: boolean;
-    adapterType: AdapterType;
     initialURL: string;
     requestURL: string;
     redirectHistory: string[];
@@ -4946,7 +4945,6 @@ export class BaseHTTPClient {
       requestID,
       wasCancelled,
       wasTimeout,
-      adapterType,
       initialURL,
       requestURL,
       isNetworkErrorOverride,
@@ -5001,7 +4999,7 @@ export class BaseHTTPClient {
       detectedRedirectURL,
       redirectHistory,
       requestID,
-      adapterType,
+      adapterType: this._adapterType,
       // Absent only when there was no body writer - and genuinely absent:
       // `requestBodySettled: settled` with `settled` undefined would put an own property
       // on a bodiless `GET`, so `'requestBodySettled' in response` would say an outcome
@@ -6305,6 +6303,23 @@ function withRequestBodySettled<T>(
   return uploadOutcome
     ? { ...response, requestBodySettled: uploadOutcome }
     : response;
+}
+
+/**
+ * Whether `outcome` - a promise this client owns, which never rejects - has settled by
+ * the next task: one already settled answers within the microtasks before it, so `true`
+ * means the upload is over, and `false` that it is still going.
+ */
+function isSettledByNextTask(
+  outcome: Promise<Error | undefined>,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), 0);
+    void outcome.then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
 }
 
 /**

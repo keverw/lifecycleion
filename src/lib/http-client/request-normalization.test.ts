@@ -5145,6 +5145,29 @@ test('baseURL must be a string without a query or fragment', () => {
   ).toThrow();
 });
 
+test('a null baseURL is no base URL, on a client and as a sub-client override', async () => {
+  let seenURL: string | undefined;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      seenURL = request.requestURL;
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+
+  const client = new HTTPClient({ adapter, baseURL: null as never });
+  await client.get('http://direct.test/x').send();
+  expect(seenURL).toBe('http://direct.test/x');
+
+  // The parent's base URL is dropped, as a null `userAgent` drops the parent's.
+  const parent = new HTTPClient({ adapter, baseURL: 'http://parent.test' });
+  const sub = parent.createSubClient({ baseURL: null as never });
+  await sub.get('http://direct.test/x').send();
+  expect(seenURL).toBe('http://direct.test/x');
+  await parent.get('/x').send();
+  expect(seenURL).toBe('http://parent.test/x');
+});
+
 test('MockAdapter route mistakes found after the route ran are not retried', async () => {
   for (const response of [
     { status: 200, cookies: { a: { value: '1', maxAge: Number.NaN } } },

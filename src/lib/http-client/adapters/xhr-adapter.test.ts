@@ -855,6 +855,85 @@ describe('XHRAdapter', () => {
     },
   );
 
+  test.each([
+    [
+      'a SharedArrayBuffer',
+      () => {
+        const buffer = new SharedArrayBuffer(2);
+        new Uint8Array(buffer).set([104, 105]);
+        return buffer;
+      },
+    ],
+    [
+      'a resizable ArrayBuffer',
+      () => {
+        const buffer = new ArrayBuffer(2, { maxByteLength: 8 });
+        new Uint8Array(buffer).set([104, 105]);
+        return buffer;
+      },
+    ],
+  ])(
+    'a response handed over as %s is copied, so later writes and resizes leave it alone',
+    async (_label, makeBuffer) => {
+      const buffer = makeBuffer();
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/buffer',
+        method: 'GET',
+        headers: {},
+      });
+      lastXHR.status = 200;
+      lastXHR.response = buffer;
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      new Uint8Array(buffer).fill(0);
+      if (buffer instanceof ArrayBuffer) {
+        (buffer as ArrayBuffer & { resize(length: number): void }).resize(0);
+      }
+
+      expect([...(response.body ?? [])]).toEqual([104, 105]);
+    },
+  );
+
+  test('a fixed ArrayBuffer response is read in place, not copied', async () => {
+    const buffer = new Uint8Array([104, 105]).buffer;
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/buffer',
+      method: 'GET',
+      headers: {},
+    });
+    lastXHR.status = 200;
+    lastXHR.response = buffer;
+    lastXHR.simulateLoad();
+
+    expect((await promise).body?.buffer).toBe(buffer);
+  });
+
+  test('a view past maxResponseBytes is refused without being copied', async () => {
+    const view = new Uint8Array(64);
+    const slice = spyOn(Uint8Array.prototype, 'slice');
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/view',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 8,
+    });
+    lastXHR.status = 200;
+    lastXHR.response = view;
+    lastXHR.simulateLoad();
+    let response;
+    let copies: number;
+    try {
+      response = await promise;
+    } finally {
+      copies = slice.mock.calls.length;
+      slice.mockRestore();
+    }
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(copies).toBe(0);
+  });
+
   test('an XHR with no response reads the body from responseText, held to the limit', async () => {
     const send = (maxResponseBytes: number) => {
       const promise = new XHRAdapter().send({

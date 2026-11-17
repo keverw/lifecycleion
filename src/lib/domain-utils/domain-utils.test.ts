@@ -4527,3 +4527,18 @@ describe('an origin whose host has a hyphen at a label edge', () => {
     expect(matchesHostFilter('-edge.example.com', ['*'])).toBe(true);
   });
 });
+
+test('isIPv4 refuses an octet with a leading zero, which a URL reads as octal', () => {
+  for (const text of ['010.0.0.1', '192.168.1.08', '00.0.0.0', '1.2.3.00']) {
+    expect(isIPv4(text)).toBe(false);
+    expect(isIPAddress(text)).toBe(false);
+  }
+  for (const text of [
+    '0.0.0.0',
+    '10.0.0.1',
+    '192.168.1.0',
+    '100.200.250.255',
+  ]) {
+    expect(isIPv4(text)).toBe(true);
+  }
+});

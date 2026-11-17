@@ -170,9 +170,9 @@ const NEXT_VALUE = new RegExp(
   'i',
 );
 
-/** A month name as a whole word, at the start of a comma piece. */
-const MONTH_WORD = new RegExp(
-  `^[ \\t]*(?:${[...LONG_MONTH_NAMES, ...SHORT_MONTH_NAMES].join('|')})(?![a-z])`,
+/** A month name as a whole word and a four-digit year, at the start of a comma piece. */
+const MONTH_AND_YEAR = new RegExp(
+  `^[ \\t]*(?:${[...LONG_MONTH_NAMES, ...SHORT_MONTH_NAMES].join('|')})[ \\t]+\\d{4}(?!\\d)`,
   'i',
 );
 
@@ -215,11 +215,16 @@ export function parseRetryAfterMS(
   const first = trimHTTPWhitespace(pieces[0]);
 
   if (/^\d+$/.test(first)) {
-    // A day before a comma and a month (`16, Nov 2026 ...`) is no number of seconds:
-    // no value of its own begins with a month name, so this is one date, unread.
-    return pieces.length > 1 && MONTH_WORD.test(pieces[1])
-      ? undefined
-      : Number(first) * 1000;
+    // A day before a comma, a month and a year (`16, Nov 2026 ...`) is one date, unread,
+    // not that many seconds. A second value that is a date of its own begins with its
+    // month and day (`120, Nov 15, 2026 ...`), and the seconds are read.
+    const isDayOfOneDate =
+      first.length <= 2 &&
+      Number(first) >= 1 &&
+      Number(first) <= 31 &&
+      pieces.length > 1 &&
+      MONTH_AND_YEAR.test(pieces[1]);
+    return isDayOfOneDate ? undefined : Number(first) * 1000;
   }
 
   // Rejoined as it was written, so the date read is the text the server sent. The most

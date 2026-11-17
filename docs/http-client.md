@@ -377,7 +377,12 @@ Redirect-phase observers see that hop's outcome.
 Before following a redirect or retrying, the client waits for a reported upload outcome.
 A redirect whose next hop sends no body - a `303`, or a `301`/`302` that rewrote a `POST`
 to `GET` - follows without waiting, since nothing goes out beside the upload, and the
-answered hop's upload is torn down as it is followed, as a browser's redirect ends it.
+answered hop's upload, if it is still going, is torn down as it is followed, as a
+browser's redirect ends it. The final response's `requestBodySettled` then resolves with
+an Error whose message is `Request body upload ended: a redirect was followed` and whose
+`cause` is the upload's failure as the client reports one (the adapter's own error is on
+that one's `cause`), so it is told from a cancel or a transport failure: the
+server answered without the rest of the body, and the request itself succeeded.
 Cancellation ends the wait. The request's `timeout` bounds inactivity during this wait,
 including silence since dispatch. Upload-progress reports restart that inactivity clock:
 the client hands an adapter an `onUploadProgress` for every request with a body to watch
@@ -1135,10 +1140,10 @@ const restored = jar.fromJSON(data); // Replaces existing cookies after preparin
 // `fromJSON` validates/copies the payload before clearing; malformed structure throws
 // without replacing the jar. It returns how many cookies it kept. A cookie with a missing or
 // invalid domain, an `expires` that cannot be read as a date, a `maxAge` / `createdAt` /
-// `lastAccessedAt` that is not a finite number, or a name or value the `Cookie` header cannot carry as
+// `lastAccessedAt` / `firstCreatedAt` that is not a finite number, or a name or value the `Cookie` header cannot carry as
 // one pair, is refused, as is an entry with a field that throws when read, so compare
 // against `data.cookies.length` to detect drops. A cookie already expired is left out
-// too, as is one the limits evict. A `null` `expires`, `maxAge`, `createdAt` or `lastAccessedAt` reads as absent, and a positive `maxAge` with no
+// too, as is one the limits evict. A `null` `expires`, `maxAge`, `createdAt`, `lastAccessedAt` or `firstCreatedAt` reads as absent, and a positive `maxAge` with no
 // `createdAt` is refused, as nothing says when it started.
 ```
 
@@ -1359,7 +1364,7 @@ const authClient = client.createSubClient({
 - `'replace'` (default): the sub-client's `defaultHeaders` replace the parent's entirely.
 - `'merge'`: the sub-client's `defaultHeaders` are layered on top of the parent's.
 
-Any `HTTPClientConfig` field can be overridden. An omitted or explicitly `undefined` field inherits the parent value. Of the options typed to accept `null`, a null `timeout` or `maxResponseBytes` inherits, while `cookieJar: null` disables cookies for that sub-client even if the parent has one. A `null` given to an option whose type excludes it also inherits for `adapter`, `defaultHeaders` and `followRedirects`; for every other option it reaches the new client as given and is handled as `new HTTPClient()` handles it, so `retryPolicy: null` disables the parent's retries, a null boolean option reads as `false`, and a null `userAgent` or `maxRedirects` as unset.
+Any `HTTPClientConfig` field can be overridden. An omitted or explicitly `undefined` field inherits the parent value. Of the options typed to accept `null`, a null `timeout` or `maxResponseBytes` inherits, while `cookieJar: null` disables cookies for that sub-client even if the parent has one. A `null` given to an option whose type excludes it also inherits for `adapter`, `defaultHeaders` and `followRedirects`; for every other option it reaches the new client as given and is handled as `new HTTPClient()` handles it, so `retryPolicy: null` disables the parent's retries, a null boolean option reads as `false`, and a null `baseURL`, `userAgent` or `maxRedirects` as unset.
 
 Sub-clients inherit the parent's interceptors and observers. The parent chain runs first, then the sub-client's own. This means shared concerns like auth headers or global logging happen before sub-client-specific logic. Adding interceptors or observers to a sub-client does not affect the parent.
 

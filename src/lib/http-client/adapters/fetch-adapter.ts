@@ -16,7 +16,7 @@ import {
   isAbortError,
   makeAbortError,
   markResponseStreamAbort,
-  markNonRetryableAdapterError,
+  nonRetryableRefusal,
   nonRetryableAdapterErrorFrom,
   unsendableBrowserBodyRefusal,
 } from '../internal/adapter-error';
@@ -121,11 +121,10 @@ export class FetchAdapter implements HTTPAdapter {
     // before anything is reported.
     const blockedPort = fetchBlockedPort(dispatchedURL);
     if (blockedPort !== undefined) {
-      const refusal = new TypeError(
+      throw nonRetryableRefusal(
+        TypeError,
         blockedPortMessage('FetchAdapter', blockedPort),
       );
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
     }
 
     // `fetch` sends a plain object as `[object Object]` and a number as its text, and on
@@ -143,11 +142,10 @@ export class FetchAdapter implements HTTPAdapter {
     // `fetchRefusedHeader`).
     const refusedHeader = fetchRefusedHeader(headers);
     if (refusedHeader !== undefined) {
-      const refusal = new TypeError(
+      throw nonRetryableRefusal(
+        TypeError,
         fetchRefusedHeaderMessage('FetchAdapter', refusedHeader),
       );
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
     }
 
     // The Fetch Standard forbids these, but Bun's `fetch` sends a `CONNECT` or `TRACE`, so
@@ -157,9 +155,10 @@ export class FetchAdapter implements HTTPAdapter {
       if (asciiUppercase(method) === 'CONNECT') {
         throw connectRefusal('FetchAdapter');
       }
-      const refusal = new Error(forbiddenMethodMessage('FetchAdapter', method));
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
+      throw nonRetryableRefusal(
+        Error,
+        forbiddenMethodMessage('FetchAdapter', method),
+      );
     }
 
     dropTransportFramedHeaders(headers, body);
@@ -170,9 +169,10 @@ export class FetchAdapter implements HTTPAdapter {
     // checked here. `HTTPClient` refuses one before this, and hands a JSON body that
     // serializes to nothing over as `null`.
     if (isBodilessMethod(method) && body !== null && body !== undefined) {
-      const refusal = new Error(bodyOnBodilessMethodMessage('fetch', method));
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
+      throw nonRetryableRefusal(
+        Error,
+        bodyOnBodilessMethodMessage('fetch', method),
+      );
     }
 
     // Checked before it is sent, so a request fetch refuses to build - Node's fetch refuses
@@ -220,11 +220,10 @@ export class FetchAdapter implements HTTPAdapter {
       // `readAdapterMethod`), and any other is case-sensitive - a `fetch` that
       // uppercases `purge` sends a different method, which a server may route apart.
       if (builtMethod !== method) {
-        const refusal = new Error(
+        throw nonRetryableRefusal(
+          Error,
           `[FetchAdapter] This runtime's fetch would send the ${method} request as ${builtMethod}. Use NodeAdapter for it.`,
         );
-        markNonRetryableAdapterError(refusal);
-        throw refusal;
       }
     }
 

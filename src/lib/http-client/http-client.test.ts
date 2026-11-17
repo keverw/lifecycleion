@@ -1074,8 +1074,13 @@ describe('HTTPClient — basic HTTP methods', () => {
               status,
               headers: { location: '/next' },
               body: null,
-              // Never settles: waiting on it would end the request at the timeout.
-              requestBodySettled: new Promise(() => {}),
+              // Settles only once the attempt is torn down: waiting on it would end
+              // the request at the timeout.
+              requestBodySettled: new Promise((resolve) => {
+                request.signal?.addEventListener('abort', () =>
+                  resolve(new Error('Request aborted')),
+                );
+              }),
             });
           }
 
@@ -1101,10 +1106,53 @@ describe('HTTPClient — basic HTTP methods', () => {
       expect(nextHop[0].method).toBe('GET');
       expect(nextHop[0].body ?? null).toBeNull();
       expect(signals[0].aborted).toBe(true);
-      // The bodied hop's outcome, carried onto the final response.
-      expect(response.requestBodySettled).toBeDefined();
+      // The bodied hop's outcome, carried onto the final response, naming the redirect
+      // that ended it.
+      const outcome = await response.requestBodySettled;
+      expect(outcome?.message).toBe(
+        'Request body upload ended: a redirect was followed',
+      );
+      expect((outcome?.cause as Error).message).toBe('Request aborted');
     },
   );
+
+  test("a 303 after the hop's upload settled leaves that attempt's signal alone", async () => {
+    // The server read the whole body and then answered: there is no upload to tear down.
+    let hop = 0;
+    const signals: AbortSignal[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+        signals.push(request.signal as AbortSignal);
+
+        const answer: AdapterResponse =
+          hop === 1
+            ? {
+                status: 303,
+                headers: { location: '/next' },
+                body: null,
+                requestBodySettled: Promise.resolve(undefined),
+              }
+            : { status: 200, headers: {}, body: null };
+        return Promise.resolve(answer);
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(hop).toBe(2);
+    expect(signals[0].aborted).toBe(false);
+    expect(await response.requestBodySettled).toBeUndefined();
+  });
 
   test('a cancel during that wait is not held for the upload', async () => {
     const controller = new AbortController();

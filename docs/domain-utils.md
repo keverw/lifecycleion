@@ -356,11 +356,12 @@ isIPAddress('example.com'); // false
 
 ### isIPv4
 
-Returns `true` if the string is a valid IPv4 address.
+Returns `true` if the string is a valid IPv4 address in dotted decimal. An octet with a leading zero is refused, as Node's `net.isIPv4` refuses it: a URL reads `010` as octal, so `010.0.0.1` names `8.0.0.1`.
 
 ```typescript
 isIPv4('192.168.1.1'); // true
 isIPv4('255.255.255.255'); // true
+isIPv4('010.0.0.1'); // false
 isIPv4('::1'); // false
 isIPv4('example.com'); // false
 ```

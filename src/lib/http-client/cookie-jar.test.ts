@@ -4976,6 +4976,59 @@ describe('jar limits', () => {
     expect(kept).toContain('recent0');
   });
 
+  test("a replaced cookie's place in the Cookie header survives toJSON and fromJSON", () => {
+    const start = Date.now();
+    const url = 'https://example.com/';
+    const jar = new CookieJar();
+    setSystemTime(new Date(start));
+    jar.processResponseHeaders({ 'set-cookie': 'a=1' }, url);
+    setSystemTime(new Date(start + 1000));
+    jar.processResponseHeaders({ 'set-cookie': 'b=1' }, url);
+    setSystemTime(new Date(start + 2000));
+    jar.processResponseHeaders({ 'set-cookie': 'a=2' }, url);
+    expect(jar.getCookieHeaderString(url)).toBe('a=2; b=1');
+
+    const saved = jar.toJSON();
+    const restored = new CookieJar();
+    restored.fromJSON(saved);
+
+    expect(restored.getCookieHeaderString(url)).toBe('a=2; b=1');
+    // Saved only where it differs from `createdAt`, and left out of every read.
+    expect(
+      Object.fromEntries(
+        saved.cookies.map((cookie) => [cookie.name, cookie.firstCreatedAt]),
+      ),
+    ).toEqual({ a: start, b: undefined });
+    expect(restored.getAllCookies()[0]).not.toHaveProperty('firstCreatedAt');
+  });
+
+  test('a firstCreatedAt that is not a finite number is refused, and one past createdAt is createdAt', () => {
+    const jar = new CookieJar();
+    const createdAt = Date.now();
+    for (const firstCreatedAt of ['1', Number.NaN, Infinity]) {
+      expect(
+        jar.setCookie({
+          name: 'x',
+          value: '1',
+          domain: 'example.com',
+          createdAt,
+          firstCreatedAt: firstCreatedAt as number,
+        }),
+      ).toBe(false);
+    }
+    jar.setCookie({
+      name: 'a',
+      value: '1',
+      domain: 'example.com',
+      createdAt,
+      firstCreatedAt: createdAt + 60_000,
+    });
+    jar.setCookie({ name: 'b', value: '1', domain: 'example.com', createdAt });
+    // Placed by its `createdAt`, tied with `b`, so by the order stored: read as given,
+    // it would come after `b`.
+    expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1; b=1');
+  });
+
   test('eviction and toJSON order cookies by lastAccessedAt, then by when they were stored', () => {
     const now = Date.now();
     setSystemTime(new Date(now));

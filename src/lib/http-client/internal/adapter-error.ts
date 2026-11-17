@@ -81,11 +81,10 @@ export function readAdapterMethod(method: unknown): string {
   }
 
   if (method === undefined || method === null) {
-    const refusal = new TypeError(
+    throw nonRetryableRefusal(
+      TypeError,
       `Adapter request method is required (got ${String(method)})`,
     );
-    markNonRetryableAdapterError(refusal);
-    throw refusal;
   }
 
   let text: string;
@@ -106,9 +105,7 @@ function assertMethodToken(method: string): string {
     return method;
   }
 
-  const refusal = new TypeError(`Adapter request method ${problem}`);
-  markNonRetryableAdapterError(refusal);
-  throw refusal;
+  throw nonRetryableRefusal(TypeError, `Adapter request method ${problem}`);
 }
 
 /**
@@ -135,11 +132,10 @@ export function isAbortError(error: unknown): error is Error {
 
 /** The refusal of a `CONNECT`, which asks for a tunnel no adapter here opens. Non-retryable. */
 export function connectRefusal(adapterName: string): TypeError {
-  const refusal = new TypeError(
+  return nonRetryableRefusal(
+    TypeError,
     `${adapterName} does not open tunnels; a CONNECT request is not supported`,
   );
-  markNonRetryableAdapterError(refusal);
-  return refusal;
 }
 
 /**
@@ -199,11 +195,10 @@ export function unsendableBrowserBodyRefusal(
  * refuses and what it writes cannot disagree.
  */
 export function unsendableBodyError(adapterName: string): TypeError {
-  const refusal = new TypeError(
+  return nonRetryableRefusal(
+    TypeError,
     `${adapterName} sends a string, Uint8Array or FormData body; serialize other bodies first`,
   );
-  markNonRetryableAdapterError(refusal);
-  return refusal;
 }
 
 /**

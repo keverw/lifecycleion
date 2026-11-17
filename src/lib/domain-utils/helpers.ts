@@ -99,8 +99,10 @@ export function isIPv4(str: string): boolean {
     return false;
   }
 
+  // Dotted decimal with no leading zero (`0` itself aside), as Node's `net.isIPv4` reads
+  // it: the URL parser reads `010` as octal, so `010.0.0.1` names `8.0.0.1`.
   const ipv4Regex =
-    /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+    /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$/;
   return ipv4Regex.test(str);
 }
 
