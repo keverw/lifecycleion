@@ -55,7 +55,9 @@ import {
   STREAM_ABORT_STATUS_KEY,
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
+  STRAY_205_DRAIN_WINDOWS,
   UPLOAD_SOURCE_STALL_GRACE_MS,
+  UPLOAD_STALL_GRACE_MS,
 } from '../consts';
 import {
   generateMultipartBoundary,
@@ -77,7 +79,7 @@ import {
   MAX_COPIED_ARRAY_LENGTH,
   readArrayLength,
 } from '../../internal/array-copy';
-import { forEachOwnIndex } from '../../internal/array-indices';
+import { readCopiedIndex } from '../../internal/array-indices';
 import { isFormData } from '../internal/form-entries';
 import {
   assertKnownFields,
@@ -1968,6 +1970,19 @@ export class NodeAdapter implements HTTPAdapter {
           const responseTask = (async () => {
             const status = res.statusCode ?? 0;
             const headers = normalizeResponseHeaders(res.headers);
+            // The answer when taking delivery of the body fails: a stream error with the
+            // real status and headers, since the server answered.
+            const streamErrorResponse = (
+              streamErrorCode: NonNullable<AdapterResponse['streamErrorCode']>,
+              errorCause: Error,
+            ): AdapterResponse => ({
+              status,
+              headers,
+              body: null,
+              isStreamError: true,
+              streamErrorCode,
+              errorCause,
+            });
             // A `HEAD` answer, a `204` / `205` / `304` and an informational status carry
             // no body: none to decode, measure or hand over.
             const hasBody = hasResponseBody(request.method, status);
@@ -2112,14 +2127,12 @@ export class NodeAdapter implements HTTPAdapter {
                         }
                       },
                       () => {
-                        settleResponse({
-                          status,
-                          headers,
-                          body: null,
-                          isStreamError: true,
-                          streamErrorCode: 'stream_response_error',
-                          errorCause,
-                        });
+                        settleResponse(
+                          streamErrorResponse(
+                            'stream_response_error',
+                            errorCause,
+                          ),
+                        );
                       },
                       abortStream,
                     );
@@ -2344,14 +2357,12 @@ export class NodeAdapter implements HTTPAdapter {
                 settleStreamFailure(
                   tearDownAfterResponse,
                   () => {
-                    settleResponse({
-                      status,
-                      headers,
-                      body: null,
-                      isStreamError: true,
-                      streamErrorCode: streamResult.code,
-                      errorCause: streamResult.cause,
-                    });
+                    settleResponse(
+                      streamErrorResponse(
+                        streamResult.code,
+                        streamResult.cause,
+                      ),
+                    );
                   },
                   abortStream,
                 );
@@ -2384,20 +2395,18 @@ export class NodeAdapter implements HTTPAdapter {
             const refuseTooLargeBody = (): void => {
               activeBufferedResponse = undefined;
               tearDownAfterResponse();
-              settleResponse({
-                status,
-                headers,
-                body: null,
-                isStreamError: true,
-                streamErrorCode: 'response_too_large',
-                // `streamResponse` is only offered where it would help: a factory is
-                // called for a 2xx alone, so any other status is buffered whatever the
-                // request asked for.
-                errorCause: makeResponseTooLargeError(
-                  maxResponseBytes,
-                  isSuccessStatus(status),
+              settleResponse(
+                streamErrorResponse(
+                  'response_too_large',
+                  // `streamResponse` is only offered where it would help: a factory is
+                  // called for a 2xx alone, so any other status is buffered whatever the
+                  // request asked for.
+                  makeResponseTooLargeError(
+                    maxResponseBytes,
+                    isSuccessStatus(status),
+                  ),
                 ),
-              });
+              );
             };
 
             // Refused before a byte is read when the body says up front that it is over
@@ -2735,14 +2744,12 @@ export class NodeAdapter implements HTTPAdapter {
               }
 
               activeBufferedResponse = undefined;
-              settleResponse({
-                status,
-                headers,
-                body: null,
-                isStreamError: true,
-                streamErrorCode: 'stream_response_error',
-                errorCause: makeResponseStreamError(message, cause),
-              });
+              settleResponse(
+                streamErrorResponse(
+                  'stream_response_error',
+                  makeResponseStreamError(message, cause),
+                ),
+              );
             };
 
             body.on('error', (err: Error) => {
@@ -3230,29 +3237,6 @@ export class NodeAdapter implements HTTPAdapter {
 }
 
 /**
- * How long an upload may make no progress after the response arrived before it is torn
- * down. See `watchForStalledUpload`.
- *
- * Progress here is coarse: `writeRequestBodyChunked` reports once per accepted
- * {@link REQUEST_BODY_CHUNK_SIZE} chunk, once its write callback has run, so a receiver
- * that has answered and then goes quiet for a moment - busy with what it already has, or
- * a TCP window that closed while it works - reports nothing for the whole pause. Anything
- * shorter than a pause like that cuts a body the server was still reading, which is the
- * failure this watchdog exists to avoid, not to cause; at one second a two-second pause
- * would truncate an 8 MiB upload at 6.8 MiB and hand the caller the early status as a
- * clean success.
- *
- * Five seconds is past any such pause on a connection that is still alive. What is left
- * is a bound rather than a promise: a receiver that stops reading for longer than this
- * while still intending to read gets a truncated body, and the far more common shape - a
- * proxy that has answered and will never read again - costs one idle socket for five to
- * ten seconds, as the watchdog checks in five-second windows - longer where the runtime
- * reports a late chunk accepted, which counts as progress and starts the window again (Bun
- * does for a large body, and Node over TLS) - instead of one held to that server's timeout.
- */
-const UPLOAD_STALL_GRACE_MS = 5_000;
-
-/**
  * Whether `response` says its connection closes after it: `Connection: close`, an HTTP/1.0
  * answer without `Connection: keep-alive`, as Node's parser reads it, or a body with
  * neither a `Content-Length` nor a `Transfer-Encoding`, which only the connection's close
@@ -3329,17 +3313,6 @@ function watchGraceWindows(
   };
 }
 
-/**
- * How many whole {@link UPLOAD_STALL_GRACE_MS} windows with nothing being uploaded
- * NodeAdapter reads and drops the bytes behind an answered `205` for before it lets the
- * connection go, however steadily they arrive: fifteen seconds from the answer when there
- * is no upload, and up to twenty from an upload's end, as a window counts only once it
- * began with the upload done. A quiet window lets it go sooner. The bytes are ones the
- * status says are not there, so this is room for a server that sends a short stray body
- * slowly, not for one that streams.
- */
-const STRAY_205_DRAIN_WINDOWS = 3;
-
 // ---------------------------------------------------------------------------
 // Streaming pipe helper
 // ---------------------------------------------------------------------------
@@ -3378,8 +3351,8 @@ async function streamResponseBody(
     let hasDrainChannel = false;
 
     const cleanup = (): void => {
-      // Before the removal, and on *every* settle path rather than only the `write`/`end`
-      // failure paths that also call it. `cleanup` takes `onWritableError` off unconditionally, so
+      // Before the removal, and on *every* settle path, the `write`/`end` failure paths
+      // among them. `cleanup` takes `onWritableError` off unconditionally, so
       // the moment it runs the writable has no `'error'` listener of ours left - and an
       // `'error'` event with no listener is an uncaught exception that ends the process.
       // (A writable with no removal method is the one shape this does not cover, and
@@ -3398,9 +3371,10 @@ async function streamResponseBody(
       // `ENOSPC`, emits `'error'` into exactly that gap. Nothing about that path throws,
       // so nothing about it looks like it needs an absorber.
       //
-      // Cheap and idempotent to call here: it is keyed on the writable through a `WeakMap`,
-      // returns immediately when one is already attached, and takes itself back off on
-      // delivery or on `'close'`.
+      // The one call each settle path needs, as every one runs `cleanup`, and before the
+      // `'error'` listener below is detached. Keyed on the writable through a `WeakMap`,
+      // it extends the window of an absorber already attached rather than adding a
+      // second, and the absorber takes itself back off on delivery or on `'close'`.
       absorbPendingWritableError(writable);
 
       detachWritableListener(writable, 'drain', onWritableDrain);
@@ -3522,14 +3496,10 @@ async function streamResponseBody(
           // signals this function honours - `end`'s callback and `errored` - and settle a
           // truncated download as a success for a writable that reports only this way. A
           // real Node stream also emits `'error'`, and `settle` is idempotent, so the two
-          // cannot both take effect.
-          //
-          // Absorbed first, exactly as the `write`-throw and `end`-callback paths do:
-          // `settle` runs `cleanup`, which detaches the `'error'` listener, so a real
-          // stream's event arriving on the next tick would otherwise be uncaught.
+          // cannot both take effect. That event, arriving on the next tick once `settle`
+          // has detached the `'error'` listener, meets the absorber `cleanup` attaches.
           if (error) {
             claimWritableError(error);
-            absorbPendingWritableError(writable);
             settle({
               code: 'stream_write_error',
               cause: normalizeError(error),
@@ -3555,7 +3525,6 @@ async function streamResponseBody(
         // its own `error` event is still on the way - carrying this same object, which is
         // why it is claimed here rather than left for the absorber to report again.
         claimWritableError(error);
-        absorbPendingWritableError(writable);
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -3614,7 +3583,6 @@ async function streamResponseBody(
 
           if (writeFailure) {
             claimWritableError(writeFailure);
-            absorbPendingWritableError(writable);
             settle({
               code: 'stream_write_error',
               cause: normalizeError(writeFailure),
@@ -3637,7 +3605,6 @@ async function streamResponseBody(
         // stream is being torn down, and its own `error` event is still on the way -
         // after `settle` has removed every listener this function registered.
         claimWritableError(error);
-        absorbPendingWritableError(writable);
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -4284,12 +4251,7 @@ function normalizeCRL(
   // An empty array adds no CRL, so revocation would be off while `crl` is set - a cached
   // list emptied by a failed refresh, a filter that matched nothing. Refused as `''` is.
   if (Array.isArray(normalized) && normalized.length === 0) {
-    throw crlValidationError(
-      new Error(
-        'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block. ' +
-          'Leave `crl` unset for no revocation list.',
-      ),
-    );
+    throw noCRLBlockRefusal();
   }
 
   assertCRLParses(normalized);
@@ -4331,11 +4293,11 @@ function copyTrustList<V>(value: V, label: string): V {
 
 /**
  * A `crl` value with an array's entries each read once, into an array this adapter owns.
- * A hole is skipped, as `flatMap` skips it, and not kept as one (`copyArrayValue` keeps
- * it): the copy is the cache key `isSameCRLInput` compares entry by entry with `every`,
- * which passes over a hole, so a later list with a CRL at that index would match it.
- * An `ArrayBuffer` is read as a view of all its bytes (see `crlEntryView`); anything
- * else is left as given.
+ * A hole is refused as an `undefined` entry is, at the first one: skipped, a list whose
+ * newer CRL was lost to a hole would enforce only the CRLs around it, and the copy is the
+ * cache key `isSameCRLInput` compares entry by entry, so one kept as a hole would match a
+ * later list with a CRL at that index. An `ArrayBuffer` is read as a view of all its
+ * bytes (see `crlEntryView`); anything else is left as given.
  */
 function snapshotCRLInput(
   crl: TLSMaterial | TLSMaterial[],
@@ -4350,9 +4312,14 @@ function snapshotCRLInput(
     'NodeAdapter crl',
     MAX_COPIED_ARRAY_LENGTH,
   );
-  forEachOwnIndex(crl, length, (index) => {
-    entries.push(crlEntryView(crl[index]));
-  });
+  for (let index = 0; index < length; index++) {
+    const entry = readCopiedIndex(crl, index);
+    if (entry === undefined) {
+      throw crlKindRefusal(entry);
+    }
+
+    entries.push(crlEntryView(entry));
+  }
 
   return entries;
 }
@@ -4372,9 +4339,14 @@ function crlEntryView(entry: TLSMaterial): string | ArrayBufferView {
     return entry as string | ArrayBufferView;
   }
 
-  return readBinaryByteLength(entry) === 0
+  return arrayBufferBytes(entry as ArrayBuffer);
+}
+
+/** An `ArrayBuffer` as a `Uint8Array` over all its bytes, or an empty one when detached. */
+function arrayBufferBytes(buffer: ArrayBufferLike): Uint8Array {
+  return readBinaryByteLength(buffer) === 0
     ? new Uint8Array(0)
-    : new Uint8Array(entry as ArrayBuffer);
+    : new Uint8Array(buffer);
 }
 
 /** A normalized CRL entry this adapter owns: a string as is, a buffer copied. */
@@ -4545,11 +4517,7 @@ function normalizeCRLEntry(
   // here is everything `tls` will read, however the view reports its own size.
   const candidate: unknown = entry;
   if (!Buffer.isBuffer(candidate) && !ArrayBuffer.isView(candidate)) {
-    throw crlValidationError(
-      new TypeError(
-        `NodeAdapter crl must be a string, binary data such as a Buffer, or an array of them (got ${describeValue(candidate)})`,
-      ),
-    );
+    throw crlKindRefusal(candidate);
   }
   const bytes = viewBytesOf(candidate);
 
@@ -4604,9 +4572,9 @@ function normalizeCRLEntry(
 }
 
 /**
- * The errors {@link splitCRLString} itself raised for a malformed bundle, so `send()` can
- * tell its own validation refusal from a throw out of caller code that `normalizeCRL`
- * runs - an array element's getter, a `Proxy` trap - which stays retryable.
+ * The errors this adapter raised refusing a `crl` value, so `send()` can tell its own
+ * validation refusal from a throw out of caller code that `normalizeCRL` runs - an array
+ * element's getter, a `Proxy` trap - which stays retryable.
  */
 const crlValidationErrors = new WeakSet<Error>();
 
@@ -4614,6 +4582,25 @@ const crlValidationErrors = new WeakSet<Error>();
 function crlValidationError(error: Error): Error {
   crlValidationErrors.add(error);
   return error;
+}
+
+/** The refusal of a `crl` value that holds no CRL at all: `''`, whitespace or `[]`. */
+function noCRLBlockRefusal(): Error {
+  return crlValidationError(
+    new Error(
+      'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block. ' +
+        'Leave `crl` unset for no revocation list.',
+    ),
+  );
+}
+
+/** The refusal of a `crl` value, or an entry of one, that is no string or binary data. */
+function crlKindRefusal(candidate: unknown): Error {
+  return crlValidationError(
+    new TypeError(
+      `NodeAdapter crl must be a string, binary data such as a Buffer, or an array of them (got ${describeValue(candidate)})`,
+    ),
+  );
 }
 
 function splitCRLString(withBOM: string): string | string[] {
@@ -4659,30 +4646,24 @@ function splitCRLString(withBOM: string): string | string[] {
   //
   // So refuse anything that is not a complete block or whitespace.
   if (RESIDUE_OUTSIDE_PEM_BLOCKS.test(residue)) {
-    const error = new Error(
-      'NodeAdapter: the `crl` value contains content outside any complete ' +
-        '-----BEGIN/END X509 CRL----- block. Only PEM CRL blocks separated ' +
-        'by whitespace are accepted, because a truncated CRL and a line of ' +
-        'commentary are indistinguishable — accepting the second would mean ' +
-        'silently dropping the first and enforcing an incomplete revocation ' +
-        'set. Common causes: a partial download, a clipped or mistyped ' +
-        'delimiter, or decoded text from `openssl ... -text`, which must be ' +
-        'stripped before the bundle is passed here.',
+    throw crlValidationError(
+      new Error(
+        'NodeAdapter: the `crl` value contains content outside any complete ' +
+          '-----BEGIN/END X509 CRL----- block. Only PEM CRL blocks separated ' +
+          'by whitespace are accepted, because a truncated CRL and a line of ' +
+          'commentary are indistinguishable — accepting the second would mean ' +
+          'silently dropping the first and enforcing an incomplete revocation ' +
+          'set. Common causes: a partial download, a clipped or mistyped ' +
+          'delimiter, or decoded text from `openssl ... -text`, which must be ' +
+          'stripped before the bundle is passed here.',
+      ),
     );
-
-    crlValidationErrors.add(error);
-    throw error;
   }
 
   // Nothing at all, or only whitespace: Node's `tls` fails to parse that on every HTTPS
   // request, so it is refused here like any other value it cannot read.
   if (blocks.length === 0) {
-    throw crlValidationError(
-      new Error(
-        'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block. ' +
-          'Leave `crl` unset for no revocation list.',
-      ),
-    );
+    throw noCRLBlockRefusal();
   }
 
   return blocks.length > 1 ? blocks : crl;
@@ -5394,10 +5375,7 @@ function tlsMaterial(value: TLSMaterial, name: string): string | Buffer {
   if (ArrayBuffer.isView(value)) {
     bytes = viewBytesOf(value);
   } else if (arrayBufferKindOf(value) !== undefined) {
-    bytes =
-      readBinaryByteLength(value) === 0
-        ? new Uint8Array(0)
-        : new Uint8Array(value);
+    bytes = arrayBufferBytes(value);
   } else {
     throw optionRefusal(
       `NodeAdapter ${name} must be PEM text or bytes (got ${describeTLSMaterial(value)})`,

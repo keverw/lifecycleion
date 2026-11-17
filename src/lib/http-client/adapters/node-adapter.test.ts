@@ -10083,6 +10083,26 @@ describe('NodeAdapter — crl option (normalization)', () => {
     expect(captured).toEqual([fixtures.crlRevoked, fixtures.unrelatedCRL]);
   });
 
+  test('a hole in a crl list is refused as an undefined entry is, wherever it falls', () => {
+    // Skipped, `[old, <hole>]` would enforce the stale CRL alone where `[old, new]`
+    // revokes the server's certificate.
+    const refusal =
+      'NodeAdapter crl must be a string, binary data such as a Buffer, or an array of them (got undefined)';
+    const trailing: string[] = [fixtures.crlEmpty];
+    trailing.length = 2;
+    const leading: string[] = [];
+    leading[1] = fixtures.crlRevoked;
+
+    expect(() => new NodeAdapter({ crl: trailing })).toThrow(refusal);
+    expect(() => new NodeAdapter({ crl: leading })).toThrow(refusal);
+    expect(
+      () =>
+        new NodeAdapter({
+          crl: [fixtures.crlEmpty, undefined as unknown as string],
+        }),
+    ).toThrow(refusal);
+  });
+
   test('a string with no CRL armour at all is refused', async () => {
     // Refused here rather than passed through for Node to reject with
     // ERR_CRYPTO_OPERATION_FAILED, so the message names the actual problem.
@@ -11059,6 +11079,38 @@ test('a caller throw while a refreshed CRL is normalized stays retryable and unt
         NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
       ),
     ).toBe(false);
+    expect(requestSpy).not.toHaveBeenCalled();
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
+test('a refreshed CRL list with a hole is refused as configuration, not retried', async () => {
+  const fixtures = getRevocationFixtures();
+  const config: NodeAdapterConfig = { crl: fixtures.crlEmpty };
+  const adapter = new NodeAdapter(config);
+  const requestSpy = spyOn(https, 'request');
+  let attempts = 0;
+  const holey: string[] = [fixtures.crlEmpty];
+  holey.length = 2;
+  config.crl = holey;
+
+  try {
+    const builder = new HTTPClient({ adapter })
+      .get('https://crl.test/api')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 })
+      .onAttemptEnd(() => {
+        attempts++;
+      });
+
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(attempts).toBe(1);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.cause?.message).toBe(
+      'NodeAdapter crl must be a string, binary data such as a Buffer, or an array of them (got undefined)',
+    );
     expect(requestSpy).not.toHaveBeenCalled();
   } finally {
     requestSpy.mockRestore();

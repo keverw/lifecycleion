@@ -294,14 +294,49 @@ export const STREAM_FAILURE_SETTLED_LISTENER_KEY = Symbol.for(
 );
 
 /**
+ * How long an upload may make no progress after the response arrived before it is torn
+ * down. See `NodeAdapter`'s `watchForStalledUpload`.
+ *
+ * Progress here is coarse: `writeRequestBodyChunked` reports once per accepted
+ * `REQUEST_BODY_CHUNK_SIZE` chunk, once its write callback has run, so a receiver that
+ * has answered and then goes quiet for a moment - busy with what it already has, or a TCP
+ * window that closed while it works - reports nothing for the whole pause. Anything
+ * shorter than a pause like that cuts a body the server was still reading, which is the
+ * failure this watchdog exists to avoid, not to cause; at one second a two-second pause
+ * would truncate an 8 MiB upload at 6.8 MiB and hand the caller the early status as a
+ * clean success.
+ *
+ * Five seconds is past any such pause on a connection that is still alive. What is left
+ * is a bound rather than a promise: a receiver that stops reading for longer than this
+ * while still intending to read gets a truncated body, and the far more common shape - a
+ * proxy that has answered and will never read again - costs one idle socket for five to
+ * ten seconds, as the watchdog checks in five-second windows - longer where the runtime
+ * reports a late chunk accepted, which counts as progress and starts the window again (Bun
+ * does for a large body, and Node over TLS) - instead of one held to that server's timeout.
+ */
+export const UPLOAD_STALL_GRACE_MS = 5_000;
+
+/**
+ * How many whole {@link UPLOAD_STALL_GRACE_MS} windows with nothing being uploaded
+ * NodeAdapter reads and drops the bytes behind an answered `205` for before it lets the
+ * connection go, however steadily they arrive: fifteen seconds from the answer when there
+ * is no upload, and up to twenty from an upload's end, as a window counts only once it
+ * began with the upload done. A quiet window lets it go sooner. The bytes are ones the
+ * status says are not there, so this is room for a server that sends a short stray body
+ * slowly, not for one that streams.
+ */
+export const STRAY_205_DRAIN_WINDOWS = 3;
+
+/**
  * How long the body writer may wait on its *source* after the response arrived before
  * that is called a stall. `NodeAdapter`'s stall watchdog gives a writer parked on a
  * `Blob.stream()` read this long, and `HTTPClient`'s wait on an attempt's upload counts
  * a reported source wait as activity for no longer than this.
  *
- * Separate from the adapter's socket grace because the two waits mean different things:
- * a socket that accepted nothing for five seconds has a receiver that stopped, while a
- * `Blob.stream()` read that has not answered in five seconds has a slow disk under it.
+ * Separate from {@link UPLOAD_STALL_GRACE_MS}, the socket grace, because the two waits
+ * mean different things: a socket that accepted nothing for five seconds has a receiver
+ * that stopped, while a `Blob.stream()` read that has not answered in five seconds has a
+ * slow disk under it.
  * A minute is past any read a live disk answers, and it is a bound rather than a promise
  * for the same reason the socket grace is: a source that never answers would otherwise
  * park the writer, the socket and `requestBodySettled` for the life of the process.
