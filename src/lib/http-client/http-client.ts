@@ -307,6 +307,22 @@ const BODY_DESCRIBING_HEADERS: ReadonlySet<string> = new Set([
   'content-location',
 ]);
 
+/** Each error code's message; an `adapter_error` with a named source has its own. */
+const ERROR_CODE_MESSAGES: Readonly<Record<HTTPClientError['code'], string>> = {
+  network_error: 'Network error',
+  timeout: 'Request timed out',
+  cancelled: 'Request was cancelled',
+  redirect_disabled: 'Redirect encountered while redirects are disabled',
+  redirect_loop: 'Redirect limit exceeded',
+  request_setup_error: 'Request setup failed',
+  adapter_error: 'Adapter error',
+  interceptor_error: 'Interceptor error',
+  stream_write_error: 'Response stream write failed',
+  stream_response_error: 'Response download stream failed',
+  stream_setup_error: 'Stream response setup failed',
+  response_too_large: 'Response body exceeded maxResponseBytes',
+};
+
 /** The `adapter_error` message when the caller's cookie jar threw on a response. */
 const COOKIE_JAR_FAILURE_MESSAGE =
   'Cookie jar failed to process response headers';
@@ -323,29 +339,45 @@ const ABANDONED_UPLOAD_MESSAGE =
  * (a class instance's prototype getters). `headers`, `effectiveRequestHeaders` and
  * `requestBodySettled` are read on their own before these.
  */
-const ADAPTER_RESPONSE_FIELDS = [
-  'status',
-  'body',
-  'wasRedirectDetected',
-  'detectedRedirectURL',
-  'isTransportError',
-  'isRetryable',
-  'wasDefinitelyNotSent',
-  'isStreamed',
-  'isStreamError',
-  'streamErrorCode',
-  'errorCause',
-] as const satisfies readonly (keyof AdapterResponse)[];
+const ADAPTER_RESPONSE_FIELD_KINDS = {
+  status: 'value',
+  body: 'value',
+  wasRedirectDetected: 'flag',
+  detectedRedirectURL: 'value',
+  isTransportError: 'flag',
+  isRetryable: 'flag',
+  wasDefinitelyNotSent: 'flag',
+  isStreamed: 'flag',
+  isStreamError: 'flag',
+  streamErrorCode: 'value',
+  errorCause: 'value',
+} as const satisfies {
+  // A field typed `boolean` must be a `'flag'`, and no other may be one.
+  readonly [K in keyof AdapterResponse]?: NonNullable<
+    AdapterResponse[K]
+  > extends boolean
+    ? 'flag'
+    : 'value';
+};
+
+type AdapterResponseField = keyof typeof ADAPTER_RESPONSE_FIELD_KINDS;
+
+const ADAPTER_RESPONSE_FIELDS = Object.keys(
+  ADAPTER_RESPONSE_FIELD_KINDS,
+) as readonly AdapterResponseField[];
+
+type AdapterResponseFlag = {
+  [
+    K in AdapterResponseField
+  ]: (typeof ADAPTER_RESPONSE_FIELD_KINDS)[K] extends 'flag' ? K : never;
+}[AdapterResponseField];
 
 /** The adapter-answer flags typed `boolean`. */
-const ADAPTER_RESPONSE_FLAGS = [
-  'wasRedirectDetected',
-  'isTransportError',
-  'isRetryable',
-  'wasDefinitelyNotSent',
-  'isStreamed',
-  'isStreamError',
-] as const satisfies readonly (keyof AdapterResponse)[];
+const ADAPTER_RESPONSE_FLAGS: readonly AdapterResponseFlag[] =
+  ADAPTER_RESPONSE_FIELDS.filter(
+    (field): field is AdapterResponseFlag =>
+      ADAPTER_RESPONSE_FIELD_KINDS[field] === 'flag',
+  );
 
 /** Status and headers of an answer whose reading then failed. */
 interface AnsweredResponse extends AdapterRedirectFields {
@@ -970,18 +1002,13 @@ export class BaseHTTPClient {
       // A cancel the builder held during setup came first, so its reason stands; the
       // signal can only have aborted after it, or the builder would have refused to hold it.
       const setupCancel = callbacks.getSetupCancel();
-      const error = this._makeError(
-        response,
-        requestID,
-        false,
-        undefined,
-        undefined,
-        setupCancel
+      const error = this._makeError(response, requestID, {
+        cancelReason: setupCancel
           ? setupCancel.reason
           : options.signal
             ? getSignalCancelReason(options.signal)
             : undefined,
-      );
+      });
       callbacks.setError(error);
       callbacks.setState('cancelled');
       callbacks.setResponse(response);
@@ -1306,13 +1333,12 @@ export class BaseHTTPClient {
             // `isBodyCopyFailure`).
             const isSetupError =
               isCallersOwnRefusal || isBodyCopyFailure(initialBodyCopy, error);
-            const normalizedError = this._makeError(
-              response,
-              requestID,
-              false,
-              isSetupError ? 'request_setup_error' : 'interceptor_error',
-              normalizeError(error),
-            );
+            const normalizedError = this._makeError(response, requestID, {
+              codeOverride: isSetupError
+                ? 'request_setup_error'
+                : 'interceptor_error',
+              cause: normalizeError(error),
+            });
 
             const failedObserverRequest =
               this._bestEffortAttemptRequestFromPending(
@@ -1369,14 +1395,9 @@ export class BaseHTTPClient {
             redirectHistory: [],
           });
 
-          const error = this._makeError(
-            cancelledResponse,
-            requestID,
-            false,
-            undefined,
-            undefined,
-            initialEnd.cancelReason,
-          );
+          const error = this._makeError(cancelledResponse, requestID, {
+            cancelReason: initialEnd.cancelReason,
+          });
           callbacks.setError(error);
           trackedCallbacks.setState('cancelled');
           callbacks.setResponse(cancelledResponse);
@@ -1877,13 +1898,14 @@ export class BaseHTTPClient {
             const redirectTargetURL = redirectRequest.requestURL;
             // The URL a request the interceptors returned is compared with to tell whether
             // they moved the hop to another origin: the target as it was before they ran,
-            // or `url` itself where they moved an `http:` target to `https:` on the same
-            // host and port, as the retry phase reads one (see `isExactHTTPSUpgrade`) - the
-            // safer choice is no third host, and must not cost the credential added for it.
-            // Read the same way wherever such a request is sent or reported.
-            const interceptedFromURL = (url: string): string =>
-              isExactHTTPSUpgrade(redirectTargetURL, url)
-                ? url
+            // or `interceptedURL` itself where they moved an `http:` target to `https:` on
+            // the same host and port, as the retry phase reads one (see
+            // `isExactHTTPSUpgrade`) - the safer choice is no third host, and must not cost
+            // the credential added for it. Read the same way wherever such a request is
+            // sent or reported.
+            const interceptedFromURL = (interceptedURL: string): string =>
+              isExactHTTPSUpgrade(redirectTargetURL, interceptedURL)
+                ? interceptedURL
                 : redirectTargetURL;
 
             // Run redirect-phase request interceptors so they can update headers
@@ -2285,21 +2307,13 @@ export class BaseHTTPClient {
         );
 
         const normalizedError = isCancelled
-          ? this._makeError(
-              response,
-              requestID,
-              false,
-              undefined,
-              undefined,
-              getSignalCancelReason(cancelSignal),
-            )
-          : this._makeError(
-              response,
-              requestID,
-              false,
-              'request_setup_error',
-              normalizeError(error),
-            );
+          ? this._makeError(response, requestID, {
+              cancelReason: getSignalCancelReason(cancelSignal),
+            })
+          : this._makeError(response, requestID, {
+              codeOverride: 'request_setup_error',
+              cause: normalizeError(error),
+            });
 
         callbacks.setAttemptCount(completedAttemptCount);
         callbacks.setNextRetryDelayMS(null);
@@ -2386,19 +2400,18 @@ export class BaseHTTPClient {
       callbacks.setResponse(finalResponse);
 
       if (response.isFailed) {
-        const error = this._makeError(
-          response,
-          requestID,
+        const error = this._makeError(response, requestID, {
           isRetriesExhausted,
           // Set for adapter_error, interceptor_error, redirect_loop, etc.; otherwise network_error.
           // Streamed-body failures after headers also terminate here, but preserve
           // their real HTTP status on the response object.
-          errorCode ??
+          codeOverride:
+            errorCode ??
             (response.isStreamError ? 'stream_write_error' : undefined),
-          adapterCause,
+          cause: adapterCause,
           cancelReason,
-          errorMessage,
-        );
+          adapterErrorMessage: errorMessage,
+        });
 
         callbacks.setError(error);
         callbacks.setNextRetryDelayMS(null);
@@ -2635,10 +2648,10 @@ export class BaseHTTPClient {
     initialURL: string;
     /** See the declaration in `_execute`: stamped on every upload-progress report. */
     uploadActivity: UploadActivity;
-    /** First attempt number for this dispatch (continues from previous hops). Defaults to 1. */
-    startAttemptNumber?: number;
+    /** First attempt number for this dispatch (continues from previous hops). */
+    startAttemptNumber: number;
     /** Accumulated redirect history — passed to interceptor context. */
-    redirectHistory?: string[];
+    redirectHistory: string[];
     /** When dispatching a redirect hop, carries the hop number and redirect info for callbacks and observer phases. */
     hopContext?: { hopNumber: number; redirect: RedirectHopInfo };
     /**
@@ -2708,7 +2721,7 @@ export class BaseHTTPClient {
       initialURL,
       hopContext,
     } = params;
-    const startAttempt = params.startAttemptNumber ?? 1;
+    const startAttempt = params.startAttemptNumber;
     // Attempt numbers count every adapter dispatch, including redirect hops. Keep the
     // retry ceiling in that same global numbering space: on a hop beginning at attempt
     // 2 with one retry, the retry phase is attempt 2/3 followed by attempt 3/3, never
@@ -2717,7 +2730,7 @@ export class BaseHTTPClient {
       ? Math.max(policy.maxRetryAttempts - policy.errors.length, 0)
       : 0;
     const maxAttemptNumber = startAttempt + retriesRemaining;
-    const redirectHistory = params.redirectHistory ?? [];
+    const redirectHistory = params.redirectHistory;
     const cookieJar = params.cookieJar ?? null;
     /**
      * Whether the policy still has a retry left at this point.
@@ -3620,11 +3633,7 @@ export class BaseHTTPClient {
         }
         // Refused as the client's own error, as an invalid status is below, rather than
         // left to the engine's error for reading a field of `undefined`.
-        if (
-          (typeof rawAdapterResponse !== 'object' &&
-            typeof rawAdapterResponse !== 'function') ||
-          rawAdapterResponse === null
-        ) {
+        if (!isObjectLike(rawAdapterResponse)) {
           throw new TypeError(
             `HTTPClient adapter answered with no response object (got ${rawAdapterResponse === null ? 'null' : typeof rawAdapterResponse})`,
           );
@@ -4645,9 +4654,10 @@ export class BaseHTTPClient {
             const retryError = this._makeError(
               failedAttemptResponse,
               requestID,
-              false,
-              'adapter_error',
-              normalizeError(error),
+              {
+                codeOverride: 'adapter_error',
+                cause: normalizeError(error),
+              },
             );
 
             if (!isCancelOutcome()) {
@@ -5118,14 +5128,23 @@ export class BaseHTTPClient {
   private _makeError(
     response: HTTPResponse,
     requestID: string,
-    isRetriesExhausted: boolean,
-    codeOverride?: HTTPClientError['code'],
-    cause?: Error,
-    cancelReason?: string,
-    adapterErrorMessage?: string,
+    details: {
+      isRetriesExhausted?: boolean;
+      codeOverride?: HTTPClientError['code'];
+      cause?: Error;
+      cancelReason?: string;
+      /** Replaces the generic message of an `adapter_error`. */
+      adapterErrorMessage?: string;
+    } = {},
   ): HTTPClientError {
+    const {
+      isRetriesExhausted = false,
+      codeOverride,
+      cause,
+      cancelReason,
+      adapterErrorMessage,
+    } = details;
     let code: HTTPClientError['code'] = codeOverride ?? 'network_error';
-    let message = 'Network error';
 
     const isSpecificStreamCodePreserved =
       code === 'stream_write_error' ||
@@ -5135,29 +5154,14 @@ export class BaseHTTPClient {
 
     if (response.isCancelled) {
       code = 'cancelled';
-      message = 'Request was cancelled';
     } else if (response.isTimeout && !isSpecificStreamCodePreserved) {
       code = 'timeout';
-      message = 'Request timed out';
-    } else if (code === 'redirect_disabled') {
-      message = 'Redirect encountered while redirects are disabled';
-    } else if (code === 'redirect_loop') {
-      message = 'Redirect limit exceeded';
-    } else if (code === 'request_setup_error') {
-      message = 'Request setup failed';
-    } else if (code === 'adapter_error') {
-      message = adapterErrorMessage ?? 'Adapter error';
-    } else if (code === 'interceptor_error') {
-      message = 'Interceptor error';
-    } else if (code === 'stream_write_error') {
-      message = 'Response stream write failed';
-    } else if (code === 'stream_response_error') {
-      message = 'Response download stream failed';
-    } else if (code === 'stream_setup_error') {
-      message = 'Stream response setup failed';
-    } else if (code === 'response_too_large') {
-      message = 'Response body exceeded maxResponseBytes';
     }
+
+    const message =
+      code === 'adapter_error' && adapterErrorMessage !== undefined
+        ? adapterErrorMessage
+        : ERROR_CODE_MESSAGES[code];
 
     return {
       code,
@@ -5330,7 +5334,7 @@ export class BaseHTTPClient {
   private _withInternalRequestHeaders(
     headers: Record<string, string | string[]>,
     requestID: string,
-    attemptNumber?: number,
+    attemptNumber: number,
   ): Record<string, string | string[]> {
     // A copy, so the internal headers added below stay off the request the next attempt
     // starts from, its arrays too: the record goes on to observers and interceptors, and
@@ -5343,7 +5347,7 @@ export class BaseHTTPClient {
       nextHeaders[DEFAULT_REQUEST_ID_HEADER] = requestID;
     }
 
-    if (attemptNumber !== undefined && this._config.includeAttemptHeader) {
+    if (this._config.includeAttemptHeader) {
       nextHeaders[DEFAULT_REQUEST_ATTEMPT_HEADER] = String(attemptNumber);
     }
 
@@ -5357,7 +5361,7 @@ export class BaseHTTPClient {
       requestID: string;
       timeout: number;
       maxResponseBytes: number;
-      attemptNumber?: number;
+      attemptNumber: number;
       cookieJar?: CookieJar | null;
     },
   ): HeldAttemptRequest {
