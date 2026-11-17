@@ -377,12 +377,14 @@ Redirect-phase observers see that hop's outcome.
 Before following a redirect or retrying, the client waits for a reported upload outcome.
 A redirect whose next hop sends no body - a `303`, or a `301`/`302` that rewrote a `POST`
 to `GET` - follows without waiting, since nothing goes out beside the upload, and the
-answered hop's upload, if it is still going, is torn down as it is followed, as a
-browser's redirect ends it. The final response's `requestBodySettled` then resolves with
-an Error whose message is `Request body upload ended: a redirect was followed` and whose
-`cause` is the upload's failure as the client reports one (the adapter's own error is on
-that one's `cause`), so it is told from a cancel or a transport failure: the
-server answered without the rest of the body, and the request itself succeeded.
+answered hop's upload, unless it is known to have finished, is torn down as it is
+followed, as a browser's redirect ends it. When that ends the upload as an abort, the
+final response's `requestBodySettled` resolves with an Error whose message is `Request
+body upload ended: a redirect was followed` and whose `cause` is the upload's failure as
+the client reports one (the adapter's own error is on that one's `cause`), so it is told
+from a cancel. An upload that ended in a failure of its own, such as a reset, reports
+that failure. In both cases the server answered without the rest of the body, and the
+request itself succeeded.
 Cancellation ends the wait. The request's `timeout` bounds inactivity during this wait,
 including silence since dispatch. Upload-progress reports restart that inactivity clock:
 the client hands an adapter an `onUploadProgress` for every request with a body to watch

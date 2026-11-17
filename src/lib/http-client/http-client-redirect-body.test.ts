@@ -200,3 +200,46 @@ test.each([
     expect(hopHeaders['content-language'] !== undefined).toBe(isKept);
   },
 );
+
+test('a 303 answered mid-upload tears the upload down and names the redirect', async () => {
+  // The server answers before reading the body, so the upload is still going when the
+  // redirect is followed.
+  const server = createServer((request, response) => {
+    if (request.url === '/upload') {
+      response.writeHead(303, { location: '/next', 'content-length': '0' });
+      response.end();
+      return;
+    }
+    request.resume();
+    response.end('ok');
+  });
+  try {
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Expected a TCP server address');
+    }
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      followRedirects: true,
+      timeout: 5000,
+    });
+    // Far more than the socket buffers hold, so it cannot finish unread.
+    const response = await client
+      .post(`http://127.0.0.1:${address.port}/upload`)
+      .body(new Uint8Array(32 * 1024 * 1024))
+      .send();
+    const outcome = await response.requestBodySettled;
+
+    expect(response.status).toBe(200);
+    expect(outcome?.message).toBe(
+      'Request body upload ended: a redirect was followed',
+    );
+    expect((outcome?.cause as Error).name).toBe('AbortError');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

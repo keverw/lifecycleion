@@ -2194,20 +2194,23 @@ export class BaseHTTPClient {
               sanitizedRedirectRequest.body,
             );
             if (hopUpload !== undefined && !isBodyResent) {
-              // An upload already over - the server read the body and then answered -
-              // has nothing to tear down, and its attempt's signal is left alone.
-              if (!(await isSettledByNextTask(hopUpload))) {
+              // Followed at once, with no wait. An upload known to be over - the
+              // server read the body and then answered - has nothing to tear down, and
+              // its attempt's signal is left alone; one not yet known to be over is
+              // torn down, which ends nothing for one that has just finished.
+              if (!settledUploadOutcomes.has(hopUpload)) {
                 attemptResult.abortAttempt?.();
-                // The failure the teardown leaves names it, so the final response's
-                // `requestBodySettled` is told from a cancel or a transport failure.
+                // The abort the teardown leaves names it, so the final response's
+                // `requestBodySettled` is told from a cancel. Any other failure - a reset
+                // that came first - is the upload's own and is left as it is.
                 if (latestUpload.outcome === hopUpload) {
                   latestUpload.outcome = hopUpload.then((failure) =>
-                    failure === undefined
-                      ? undefined
-                      : new Error(
+                    failure !== undefined && isAbortError(failure)
+                      ? new Error(
                           'Request body upload ended: a redirect was followed',
                           { cause: failure },
-                        ),
+                        )
+                      : failure,
                   );
                 }
               }
@@ -6306,21 +6309,11 @@ function withRequestBodySettled<T>(
 }
 
 /**
- * Whether `outcome` - a promise this client owns, which never rejects - has settled by
- * the next task: one already settled answers within the microtasks before it, so `true`
- * means the upload is over, and `false` that it is still going.
+ * The upload outcomes this client adopted that have settled, recorded as each settles; see
+ * `adoptRequestBodySettled`. Read without waiting, so a redirect whose upload has just
+ * finished may not be in it yet, which is answered as an upload still going.
  */
-function isSettledByNextTask(
-  outcome: Promise<Error | undefined>,
-): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(false), 0);
-    void outcome.then(() => {
-      clearTimeout(timer);
-      resolve(true);
-    });
-  });
-}
+const settledUploadOutcomes = new WeakSet<Promise<Error | undefined>>();
 
 /**
  * Adopt whatever an adapter put on `requestBodySettled` onto a promise this client owns.
@@ -6348,10 +6341,12 @@ function adoptRequestBodySettled(
   // that the upload completed - with `undefined`, or the `null` a plain-JS adapter may
   // use for "no error": a rejection is always a failure, so a rejection reason of
   // `undefined` is normalized to an Error like any other reason.
-  return pending.then(
+  const outcome = pending.then(
     ({ value }) => (isNullish(value) ? undefined : stableUploadError(value)),
     (error: unknown) => stableUploadError(error),
   );
+  void outcome.then(() => settledUploadOutcomes.add(outcome));
+  return outcome;
 }
 
 /** The fields an upload Error's wrapper copies from it; see `stableUploadError`. */

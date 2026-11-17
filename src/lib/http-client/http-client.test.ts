@@ -1062,6 +1062,10 @@ describe('HTTPClient — basic HTTP methods', () => {
       let hop = 0;
       const signals: AbortSignal[] = [];
       const nextHop: AdapterRequest[] = [];
+      // A timer queued as the first hop answers: the next hop goes out before it runs,
+      // so the client waited on no timer.
+      let hasTimerRun = false;
+      let hasTimerRunBeforeNextHop: boolean | undefined;
 
       const adapter: HTTPAdapter = {
         getType: () => 'node',
@@ -1070,6 +1074,10 @@ describe('HTTPClient — basic HTTP methods', () => {
           signals.push(request.signal as AbortSignal);
 
           if (hop === 1) {
+            setTimeout(() => {
+              hasTimerRun = true;
+            }, 0);
+
             return Promise.resolve({
               status,
               headers: { location: '/next' },
@@ -1078,13 +1086,18 @@ describe('HTTPClient — basic HTTP methods', () => {
               // the request at the timeout.
               requestBodySettled: new Promise((resolve) => {
                 request.signal?.addEventListener('abort', () =>
-                  resolve(new Error('Request aborted')),
+                  resolve(
+                    Object.assign(new Error('Request aborted'), {
+                      name: 'AbortError',
+                    }),
+                  ),
                 );
               }),
             });
           }
 
           nextHop.push(request);
+          hasTimerRunBeforeNextHop = hasTimerRun;
 
           return Promise.resolve({ status: 200, headers: {}, body: null });
         },
@@ -1103,6 +1116,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       expect(response.status).toBe(200);
       expect(response.isTimeout).toBe(false);
       expect(hop).toBe(2);
+      expect(hasTimerRunBeforeNextHop).toBe(false);
       expect(nextHop[0].method).toBe('GET');
       expect(nextHop[0].body ?? null).toBeNull();
       expect(signals[0].aborted).toBe(true);
@@ -1115,6 +1129,49 @@ describe('HTTPClient — basic HTTP methods', () => {
       expect((outcome?.cause as Error).message).toBe('Request aborted');
     },
   );
+
+  test('an upload a redirect tears down that ends in a failure of its own keeps it', async () => {
+    // The upload ends in a reset rather than the teardown's abort - a reset that won the
+    // race with it - so the failure is the upload's own and is reported as it is.
+    let hop = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        hop++;
+        const answer: AdapterResponse =
+          hop === 1
+            ? {
+                status: 303,
+                headers: { location: '/next' },
+                body: null,
+                requestBodySettled: new Promise((resolve) => {
+                  request.signal?.addEventListener('abort', () =>
+                    resolve(
+                      Object.assign(new Error('socket hang up'), {
+                        code: 'ECONNRESET',
+                      }),
+                    ),
+                  );
+                }),
+              }
+            : { status: 200, headers: {}, body: null };
+        return Promise.resolve(answer);
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    const outcome = await response.requestBodySettled;
+    expect(response.status).toBe(200);
+    expect(outcome?.message).toBe('socket hang up');
+  });
 
   test("a 303 after the hop's upload settled leaves that attempt's signal alone", async () => {
     // The server read the whole body and then answered: there is no upload to tear down.
