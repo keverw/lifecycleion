@@ -170,6 +170,12 @@ const NEXT_VALUE = new RegExp(
   'i',
 );
 
+/** A month name as a whole word, at the start of a comma piece. */
+const MONTH_WORD = new RegExp(
+  `^[ \\t]*(?:${[...LONG_MONTH_NAMES, ...SHORT_MONTH_NAMES].join('|')})(?![a-z])`,
+  'i',
+);
+
 /**
  * How long a `Retry-After` value asks the client to wait, in milliseconds from `now` (an
  * epoch time), or `undefined` for a value that is neither form RFC 9110 defines: a whole
@@ -209,7 +215,11 @@ export function parseRetryAfterMS(
   const first = trimHTTPWhitespace(pieces[0]);
 
   if (/^\d+$/.test(first)) {
-    return Number(first) * 1000;
+    // A day before a comma and a month (`16, Nov 2026 ...`) is no number of seconds:
+    // no value of its own begins with a month name, so this is one date, unread.
+    return pieces.length > 1 && MONTH_WORD.test(pieces[1])
+      ? undefined
+      : Number(first) * 1000;
   }
 
   // Rejoined as it was written, so the date read is the text the server sent. The most

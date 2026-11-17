@@ -1,4 +1,5 @@
 import { readUnknownMember } from '../../internal/read-member';
+import { reportCallbackError } from '../../safe-handle-callback';
 import type { AdapterRequest } from '../types';
 
 /**
@@ -33,10 +34,15 @@ export function readHiddenRequestListener<
   return typeof listener === 'function' ? (listener as Listener) : undefined;
 }
 
+/** The listeners whose throw has been reported; see `notifyHiddenRequestListener`. */
+const reportedListeners = new WeakSet<object>();
+
 /**
  * Tells `listener` `args`. One that throws - one a caller driving the adapter directly
- * put on its request - is ignored: what it is told is a hint to the client, and its
- * failure must not fail the adapter work that told it.
+ * put on its request - does not fail the adapter work that told it, as what it is told is
+ * a hint to the client. Its first throw is reported (see `reportCallbackError`), so a
+ * listener that failed partway is not silent; later ones are not, as one told of every
+ * source wait would report each.
  */
 export function notifyHiddenRequestListener<Args extends unknown[]>(
   listener: ((...args: Args) => void) | undefined,
@@ -48,7 +54,10 @@ export function notifyHiddenRequestListener<Args extends unknown[]>(
 
   try {
     Reflect.apply(listener, undefined, args);
-  } catch {
-    // See above.
+  } catch (error) {
+    if (!reportedListeners.has(listener)) {
+      reportedListeners.add(listener);
+      reportCallbackError('hidden request listener', error);
+    }
   }
 }

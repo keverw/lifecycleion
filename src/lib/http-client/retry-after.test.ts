@@ -183,6 +183,9 @@ describe('parseRetryAfterMS', () => {
     'Sun Nov  8 11:00:30 2026, UTC +0100',
     'Sun Nov  8 07:00:30 2026, America/New_York',
     'Sun Nov  8 12:00:30 2026, retry later',
+    // A day first, then a comma and a month, with no day name: no number of seconds.
+    '8, Nov 2026 12:00:30 GMT',
+    '08, November 2026 12:00:30 GMT',
   ])('%p is unreadable', (value) => {
     expect(parseRetryAfterMS(value, NOW)).toBeUndefined();
   });

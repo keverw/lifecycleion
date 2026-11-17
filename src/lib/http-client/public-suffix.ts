@@ -1,3 +1,4 @@
+import { isNullish } from '../internal/is-nullish';
 import { isPlainRecord } from './internal/plain-record';
 import { copyArrayValue } from '../internal/array-copy';
 import { describeValue } from '../internal/describe-value';
@@ -390,10 +391,9 @@ export class PublicSuffixResolver {
       // Walked by offset, and a candidate looked up only once it is no longer than the
       // longest added suffix, so a host of many labels costs time in its length, not its
       // length squared.
-      const bundledLength =
-        bundled.publicSuffix === null || bundled.publicSuffix === undefined
-          ? 0
-          : labelCountOf(bundled.publicSuffix);
+      const bundledLength = isNullish(bundled.publicSuffix)
+        ? 0
+        : labelCountOf(bundled.publicSuffix);
       let labelCount = labelCountOf(normalized);
       let previous = -1;
       let start = 0;

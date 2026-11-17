@@ -181,7 +181,9 @@ function topLevelQueryKey(wirePair: string): string {
  * straight here - it is a name `qs` will encode, not one to decode.
  */
 function topLevelKeyOf(key: string): string {
-  // A key that opens with a bracket (`[x]=1`) is read by `qs` as the name inside it.
+  // A key that opens with a bracket (`[x]=1`) is read by `qs` as the name inside it. A
+  // bare `[]` is left as it is: `qs` numbers it by the pairs around it (`[]=1&[]=2` is
+  // `0` and `1`, `[][a]=1&[]=2` both `0`), so it matches no `.params()` key.
   if (key.startsWith('[')) {
     const close = key.indexOf(']');
     return close > 1 ? key.slice(1, close) : key;
