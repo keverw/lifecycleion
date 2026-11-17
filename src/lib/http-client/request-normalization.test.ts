@@ -1,3 +1,4 @@
+import { raceSentinel } from '../internal/race-sentinel-test-utils';
 import {
   afterAll,
   beforeAll,
@@ -8968,7 +8969,7 @@ test('a decode failure after the raw body ended reaches a pending stream setup',
     // Settled when decoding failed, not once the factory was done: waiting on the
     // factory, the answer would come after this timer, which is set before the
     // factory's own, as timers run in the order they come due.
-    const factoryDone = sleep(2_000).then(() => 'factory done' as const);
+    const factoryDone = raceSentinel(2_000, 'factory done');
     const builder = client.get('/').streamResponse(async () => {
       await new Promise((resolve) => setTimeout(resolve, 2_000));
       return new Writable({
@@ -13889,7 +13890,7 @@ test('an adapter that honors its signal is not held by the abort grace', async (
   // as long as the grace set before the request: timers run in order, so this holds on a
   // runner whose timers run late, too.
   const beforeGrace = <T>(sending: Promise<T>): Promise<T | 'held'> =>
-    Promise.race([sending, sleep(1000).then(() => 'held' as const)]);
+    Promise.race([sending, raceSentinel(1000, 'held')]);
 
   const timedOut = await beforeGrace(client.get('/slow').timeout(50).send());
   expect(timedOut !== 'held' && timedOut.isTimeout).toBe(true);

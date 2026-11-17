@@ -1,5 +1,5 @@
+import { raceSentinel } from '../../internal/race-sentinel-test-utils';
 import { hostileRejections } from '../../internal/hostile-promise-test-utils';
-import { sleep } from '../../sleep';
 import { describe, expect, test, beforeAll, afterAll, spyOn } from 'bun:test';
 import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -11836,7 +11836,7 @@ test('a 205 whose bytes pass the limit is answered at once, and its connection l
     const loaded: number[] = [];
     // Held to the next window, the connection would close after this timer: it is set
     // before the window's own, and timers run in the order they come due.
-    const nextWindow = sleep(5_000).then(() => 'next window' as const);
+    const nextWindow = raceSentinel(5_000, 'next window');
     const response = await new NodeAdapter().send({
       requestURL: `http://127.0.0.1:${port}/`,
       method: 'GET',
@@ -13329,7 +13329,7 @@ test('a 205 with no length held open after its upload lets its connection go aft
     const startedAt = performance.now();
     // Held until the connection is let go, the answer would come after this timer: it is
     // set before the quiet window's own, and timers run in the order they come due.
-    const quietWindow = sleep(5_000).then(() => 'quiet window' as const);
+    const quietWindow = raceSentinel(5_000, 'quiet window');
     const response = await Promise.race([
       new NodeAdapter().send({
         requestURL: `http://127.0.0.1:${raw.port}/`,

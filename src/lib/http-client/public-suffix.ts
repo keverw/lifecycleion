@@ -211,13 +211,37 @@ export class PublicSuffixResolver {
     this.longestAddedLength = longestAddedLength;
     this.removed = new Set(removed);
 
+    // Each added suffix and every name above it looked up among the removals, by the
+    // first index each removal is at: time in the lists' total length, not their product.
+    const removedIndexes = new Map<string, number>();
+    for (const [removeIndex, removedSuffix] of removed.entries()) {
+      if (!removedIndexes.has(removedSuffix)) {
+        removedIndexes.set(removedSuffix, removeIndex);
+      }
+    }
+
     for (const [addIndex, suffix] of added.entries()) {
-      for (const [removeIndex, removedSuffix] of removed.entries()) {
-        if (suffix === removedSuffix || suffix.endsWith(`.${removedSuffix}`)) {
-          throw new TypeError(
-            `publicSuffixes.add[${String(addIndex)}] is, or is beneath, publicSuffixes.remove[${String(removeIndex)}]; shared cookies conflict with tenant isolation`,
-          );
+      // The removal listed first, of all those it is or is beneath.
+      let conflict: number | undefined;
+      let start = 0;
+      while (true) {
+        const index = removedIndexes.get(suffix.slice(start));
+        if (
+          index !== undefined &&
+          (conflict === undefined || index < conflict)
+        ) {
+          conflict = index;
         }
+        const dot = suffix.indexOf('.', start);
+        if (dot === -1) {
+          break;
+        }
+        start = dot + 1;
+      }
+      if (conflict !== undefined) {
+        throw new TypeError(
+          `publicSuffixes.add[${String(addIndex)}] is, or is beneath, publicSuffixes.remove[${String(conflict)}]; shared cookies conflict with tenant isolation`,
+        );
       }
     }
   }
@@ -366,16 +390,11 @@ export class PublicSuffixResolver {
       // Walked by offset, and a candidate looked up only once it is no longer than the
       // longest added suffix, so a host of many labels costs time in its length, not its
       // length squared.
-      const bundledLength = bundled.publicSuffix?.split('.').length ?? 0;
-      // Counted by its dots, without an array of its labels.
-      let labelCount = 1;
-      for (
-        let dot = normalized.indexOf('.');
-        dot !== -1;
-        dot = normalized.indexOf('.', dot + 1)
-      ) {
-        labelCount++;
-      }
+      const bundledLength =
+        bundled.publicSuffix === null || bundled.publicSuffix === undefined
+          ? 0
+          : labelCountOf(bundled.publicSuffix);
+      let labelCount = labelCountOf(normalized);
       let previous = -1;
       let start = 0;
       while (labelCount >= bundledLength) {
@@ -411,6 +430,19 @@ export class PublicSuffixResolver {
     // cookies are kept and a domain clear of `example.com` reaches it.
     return bundled.domain ?? normalized;
   }
+}
+
+/** How many labels `name` has, by its dots, without an array of them. */
+function labelCountOf(name: string): number {
+  let count = 1;
+  for (
+    let dot = name.indexOf('.');
+    dot !== -1;
+    dot = name.indexOf('.', dot + 1)
+  ) {
+    count++;
+  }
+  return count;
 }
 
 /**

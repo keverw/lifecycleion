@@ -1,3 +1,4 @@
+import { raceSentinel } from '../internal/race-sentinel-test-utils';
 import {
   afterEach,
   afterAll,
@@ -49,7 +50,6 @@ import type {
   WritableLike,
 } from './types';
 import { hostileRejections } from '../internal/hostile-promise-test-utils';
-import { sleep } from '../sleep';
 
 let server: TestServer;
 const originalFetch = globalThis.fetch;
@@ -584,7 +584,7 @@ describe('HTTPClient — basic HTTP methods', () => {
         new HTTPClient({ adapter, baseURL: 'http://example.test' })
           .get('/x')
           .send(),
-        sleep(200).then(() => 'hung' as const),
+        raceSentinel(200, 'hung'),
       ]);
 
       expect(outcome).not.toBe('hung');
@@ -614,7 +614,7 @@ describe('HTTPClient — basic HTTP methods', () => {
 
       const outcome = await Promise.race([
         client.get('/x').send(),
-        sleep(200).then(() => 'hung' as const),
+        raceSentinel(200, 'hung'),
       ]);
 
       expect(outcome).not.toBe('hung');
@@ -644,7 +644,7 @@ describe('HTTPClient — basic HTTP methods', () => {
         .send<{ ok: boolean }>();
       const settled = await Promise.race([
         response.requestBodySettled,
-        sleep(200).then(() => 'hung' as const),
+        raceSentinel(200, 'hung'),
       ]);
 
       expect(settled).toBeInstanceOf(Error);
@@ -1272,7 +1272,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       // A wait given a fresh bound on entry would answer 2000ms in, after this timer: it
       // is set before the request, and timers run in the order they come due, so a
       // runner whose timers fire late cannot reorder them.
-      const freshBound = sleep(2000).then(() => 'fresh bound' as const);
+      const freshBound = raceSentinel(2000, 'fresh bound');
       const startedAt = Date.now();
       const response = await Promise.race([
         new HTTPClient({
@@ -6979,7 +6979,7 @@ describe('HTTPClient — builder state', () => {
     // delay's own, and timers run in the order they come due.
     const res = await Promise.race([
       builder.send(),
-      sleep(5000).then(() => 'held for the delay' as const),
+      raceSentinel(5000, 'held for the delay'),
     ]);
 
     expect(res).not.toBe('held for the delay');
@@ -7407,7 +7407,7 @@ describe('HTTPClient — builder state', () => {
     // delay's own, and timers run in the order they come due.
     const res = await Promise.race([
       builder.send(),
-      sleep(5000).then(() => 'held for the delay' as const),
+      raceSentinel(5000, 'held for the delay'),
     ]);
 
     expect(res).not.toBe('held for the delay');

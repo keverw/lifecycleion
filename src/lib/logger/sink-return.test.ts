@@ -1,3 +1,4 @@
+import { raceSentinel } from '../internal/race-sentinel-test-utils';
 import { expect, spyOn, test } from 'bun:test';
 import { Logger } from './index';
 import type { LoggerDiagnostic, LogSink } from './types';
@@ -191,7 +192,7 @@ test('close adopts a hostile native promise and reads its method once', async ()
   });
   const result = await Promise.race([
     logger.close().then(() => 'closed'),
-    sleep(50).then(() => 'timeout'),
+    raceSentinel(50, 'timeout'),
   ]);
   expect(result).toBe('closed');
   expect(closeReads).toBe(1);
@@ -802,7 +803,7 @@ for (const mode of ['return', 'await'] as const) {
     expect(
       await Promise.race([
         closing.then(() => 'closed'),
-        sleep(50).then(() => 'hung'),
+        raceSentinel(50, 'hung'),
       ]),
     ).toBe('closed');
     await sleep(0);
@@ -888,7 +889,7 @@ test('a returned then getter cannot join its own logger close', async () => {
   expect(
     await Promise.race([
       closing.then(() => 'closed'),
-      sleep(50).then(() => 'hung'),
+      raceSentinel(50, 'hung'),
     ]),
   ).toBe('closed');
   await sleep(0);

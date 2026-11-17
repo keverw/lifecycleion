@@ -38,6 +38,36 @@ describe('PublicSuffixResolver', () => {
     );
   });
 
+  test('an added suffix at or beneath several removals names the first of them listed', () => {
+    expect(
+      () =>
+        new PublicSuffixResolver({
+          add: ['ok.test', 'x.a.b'],
+          remove: ['q.test', 'x.a.b', 'b', 'a.b'],
+        }),
+    ).toThrow(
+      new TypeError(
+        'publicSuffixes.add[1] is, or is beneath, publicSuffixes.remove[1]; shared cookies conflict with tenant isolation',
+      ),
+    );
+  });
+
+  test('long add and remove lists are checked against each other in linear time', () => {
+    const add = Array.from(
+      { length: 20_000 },
+      (_, index) => `a${String(index)}.corp.test`,
+    );
+    const remove = Array.from(
+      { length: 20_000 },
+      (_, index) => `r${String(index)}.other.test`,
+    );
+    const started = performance.now();
+
+    expect(() => new PublicSuffixResolver({ add, remove })).not.toThrow();
+    // Each pair compared, this takes over ten seconds; by lookup, under a tenth of one.
+    expect(performance.now() - started).toBeLessThan(3000);
+  }, 30_000);
+
   test('a list of added suffixes too long to spread as arguments is accepted', () => {
     // Two million: past what Bun's call stack takes as spread arguments.
     const names = Array.from(

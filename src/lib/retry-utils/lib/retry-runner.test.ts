@@ -1,3 +1,4 @@
+import { raceSentinel } from '../../internal/race-sentinel-test-utils';
 import { describe, expect, test } from 'bun:test';
 import {
   ATTEMPT_HANDLED,
@@ -1124,7 +1125,7 @@ describe('RetryRunner - an operation returning a hostile rejected promise', () =
       try {
         const outcome = await Promise.race([
           runner.run(true).then(() => 'settled'),
-          sleep(200).then(() => 'hung'),
+          raceSentinel(200, 'hung'),
         ]);
 
         expect(outcome).toBe('settled');
@@ -1166,7 +1167,7 @@ test('operation thenable uses its first then read and observes rejection', async
   try {
     const outcome = await Promise.race([
       runner.run(true).then(() => 'settled'),
-      sleep(200).then(() => 'hung'),
+      raceSentinel(200, 'hung'),
     ]);
     expect(outcome).toBe('settled');
     expect(reads).toBe(attempts);
@@ -1408,7 +1409,7 @@ for (const failingDependency of ['random', 'timer'] as const) {
       Math.random = random;
       globalThis.setTimeout = timer;
     }
-    const result = await Promise.race([pending, sleep(100).then(() => 'hung')]);
+    const result = await Promise.race([pending, raceSentinel(100, 'hung')]);
     expect(result).toEqual({
       status: 'attempt_fatal',
       code: 'unexpected_error',
@@ -1571,7 +1572,7 @@ for (const replacement of ['forceTry', 'cancel'] as const) {
       }
       const outcome = await Promise.race([
         completion,
-        sleep(100).then(() => 'hung'),
+        raceSentinel(100, 'hung'),
       ]);
       expect(outcome).toEqual(
         replacement === 'forceTry'

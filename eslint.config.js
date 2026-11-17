@@ -9,7 +9,9 @@ import checkFile from 'eslint-plugin-check-file';
 
 /**
  * `no-restricted-syntax` entries refusing each method in `methods` (a regex alternation)
- * however it is named: `x.trim`, `x['trim']`, ``x[`trim`]`` and `const { trim } = x`.
+ * however it is named: `x.trim`, `x['trim']`, ``x[`trim`]``, and destructured as
+ * `const { trim } = x`, `const { 'trim': t } = x`, `const { ['trim']: t } = x` or
+ * ``const { [`trim`]: t } = x``.
  */
 function restrictedMembers(methods, message) {
   const names = `/^(${methods})$/`;
@@ -19,6 +21,8 @@ function restrictedMembers(methods, message) {
     `MemberExpression[computed=true][property.type='Literal'][property.value=${names}]`,
     `MemberExpression[computed=true][property.type='TemplateLiteral'][property.expressions.length=0][property.quasis.0.value.cooked=${names}]`,
     `ObjectPattern > Property[computed=false][key.name=${names}]`,
+    `ObjectPattern > Property[key.type='Literal'][key.value=${names}]`,
+    `ObjectPattern > Property[computed=true][key.type='TemplateLiteral'][key.expressions.length=0][key.quasis.0.value.cooked=${names}]`,
   ].map((selector) => ({ selector, message }));
 }
 

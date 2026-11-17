@@ -1,3 +1,4 @@
+import { raceSentinel } from '../../internal/race-sentinel-test-utils';
 import { describe, expect, test, beforeEach } from 'bun:test';
 import vm from 'node:vm';
 import { MockAdapter } from './mock-adapter';
@@ -20,7 +21,6 @@ import type {
 } from '../types';
 import type { Cookie } from '../cookie-jar';
 import { hostileRejections } from '../../internal/hostile-promise-test-utils';
-import { sleep } from '../../sleep';
 
 function makeCookie(
   overrides: Partial<Cookie> & { name: string; value: string },
@@ -1701,7 +1701,7 @@ describe('MockAdapter.send() — low-level contract', () => {
     // Thrown before the delay completed: held for it, the answer would come after this
     // timer, which is set before the delay's own, as timers run in the order they come
     // due.
-    const delayDone = sleep(1000).then(() => 'delay done' as const);
+    const delayDone = raceSentinel(1000, 'delay done');
     setTimeout(() => controller.abort(), 30);
 
     const outcome = await Promise.race([
