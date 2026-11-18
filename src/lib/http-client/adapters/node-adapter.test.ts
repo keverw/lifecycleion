@@ -6108,7 +6108,10 @@ describe('NodeAdapter.send() — unit branches without server', () => {
   test.each([
     ['a synchronous', failedSink],
     // Failed before its first `await`, so before the adapter could have it.
-    ['an async (failed at once)', async () => Promise.resolve(failedSink())],
+    [
+      'an async (failed at once)',
+      async () => await Promise.resolve(failedSink()),
+    ],
     [
       'an async (failed before a microtask await)',
       async () => {

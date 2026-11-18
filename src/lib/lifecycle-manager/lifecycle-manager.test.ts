@@ -10617,9 +10617,17 @@ describe('LifecycleManager - Signal Integration', () => {
       });
 
       const component = new SlowStopComponent(logger, 'slow', 2000);
+      // The component's own graceful timeout aborts its stop's signal with a
+      // ComponentStopTimeoutError; each is counted.
       let gracefulTimeouts = 0;
-      component.onGracefulStopTimeout = () => {
-        gracefulTimeouts++;
+      const stop = component.stop.bind(component);
+      component.stop = (signal?: AbortSignal) => {
+        signal?.addEventListener('abort', () => {
+          if (signal.reason instanceof ComponentStopTimeoutError) {
+            gracefulTimeouts++;
+          }
+        });
+        return stop();
       };
       await lifecycle.registerComponent(component);
       await lifecycle.startAllComponents();
@@ -10646,9 +10654,17 @@ describe('LifecycleManager - Signal Integration', () => {
       });
 
       const component = new SlowStopComponent(logger, 'slow', 2000);
+      // The component's own graceful timeout aborts its stop's signal with a
+      // ComponentStopTimeoutError; each is counted.
       let gracefulTimeouts = 0;
-      component.onGracefulStopTimeout = () => {
-        gracefulTimeouts++;
+      const stop = component.stop.bind(component);
+      component.stop = (signal?: AbortSignal) => {
+        signal?.addEventListener('abort', () => {
+          if (signal.reason instanceof ComponentStopTimeoutError) {
+            gracefulTimeouts++;
+          }
+        });
+        return stop();
       };
       await lifecycle.registerComponent(component);
       await lifecycle.startAllComponents();
@@ -10710,9 +10726,17 @@ describe('LifecycleManager - Signal Integration', () => {
       const lifecycle = new LifecycleManager({ logger });
 
       const component = new SlowStopComponent(logger, 'slow', 5000);
+      // The component's own graceful timeout aborts its stop's signal with a
+      // ComponentStopTimeoutError; each is counted.
       let gracefulTimeouts = 0;
-      component.onGracefulStopTimeout = () => {
-        gracefulTimeouts++;
+      const stop = component.stop.bind(component);
+      component.stop = (signal?: AbortSignal) => {
+        signal?.addEventListener('abort', () => {
+          if (signal.reason instanceof ComponentStopTimeoutError) {
+            gracefulTimeouts++;
+          }
+        });
+        return stop();
       };
       await lifecycle.registerComponent(component);
       await lifecycle.startAllComponents();

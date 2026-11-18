@@ -64,7 +64,7 @@ test('FetchAdapter driven directly refuses as the client does, in the same words
 
 /** The message `send` rejects with, or `undefined` when it resolves. */
 async function refusalOf(send: Promise<unknown>): Promise<string | undefined> {
-  return send.then(
+  return await send.then(
     () => undefined,
     (error: unknown) => (error as Error).message,
   );
