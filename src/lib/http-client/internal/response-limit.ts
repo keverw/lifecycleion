@@ -17,6 +17,14 @@ import { headerListTokens } from './header-utils';
 import { contentCodings } from './content-codings';
 
 /**
+ * What an adapter's body read answers for a body over `maxResponseBytes` - FetchAdapter's
+ * past the limit as it is read, XHRAdapter's for text whose UTF-8 bytes are over it,
+ * measured before it is encoded (see {@link isAnsweredBodyOverLimit}) - for the adapter
+ * to answer with {@link tooLargeAnswer}.
+ */
+export const RESPONSE_TOO_LARGE: unique symbol = Symbol('response too large');
+
+/**
  * The limit an adapter enforces for `request`: `maxResponseBytes`, or `Infinity` when it
  * is absent (`undefined` or `null`).
  *

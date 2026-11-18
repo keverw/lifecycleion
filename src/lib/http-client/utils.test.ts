@@ -1854,6 +1854,18 @@ describe('firstJoinedLocation', () => {
     expect(firstJoinedLocation('/a?x, , /a?x')).toBe('/a?x');
     expect(firstJoinedLocation('/a#f, , /a#f')).toBe('/a#f');
     expect(firstJoinedLocation('/a?x, /a?x, , /a?x')).toBe('/a?x');
+    // A query holding `, , `, sent twice, keeps it.
+    expect(firstJoinedLocation('/search?q=a, , b, /search?q=a, , b')).toBe(
+      '/search?q=a, , b',
+    );
+  });
+
+  test('a repeat of HTTP whitespace alone is empty, as every adapter reads one', () => {
+    expect(firstJoinedLocation('/a,  , /b')).toBe('/a');
+    expect(firstJoinedLocation('/a, \t')).toBe('/a');
+    expect(firstJoinedLocation('/a,  ')).toBe('/a');
+    expect(firstJoinedLocation(',  , /b')).toBe('/b');
+    expect(firstJoinedLocation(',  ')).toBe('');
   });
 
   test('a long run of empty repeats is dropped, wherever it ends', () => {

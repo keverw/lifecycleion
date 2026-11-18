@@ -9,7 +9,8 @@ import {
   requestHeaderPairs,
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
-import { concatChunks } from '../internal/concat-chunks';
+import { BodyBytes } from '../internal/body-bytes';
+import { isHighSurrogate } from '../internal/utf8-length';
 import {
   isSignalAborted,
   isSignalAbortedQuietly,
@@ -35,6 +36,7 @@ import {
 } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
+  RESPONSE_TOO_LARGE,
   hasResponseBody,
   isIdentityContentEncoding,
   tooLargeAnswer,
@@ -55,9 +57,8 @@ import { toError as normalizeError } from '../../to-error';
 // Members of a body or a thrown error read guarded, for the same reason adapter marker
 // reads are.
 import { readUnknownMember } from '../../internal/read-member';
+import { callQuietly } from '../../internal/call-quietly';
 import { adoptPromise } from '../../internal/adopt-promise';
-import { noop, observeRejection } from '../../internal/promise-reactions';
-import { isObjectLike } from '../../internal/is-object-like';
 import {
   readBinaryByteLength,
   isUint8ArrayValue,
@@ -470,9 +471,6 @@ export class FetchAdapter implements HTTPAdapter {
 /** How many empty chunks a body read takes between the waits that let timers run. */
 const EMPTY_CHUNKS_PER_YIELD = 64;
 
-/** What {@link readResponseBody} answers for a body over `maxResponseBytes`. */
-const RESPONSE_TOO_LARGE = Symbol('response too large');
-
 /** What a body read waiting on its next chunk is answered with by an abort. */
 const ABORTED_READ = Symbol('aborted read');
 
@@ -680,10 +678,69 @@ async function readBodyWithin(
   isTextChunkAccepted: boolean,
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
-  const chunks: Uint8Array[] = [];
+  // Copied in as read (see `BodyBytes`).
+  const body = new BodyBytes(maxResponseBytes);
   let loadedBytes = 0;
   let emptyChunks = 0;
   let encoder: TextEncoder | undefined;
+  // A string chunk's last UTF-16 unit, held for the next chunk when it is the first half
+  // of a surrogate pair, so a pair split across two is encoded as the one character it is,
+  // as the text joined and then encoded would be. One left with nothing after it to pair
+  // with is encoded alone, as U+FFFD.
+  let heldUnit = '';
+  const encodeText = (text: string): Uint8Array =>
+    (encoder ??= new TextEncoder()).encode(text);
+
+  /**
+   * Counts and keeps one chunk: `RESPONSE_TOO_LARGE` once the body passes the limit, the
+   * body let go.
+   */
+  const take = async (
+    chunk: unknown,
+  ): Promise<typeof RESPONSE_TOO_LARGE | undefined> => {
+    const byteLength = isUint8ArrayValue(chunk)
+      ? readBinaryByteLength(chunk)
+      : null;
+
+    if (byteLength === null) {
+      letGo();
+      throw new TypeError(
+        'FetchAdapter response body yielded a chunk that is not a Uint8Array',
+      );
+    }
+
+    // No bytes to count or keep, and no limit they could reach: a stream that keeps
+    // answering with them from microtasks alone would otherwise starve every timer, the
+    // attempt timeout's included. `setTimeout`, as this adapter also runs in browsers -
+    // once every so many of them, counted over the whole body so bytes between them do
+    // not put the wait off, as a browser holds a timer set from a timer's callback to at
+    // least 4 ms past a few levels, which a wait after each one would add up. Chunks
+    // with bytes need none: the limit bounds them (a body with no limit is read whole, not
+    // here), and ones that all come from microtasks are a body already in memory, whose
+    // read is work as parsing it would be. A wait on every so many of a real download's
+    // would hold it on a timer a hidden tab throttles to a second or more.
+    if (byteLength === 0) {
+      emptyChunks += 1;
+
+      if (emptyChunks % EMPTY_CHUNKS_PER_YIELD === 0) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      }
+
+      return undefined;
+    }
+
+    loadedBytes += byteLength;
+
+    if (loadedBytes > maxResponseBytes) {
+      letGo();
+      return RESPONSE_TOO_LARGE;
+    }
+
+    body.append(chunk as Uint8Array, byteLength);
+    return undefined;
+  };
 
   // The body is let go of on an abort, not only when a chunk next arrives: a polyfill's
   // stream need not heed the signal, and would otherwise hold its socket with a read
@@ -782,64 +839,43 @@ async function readBodyWithin(
 
       throwIfAborted();
 
-      const chunk =
-        isTextChunkAccepted && typeof value === 'string'
-          ? (encoder ??= new TextEncoder()).encode(value)
-          : value;
-      const byteLength = isUint8ArrayValue(chunk)
-        ? readBinaryByteLength(chunk)
-        : null;
+      let chunks: unknown[];
 
-      if (byteLength === null) {
-        letGo();
-        throw new TypeError(
-          'FetchAdapter response body yielded a chunk that is not a Uint8Array',
-        );
-      }
+      if (isTextChunkAccepted && typeof value === 'string') {
+        let text = heldUnit + value;
+        heldUnit = '';
 
-      // No bytes to count or keep, and no limit they could reach: a stream that keeps
-      // answering with them from microtasks alone would otherwise starve every timer, the
-      // attempt timeout's included. `setTimeout`, as this adapter also runs in browsers -
-      // once every so many of them, counted over the whole body so bytes between them do
-      // not put the wait off, as a browser holds a timer set from a timer's callback to at
-      // least 4 ms past a few levels, which a wait after each one would add up. Chunks
-      // with bytes need none: the limit bounds them (a body with no limit is read whole, not
-      // here), and ones that all come from microtasks are a body already in memory, whose
-      // read is work as parsing it would be. A wait on every so many of a real download's
-      // would hold it on a timer a hidden tab throttles to a second or more.
-      if (byteLength === 0) {
-        emptyChunks += 1;
-
-        if (emptyChunks % EMPTY_CHUNKS_PER_YIELD === 0) {
-          await new Promise<void>((resolve) => {
-            setTimeout(resolve, 0);
-          });
+        if (isHighSurrogate(text.charCodeAt(text.length - 1))) {
+          heldUnit = text.slice(-1);
+          text = text.slice(0, -1);
         }
 
-        continue;
+        chunks = [encodeText(text)];
+      } else if (heldUnit !== '') {
+        chunks = [encodeText(heldUnit), value];
+        heldUnit = '';
+      } else {
+        chunks = [value];
       }
 
-      loadedBytes += byteLength;
-
-      if (loadedBytes > maxResponseBytes) {
-        letGo();
-        return RESPONSE_TOO_LARGE;
+      for (const chunk of chunks) {
+        if ((await take(chunk)) === RESPONSE_TOO_LARGE) {
+          return RESPONSE_TOO_LARGE;
+        }
       }
+    }
 
-      // Copied as it is read, as the Fetch standard's body read copies it: a source may
-      // hand over the same buffer again with the next chunk's bytes. A string's bytes are
-      // the encoder's own.
-      chunks.push(
-        chunk === value
-          ? copyChunk(chunk as Uint8Array, byteLength)
-          : (chunk as Uint8Array),
-      );
+    if (
+      heldUnit !== '' &&
+      (await take(encodeText(heldUnit))) === RESPONSE_TOO_LARGE
+    ) {
+      return RESPONSE_TOO_LARGE;
     }
 
     // A cancel can end the stream as if finished; what it read is not the whole body.
     throwIfAborted();
 
-    return concatChunks(chunks, loadedBytes);
+    return body.bytes();
   } catch (error) {
     // Every failure lets the body go - an iterator that failed or answered with what is
     // no step included - so a polyfill's stream does not hold its socket.
@@ -854,27 +890,9 @@ async function readBodyWithin(
   }
 }
 
-/**
- * A plain `Uint8Array` of `chunk`'s `byteLength` bytes, owned, copied through its internal
- * slots.
- */
-function copyChunk(chunk: Uint8Array, byteLength: number): Uint8Array {
-  const copy = new Uint8Array(byteLength);
-  copy.set(chunk);
-  return copy;
-}
-
 /** Asks an iterator left early to `return()`, without waiting on it or minding a refusal. */
 function endIteratorQuietly(iterator: AsyncIterator<unknown>): void {
-  try {
-    const returned: unknown = iterator.return?.();
-
-    if (isObjectLike(returned)) {
-      observeRejection(adoptPromise(returned), noop);
-    }
-  } catch {
-    // An iterator whose `return` throws has nothing more to let go of.
-  }
+  callQuietly(readUnknownMember(iterator, 'return'), iterator);
 }
 
 /**
@@ -887,27 +905,16 @@ function cancelBodyQuietly(body: unknown): void {
     return;
   }
 
-  try {
-    const cancel = readUnknownMember(body, 'cancel');
-    if (typeof cancel === 'function') {
-      const cancelled: unknown = cancel.call(body);
-      // The body is being discarded; a stream that fails to cancel has nothing to add.
-      // Any thenable is followed - another realm's promise, a polyfill's - so a
-      // rejection is never left unhandled.
-      if (isObjectLike(cancelled)) {
-        observeRejection(adoptPromise(cancelled), noop);
-      }
-      return;
-    }
+  // The body is being discarded: a locked or already-cancelled stream, or a cancel that
+  // throws or rejects, has nothing to add (see `callQuietly`).
+  const cancel = readUnknownMember(body, 'cancel');
 
-    const destroy = readUnknownMember(body, 'destroy');
-    if (typeof destroy === 'function') {
-      destroy.call(body);
-    }
-  } catch {
-    // A locked or already-cancelled stream, or a cancel that throws: nothing left to
-    // release.
+  if (typeof cancel === 'function') {
+    callQuietly(cancel, body);
+    return;
   }
+
+  callQuietly(readUnknownMember(body, 'destroy'), body);
 }
 
 /**

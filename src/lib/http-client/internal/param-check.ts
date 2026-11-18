@@ -1,4 +1,5 @@
 import { isPlainRecord } from './plain-record';
+import { isHighSurrogate } from './utf8-length';
 
 /**
  * How deep a `.params()` value may nest: a top-level value is at depth 0, and an entry
@@ -342,10 +343,9 @@ function reportedParamPath(path: readonly string[]): string {
     }
 
     const lastUnit = key.charCodeAt(REPORTED_KEY_LENGTH - 1);
-    const end =
-      lastUnit >= 0xd800 && lastUnit <= 0xdbff
-        ? REPORTED_KEY_LENGTH - 1
-        : REPORTED_KEY_LENGTH;
+    const end = isHighSurrogate(lastUnit)
+      ? REPORTED_KEY_LENGTH - 1
+      : REPORTED_KEY_LENGTH;
     return `${key.slice(0, end)}...`;
   };
   const omitted = path.length - REPORTED_LEADING_KEYS - REPORTED_TRAILING_KEYS;

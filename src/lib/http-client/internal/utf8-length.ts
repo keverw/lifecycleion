@@ -24,8 +24,7 @@ export function countUTF8ByteLength(text: string): number {
     } else if (unit < 0x800) {
       bytes += 2;
     } else if (
-      unit >= 0xd800 &&
-      unit <= 0xdbff &&
+      isHighSurrogate(unit) &&
       index + 1 < text.length &&
       (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00
     ) {
@@ -37,4 +36,9 @@ export function countUTF8ByteLength(text: string): number {
   }
 
   return bytes;
+}
+
+/** Whether a UTF-16 unit is the first half of a surrogate pair. */
+export function isHighSurrogate(unit: number): boolean {
+  return unit >= 0xd800 && unit <= 0xdbff;
 }

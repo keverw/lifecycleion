@@ -31,6 +31,7 @@ import {
   readAdapterRequestFields,
 } from '../internal/request-fields';
 import {
+  RESPONSE_TOO_LARGE,
   tooLargeAnswer,
   hasResponseBody,
   isAnsweredBodyOverLimit,
@@ -317,6 +318,9 @@ export class XHRAdapter implements HTTPAdapter {
       // retried as though nothing had been answered. Only an answer is kept: headers in,
       // with a status. A failure sets the state to done with the status already `0`.
       let answeredAtHeaders: AnsweredHeaders | undefined;
+      // Set once a status no server may send has ended the send (see
+      // `endOnMalformedStatus`).
+      let didEndOnMalformedStatus = false;
 
       /**
        * The URL of a redirect the browser followed, fixed as the send begins to end there
@@ -363,10 +367,17 @@ export class XHRAdapter implements HTTPAdapter {
        * `abortQuietly`).
        */
       const stopCancelledSend = (): void => {
+        const wasEndedOnStatus = didEndOnMalformedStatus;
+
         try {
           captureAnswer();
         } catch {
           // Nothing more was read to carry out.
+        }
+
+        // That read ended the send on a malformed status, the XHR stopped with it.
+        if (!wasEndedOnStatus && didEndOnMalformedStatus) {
+          return;
         }
 
         let isDone = false;
@@ -446,6 +457,8 @@ export class XHRAdapter implements HTTPAdapter {
           return false;
         }
 
+        didEndOnMalformedStatus = true;
+
         if (isSignalAbortedQuietly(signal)) {
           settleAborted(undefined);
         } else {
@@ -465,9 +478,16 @@ export class XHRAdapter implements HTTPAdapter {
         return true;
       };
 
-      /** The answer, read the first time there is one (see `takeAnswer`). */
+      /**
+       * The answer, read the first time there is one (see `takeAnswer`). Read no more once
+       * a malformed status ended the send, so its rule runs once.
+       */
       const captureAnswer = (): AnsweredHeaders | undefined => {
-        if (answeredAtHeaders === undefined && xhr.readyState >= 2) {
+        if (
+          answeredAtHeaders === undefined &&
+          !didEndOnMalformedStatus &&
+          xhr.readyState >= 2
+        ) {
           const status = xhr.status;
 
           if (status !== 0) {
@@ -1431,12 +1451,6 @@ interface AnsweredHeaders {
 
 /** What `readResponseBody` answers for a body an XHR handed over in no form it can read. */
 const RESPONSE_UNREADABLE = Symbol('response unreadable');
-
-/**
- * What `readResponseBody` answers for text whose UTF-8 bytes are over the limit, measured
- * before it is encoded (see `isAnsweredBodyOverLimit`), so it is not copied to be refused.
- */
-const RESPONSE_TOO_LARGE = Symbol('response too large');
 
 /**
  * The response for a redirect the browser followed on its own: `status: 0` with the

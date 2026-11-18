@@ -150,6 +150,7 @@ import type { CookieJar } from './cookie-jar';
 // original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember } from '../internal/read-member';
+import { callQuietly } from '../internal/call-quietly';
 import {
   hasResponseBody,
   isAnsweredBodyOverLimit,
@@ -192,11 +193,7 @@ import {
   adoptResult,
   UnreadableReturn,
 } from '../internal/adopt-promise';
-import {
-  attachIntrinsicReactions,
-  noop,
-  observeRejection,
-} from '../internal/promise-reactions';
+import { attachIntrinsicReactions } from '../internal/promise-reactions';
 import { isObjectLike } from '../internal/is-object-like';
 
 type RemoveFn = () => void;
@@ -4369,37 +4366,34 @@ export class BaseHTTPClient {
           return endCancelled(reportedSentRequest);
         }
 
-        // The cut stream an attempt whose factory started one ends as: the answer's headers
-        // had arrived and part of its body may be in the caller's sink, so a retry would
-        // open a second sink for the same request. Ended as the stream error a
-        // well-behaved adapter reports when a stream is cut, with the status the factory
-        // was announced. A cancel stays the cancel it is.
-        const endAsCutStream = () => {
+        // The attempt ended as a `stream_response_error` over an answer whose headers had
+        // arrived, with `status` and `headers`: not retried, whatever the status, as part
+        // of its body may already be delivered. With the upload's outcome and the headers
+        // the adapter recorded sending, as the stream error a tagged rejection carries
+        // reports them.
+        const endAsStreamError = (
+          status: number,
+          headers: Record<string, string | string[]>,
+          isStreamed: boolean,
+        ) => {
           const streamCause = normalizeError(error);
 
           emitAttemptEnd({
             willRetry: false,
-            ...(isRetryAvailable() &&
-            RETRYABLE_STATUS_CODES.has(streamFactoryStatus)
+            ...(isRetryAvailable() && RETRYABLE_STATUS_CODES.has(status)
               ? { retrySuppressedReason: 'stream_error' as const }
               : {}),
-            status: streamFactoryStatus,
+            status,
           });
 
-          // The upload's outcome and the headers the adapter recorded sending, as the
-          // stream error a tagged rejection carries reports them.
           return {
             adapterResponse: {
               ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-              status: streamFactoryStatus,
-              ...derivedRedirectFields(
-                sentRequest.requestURL,
-                streamFactoryStatus,
-                streamFactoryHeaders ?? {},
-              ),
-              headers: streamFactoryHeaders ?? {},
+              status,
+              ...derivedRedirectFields(sentRequest.requestURL, status, headers),
+              headers,
               body: null,
-              isStreamed: true,
+              ...(isStreamed ? { isStreamed: true } : {}),
               isStreamError: true,
               streamErrorCode: 'stream_response_error' as const,
               errorCause: streamCause,
@@ -4420,6 +4414,18 @@ export class BaseHTTPClient {
           };
         };
 
+        // The cut stream an attempt whose factory started one ends as: the answer's headers
+        // had arrived and part of its body may be in the caller's sink, so a retry would
+        // open a second sink for the same request. Ended as the stream error a
+        // well-behaved adapter reports when a stream is cut, with the status the factory
+        // was announced. A cancel stays the cancel it is.
+        const endAsCutStream = () =>
+          endAsStreamError(
+            streamFactoryStatus,
+            streamFactoryHeaders ?? {},
+            true,
+          );
+
         // An attempt given up on once its factory had started a stream - a sink still on
         // its way counts, as it may yet open - is that cut stream, not a timeout to retry.
         if (isAbandoned && didStartStream() && !isCancelOutcome()) {
@@ -4431,11 +4437,6 @@ export class BaseHTTPClient {
           // during the body read as `TypeError: terminated`, and requiring the name would
           // drop the tagged status and headers, letting a post-header failure reach the
           // generic network path as a retryable `status: 0`.
-          //
-          // Normalized once for the cause slots below, since the tag, not the name, is
-          // the gate, so it does not imply an `Error`.
-          const streamCause = normalizeError(error);
-
           if (isCancelOutcome()) {
             return endCancelled(
               sentRequestForObservedAdapterError(
@@ -4451,46 +4452,13 @@ export class BaseHTTPClient {
             isTimedOut = true;
           }
 
-          const fallbackStatus = abortedResponse?.status ?? 0;
-          const fallbackHeaders = abortedResponse?.headers ?? {};
-
-          emitAttemptEnd({
-            willRetry: false,
-            ...(isRetryAvailable() && RETRYABLE_STATUS_CODES.has(fallbackStatus)
-              ? { retrySuppressedReason: 'stream_error' as const }
-              : {}),
-            status: fallbackStatus,
-          });
-
-          return {
-            adapterResponse: {
-              ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-              status: fallbackStatus,
-              ...derivedRedirectFields(
-                sentRequest.requestURL,
-                fallbackStatus,
-                fallbackHeaders,
-              ),
-              headers: fallbackHeaders,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: streamCause,
-              effectiveRequestHeaders:
-                getEffectiveRequestHeadersFromError(error),
-            },
-            sentRequest: sentRequestForObservedAdapterError(
-              sentRequest,
-              error,
-              observedSentRequest,
-            ),
-            attemptCount: attemptNumber,
-            wasCancelled: false,
-            wasTimeout: isTimedOut,
-            isRetriesExhausted: false,
-            errorCode: 'stream_response_error',
-            adapterCause: streamCause,
-          };
+          // The tag, not the error's name, is the gate, so the cause is normalized, as it
+          // need not be an `Error`.
+          return endAsStreamError(
+            abortedResponse?.status ?? 0,
+            abortedResponse?.headers ?? {},
+            false,
+          );
         }
 
         // An `AbortError` the stream factory threw of its own - one from the controller it
@@ -6574,19 +6542,10 @@ function tearDownStreamFactoryAnswer(answer: object): StreamFactoryState {
     return 'pending';
   }
 
-  const destroy = readUnknownMember(answer, 'destroy');
-  if (typeof destroy === 'function') {
-    try {
-      const result: unknown = Reflect.apply(destroy, answer, []);
-      // An async `destroy` that rejects is contained as one that throws is: left alone,
-      // its rejection would be unhandled - fatal under Node's default.
-      if (isObjectLike(result)) {
-        observeRejection(adoptPromise(result), noop);
-      }
-    } catch {
-      // Best-effort cleanup only; the attempt's own outcome is what is reported.
-    }
-  }
+  // Best-effort cleanup only; the attempt's own outcome is what is reported. An async
+  // `destroy` that rejects is contained as one that throws is: left alone, its rejection
+  // would be unhandled - fatal under Node's default.
+  callQuietly(readUnknownMember(answer, 'destroy'), answer);
 
   return 'answered';
 }

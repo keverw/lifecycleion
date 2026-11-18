@@ -3575,6 +3575,48 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     expect(Array.from(response.body ?? [])).toEqual([1, 2, 3]);
   });
 
+  test('a surrogate pair split across two text chunks is read as the one character it is', async () => {
+    /** The body of an iterable yielding `chunks`, read under `maxResponseBytes`. */
+    async function read(chunks: unknown[], maxResponseBytes: number) {
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          type: 'basic',
+          headers: new Headers(),
+          body: {
+            *[Symbol.asyncIterator]() {
+              yield* chunks;
+            },
+          },
+          arrayBuffer: () => Promise.reject(new Error('not read whole')),
+        });
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes,
+      });
+
+      return response.streamErrorCode ?? [...(response.body ?? [])];
+    }
+
+    // U+1F600, four bytes, as joined text encodes it: not refused at four.
+    expect(await read(['\uD83D', '\uDE00'], 4)).toEqual([
+      0xf0, 0x9f, 0x98, 0x80,
+    ]);
+    expect(await read(['a\uD83D', '\uDE00b'], 100)).toEqual([
+      0x61, 0xf0, 0x9f, 0x98, 0x80, 0x62,
+    ]);
+    // A half with nothing to pair with is U+FFFD, as joined text encodes it: at the end,
+    // and before a chunk of bytes.
+    expect(await read(['a\uD83D'], 100)).toEqual([0x61, 0xef, 0xbf, 0xbd]);
+    expect(await read(['\uD83D', new Uint8Array([1])], 100)).toEqual([
+      0xef, 0xbf, 0xbd, 1,
+    ]);
+    expect(await read(['\uD83D', 'x'], 100)).toEqual([0xef, 0xbf, 0xbd, 0x78]);
+  });
+
   test('a body whose iterator fails is let go of', async () => {
     const shapes: Array<[string, () => AsyncIterator<unknown>]> = [
       [

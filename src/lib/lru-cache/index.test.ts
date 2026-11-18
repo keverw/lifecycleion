@@ -132,7 +132,55 @@ describe('LRUCache', () => {
   });
 
   describe('TTL expiration', () => {
-    test('a write scans the entries for expired ones only while some can expire', () => {
+    test('a write scans the entries for expired ones only once one may have expired', () => {
+      const originalNow = Date.now;
+      let currentTime = 1000;
+
+      try {
+        Date.now = () => currentTime;
+        const cache = new LRUCache<string, string>(1000, {
+          defaultTtl: 60_000,
+        });
+        const internal = cache as unknown as {
+          map: Map<string, unknown>;
+        };
+        const entries = internal.map.entries.bind(internal.map);
+        let scans = 0;
+        internal.map.entries = () => {
+          scans++;
+          return entries();
+        };
+
+        // Every entry still live: no scan.
+        for (let index = 0; index < 100; index++) {
+          cache.set(`key${index}`, 'value');
+        }
+
+        cache.set('short', 'value', 10);
+        cache.set('after', 'value');
+
+        expect(scans).toBe(0);
+
+        // Past the earliest expiry: one scan reclaims it, and none follows until the next.
+        currentTime += 11;
+        cache.set('next', 'value');
+        cache.set('next2', 'value');
+
+        expect(scans).toBe(1);
+        expect(cache.has('short')).toBe(false);
+        expect(cache.size).toBe(103);
+
+        currentTime += 61_000;
+        cache.set('last', 'value');
+
+        expect(scans).toBe(2);
+        expect(cache.size).toBe(1);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('a write in a cache holding no entry that can expire scans nothing', () => {
       const cache = new LRUCache<string, string>(1000);
       const internal = cache as unknown as {
         map: Map<string, unknown>;
@@ -149,12 +197,7 @@ describe('LRUCache', () => {
       }
 
       expect(scans).toBe(0);
-
-      cache.set('expiring', 'value', 60_000);
-      cache.set('after', 'value');
-
-      expect(scans).toBe(1);
-      expect(cache.size).toBe(102);
+      expect(cache.size).toBe(100);
     });
 
     test('should support manual cleanup of expired entries', () => {

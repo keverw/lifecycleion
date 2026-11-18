@@ -127,6 +127,9 @@ export class LRUCache<K, V> {
   private cleanupInterval = 60 * 1000; // Run cleanup once per minute at most
   private currentSize = 0; // Track current total size in bytes
   private expirableEntryCount = 0; // Track how many entries currently have expirations
+  // No live entry expires before this: a lower bound, so a write scans for expired entries
+  // only once one may have expired. Recomputed by every scan.
+  private earliestExpiry = Infinity;
   private sizeCalculator?: (value: V) => number; // Optional function to calculate item size
   private onChange?: (event: LRUCacheChangeEvent<K, V>) => void | Promise<void>;
   private onChangeReasons?: ReadonlySet<LRUCacheChangeReason>;
@@ -301,9 +304,10 @@ export class LRUCache<K, V> {
     const changeEvents = this.createLocalChangeQueue();
 
     // Reclaim expired entries before deciding whether this write is a fresh insert,
-    // an overwrite, or a skipped oversized write. A cache holding none that can expire has
-    // none to reclaim, so its writes do not scan every entry.
-    if (this.expirableEntryCount > 0) {
+    // an overwrite, or a skipped oversized write. Only once one may have expired (see
+    // `earliestExpiry`), so a cache whose entries are all still live - or that holds none
+    // that can expire - does not scan every entry on each write.
+    if (this.expirableEntryCount > 0 && Date.now() > this.earliestExpiry) {
       this.cleanupExpiredInternal(changeEvents);
     }
     const existingEntry = this.map.get(key);
@@ -347,6 +351,7 @@ export class LRUCache<K, V> {
 
     if (expires !== undefined) {
       this.expirableEntryCount++;
+      this.earliestExpiry = Math.min(this.earliestExpiry, expires);
     }
 
     // Record the write after state is updated so observers see the final value.
@@ -396,6 +401,7 @@ export class LRUCache<K, V> {
     this.map.clear();
     this.currentSize = 0;
     this.expirableEntryCount = 0;
+    this.earliestExpiry = Infinity;
     this.lastCleanup = Date.now();
 
     // Flush this operation's queued events after the cache has been reset.
@@ -436,14 +442,18 @@ export class LRUCache<K, V> {
   ): number {
     let removed = 0;
     const now = Date.now();
+    let earliestExpiry = Infinity;
 
     for (const [key, entry] of this.map.entries()) {
       if (entry.expires && now > entry.expires) {
         this.removeEntry(key, 'expired', changeEvents);
         removed++;
+      } else if (entry.expires !== undefined) {
+        earliestExpiry = Math.min(earliestExpiry, entry.expires);
       }
     }
 
+    this.earliestExpiry = earliestExpiry;
     this.lastCleanup = now;
 
     return removed;

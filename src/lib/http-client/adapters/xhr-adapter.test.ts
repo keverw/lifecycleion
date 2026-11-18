@@ -530,6 +530,32 @@ describe('XHRAdapter', () => {
     expect((failure as Error | null)?.name).toBe('AbortError');
   });
 
+  test('a cancel that reads a status no server may send stops the XHR once', async () => {
+    const controller = new AbortController();
+    const cancelled = new XHRAdapter().send({
+      requestURL: 'https://api.test/odd',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+    });
+    let aborts = 0;
+    // A shim's `abort()` that fires no event, and an answer it shows only to a read.
+    lastXHR.abort = () => {
+      aborts++;
+    };
+    lastXHR.readyState = 2;
+    lastXHR.status = 99;
+    controller.abort();
+
+    const failure = await cancelled.then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect((failure as Error | null)?.name).toBe('AbortError');
+    expect(aborts).toBe(1);
+  });
+
   test('a status no server may send, first read past the limit by an XHR that shows no state, ends the send the same way', async () => {
     // An XHR outside a browser that reports progress while its state still reads as
     // before the headers: the answer is first read past the limit, and held to the rule.

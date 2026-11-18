@@ -1691,6 +1691,79 @@ export class NodeAdapter implements HTTPAdapter {
           destroyRequestQuietly(req);
         };
 
+        /**
+         * Answers a request that got no readable response - a transport error, or a status
+         * line no server may send - with `status: 0` and `isTransportError`, a TLS
+         * certificate failure with a non-retryable `495`. Declared before the response
+         * handler that may call it, so no order of events finds it uninitialized.
+         */
+        const answerTransportError = (error: Error): void => {
+          // The body writer is over too, for the reason `reportWriteErrorAfterResponse`
+          // settles it: the request is failing and about to be torn down, and a writer
+          // parked inside `Blob.stream()`'s `read()` has no pending `req.write` to
+          // reject, so it never returns to run `endBodyWrite`. Nothing else would answer
+          // here - the stall watchdog is armed only from the response's `'close'`, which
+          // a request that never got a response does not reach - so
+          // `await response.requestBodySettled` would wait forever, and the client's own
+          // `settleUploadBeforeNextDispatch` would wait with it: a retryable `PUT` whose
+          // socket resets mid-upload would hang instead of retrying. First-call-wins, so
+          // a writer that does notice the teardown and reports its own `EPIPE` afterwards
+          // changes nothing.
+          //
+          // `isWritingBody` is deliberately left as it is: this answers the caller and does
+          // not claim the writer has stopped.
+          if (upload.settle !== null) {
+            settleBodyOutcome(error);
+          }
+
+          // TLS certificate errors → 495. This is non-standard but widely
+          // understood for client cert / server cert validation failures. We
+          // preserve the diagnostic 495 status, but still flag it as a transport
+          // failure so the client routes it through the failed/error path and
+          // never retries it.
+          if (isTLSCertificateError(error)) {
+            settleResponse({
+              status: 495,
+              isTransportError: true,
+              isRetryable: false,
+              headers: {},
+              body: null,
+              errorCause: error,
+            });
+            return;
+          }
+
+          // Only `wasDefinitelyNotSent` is claimed here, and only the transport
+          // error code can supply it. No `isRetryable: false` alongside: that flag
+          // blocks every method, so it would stop retrying an idempotent PUT after
+          // an ordinary socket error and override retryNonIdempotentMethods.
+          // Whether a partly-sent request may be replayed is the client's method
+          // rule to answer, and withholding the proof is what answers it.
+          //
+          // A body-byte count cannot supply it in either direction: an empty-body
+          // POST writes headers and nothing else, and the counter tracks bytes
+          // handed to the stream rather than bytes on the wire. The error code is
+          // also the only signal that behaves the same on Node and Bun, where
+          // `socket.bytesWritten` and `socket.connecting` are unreliable.
+          //
+          // Set only when proven, never as `false` — absence means "not known", so
+          // an explicit `false` would read as proof of delivery.
+          const wasDefinitelyNotSent = isPreConnectionError(
+            error,
+            dialedSocketPath !== undefined,
+          );
+
+          // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
+          settleResponse({
+            status: 0,
+            isTransportError: true,
+            ...(wasDefinitelyNotSent ? { wasDefinitelyNotSent: true } : {}),
+            headers: {},
+            body: null,
+            errorCause: error,
+          });
+        };
+
         const observeTaskFailure = (
           task: Promise<void>,
           onFailure: (error: unknown) => void,
@@ -2952,78 +3025,6 @@ export class NodeAdapter implements HTTPAdapter {
           failRequest(protocolSwitchRefusal());
         };
         req.on('upgrade', onSocketHandover);
-
-        /**
-         * Answers a request that got no readable response - a transport error, or a status
-         * line no server may send - with `status: 0` and `isTransportError`, a TLS
-         * certificate failure with a non-retryable `495`.
-         */
-        const answerTransportError = (error: Error): void => {
-          // The body writer is over too, for the reason `reportWriteErrorAfterResponse`
-          // settles it: the request is failing and about to be torn down, and a writer
-          // parked inside `Blob.stream()`'s `read()` has no pending `req.write` to
-          // reject, so it never returns to run `endBodyWrite`. Nothing else would answer
-          // here - the stall watchdog is armed only from the response's `'close'`, which
-          // a request that never got a response does not reach - so
-          // `await response.requestBodySettled` would wait forever, and the client's own
-          // `settleUploadBeforeNextDispatch` would wait with it: a retryable `PUT` whose
-          // socket resets mid-upload would hang instead of retrying. First-call-wins, so
-          // a writer that does notice the teardown and reports its own `EPIPE` afterwards
-          // changes nothing.
-          //
-          // `isWritingBody` is deliberately left as it is: this answers the caller and does
-          // not claim the writer has stopped.
-          if (upload.settle !== null) {
-            settleBodyOutcome(error);
-          }
-
-          // TLS certificate errors → 495. This is non-standard but widely
-          // understood for client cert / server cert validation failures. We
-          // preserve the diagnostic 495 status, but still flag it as a transport
-          // failure so the client routes it through the failed/error path and
-          // never retries it.
-          if (isTLSCertificateError(error)) {
-            settleResponse({
-              status: 495,
-              isTransportError: true,
-              isRetryable: false,
-              headers: {},
-              body: null,
-              errorCause: error,
-            });
-            return;
-          }
-
-          // Only `wasDefinitelyNotSent` is claimed here, and only the transport
-          // error code can supply it. No `isRetryable: false` alongside: that flag
-          // blocks every method, so it would stop retrying an idempotent PUT after
-          // an ordinary socket error and override retryNonIdempotentMethods.
-          // Whether a partly-sent request may be replayed is the client's method
-          // rule to answer, and withholding the proof is what answers it.
-          //
-          // A body-byte count cannot supply it in either direction: an empty-body
-          // POST writes headers and nothing else, and the counter tracks bytes
-          // handed to the stream rather than bytes on the wire. The error code is
-          // also the only signal that behaves the same on Node and Bun, where
-          // `socket.bytesWritten` and `socket.connecting` are unreliable.
-          //
-          // Set only when proven, never as `false` — absence means "not known", so
-          // an explicit `false` would read as proof of delivery.
-          const wasDefinitelyNotSent = isPreConnectionError(
-            error,
-            dialedSocketPath !== undefined,
-          );
-
-          // All other transport errors (ECONNREFUSED, ENOTFOUND, etc.) → status 0
-          settleResponse({
-            status: 0,
-            isTransportError: true,
-            ...(wasDefinitelyNotSent ? { wasDefinitelyNotSent: true } : {}),
-            headers: {},
-            body: null,
-            errorCause: error,
-          });
-        };
 
         // Network / transport errors (DNS failure, connection refused, cert errors)
         req.on('error', (error) => {

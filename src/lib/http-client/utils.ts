@@ -1123,7 +1123,8 @@ function hasXMLHttpRequestGlobal(): boolean {
  * are followed as one. A server percent-encodes the space in such a value. An empty
  * `Location` among them (`/a, `, `, /b`, `/a, , /b`) is dropped first, as browsers follow
  * the first that is not empty; one made of nothing else (`, `) is empty, as no
- * `Location` at all. One at the start or end is dropped even past a `?` or `#`, as a
+ * `Location` at all; one of HTTP whitespace alone is empty too, as every adapter reads a
+ * repeat. One at the start or end is dropped even past a `?` or `#`, as a
  * single value neither starts nor ends with a space; one between two others only before
  * the first `?` or `#`, so a query or fragment holding `, , `
  * (`/search?q=a, , b`) is kept whole, unless the value is one target repeated around it
@@ -1136,22 +1137,27 @@ export function firstJoinedLocation(value: string): string {
   let start = 0;
   let end = parts.length;
 
-  while (start < end && parts[start] === '') {
+  while (start < end && isEmptyHeaderValue(parts[start])) {
     start++;
   }
 
-  while (end > start && parts[end - 1] === '') {
+  while (end > start && isEmptyHeaderValue(parts[end - 1])) {
     end--;
   }
 
   const kept: string[] = [];
   let isInQuery = false;
+  let hasKeptEmpty = false;
 
   for (let index = start; index < end; index++) {
     const part = parts[index];
 
-    if (part === '' && !isInQuery) {
-      continue;
+    if (isEmptyHeaderValue(part)) {
+      if (!isInQuery) {
+        continue;
+      }
+
+      hasKeptEmpty = true;
     }
 
     kept.push(part);
@@ -1160,17 +1166,20 @@ export function firstJoinedLocation(value: string): string {
 
   const joined = kept.join(', ');
   // The repeated unit is split as any value is: `/a, /b` sent twice is `/a`. Looked for
-  // with every empty repeat dropped, so a target with a query sent twice around an empty
-  // one (`/a?x, , /a?x`) is still that target.
+  // in the value as kept, so a query holding `, , ` sent twice keeps it, and then with
+  // every empty repeat dropped, so a target with a query sent twice around an empty one
+  // (`/a?x, , /a?x`) is still that target.
   const candidate =
-    repeatedTarget(
-      joined.includes(', , ')
-        ? parts
+    repeatedTarget(joined) ??
+    (hasKeptEmpty
+      ? repeatedTarget(
+          parts
             .slice(start, end)
-            .filter((part) => part !== '')
-            .join(', ')
-        : joined,
-    ) ?? joined;
+            .filter((part) => !isEmptyHeaderValue(part))
+            .join(', '),
+        )
+      : undefined) ??
+    joined;
   const separator = candidate.search(
     /, (?:\/|\.\.?\/|\?|#|[a-z][a-z\d+.-]*:\/\/)/i,
   );
@@ -1216,32 +1225,21 @@ function repeatedTarget(value: string): string | undefined {
 }
 
 /**
- * Keeps the first value of a repeated `Location` in a lowercased header record, in place,
- * for an adapter whose transport joined the repeats as `a, b` (fetch, XHR). Its first
- * value that is not empty is kept, as browsers follow it and NodeAdapter keeps it,
- * rather than followed and reported as the one mangled URL `a,%20b`. See
- * {@link firstJoinedLocation} for where it splits: a single value with a raw space
- * (`/files/Smith, John.pdf`) is kept whole and percent-encoded when followed, as
- * NodeAdapter and browsers follow it.
- */
-export function keepFirstJoinedLocation(
-  headers: Record<string, string | string[]>,
-): void {
-  const location = headers['location'];
-
-  if (typeof location === 'string') {
-    headers['location'] = firstJoinedLocation(location);
-  }
-}
-
-/**
  * The first of a repeated header's values that is not empty or HTTP whitespace alone,
  * as browsers follow the first `Location` that is not empty, or `undefined` when none is.
  */
 export function firstNonEmptyValue(
   values: readonly string[],
 ): string | undefined {
-  return values.find((value) => trimHTTPWhitespace(value) !== '');
+  return values.find((value) => !isEmptyHeaderValue(value));
+}
+
+/**
+ * Whether a header value, or one repeat of a joined one, is empty or HTTP whitespace
+ * alone: the one test every reading of a repeated `Location` drops a repeat by.
+ */
+function isEmptyHeaderValue(value: string): boolean {
+  return trimHTTPWhitespace(value) === '';
 }
 
 /**
@@ -1280,7 +1278,16 @@ export function extractFetchHeaders(
     }
   }
 
-  keepFirstJoinedLocation(result);
+  // A `Location` fetch joined from repeats keeps its first value that is not empty, as
+  // browsers follow it, rather than being followed and reported as the one mangled URL
+  // `a,%20b`. See `firstJoinedLocation` for where it splits: a single value with a raw
+  // space (`/files/Smith, John.pdf`) is kept whole and percent-encoded when followed, as
+  // NodeAdapter and browsers follow it.
+  const location = result['location'];
+
+  if (typeof location === 'string') {
+    result['location'] = firstJoinedLocation(location);
+  }
 
   // Use getSetCookie() when available (Bun, Node 18.14+, modern browsers)
   if (typeof headers.getSetCookie === 'function') {
