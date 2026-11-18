@@ -48,8 +48,10 @@ Keep: the handling of a caller's signal from another realm or jsdom (`isSignalRe
 string fallbacks for "a test shim's XHR" and the `xmlhttprequest` npm package,
 `abortQuietly`'s cover for a shim's `abort()` that fires no event, the re-entrancy guards
 for "a shim" firing events from `load`, a shim's `lengthComputable` with a total of 0, and
-a shim `location` with no origin. Check each against React Native's XHR first; some of
-the re-entrancy guards may also keep event ordering safe, and those stay.
+a shim `location` with no origin, and the owed abort (`isInsideSend`, `isAbortOwed`,
+`readyStateQuietly`) that makes again, once `send()` returns, an `abort()` a shim ignored
+inside it. Check each against React Native's XHR first; some of the re-entrancy guards
+may also keep event ordering safe, and those stay.
 
 ## 3. `shared-slot.ts`: share the state, stop repairing it
 
