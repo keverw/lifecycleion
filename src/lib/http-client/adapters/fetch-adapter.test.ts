@@ -3563,6 +3563,63 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     });
   });
 
+  test('a text chunk whose UTF-16 units are exactly the bytes the limit has left is read', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body: {
+          *[Symbol.asyncIterator]() {
+            yield 'a'.repeat(600);
+            yield 'b'.repeat(400);
+          },
+        },
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1000,
+    });
+
+    expect(response.streamErrorCode).toBeUndefined();
+    expect((response.body as Uint8Array).length).toBe(1000);
+  });
+
+  test('a text chunk with more UTF-16 units than the limit has bytes left is refused before it is encoded', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body: {
+          *[Symbol.asyncIterator]() {
+            yield 'a'.repeat(600);
+            yield 'b'.repeat(1_000_000);
+          },
+        },
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+    const encode = spyOn(TextEncoder.prototype, 'encode');
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+      });
+
+      expect(response.streamErrorCode).toBe('response_too_large');
+      expect(encode.mock.calls.map(([text]) => text?.length)).toEqual([600]);
+    } finally {
+      encode.mockRestore();
+    }
+  });
+
   test('a surrogate pair split across two text chunks is read as the one character it is', async () => {
     /** The body of an iterable yielding `chunks`, read under `maxResponseBytes`. */
     async function read(chunks: unknown[], maxResponseBytes: number) {

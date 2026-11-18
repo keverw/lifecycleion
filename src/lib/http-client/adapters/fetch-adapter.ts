@@ -846,6 +846,14 @@ async function readBodyWithin(
       throwIfAborted();
 
       if (isTextChunkAccepted && typeof value === 'string') {
+        // Refused before it is joined or encoded when it has more UTF-16 units than the
+        // limit has bytes left: UTF-8 takes at least a byte for each, so it is over the
+        // limit whatever it encodes to, and a large one is not encoded only to be refused.
+        if (heldUnit.length + value.length > maxResponseBytes - loadedBytes) {
+          letGo();
+          return RESPONSE_TOO_LARGE;
+        }
+
         let text = heldUnit + value;
         heldUnit = '';
 

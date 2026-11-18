@@ -18483,6 +18483,72 @@ describe('a bytes body handed to a retry- or redirect-phase interceptor', () => 
   });
 });
 
+type GrowableBuffer = { byteLength: number; grow?: (n: number) => void };
+const makeGrowableShared = (): GrowableBuffer =>
+  new (
+    SharedArrayBuffer as unknown as new (
+      length: number,
+      options: { maxByteLength: number },
+    ) => GrowableBuffer
+  )(0, { maxByteLength: 64 });
+
+test.each([
+  [
+    'a resizable buffer',
+    () => new ArrayBuffer(0, { maxByteLength: 64 }) as GrowableBuffer,
+    false,
+  ],
+  [
+    'a length-tracking view over a resizable buffer',
+    () => new ArrayBuffer(0, { maxByteLength: 64 }) as GrowableBuffer,
+    true,
+  ],
+  ['a growable shared buffer', makeGrowableShared, false],
+  [
+    'a length-tracking view over a growable shared buffer',
+    makeGrowableShared,
+    true,
+  ],
+] as const)(
+  "a custom adapter's empty body over %s is delivered as no body, not as the buffer grown since",
+  async (_label, makeBuffer, isView) => {
+    const buffer = makeBuffer();
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/octet-stream' },
+            body: (isView
+              ? new Uint8Array(buffer as ArrayBuffer)
+              : buffer) as Uint8Array,
+          }),
+      },
+      baseURL: 'http://example.test',
+      maxResponseBytes: 8,
+    });
+
+    const response = await client
+      .get('/x')
+      .onAttemptEnd(() => {
+        // Grown past the limit once measured, before the body is delivered.
+        const grown = buffer as {
+          resize?: (n: number) => void;
+          grow?: (n: number) => void;
+        };
+        (grown.resize ?? grown.grow)?.call(buffer, 16);
+      })
+      .send();
+
+    expect(buffer.byteLength).toBe(16);
+    expect(response.status).toBe(200);
+    expect(response.isFailed).toBe(false);
+    // Delivered as no body, as any empty one is.
+    expect(response.body).toBeNull();
+  },
+);
+
 test.each([
   ['a length-tracking view', (buffer: ArrayBuffer) => new Uint8Array(buffer)],
   ['the buffer itself', (buffer: ArrayBuffer) => buffer],

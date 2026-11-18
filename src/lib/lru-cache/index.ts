@@ -343,8 +343,12 @@ export class LRUCache<K, V> {
     const entry = this.map.get(key);
 
     if (entry) {
+      // One clock read for the expiry check and the cleanup below, so an entry returned
+      // is not also removed as expired by that cleanup.
+      const now = Date.now();
+
       // Check if entry has expired
-      if (entry.expires && Date.now() > entry.expires) {
+      if (entry.expires && now > entry.expires) {
         const changeEvents = this.createLocalChangeQueue();
         this.removeEntry(key, 'expired', changeEvents);
         this.flushLocalChangeQueue(changeEvents);
@@ -357,7 +361,7 @@ export class LRUCache<K, V> {
       this.map.set(key, entry);
 
       // Run periodic cleanup if needed
-      this.maybeCleanup();
+      this.maybeCleanup(now);
 
       return entry.value;
     }
@@ -518,11 +522,13 @@ export class LRUCache<K, V> {
    * Removes every entry `expiryHeap` shows expired, least recently used first: found by
    * expiry, then ordered by use. What every cleanup runs - a write's, the periodic one a
    * read starts, `cleanupExpired()` - so none scans the live entries. Returns how many it
-   * removed.
+   * removed. `now` is the time an entry must be past to have expired.
    */
-  private reclaimExpired(changeEvents: LRUCacheChangeEvent<K, V>[]): number {
+  private reclaimExpired(
+    changeEvents: LRUCacheChangeEvent<K, V>[],
+    now: number = Date.now(),
+  ): number {
     const heap = this.expiryHeap;
-    const now = Date.now();
     this.lastCleanup = now;
 
     if (heap.length === 0) {
@@ -564,17 +570,19 @@ export class LRUCache<K, V> {
    * Rebuilds `expiryHeap` from its live nodes once stale ones make up most of it - an
    * entry overwritten again and again before it expires, or many removed - so it holds no
    * more than about twice the expirable entries. Run as a node is added or let go of, so
-   * the rebuild's cost is spread over at least as many of them as it drops.
+   * the rebuild's cost is spread over at least as many of them as it drops. The live nodes
+   * sorted by expiry are the new heap, as a sorted array is a valid min-heap.
    */
   private compactExpiryHeap(): void {
     const heap = this.expiryHeap;
 
     if (heap.length >= 2 * this.expirableEntryCount + 32) {
       const live = heap.filter((node) => node.entry !== undefined);
+      live.sort((a, b) => a.expires - b.expires);
       heap.length = 0;
 
       for (const node of live) {
-        pushExpiry(heap, node);
+        heap.push(node);
       }
     }
   }
@@ -876,15 +884,16 @@ export class LRUCache<K, V> {
     }
   }
 
-  private maybeCleanup(): void {
-    const now = Date.now();
-
+  /** The periodic cleanup a read starts, as of `now`, the time the read checked against. */
+  private maybeCleanup(now: number): void {
     // Only run cleanup occasionally to avoid performance impact
     if (
       now - this.lastCleanup > this.cleanupInterval &&
       this.expirableEntryCount > 0
     ) {
-      this.cleanupExpired();
+      const changeEvents = this.createLocalChangeQueue();
+      this.reclaimExpired(changeEvents, now);
+      this.flushLocalChangeQueue(changeEvents);
     }
   }
 

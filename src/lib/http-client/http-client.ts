@@ -6113,11 +6113,6 @@ function answeredBodySizeOf(body: unknown): number | 'string' | null {
  * `Uint8Array`. Read through the intrinsic getters, as the body was measured.
  */
 function fixedAnsweredBody(body: object, size: number): unknown {
-  // Nothing to copy, nor to read off a detached buffer: an empty body is none.
-  if (size === 0) {
-    return body;
-  }
-
   const isBuffer = arrayBufferKindOf(body) !== undefined;
   const buffer = isBuffer
     ? (body as ArrayBufferLike)
@@ -6125,6 +6120,12 @@ function fixedAnsweredBody(body: object, size: number): unknown {
 
   if (!isResizableBuffer(buffer)) {
     return body;
+  }
+
+  // Nothing to copy, nor to read off a buffer detached since: an empty body is a fixed
+  // empty one, as a resizable one could grow after it was measured.
+  if (size === 0) {
+    return isBuffer ? new ArrayBuffer(0) : new Uint8Array(0);
   }
 
   const bytes = isBuffer

@@ -132,6 +132,79 @@ describe('LRUCache', () => {
   });
 
   describe('TTL expiration', () => {
+    test("a get() whose periodic cleanup runs as the clock passes the entry's expiry returns it and does not expire it", () => {
+      const originalNow = Date.now;
+
+      try {
+        Date.now = () => 1000;
+        const events: string[] = [];
+        const cache = new LRUCache<string, string>(10, {
+          defaultTtl: 120_000,
+          onChange: (event) => {
+            events.push(`${event.reason}:${String(event.key)}`);
+          },
+        });
+        cache.set('a', 'A');
+
+        // The first read is the entry's expiry, which it is not past; every later one is a
+        // millisecond on. The periodic cleanup is due.
+        let reads = 0;
+        Date.now = () => (++reads === 1 ? 121_000 : 121_001);
+
+        expect(cache.get('a')).toBe('A');
+        expect(events).toEqual(['set:a']);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('the expiry heap rebuilt from its live nodes still reclaims entries soonest first', () => {
+      const originalNow = Date.now;
+      let currentTime = 1000;
+
+      try {
+        Date.now = () => currentTime;
+        const expired: string[] = [];
+        const cache = new LRUCache<string, number>(1000, {
+          onChange: (event) => {
+            if (event.reason === 'expired') {
+              expired.push(String(event.key));
+            }
+          },
+        });
+        const ttlOf = (index: number): number => ((index * 37) % 200) + 1;
+
+        // Expiries out of the order they are set in, then most of them deleted, so the
+        // heap is rebuilt from what is left as the deletes go.
+        for (let index = 0; index < 200; index++) {
+          cache.set(`key${index}`, index, ttlOf(index));
+        }
+
+        for (let index = 0; index < 200; index++) {
+          if (index % 10 !== 0) {
+            cache.delete(`key${index}`);
+          }
+        }
+
+        const { expiryHeap } = cache as unknown as { expiryHeap: unknown[] };
+        expect(expiryHeap.length).toBeLessThan(200);
+
+        // A write once each live entry is past its expiry reclaims it, and only it.
+        const live = Array.from({ length: 20 }, (_, n) => n * 10).sort(
+          (a, b) => ttlOf(a) - ttlOf(b),
+        );
+
+        for (const index of live) {
+          currentTime = 1001 + ttlOf(index);
+          cache.set('write', 0, 100_000);
+          expect(expired).toEqual([`key${index}`]);
+          expired.length = 0;
+        }
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
     test('a write reclaims expired entries without scanning the live ones, under steady writes too', () => {
       const originalNow = Date.now;
       let currentTime = 1000;

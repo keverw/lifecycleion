@@ -170,20 +170,18 @@ export function isResizableBuffer(
  * constructor do.
  */
 export function plainBytesView(view: ArrayBufferView): Uint8Array {
+  const buffer = readViewBuffer(view);
+
   if (isDataViewBrand(view)) {
     return new Uint8Array(
-      Reflect.apply(
-        DATA_VIEW_BUFFER as () => unknown,
-        view,
-        [],
-      ) as ArrayBufferLike,
+      buffer,
       Reflect.apply(DATA_VIEW_BYTE_OFFSET as () => unknown, view, []) as number,
       Reflect.apply(DATA_VIEW_BYTE_LENGTH as () => unknown, view, []) as number,
     );
   }
 
   return new Uint8Array(
-    readTypedArrayBuffer(view),
+    buffer,
     readTypedArrayByteOffset(view),
     Reflect.apply(TYPED_ARRAY_BYTE_LENGTH as () => unknown, view, []) as number,
   );
