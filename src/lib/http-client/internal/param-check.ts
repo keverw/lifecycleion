@@ -1,5 +1,5 @@
 import { isPlainRecord } from './plain-record';
-import { isHighSurrogate } from './utf8-length';
+import { isHighSurrogate } from '../../internal/surrogates';
 
 /**
  * How deep a `.params()` value may nest: a top-level value is at depth 0, and an entry

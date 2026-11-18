@@ -507,43 +507,28 @@ export class LRUCache<K, V> {
 
   public cleanupExpired(): number {
     const changeEvents = this.createLocalChangeQueue();
-    const removed = this.cleanupExpiredInternal(changeEvents);
+    const removed = this.reclaimExpired(changeEvents);
 
     // Flush this operation's queued events after expired entries have been removed.
     this.flushLocalChangeQueue(changeEvents);
     return removed;
   }
 
-  private cleanupExpiredInternal(
-    changeEvents: LRUCacheChangeEvent<K, V>[],
-  ): number {
-    let removed = 0;
+  /**
+   * Removes every entry `expiryHeap` shows expired, least recently used first: found by
+   * expiry, then ordered by use. What every cleanup runs - a write's, the periodic one a
+   * read starts, `cleanupExpired()` - so none scans the live entries. Returns how many it
+   * removed.
+   */
+  private reclaimExpired(changeEvents: LRUCacheChangeEvent<K, V>[]): number {
+    const heap = this.expiryHeap;
     const now = Date.now();
-
-    for (const [key, entry] of this.map.entries()) {
-      if (entry.expires && now > entry.expires) {
-        this.removeEntry(key, 'expired', changeEvents);
-        removed++;
-      }
-    }
-
     this.lastCleanup = now;
 
-    return removed;
-  }
-
-  /**
-   * Removes every entry `expiryHeap` shows expired, least recently used first, as a full
-   * cleanup removes them: found by expiry, then ordered by use.
-   */
-  private reclaimExpired(changeEvents: LRUCacheChangeEvent<K, V>[]): void {
-    const heap = this.expiryHeap;
-
     if (heap.length === 0) {
-      return;
+      return 0;
     }
 
-    const now = Date.now();
     const expired: ExpiryNode<K, V>[] = [];
 
     while (heap.length > 0 && now > heap[0].expires) {
@@ -563,14 +548,25 @@ export class LRUCache<K, V> {
     for (const { key } of expired) {
       this.removeEntry(key as K, 'expired', changeEvents);
     }
+
+    return expired.length;
+  }
+
+  /** Adds `entry` to `expiryHeap`. */
+  private trackExpiry(key: K, entry: CacheEntry<V>, expires: number): void {
+    this.compactExpiryHeap();
+    const node: ExpiryNode<K, V> = { key, entry, expires };
+    entry.expiryNode = node;
+    pushExpiry(this.expiryHeap, node);
   }
 
   /**
-   * Adds `entry` to `expiryHeap`, rebuilt from the live entries first once stale nodes
-   * make up most of it - an entry overwritten again and again before it expires - so it
-   * holds no more than about twice the expirable entries.
+   * Rebuilds `expiryHeap` from its live nodes once stale ones make up most of it - an
+   * entry overwritten again and again before it expires, or many removed - so it holds no
+   * more than about twice the expirable entries. Run as a node is added or let go of, so
+   * the rebuild's cost is spread over at least as many of them as it drops.
    */
-  private trackExpiry(key: K, entry: CacheEntry<V>, expires: number): void {
+  private compactExpiryHeap(): void {
     const heap = this.expiryHeap;
 
     if (heap.length >= 2 * this.expirableEntryCount + 32) {
@@ -581,10 +577,6 @@ export class LRUCache<K, V> {
         pushExpiry(heap, node);
       }
     }
-
-    const node: ExpiryNode<K, V> = { key, entry, expires };
-    entry.expiryNode = node;
-    pushExpiry(heap, node);
   }
 
   private isBufferValue(value: unknown): value is { length: number } {
@@ -943,6 +935,7 @@ export class LRUCache<K, V> {
       entry.expiryNode.key = undefined;
       entry.expiryNode.entry = undefined;
       entry.expiryNode = undefined;
+      this.compactExpiryHeap();
     }
 
     this.map.delete(key);

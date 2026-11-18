@@ -126,6 +126,42 @@ export function readTypedArrayByteOffset(view: ArrayBufferView): number {
 }
 
 /**
+ * The buffer a typed array or `DataView` is over, read through the intrinsic getters as
+ * {@link plainBytesView} reads it. Throws for a value that is neither.
+ */
+export function readViewBuffer(view: ArrayBufferView): ArrayBufferLike {
+  if (isDataViewBrand(view)) {
+    return Reflect.apply(
+      DATA_VIEW_BUFFER as () => unknown,
+      view,
+      [],
+    ) as ArrayBufferLike;
+  }
+
+  return readTypedArrayBuffer(view);
+}
+
+/**
+ * Whether `buffer` can change size - a resizable `ArrayBuffer` or a growable
+ * `SharedArrayBuffer`, from any realm - told through the intrinsic getters. `false` for a
+ * fixed buffer, for anything that is not one, and on a runtime with no resizable buffers,
+ * whose getters are missing. `kind` is the buffer's, where the caller has told it already.
+ */
+export function isResizableBuffer(
+  buffer: object,
+  kind = arrayBufferKindOf(buffer),
+): boolean {
+  if (kind === 'ArrayBuffer') {
+    return Reflect.get(ArrayBuffer.prototype, 'resizable', buffer) === true;
+  }
+
+  return (
+    kind === 'SharedArrayBuffer' &&
+    Reflect.get(SharedArrayBuffer.prototype, 'growable', buffer) === true
+  );
+}
+
+/**
  * `view` as a plain `Uint8Array` over the same bytes - a view, not a copy - built from the
  * intrinsic `buffer`, `byteOffset` and `byteLength` getters rather than the view's own,
  * which a subclass or an own property can override: a typed array's, or for a `DataView`,

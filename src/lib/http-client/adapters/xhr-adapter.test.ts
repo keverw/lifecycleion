@@ -6700,6 +6700,40 @@ test('a redirect an XHR outside a browser reports only at load is the followed r
   expect(response.body).toBeNull();
 });
 
+test('a stop asked for inside send(), where abort() does nothing, is made once send() returns', async () => {
+  // An XHR outside a browser that reports a malformed status inside send(), while the
+  // response is still loading, and whose abort() does nothing until send() has returned.
+  const abortCalls: boolean[] = [];
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- put back as it was, below
+  const originalSend = FakeXHR.prototype.send;
+  FakeXHR.prototype.send = function (this: FakeXHR) {
+    let isInsideSend = true;
+    this.abort = () => {
+      abortCalls.push(isInsideSend);
+
+      if (!isInsideSend) {
+        this.readyState = 0;
+      }
+    };
+    this.simulateHeadersReceived(99);
+    this.readyState = 3;
+    isInsideSend = false;
+  };
+
+  try {
+    const response = await new XHRAdapter().send({
+      requestURL: 'https://api.test/odd',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.status).toBe(0);
+    expect(abortCalls).toEqual([true, false]);
+  } finally {
+    FakeXHR.prototype.send = originalSend;
+  }
+});
+
 test('a malformed status inside send() with the signal aborted there too stops the XHR once', async () => {
   const controller = new AbortController();
   let abortCalls = 0;

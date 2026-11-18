@@ -1,3 +1,5 @@
+import { isHighSurrogate, isLowSurrogate } from '../../internal/surrogates';
+
 /**
  * A string's UTF-8 byte length, measured rather than encoded, so a large body is not
  * copied to be measured: Node's native count where there is a `Buffer` - a string body is
@@ -26,7 +28,7 @@ export function countUTF8ByteLength(text: string): number {
     } else if (
       isHighSurrogate(unit) &&
       index + 1 < text.length &&
-      (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00
+      isLowSurrogate(text.charCodeAt(index + 1))
     ) {
       bytes += 4;
       index++;
@@ -36,9 +38,4 @@ export function countUTF8ByteLength(text: string): number {
   }
 
   return bytes;
-}
-
-/** Whether a UTF-16 unit is the first half of a surrogate pair. */
-export function isHighSurrogate(unit: number): boolean {
-  return unit >= 0xd800 && unit <= 0xdbff;
 }

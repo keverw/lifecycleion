@@ -39,7 +39,11 @@ import {
   parseContentLength,
   streamErrorAnswer,
 } from '../internal/response-limit';
-import { arrayBufferKindOf, plainBytesView } from '../../internal/binary-view';
+import {
+  arrayBufferKindOf,
+  isResizableBuffer,
+  plainBytesView,
+} from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 import {
   blockedPortMessage,
@@ -330,6 +334,22 @@ export class XHRAdapter implements HTTPAdapter {
        */
       let followedRedirectURL: string | undefined;
 
+      // Set while `send()` runs, where the XHR standard has `abort()` do nothing and fire no
+      // event until the XHR has marked itself sent: an XHR outside a browser may fire events
+      // inside it, and a stop asked for there - a malformed status, a followed redirect, a
+      // body over the limit, a cancel - that changes nothing is owed, and made once `send()`
+      // has returned (see the send below).
+      let isInsideSend = false;
+      let isAbortOwed = false;
+      /** The XHR's `readyState`, or `undefined` for one whose read throws. */
+      const readyStateQuietly = (): unknown => {
+        try {
+          return xhr.readyState;
+        } catch {
+          return undefined;
+        }
+      };
+
       /**
        * Stop the XHR, then end the send as the abort if nothing has ended it: an `abort()`
        * that throws, or that fires no `abort` event (a shim's that only tears down its
@@ -337,10 +357,22 @@ export class XHRAdapter implements HTTPAdapter {
        * the call, which settles first, so the settle here does nothing.
        */
       const abortQuietly = (): void => {
+        const stateBefore = isInsideSend ? readyStateQuietly() : undefined;
+
         try {
           xhr.abort();
         } catch {
           // Settled below.
+        }
+
+        // Owed where it changed nothing: an `abort()` that took resets the state. Not for an
+        // XHR whose state cannot be read, which shows nothing either way.
+        if (
+          isInsideSend &&
+          stateBefore !== undefined &&
+          readyStateQuietly() === stateBefore
+        ) {
+          isAbortOwed = true;
         }
 
         settleAborted(answeredAtHeaders);
@@ -1343,6 +1375,7 @@ export class XHRAdapter implements HTTPAdapter {
       // dispatches.
       try {
         didSend = true;
+        isInsideSend = true;
         // A `string`, a `Uint8Array` (a BufferSource) and a `FormData` are all
         // `XMLHttpRequestBodyInit`: the cast is safe for the bodies the client produces.
         xhr.send(requestBody as XMLHttpRequestBodyInit | null);
@@ -1353,15 +1386,24 @@ export class XHRAdapter implements HTTPAdapter {
           refuse(error);
         }
         return;
+      } finally {
+        isInsideSend = false;
       }
 
-      // A cancel while `send()` ran - an XHR outside a browser may fire events or run code
-      // inside it - came before the XHR marked itself sent, where the XHR standard has
-      // `abort()` do nothing and fire no event, so the request went out regardless: stopped
-      // now, as `onAbort` stops one, and ended as the cancel it is. Stopped even once the
-      // abort listener has ended the send: its `abort()` stopped nothing. One the runtime
-      // completed within `send()` is done, and not aborted again.
-      if (isSignalAbortedQuietly(signal)) {
+      // A stop asked for while `send()` ran, whose `abort()` changed nothing there, came
+      // before the XHR marked itself sent, so the request went out regardless: made again
+      // now, once, unless the runtime completed the response within `send()`.
+      if (isAbortOwed) {
+        isAbortOwed = false;
+
+        if (readyStateQuietly() !== 4) {
+          abortQuietly();
+        }
+      } else if (isSignalAbortedQuietly(signal)) {
+        // A cancel while `send()` ran with no stop owed - code an XHR outside a browser ran
+        // inside it asked for none, or one asked for there took - stopped now, as `onAbort`
+        // stops one (an `abort()` on an XHR already stopped does nothing), and ended as the
+        // cancel it is. One the runtime completed within `send()` is done, and not aborted.
         stopCancelledSend();
       }
     };
@@ -1545,7 +1587,7 @@ function readResponseBody(
       const bytes = new Uint8Array(response as ArrayBuffer);
       const isFixed =
         bufferKind === 'ArrayBuffer' &&
-        Reflect.get(ArrayBuffer.prototype, 'resizable', response) !== true;
+        !isResizableBuffer(response, bufferKind);
       return isFixed ? bytes : bytes.slice();
     }
 

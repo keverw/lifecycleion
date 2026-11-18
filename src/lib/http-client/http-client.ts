@@ -158,9 +158,10 @@ import {
 } from './internal/response-limit';
 import {
   arrayBufferKindOf,
+  isResizableBuffer,
   plainBytesView,
   readBinaryByteLength,
-  readTypedArrayBuffer,
+  readViewBuffer,
 } from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
@@ -6118,34 +6119,21 @@ function fixedAnsweredBody(body: object, size: number): unknown {
   }
 
   const isBuffer = arrayBufferKindOf(body) !== undefined;
-  const bytes = isBuffer
-    ? new Uint8Array(body as ArrayBufferLike, 0, size)
-    : plainBytesView(body as ArrayBufferView);
   const buffer = isBuffer
     ? (body as ArrayBufferLike)
-    : readTypedArrayBuffer(bytes);
+    : readViewBuffer(body as ArrayBufferView);
 
-  if (!canChangeSize(buffer)) {
+  if (!isResizableBuffer(buffer)) {
     return body;
   }
 
+  const bytes = isBuffer
+    ? new Uint8Array(buffer, 0, size)
+    : plainBytesView(body as ArrayBufferView).subarray(0, size);
   const copy = new Uint8Array(size);
-  copy.set(bytes.subarray(0, size));
+  copy.set(bytes);
 
   return isBuffer ? copy.buffer : copy;
-}
-
-/** Whether `buffer` is a resizable `ArrayBuffer` or a growable `SharedArrayBuffer`. */
-function canChangeSize(buffer: ArrayBufferLike): boolean {
-  if (arrayBufferKindOf(buffer) === 'ArrayBuffer') {
-    // `undefined` where the runtime has no resizable buffers, which leaves it fixed.
-    return Reflect.get(ArrayBuffer.prototype, 'resizable', buffer) === true;
-  }
-
-  return (
-    typeof SharedArrayBuffer === 'function' &&
-    Reflect.get(SharedArrayBuffer.prototype, 'growable', buffer) === true
-  );
 }
 
 /**

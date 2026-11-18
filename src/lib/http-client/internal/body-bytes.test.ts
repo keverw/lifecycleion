@@ -78,7 +78,7 @@ describe('BodyBytes', () => {
     expect(bytes[19_999]).toBe((9_999 + 16) % 256);
   });
 
-  test('a chunk under 16 KiB is copied as it is appended', () => {
+  test('a chunk under 4 KiB is copied as it is appended', () => {
     const body = new BodyBytes(100);
     const scratch = new Uint8Array(1);
 
@@ -90,12 +90,39 @@ describe('BodyBytes', () => {
     expect([...body.bytes()]).toEqual([1, 2, 3]);
   });
 
-  test('a lone chunk of 16 KiB or more spanning a plain buffer is the body as it is, not copied', () => {
-    const chunk = counting(20_000);
-    const body = new BodyBytes(100_000);
-    body.append(chunk, chunk.length);
+  test('a lone chunk of 4 KiB or more spanning a plain buffer is the body as it is, not copied', () => {
+    for (const length of [4096, 16_000, 20_000]) {
+      const chunk = counting(length);
+      const body = new BodyBytes(100_000);
+      body.append(chunk, chunk.length);
 
-    expect(body.bytes()).toBe(chunk);
+      expect(body.bytes()).toBe(chunk);
+    }
+  });
+
+  test('a chunk of 4 KiB or more is kept as it is, copied only by the join', () => {
+    const kept = counting(15_000);
+    const body = new BodyBytes(100_000);
+    body.append(counting(10), 10);
+    body.append(kept, kept.length);
+    // Seen by the join: the chunk was kept, not copied as it was appended.
+    kept[0] = 200;
+
+    expect(body.bytes()[10]).toBe(200);
+  });
+
+  test('a large view over less than half its buffer is copied, so the rest of it is not held', () => {
+    // A piece of a socket's read buffer, as Node's HTTP parser hands a body over.
+    const read = counting(64 * 1024);
+    const piece = read.subarray(0, 16 * 1024);
+    const body = new BodyBytes(100_000);
+    body.append(piece, piece.length);
+    read[0] = 200;
+    const bytes = body.bytes();
+
+    expect(bytes[0]).toBe(0);
+    expect(bytes.length).toBe(16 * 1024);
+    expect(bytes.buffer.byteLength).toBe(16 * 1024);
   });
 
   test('a view into a larger buffer, a Buffer, or a chunk from another realm is joined by its own bytes', () => {

@@ -1,5 +1,6 @@
 import {
   arrayBufferKindOf,
+  isResizableBuffer,
   readBinaryByteLength,
   readTypedArrayBuffer,
   readTypedArrayByteOffset,
@@ -82,8 +83,7 @@ function isWholeOfPlainBuffer(chunk: Uint8Array, byteLength: number): boolean {
   return (
     Object.getPrototypeOf(buffer) === ArrayBuffer.prototype &&
     arrayBufferKindOf(buffer) === 'ArrayBuffer' &&
-    // `undefined` where the runtime has no resizable buffers, which leaves it fixed.
-    Reflect.get(ArrayBuffer.prototype, 'resizable', buffer) !== true &&
+    !isResizableBuffer(buffer) &&
     readBinaryByteLength(buffer) === byteLength
   );
 }

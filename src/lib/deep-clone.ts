@@ -30,6 +30,7 @@ import { isDOMExceptionInstance } from './internal/dom-exception';
 import {
   arrayBufferKindOf,
   hasBufferTagInChain,
+  isResizableBuffer,
   typedArrayNameOf,
 } from './internal/binary-view';
 
@@ -1140,8 +1141,7 @@ function copyBuffer(buffer: object, kind: BufferKind): object {
   const byteLength = read('byteLength') as number;
   const maxByteLength = read('maxByteLength');
   const isResizable =
-    read(kind === 'ArrayBuffer' ? 'resizable' : 'growable') === true &&
-    typeof maxByteLength === 'number';
+    isResizableBuffer(buffer, kind) && typeof maxByteLength === 'number';
 
   return copyBytes(
     buffer,
@@ -1242,7 +1242,8 @@ function bufferConstructor(kind: BufferKind): BufferConstructorLike {
  * private field its methods read - are set up as they are for any instance of it. Told
  * by the prototype's own constructor and its name, not by `instanceof`, which a `Buffer`
  * fails where the globals are another realm's (a jsdom test environment), and by its
- * parent: a class given the built-in's name has the built-in's own prototype there.
+ * parent: a built-in's prototype has the kind's own parent (`TypedArray`'s or `Object`'s),
+ * where a class given the built-in's name has the built-in, or a class between, there.
  */
 function isSubclass(
   original: object,
@@ -1255,11 +1256,17 @@ function isSubclass(
     return false;
   }
 
-  // A class given the built-in's name (`class Uint8Array extends Uint8Array`) has a
-  // prototype named as the built-in's is, but its parent is named so too.
-  return (
-    !isBasePrototype(prototype, baseName) ||
-    isBasePrototype(Reflect.getPrototypeOf(prototype) ?? {}, baseName)
+  // Some realm's built-in only where the prototype is named as the built-in's is and its
+  // parent is the kind's own parent - `TypedArray`'s prototype for a typed array,
+  // `Object`'s for a buffer - so a class given the built-in's name (`class Uint8Array
+  // extends Uint8Array`, or one over a class between) is told as the subclass it is.
+  const parentName =
+    baseName === 'ArrayBuffer' || baseName === 'SharedArrayBuffer'
+      ? 'Object'
+      : 'TypedArray';
+  return !(
+    isBasePrototype(prototype, baseName) &&
+    isBasePrototype(Reflect.getPrototypeOf(prototype) ?? {}, parentName)
   );
 }
 

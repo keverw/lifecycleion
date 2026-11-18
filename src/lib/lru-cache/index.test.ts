@@ -178,6 +178,64 @@ describe('LRUCache', () => {
       }
     });
 
+    test('cleanupExpired() and the periodic cleanup a read starts remove the expired entries without scanning the live ones', () => {
+      const originalNow = Date.now;
+      let currentTime = 1000;
+
+      try {
+        Date.now = () => currentTime;
+        const cache = new LRUCache<string, string>(10_000);
+        const internal = cache as unknown as {
+          map: Map<string, unknown>;
+        };
+        const entries = internal.map.entries.bind(internal.map);
+        let scans = 0;
+        internal.map.entries = () => {
+          scans++;
+          return entries();
+        };
+
+        for (let index = 0; index < 5000; index++) {
+          cache.set(`live${index}`, 'value');
+        }
+
+        cache.set('a', 'value', 10);
+        cache.set('b', 'value', 10);
+        cache.set('c', 'value', 10);
+        currentTime += 11;
+
+        expect(cache.cleanupExpired()).toBe(3);
+        expect(cache.size).toBe(5000);
+
+        cache.set('d', 'value', 10);
+        // Past the cleanup interval: the next read cleans up, 'd' with it.
+        currentTime += 61_000;
+        expect(cache.get('live0')).toBe('value');
+        expect(cache.size).toBe(5000);
+        expect(scans).toBe(0);
+      } finally {
+        Date.now = originalNow;
+      }
+    });
+
+    test('entries that could expire, removed before they do, do not leave the expiry heap large', () => {
+      const cache = new LRUCache<string, number>(100_000, {
+        defaultTtl: 24 * 60 * 60 * 1000,
+      });
+
+      for (let index = 0; index < 10_000; index++) {
+        cache.set(`key${index}`, index);
+      }
+
+      for (let index = 0; index < 9990; index++) {
+        cache.delete(`key${index}`);
+      }
+
+      const { expiryHeap } = cache as unknown as { expiryHeap: unknown[] };
+      expect(expiryHeap.length).toBeLessThanOrEqual(2 * 10 + 32);
+      expect(cache.get('key9999')).toBe(9999);
+    });
+
     test('an entry overwritten again and again before it expires keeps the expiry heap small', () => {
       const cache = new LRUCache<string, number>(10, { defaultTtl: 60_000 });
 

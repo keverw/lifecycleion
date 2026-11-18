@@ -4,7 +4,7 @@ TTL-aware LRU (Least Recently Used) cache with optional size-based eviction and 
 
 Expiration is lazy by design. Entries are removed when accessed with `get()` or `has()`, when `set()` performs its write-time expired-entry cleanup, during occasional internal cleanup triggered by successful `get()` calls when the cache contains expirable entries, or when you explicitly call `cleanupExpired()`. There is no background timer.
 
-That internal `get()`-triggered sweep is throttled: it runs only after a successful `get()`, only when the cache currently contains one or more entries with an expiration time, and only when more than one minute has passed since the last cleanup-timer reset. Calls to `set()`, `cleanupExpired()`, and `clear()` reset the internal cleanup timer.
+That internal `get()`-triggered sweep is throttled: it runs only after a successful `get()`, only when the cache currently contains one or more entries with an expiration time, and only when more than one minute has passed since the last cleanup-timer reset. Calls to `set()`, `cleanupExpired()`, and `clear()` reset the internal cleanup timer. Every cleanup finds expired entries by their expiry time without reading the live ones, so its cost follows how many entries expired, not how many the cache holds.
 
 <!-- toc -->
 
@@ -128,7 +128,7 @@ Every successful `set()` emits `reason: 'set'`. When the key already existed, th
 has(key: K): boolean
 ```
 
-Checks if a key exists in the cache. Returns `false` if the key is missing or the entry has expired. Does **not** update the LRU order and does not trigger the cache's periodic full cleanup sweep.
+Checks if a key exists in the cache. Returns `false` if the key is missing or the entry has expired. Does **not** update the LRU order and does not trigger the cache's periodic cleanup of other expired entries.
 
 If the key exists but is expired, `has()` removes that entry immediately before returning `false`. As a result, calling `has()` on an expired key can reduce both `size` and `byteSize`.
 
@@ -138,7 +138,7 @@ If the key exists but is expired, `has()` removes that entry immediately before 
 get(key: K): V | undefined
 ```
 
-Retrieves a value from the cache. Returns `undefined` if the key is missing or the entry has expired. Marks the entry as most recently used. When the cache contains expirable entries, successful `get()` calls may also trigger the cache's occasional full cleanup sweep for other expired entries, but at most once per minute.
+Retrieves a value from the cache. Returns `undefined` if the key is missing or the entry has expired. Marks the entry as most recently used. When the cache contains expirable entries, successful `get()` calls may also trigger the cache's occasional cleanup of other expired entries, but at most once per minute.
 
 If the key exists but is expired, `get()` removes that entry immediately before returning `undefined`. As a result, calling `get()` on an expired key can reduce both `size` and `byteSize`.
 
@@ -162,7 +162,7 @@ If a single value is larger than `maxSize`, `set()` skips the write and leaves a
 
 TTL expiration is checked with a strict `now > expires` comparison, so an entry remains valid at the exact `createdAt + ttl` timestamp and expires immediately after that boundary is passed.
 
-Before writing the new value, `set()` removes any expired entries currently in the cache, least recently used first, as `cleanupExpired()` does, so an expired entry under the same key is replaced as a fresh insert and the entry-count and size limits count only live entries. This means a write can reduce `size` and `byteSize` by deleting unrelated expired entries. It finds them without reading the live ones, so the cost follows how many entries expired, not how many the cache holds.
+Before writing the new value, `set()` removes any expired entries currently in the cache, least recently used first, as `cleanupExpired()` does, so an expired entry under the same key is replaced as a fresh insert and the entry-count and size limits count only live entries. This means a write can reduce `size` and `byteSize` by deleting unrelated expired entries.
 
 ### delete
 

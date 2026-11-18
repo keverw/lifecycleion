@@ -10,7 +10,6 @@ import {
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { BodyBytes } from '../internal/body-bytes';
-import { isHighSurrogate } from '../internal/utf8-length';
 import {
   isSignalAborted,
   isSignalAbortedQuietly,
@@ -75,6 +74,7 @@ import {
   isForbiddenBrowserMethod,
 } from '../internal/transport-refusal';
 import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
+import { isHighSurrogate } from '../../internal/surrogates';
 
 export class FetchAdapter implements HTTPAdapter {
   constructor() {
@@ -483,11 +483,9 @@ const ABORTED_READ = Symbol('aborted read');
  *
  * With a limit, the body is read chunk by chunk and counted as it arrives, so a body over
  * it is cancelled - the rest neither downloaded nor held - rather than buffered whole by
- * `arrayBuffer()` and refused afterwards; one whose `Content-Length` says it is within the
- * limit, counts what `fetch` hands over, and frames the body alone, is read by
- * `arrayBuffer()`. Without one, or without a `body` that is a web
- * stream or async-iterable (a test double, an XHR-based polyfill), it is read whole through
- * `arrayBuffer()`, and checked after where there is a limit.
+ * `arrayBuffer()` and refused afterwards. Without one, or without a `body` that is a web
+ * stream or async-iterable (a test double, an XHR-based polyfill), it is read whole
+ * through `arrayBuffer()`, and checked after where there is a limit.
  */
 async function readResponseBody(
   method: string,
@@ -569,20 +567,11 @@ async function readResponseBody(
     return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
   }
 
-  // A body whose `Content-Length` counts what `fetch` hands over, and is within the
-  // limit, is read whole by the runtime's own `arrayBuffer()`: HTTP's framing ends the
-  // body at that length, so it cannot pass the limit, and a small answer read a chunk at a
-  // time in JS costs about a third more. Checked after all the same. Not beside a
-  // `Transfer-Encoding`, which frames the body instead: Bun's `fetch` reads a chunked
-  // body whole past the `Content-Length` sent with it.
-  if (
-    declaredLength !== undefined &&
-    answered.headers['transfer-encoding'] === undefined
-  ) {
-    const bytes = await readWholeBody(response, body, signal);
-    return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
-  }
-
+  // Read a chunk at a time even when `Content-Length` says the body is within the
+  // limit: the header is only a value, and `arrayBuffer()` would hold whatever the
+  // body turns out to be before it could be measured. A chunked body can carry one
+  // that does not frame it, and a cross-origin (`cors`) response hides the
+  // `Transfer-Encoding` that would say so.
   const reader = Reflect.apply(
     getReader,
     body,

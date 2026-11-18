@@ -3248,7 +3248,7 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     ['grows', 5],
     ['shrinks', 1],
   ])(
-    'a chunk under 16 KiB whose buffer %s after it is read keeps the bytes it held when read',
+    'a chunk under 4 KiB whose buffer %s after it is read keeps the bytes it held when read',
     async (_label, newLength) => {
       const response = await sendResized(3, newLength);
 
@@ -3262,7 +3262,7 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     ['grows', 40_000],
     ['shrinks', 1],
   ])(
-    'a chunk of 16 KiB or more whose buffer %s after it is read fails as a stream error, not joined wrong',
+    'a chunk of 4 KiB or more whose buffer %s after it is read fails as a stream error, not joined wrong',
     async (_label, newLength) => {
       const response = await sendResized(20_000, newLength);
 
@@ -4168,50 +4168,78 @@ test('a bounded body read takes an iterator result that is a function object, as
   expect([...(response.body as Uint8Array)]).toEqual([1, 2]);
 });
 
-test('a body whose Content-Length is within the limit is read by the runtime, not a chunk at a time', async () => {
-  let getReaderCalls = 0;
-  (globalThis as any).fetch = () => {
-    const response = new Response('abc', {
-      headers: { 'content-length': '3' },
-    });
-    const body = response.body as ReadableStream<Uint8Array>;
-    const getReader = body.getReader.bind(body);
-    Object.defineProperty(body, 'getReader', {
-      value: (...args: []) => {
-        getReaderCalls++;
-        return getReader(...args);
-      },
-    });
-    return Promise.resolve(response);
-  };
-
-  const response = await new FetchAdapter().send({
-    requestURL: 'https://local.test/data',
-    method: 'GET',
-    headers: {},
-    maxResponseBytes: 100,
-  });
-
-  expect(new TextDecoder().decode(response.body as Uint8Array)).toBe('abc');
-  expect(getReaderCalls).toBe(0);
-});
-
-test('a body read by the runtime past a Content-Length it understated is still refused as too large', async () => {
-  // A test double's: a server's body ends at its Content-Length.
+test('a body whose Content-Length understates it is read no further than the limit', async () => {
+  // The header is only a value: a test double's, a service worker's, or one beside a
+  // chunked body. What is pulled from the source is held to the limit all the same.
+  const chunk = new Uint8Array(64 * 1024);
+  let pulledBytes = 0;
   (globalThis as any).fetch = () =>
     Promise.resolve(
-      new Response('x'.repeat(200), { headers: { 'content-length': '3' } }),
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (pulledBytes >= 2000 * chunk.length) {
+              controller.close();
+              return;
+            }
+
+            pulledBytes += chunk.length;
+            controller.enqueue(chunk.slice());
+          },
+        }),
+        { headers: { 'content-length': '10' } },
+      ),
     );
 
   const response = await new FetchAdapter().send({
     requestURL: 'https://local.test/data',
     method: 'GET',
     headers: {},
-    maxResponseBytes: 100,
+    maxResponseBytes: 1000,
   });
 
   expect(response.streamErrorCode).toBe('response_too_large');
-  expect(response.body).toBeNull();
+  expect(pulledBytes).toBeLessThanOrEqual(4 * chunk.length);
+});
+
+test('an abort ends a stalled body read whose Content-Length is within the limit', async () => {
+  // A stream that stalls after its first chunk and does not heed the signal.
+  const controller = new AbortController();
+  let pulls = 0;
+  (globalThis as any).fetch = () =>
+    Promise.resolve(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(stream) {
+            pulls++;
+
+            if (pulls === 1) {
+              stream.enqueue(new Uint8Array([1, 2, 3]));
+              return;
+            }
+
+            controller.abort();
+            return new Promise<void>(() => undefined);
+          },
+        }),
+        { headers: { 'content-length': '10' } },
+      ),
+    );
+
+  const sent = new FetchAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 100,
+    signal: controller.signal,
+  });
+
+  const outcome = await sent.then(
+    () => 'resolved',
+    (error: unknown) => (error as Error).name,
+  );
+
+  expect(outcome).toBe('AbortError');
 });
 
 test('a body with a Transfer-Encoding beside its Content-Length is read a chunk at a time, held to the limit', async () => {

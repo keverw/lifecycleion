@@ -1,6 +1,7 @@
 import { stringifyValue } from '../../../stringify-value';
 import { MAX_RENDER_LENGTH } from '../../../internal/render-budget';
 import type { LogEntry } from '../../types';
+import { isHighSurrogate, isLowSurrogate } from '../../../internal/surrogates';
 
 /**
  * One log entry as one line of JSON, for the `jsonFormat` of `FileSink` and
@@ -115,10 +116,10 @@ export function exceedsJSONEncodedStringLength(
         codeUnit === 0x0d
           ? 2
           : 6;
-    } else if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+    } else if (isHighSurrogate(codeUnit)) {
       const next = text.charCodeAt(index + 1);
 
-      if (next >= 0xdc00 && next <= 0xdfff) {
+      if (isLowSurrogate(next)) {
         // A valid surrogate pair is emitted as the original two UTF-16 code units.
         encodedLength += 2;
         index++;
@@ -126,7 +127,7 @@ export function exceedsJSONEncodedStringLength(
         // Well-formed JSON.stringify escapes a lone surrogate as `\udxxx`.
         encodedLength += 6;
       }
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+    } else if (isLowSurrogate(codeUnit)) {
       encodedLength += 6;
     } else {
       encodedLength++;

@@ -1,24 +1,31 @@
 import { concatChunks } from './concat-chunks';
 import {
+  readBinaryByteLength,
   readTypedArrayBuffer,
   readTypedArrayByteOffset,
 } from '../../internal/binary-view';
 
-/**
- * The size of a block small chunks are copied into, and the smallest chunk kept as it is
- * rather than copied.
- */
+/** The size of a block small chunks are copied into. */
 const BLOCK_BYTES = 16 * 1024;
 
 /**
+ * The smallest chunk kept as it is rather than copied. Below it, the object a kept chunk
+ * costs would weigh against its bytes; above it, a chunk is copied once, by the join.
+ */
+const KEEP_BYTES = 4 * 1024;
+
+/**
  * A response body's bytes, kept as each chunk is read and joined once by
- * {@link concatChunks}. A chunk of {@link BLOCK_BYTES} or more is kept as it is, so its
- * bytes are copied once, by the join. A smaller one is copied into a block shared with the
- * chunks around it, so what is held follows the bytes read, not how finely the server
- * split them: a body sent in one-byte chunks holds about its own size, not one array per
- * byte. Blocks are added only as bytes arrive, whatever length the body declares. The
- * first is the size of the first chunk copied into it, so a body of one small chunk fills
- * it exactly and is that block, copied once.
+ * {@link concatChunks}. A chunk of {@link KEEP_BYTES} or more that spans at least half the
+ * buffer it is a view over is kept as it is, so its bytes are copied once, by the join.
+ * Any other is copied into a block shared with the chunks around it, so what is held
+ * follows the bytes read, not how finely the server split them nor how much of a larger
+ * buffer each piece is a view over: at most about twice the body's size. A body sent in
+ * one-byte chunks holds about its own size, not one array per byte, and one handed over
+ * as small views over a socket's read buffer does not hold the rest of each buffer. Blocks
+ * are added only as bytes arrive, whatever length the body declares. The first is the size
+ * of the first chunk copied into it, so a body of one small chunk fills it exactly and is
+ * that block, copied once.
  *
  * A chunk kept as it is must not change before the join: the runtime's streams hand over
  * each chunk in memory of its own. One whose length changes by then fails the join.
@@ -42,7 +49,7 @@ export class BodyBytes {
    * from any realm, measured already. The caller holds the total to `maxBytes`.
    */
   public append(chunk: Uint8Array, byteLength: number): void {
-    if (byteLength >= BLOCK_BYTES) {
+    if (byteLength >= KEEP_BYTES && spansMostOfBuffer(chunk, byteLength)) {
       this.endPart();
       this.parts.push(chunk);
       this.written += byteLength;
@@ -118,4 +125,14 @@ export class BodyBytes {
     this.blockStart = 0;
     this.filled = 0;
   }
+}
+
+/**
+ * Whether `chunk`'s `byteLength` bytes are at least half its buffer, measured through the
+ * intrinsic getters, so keeping the chunk holds no more than twice what it counts.
+ */
+function spansMostOfBuffer(chunk: Uint8Array, byteLength: number): boolean {
+  const bufferBytes = readBinaryByteLength(readTypedArrayBuffer(chunk));
+
+  return bufferBytes !== null && byteLength * 2 >= bufferBytes;
 }
