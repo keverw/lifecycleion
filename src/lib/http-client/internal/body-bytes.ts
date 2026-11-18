@@ -1,5 +1,6 @@
 import { concatChunks } from './concat-chunks';
 import {
+  arrayBufferKindOf,
   readBinaryByteLength,
   readTypedArrayBuffer,
   readTypedArrayByteOffset,
@@ -16,16 +17,16 @@ const KEEP_BYTES = 4 * 1024;
 
 /**
  * A response body's bytes, kept as each chunk is read and joined once by
- * {@link concatChunks}. A chunk of {@link KEEP_BYTES} or more that spans at least half the
- * buffer it is a view over is kept as it is, so its bytes are copied once, by the join.
- * Any other is copied into a block shared with the chunks around it, so what is held
- * follows the bytes read, not how finely the server split them nor how much of a larger
- * buffer each piece is a view over: at most about twice the body's size. A body sent in
- * one-byte chunks holds about its own size, not one array per byte, and one handed over
- * as small views over a socket's read buffer does not hold the rest of each buffer. Blocks
- * are added only as bytes arrive, whatever length the body declares. The first is the size
- * of the first chunk copied into it, so a body of one small chunk fills it exactly and is
- * that block, copied once.
+ * {@link concatChunks}. A chunk of {@link KEEP_BYTES} or more that spans at least half
+ * the unshared buffer it is a view over is kept as it is, so its bytes are copied once, by
+ * the join. Any other is copied into a block shared with the chunks around it, so what is
+ * held follows the bytes read, not how finely the server split them nor how much of a
+ * larger buffer each piece is a view over: at most about twice the body's size. A body
+ * sent in one-byte chunks holds about its own size, not one array per byte, and one handed
+ * over as small views over a socket's read buffer does not hold the rest of each buffer.
+ * Blocks are added only as bytes arrive, whatever length the body declares. The first is
+ * the size of the first chunk copied into it, so a body of one small chunk fills it
+ * exactly and is that block, copied once.
  *
  * A chunk kept as it is must not change before the join: the runtime's streams hand over
  * each chunk in memory of its own. One whose length changes by then fails the join.
@@ -46,10 +47,15 @@ export class BodyBytes {
 
   /**
    * Keeps `chunk`'s `byteLength` bytes, read through its internal slots: a `Uint8Array`
-   * from any realm, measured already. The caller holds the total to `maxBytes`.
+   * from any realm, measured already. The caller holds the total to `maxBytes`; a chunk
+   * that would pass it throws a `RangeError`, as there is no block left to copy it into.
    */
   public append(chunk: Uint8Array, byteLength: number): void {
-    if (byteLength >= KEEP_BYTES && spansMostOfBuffer(chunk, byteLength)) {
+    if (byteLength > this.maxBytes - this.written) {
+      throw new RangeError('BodyBytes cannot hold more than its maxBytes');
+    }
+
+    if (byteLength >= KEEP_BYTES && isKeptAsIs(chunk, byteLength)) {
       this.endPart();
       this.parts.push(chunk);
       this.written += byteLength;
@@ -128,11 +134,19 @@ export class BodyBytes {
 }
 
 /**
- * Whether `chunk`'s `byteLength` bytes are at least half its buffer, measured through the
- * intrinsic getters, so keeping the chunk holds no more than twice what it counts.
+ * Whether `chunk` may be kept as it is: over an unshared `ArrayBuffer`, whose `byteLength`
+ * bytes are at least half of it, measured through the intrinsic getters, so keeping the
+ * chunk holds no more than twice what it counts. A chunk over shared memory is copied as
+ * it is read instead, as another thread could write it before the join.
  */
-function spansMostOfBuffer(chunk: Uint8Array, byteLength: number): boolean {
-  const bufferBytes = readBinaryByteLength(readTypedArrayBuffer(chunk));
+function isKeptAsIs(chunk: Uint8Array, byteLength: number): boolean {
+  const buffer = readTypedArrayBuffer(chunk);
+
+  if (arrayBufferKindOf(buffer) !== 'ArrayBuffer') {
+    return false;
+  }
+
+  const bufferBytes = readBinaryByteLength(buffer);
 
   return bufferBytes !== null && byteLength * 2 >= bufferBytes;
 }

@@ -411,14 +411,8 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        let isDone = false;
-        try {
-          isDone = xhr.readyState === 4;
-        } catch {
-          // Stopped as any other.
-        }
-
-        if (isDone) {
+        // An XHR whose state cannot be read is stopped as any other.
+        if (readyStateQuietly() === 4) {
           settleAborted(answeredAtHeaders);
           return;
         }

@@ -1259,7 +1259,9 @@ function isSubclass(
   // Some realm's built-in only where the prototype is named as the built-in's is and its
   // parent is the kind's own parent - `TypedArray`'s prototype for a typed array,
   // `Object`'s for a buffer - so a class given the built-in's name (`class Uint8Array
-  // extends Uint8Array`, or one over a class between) is told as the subclass it is.
+  // extends Uint8Array`, or one over a class between) is told as the subclass it is. A
+  // chain named exactly as the built-in's (`Uint8Array` over a class named `TypedArray`)
+  // is read as the built-in: no test of names can tell it from another realm's.
   const parentName =
     baseName === 'ArrayBuffer' || baseName === 'SharedArrayBuffer'
       ? 'Object'

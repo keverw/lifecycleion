@@ -6107,32 +6107,39 @@ function answeredBodySizeOf(body: unknown): number | 'string' | null {
 
 /**
  * `body` - bytes measured at `size` - or, where its memory can change size (a resizable
- * `ArrayBuffer` or growable `SharedArrayBuffer`, or a view over one), a fixed copy of those
- * `size` bytes, so the bytes held to `maxResponseBytes` are the ones delivered whatever
- * grows the memory later. A buffer is copied as an `ArrayBuffer`, a view as a
- * `Uint8Array`. Read through the intrinsic getters, as the body was measured.
+ * `ArrayBuffer` or growable `SharedArrayBuffer`) or be written from another thread (any
+ * `SharedArrayBuffer`), or is a view over such memory, a copy of those `size` bytes in
+ * memory of its own, so the bytes held to `maxResponseBytes` are the ones delivered
+ * whatever changes the memory later, as XHRAdapter copies a shared body. A buffer is
+ * copied as an `ArrayBuffer`, a view as a `Uint8Array`. Read through the intrinsic
+ * getters, as the body was measured.
  */
 function fixedAnsweredBody(body: object, size: number): unknown {
-  const isBuffer = arrayBufferKindOf(body) !== undefined;
+  const bodyKind = arrayBufferKindOf(body);
+  const isBuffer = bodyKind !== undefined;
   const buffer = isBuffer
     ? (body as ArrayBufferLike)
     : readViewBuffer(body as ArrayBufferView);
+  const bufferKind = isBuffer ? bodyKind : arrayBufferKindOf(buffer);
 
-  if (!isResizableBuffer(buffer)) {
+  if (
+    bufferKind !== 'SharedArrayBuffer' &&
+    !isResizableBuffer(buffer, bufferKind)
+  ) {
     return body;
   }
 
   // Nothing to copy, nor to read off a buffer detached since: an empty body is a fixed
-  // empty one, as a resizable one could grow after it was measured.
+  // empty one, as the memory under it could grow after it was measured.
   if (size === 0) {
     return isBuffer ? new ArrayBuffer(0) : new Uint8Array(0);
   }
 
-  const bytes = isBuffer
-    ? new Uint8Array(buffer, 0, size)
-    : plainBytesView(body as ArrayBufferView).subarray(0, size);
-  const copy = new Uint8Array(size);
-  copy.set(bytes);
+  const copy = (
+    isBuffer
+      ? new Uint8Array(buffer, 0, size)
+      : plainBytesView(body as ArrayBufferView).subarray(0, size)
+  ).slice();
 
   return isBuffer ? copy.buffer : copy;
 }

@@ -111,6 +111,27 @@ describe('BodyBytes', () => {
     expect(body.bytes()[10]).toBe(200);
   });
 
+  test('a large chunk over a SharedArrayBuffer is copied as it is appended, so a later write does not reach the join', () => {
+    const shared = new Uint8Array(new SharedArrayBuffer(8 * 1024));
+    shared.set(counting(8 * 1024));
+    const body = new BodyBytes(100_000);
+    body.append(shared, shared.length);
+    // As another thread could write it after it was counted.
+    shared[0] = 200;
+    const bytes = body.bytes();
+
+    expect(bytes[0]).toBe(0);
+    expect(bytes.length).toBe(8 * 1024);
+  });
+
+  test('a chunk past maxBytes throws a RangeError rather than looping for a block', () => {
+    const body = new BodyBytes(4);
+    body.append(counting(4), 4);
+
+    expect(() => body.append(counting(1), 1)).toThrow(RangeError);
+    expect([...body.bytes()]).toEqual([0, 1, 2, 3]);
+  });
+
   test('a large view over less than half its buffer is copied, so the rest of it is not held', () => {
     // A piece of a socket's read buffer, as Node's HTTP parser hands a body over.
     const read = counting(64 * 1024);

@@ -208,6 +208,14 @@ export function readBinaryTemplateMember(value: object, key: string): unknown {
   return (value as Record<string, unknown>)[key];
 }
 
+/** The `byteLength` getters {@link readBinaryByteLength} tries, in order. */
+const BYTE_LENGTH_GETTERS = [
+  TYPED_ARRAY_BYTE_LENGTH,
+  DATA_VIEW_BYTE_LENGTH,
+  ARRAY_BUFFER_BYTE_LENGTH,
+  SHARED_ARRAY_BUFFER_BYTE_LENGTH,
+] as const;
+
 /** One intrinsic getter's answer for `value`, or `null` when it is not that kind. */
 function callByteLengthGetter(
   getter: (() => unknown) | undefined,
@@ -378,12 +386,7 @@ function isBufferTag(tag: unknown): boolean {
  * is what it holds.
  */
 export function readBinaryByteLength(value: object): number | null {
-  for (const getter of [
-    TYPED_ARRAY_BYTE_LENGTH,
-    DATA_VIEW_BYTE_LENGTH,
-    ARRAY_BUFFER_BYTE_LENGTH,
-    SHARED_ARRAY_BUFFER_BYTE_LENGTH,
-  ]) {
+  for (const getter of BYTE_LENGTH_GETTERS) {
     const byteLength = callByteLengthGetter(getter, value);
 
     if (byteLength !== null) {

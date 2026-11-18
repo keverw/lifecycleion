@@ -18483,6 +18483,41 @@ describe('a bytes body handed to a retry- or redirect-phase interceptor', () => 
   });
 });
 
+test.each([
+  ['a view over it', (buffer: SharedArrayBuffer) => new Uint8Array(buffer)],
+  ['the buffer itself', (buffer: SharedArrayBuffer) => buffer],
+] as const)(
+  "a custom adapter's body over a fixed SharedArrayBuffer is delivered as a copy, so a later write does not reach it: %s",
+  async (_label, makeBody) => {
+    const buffer = new SharedArrayBuffer(4);
+    new Uint8Array(buffer).set([1, 2, 3, 4]);
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/octet-stream' },
+            body: makeBody(buffer) as Uint8Array,
+          }),
+      },
+      baseURL: 'http://example.test',
+    });
+
+    const response = await client.get('/x').send();
+    // As another thread could write it once delivered.
+    new Uint8Array(buffer)[0] = 200;
+    const body = response.body as ArrayBuffer | Uint8Array;
+    const delivered = body instanceof Uint8Array ? body : new Uint8Array(body);
+
+    expect(response.isFailed).toBe(false);
+    expect(Object.prototype.toString.call(delivered.buffer)).toBe(
+      '[object ArrayBuffer]',
+    );
+    expect([...delivered]).toEqual([1, 2, 3, 4]);
+  },
+);
+
 type GrowableBuffer = { byteLength: number; grow?: (n: number) => void };
 const makeGrowableShared = (): GrowableBuffer =>
   new (
