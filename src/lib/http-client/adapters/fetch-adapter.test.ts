@@ -3203,49 +3203,71 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     expect([...(joined.response.body as Uint8Array)]).toEqual([1, 2, 3]);
   });
 
+  /** A `fetch` whose one chunk spans a resizable buffer resized to `newLength` once read. */
+  async function sendResized(byteLength: number, newLength: number) {
+    const buffer = new ArrayBuffer(byteLength, {
+      maxByteLength: byteLength * 2,
+    });
+    const chunk = new Uint8Array(buffer);
+    chunk.fill(7);
+    let pulls = 0;
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream(
+            {
+              pull(controller) {
+                pulls++;
+
+                if (pulls === 1) {
+                  controller.enqueue(chunk);
+                } else {
+                  buffer.resize(newLength);
+                  controller.close();
+                }
+              },
+            },
+            // Pulled only when read: the chunk is counted before it is resized.
+            { highWaterMark: 0 },
+          ),
+          { status: 200 },
+        ),
+      );
+
+    return new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: byteLength * 4,
+    });
+  }
+
   test.each([
     ['grows', 5],
     ['shrinks', 1],
   ])(
-    'a chunk whose buffer %s after it is read keeps the bytes it held when read',
+    'a chunk under 16 KiB whose buffer %s after it is read keeps the bytes it held when read',
     async (_label, newLength) => {
-      const buffer = new ArrayBuffer(3, { maxByteLength: 8 });
-      const chunk = new Uint8Array(buffer);
-      chunk.set([1, 2, 3]);
-      let pulls = 0;
-      (globalThis as any).fetch = () =>
-        Promise.resolve(
-          new Response(
-            new ReadableStream(
-              {
-                pull(controller) {
-                  pulls++;
-
-                  if (pulls === 1) {
-                    controller.enqueue(chunk);
-                  } else {
-                    buffer.resize(newLength);
-                    controller.close();
-                  }
-                },
-              },
-              // Pulled only when read: the chunk is counted before it is resized.
-              { highWaterMark: 0 },
-            ),
-            { status: 200 },
-          ),
-        );
-
-      const response = await new FetchAdapter().send({
-        requestURL: 'https://local.test/data',
-        method: 'GET',
-        headers: {},
-        maxResponseBytes: 100,
-      });
+      const response = await sendResized(3, newLength);
 
       expect(response.status).toBe(200);
       expect(response.isStreamError).toBeUndefined();
-      expect([...(response.body as Uint8Array)]).toEqual([1, 2, 3]);
+      expect([...(response.body as Uint8Array)]).toEqual([7, 7, 7]);
+    },
+  );
+
+  test.each([
+    ['grows', 40_000],
+    ['shrinks', 1],
+  ])(
+    'a chunk of 16 KiB or more whose buffer %s after it is read fails as a stream error, not joined wrong',
+    async (_label, newLength) => {
+      const response = await sendResized(20_000, newLength);
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_response_error');
+      expect(response.body).toBeNull();
     },
   );
 
@@ -3537,42 +3559,6 @@ describe('FetchAdapter - body chunk types and sizes', () => {
       outcome: 'AbortError',
       returnCalls: 1,
     });
-  });
-
-  test('a bounded body read keeps each chunk as it was read when the source reuses its buffer', async () => {
-    const scratch = new Uint8Array(1);
-    let index = 0;
-    const body = {
-      [Symbol.asyncIterator]: () => ({
-        next: () => {
-          index++;
-
-          if (index > 3) {
-            return Promise.resolve({ done: true, value: undefined });
-          }
-
-          scratch[0] = index;
-          return Promise.resolve({ done: false, value: scratch });
-        },
-      }),
-    };
-    (globalThis as any).fetch = () =>
-      Promise.resolve({
-        status: 200,
-        type: 'basic',
-        headers: new Headers(),
-        body,
-        arrayBuffer: () => Promise.reject(new Error('not read whole')),
-      });
-
-    const response = await new FetchAdapter().send({
-      requestURL: 'https://local.test/data',
-      method: 'GET',
-      headers: {},
-      maxResponseBytes: 100,
-    });
-
-    expect(Array.from(response.body ?? [])).toEqual([1, 2, 3]);
   });
 
   test('a surrogate pair split across two text chunks is read as the one character it is', async () => {

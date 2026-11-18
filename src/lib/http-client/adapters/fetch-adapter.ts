@@ -678,7 +678,7 @@ async function readBodyWithin(
   isTextChunkAccepted: boolean,
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
-  // Copied in as read (see `BodyBytes`).
+  // Kept as read, a small chunk copied (see `BodyBytes`).
   const body = new BodyBytes(maxResponseBytes);
   let loadedBytes = 0;
   let emptyChunks = 0;

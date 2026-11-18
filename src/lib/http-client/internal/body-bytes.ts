@@ -4,51 +4,55 @@ import {
   readTypedArrayByteOffset,
 } from '../../internal/binary-view';
 
-/** The first block a body is copied into. */
-const FIRST_BLOCK_BYTES = 16 * 1024;
-
-/** The largest block a body is copied into: each one after the first is twice the last. */
-const MAX_BLOCK_BYTES = 1024 * 1024;
+/**
+ * The size of a block small chunks are copied into, and the smallest chunk kept as it is
+ * rather than copied.
+ */
+const BLOCK_BYTES = 16 * 1024;
 
 /**
- * A response body's bytes, copied in as each chunk is read - as the Fetch standard's body
- * read copies them, so a source that hands over the same buffer again with the next
- * chunk's bytes is kept as it was read - into blocks of their own rather than one buffer
- * per chunk, so what is held follows the bytes read, not how finely the server split
- * them. Blocks are added only as bytes arrive, whatever length the body declares, and
- * joined once it is read, by {@link concatChunks}.
+ * A response body's bytes, kept as each chunk is read and joined once by
+ * {@link concatChunks}. A chunk of {@link BLOCK_BYTES} or more is kept as it is, so its
+ * bytes are copied once, by the join. A smaller one is copied into a block shared with the
+ * chunks around it, so what is held follows the bytes read, not how finely the server
+ * split them: a body sent in one-byte chunks holds about its own size, not one array per
+ * byte. Blocks are added only as bytes arrive, whatever length the body declares.
  */
 export class BodyBytes {
-  private readonly blocks: Uint8Array[] = [];
+  private readonly parts: Uint8Array[] = [];
   private readonly maxBytes: number;
-  private block: Uint8Array;
+  private block: Uint8Array | undefined;
+  /** Where the block's bytes not yet in `parts` begin. */
+  private blockStart = 0;
   private filled = 0;
-  private nextBlockBytes = FIRST_BLOCK_BYTES * 2;
   private written = 0;
 
   /** `maxBytes` bounds every block; no more than it may be appended in all. */
   constructor(maxBytes: number) {
     this.maxBytes = maxBytes;
-    this.block = new Uint8Array(Math.min(FIRST_BLOCK_BYTES, maxBytes));
   }
 
   /**
-   * Copies `chunk`'s `byteLength` bytes in, read through its internal slots: a
-   * `Uint8Array` from any realm, measured already. The caller holds the total to
-   * `maxBytes`.
+   * Keeps `chunk`'s `byteLength` bytes, read through its internal slots: a `Uint8Array`
+   * from any realm, measured already. The caller holds the total to `maxBytes`.
    */
   public append(chunk: Uint8Array, byteLength: number): void {
+    if (byteLength >= BLOCK_BYTES) {
+      this.endPart();
+      this.parts.push(chunk);
+      this.written += byteLength;
+      return;
+    }
+
     let offset = 0;
 
     while (offset < byteLength) {
-      if (this.filled === this.block.length) {
+      if (this.block === undefined || this.filled === this.block.length) {
         this.startBlock();
       }
 
-      const count = Math.min(
-        byteLength - offset,
-        this.block.length - this.filled,
-      );
+      const block = this.block as Uint8Array;
+      const count = Math.min(byteLength - offset, block.length - this.filled);
       // A part of the chunk, made over its buffer by the intrinsic getters rather than its
       // own `subarray`, which would build it through the chunk's own constructor.
       const part =
@@ -59,7 +63,7 @@ export class BodyBytes {
               readTypedArrayByteOffset(chunk) + offset,
               count,
             );
-      this.block.set(part, this.filled);
+      block.set(part, this.filled);
       this.filled += count;
       this.written += count;
       offset += count;
@@ -67,32 +71,35 @@ export class BodyBytes {
   }
 
   /**
-   * The bytes appended, as a plain `Uint8Array` spanning an `ArrayBuffer` of its own: the
-   * one block itself where the body filled it exactly, joined otherwise.
+   * The bytes appended, as a plain `Uint8Array` spanning an `ArrayBuffer` of its own:
+   * joined by {@link concatChunks}, which hands back a lone part that already is that.
    */
   public bytes(): Uint8Array {
-    if (this.blocks.length === 0 && this.filled === this.block.length) {
-      return this.block;
+    this.endPart();
+    return concatChunks(this.parts, this.written);
+  }
+
+  /** Adds the block's bytes copied since the last part as a part of their own. */
+  private endPart(): void {
+    if (this.block !== undefined && this.filled > this.blockStart) {
+      this.parts.push(
+        new Uint8Array(
+          this.block.buffer,
+          this.blockStart,
+          this.filled - this.blockStart,
+        ),
+      );
+      this.blockStart = this.filled;
     }
-
-    const parts =
-      this.filled === 0
-        ? this.blocks
-        : [...this.blocks, new Uint8Array(this.block.buffer, 0, this.filled)];
-
-    return concatChunks(parts, this.written);
   }
 
   private startBlock(): void {
-    if (this.filled > 0) {
-      this.blocks.push(this.block);
-    }
-
+    this.endPart();
     // Never past what the limit leaves: a body over it is refused before it is appended.
     this.block = new Uint8Array(
-      Math.min(this.nextBlockBytes, this.maxBytes - this.written),
+      Math.min(BLOCK_BYTES, this.maxBytes - this.written),
     );
-    this.nextBlockBytes = Math.min(this.nextBlockBytes * 2, MAX_BLOCK_BYTES);
+    this.blockStart = 0;
     this.filled = 0;
   }
 }
