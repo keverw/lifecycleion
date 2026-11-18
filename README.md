@@ -189,6 +189,8 @@ Lifecycleion calls code it does not control, and defends against that code misbe
 
 The library reads built-ins - `Promise`, `Reflect`, `Object`, `Array`, `Set`, `Map`, `WeakMap`, `WeakSet`, `Math`, `Number`, `Symbol`, `EventTarget`, `AbortController`, and their methods - live, when it uses them, and does not defend against them being replaced or modified. Tampering with built-ins, such as replacing `Promise.prototype.then` or `Object.defineProperty`, is unsupported. That is separate from the pollution above: an extra property on `Object.prototype` is defended where it would change how the library reads caller data; a replaced built-in method is not.
 
+The same holds for the runtime's own objects: `fetch` and the `Response` it returns, `XMLHttpRequest`, `Headers`, `TextEncoder`, the typed arrays, `console`, and the state bundled copies of the library share on `globalThis`. A polyfill or test double installed as one of these globals is used as if it were the runtime's own, and where it behaves unlike one, the result is unsupported. A value you pass in - a signal, a body, a header value - is defended whatever realm or polyfill it comes from.
+
 ## Change Log
 
 See [changelog.md](./changelog.md) for version history and release notes.

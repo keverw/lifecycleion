@@ -1,6 +1,6 @@
 # Change Log
 
-- **Threat model:** Lifecycleion defends against hostile caller-supplied values - component instances and their getters, option objects, promises and thenables returned by hooks, loggers, sinks, adapters, interceptors and listeners, and prototype-polluted caller data - and reads built-ins live. Replacing or modifying built-ins such as `Promise`, `Reflect`, `Object`, `Array`, the collections, `EventTarget` or `AbortController` is unsupported. See [Security and threat model](./README.md#security-and-threat-model).
+- **Threat model:** Lifecycleion defends against hostile caller-supplied values - component instances and their getters, option objects, promises and thenables returned by hooks, loggers, sinks, adapters, interceptors and listeners, and prototype-polluted caller data - and reads built-ins live. Replacing or modifying built-ins such as `Promise`, `Reflect`, `Object`, `Array`, the collections, `EventTarget` or `AbortController` is unsupported, as is a polyfill or test double installed in place of the runtime's own `fetch`, `XMLHttpRequest`, `Headers` or `console`. See [Security and threat model](./README.md#security-and-threat-model).
 - Lifecycle follow-up review fixes preserve successful start/stop state across inspection failures, abort superseded force signals, keep dependencies protected when concurrent stops stall, and preserve selected component identity in aggregate health checks. Synchronous `getValue()` refuses lazy thenables without starting their work.
 
 <!-- toc -->
