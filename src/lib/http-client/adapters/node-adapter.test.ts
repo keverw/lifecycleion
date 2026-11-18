@@ -15220,3 +15220,115 @@ test('a server status below 100 on a request whose signal reads aborted stays th
     });
   }
 });
+
+test('an empty first Location is passed over for the first that is not empty, as browsers follow it', async () => {
+  const answers = [
+    ['Location: ', 'Location: /second', 'Location: /third'],
+    ['Location: ', 'Location: '],
+    ['Location: /first', 'Location: /second'],
+  ];
+  let answer = answers[0];
+  const paths: string[] = [];
+  const server = net.createServer((socket) => {
+    socket.once('data', (data: Buffer) => {
+      paths.push(data.toString('latin1').split(' ')[1]);
+      socket.end(
+        `HTTP/1.1 302 Found\r\n${answer.join('\r\n')}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`,
+      );
+    });
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const locations: unknown[] = [];
+
+    for (const lines of answers) {
+      answer = lines;
+      const response = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${port}/`,
+        method: 'GET',
+        headers: {},
+      });
+
+      locations.push(response.headers['location']);
+    }
+
+    expect(locations).toEqual(['/second', '', '/first']);
+
+    // The client follows it.
+    answer = answers[0];
+    paths.length = 0;
+    await new HTTPClient({
+      adapter: new NodeAdapter(),
+      followRedirects: true,
+      maxRedirects: 1,
+    })
+      .get(`http://127.0.0.1:${port}/`)
+      .send();
+
+    expect(paths).toEqual(['/', '/second']);
+  } finally {
+    await new Promise<void>((done) => {
+      server.close(() => done());
+    });
+  }
+});
+
+test('a server status below 100 mid-upload ends the upload as the transport error, its progress where it stopped', async () => {
+  // The server reads no more after the first chunk, so the upload cannot finish past what
+  // the socket buffers hold, which is far less than the body.
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.once('data', () => {
+      socket.pause();
+      socket.end(
+        'HTTP/1.1 099 Odd\r\nContent-Length: 0\r\nConnection: close\r\n\r\n',
+      );
+    });
+    socket.on('error', () => {});
+  });
+
+  await new Promise<void>((done) => {
+    server.listen(0, '127.0.0.1', done);
+  });
+
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const uploads: number[] = [];
+    const answer = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/`,
+      method: 'POST',
+      headers: {},
+      body: new Uint8Array(32 * 1024 * 1024),
+      onUploadProgress: (event) => {
+        uploads.push(event.progress);
+      },
+    });
+
+    expect(answer.isTransportError).toBe(true);
+
+    const settled = await answer.requestBodySettled;
+
+    expect(settled?.message).toBe(
+      'Server answered with an invalid status code (got 99)',
+    );
+    expect(uploads[0]).toBe(0);
+    expect(uploads.at(-1)).toBeLessThan(1);
+  } finally {
+    // Paused, so each would otherwise wait on a close it never reads.
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+
+    await new Promise<void>((done) => {
+      server.close(() => done());
+    });
+  }
+});

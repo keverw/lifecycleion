@@ -473,6 +473,9 @@ const EMPTY_CHUNKS_PER_YIELD = 64;
 /** What {@link readResponseBody} answers for a body over `maxResponseBytes`. */
 const RESPONSE_TOO_LARGE = Symbol('response too large');
 
+/** What a body read waiting on its next chunk is answered with by an abort. */
+const ABORTED_READ = Symbol('aborted read');
+
 /**
  * The response body's bytes, `null` for a response that carries none, or
  * {@link RESPONSE_TOO_LARGE} once the body passes `maxResponseBytes`.
@@ -701,7 +704,15 @@ async function readBodyWithin(
 
   throwIfAborted();
 
-  const stopWatching = letGoOnAbort(signal, letGo);
+  // Ends the wait on the chunk being read, so a read the body has stalled on - its
+  // `cancel` missing, or not ending the read - is waited on no longer, and the iterator
+  // is asked to `return()`. One per wait, dropped once it is over, so a long body holds
+  // nothing per chunk it has read.
+  let wakeOnAbort: (() => void) | undefined;
+  const stopWatching = letGoOnAbort(signal, () => {
+    letGo();
+    wakeOnAbort?.();
+  });
   // Driven by hand rather than by `for await`, which leaving early waits on the iterator's
   // `return()`: a polyfill's iterator may never settle it, and the answer here - past the
   // limit, aborted, a chunk refused - does not depend on when it lets go. Called, not
@@ -717,9 +728,36 @@ async function readBodyWithin(
 
     for (;;) {
       let value: unknown;
+      let settled: { value: unknown } | typeof ABORTED_READ;
+
+      // An abort while no chunk was awaited - during a wait for timers - finds none to
+      // end.
+      throwIfAborted();
 
       try {
-        const step: unknown = await iterator.next();
+        // Adopted, and handed both outcomes, so a `next()` left behind by an abort that
+        // later rejects is observed.
+        const next = adoptPromise(iterator.next());
+        settled = await new Promise<{ value: unknown } | typeof ABORTED_READ>(
+          (resolve, reject) => {
+            wakeOnAbort = () => resolve(ABORTED_READ);
+            next.then(resolve, reject);
+          },
+        );
+      } catch (error) {
+        isIteratorEnded = true;
+        throw error;
+      } finally {
+        wakeOnAbort = undefined;
+      }
+
+      // Left waiting: the iterator is asked to `return()` below.
+      if (settled === ABORTED_READ) {
+        throw makeAbortError();
+      }
+
+      try {
+        const step = settled.value;
 
         if (typeof step !== 'object' || step === null) {
           throw new TypeError(

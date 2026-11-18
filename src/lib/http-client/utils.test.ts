@@ -1809,14 +1809,27 @@ test('serializeBody refuses a body whose prototype answers differently once it h
 });
 
 describe('firstJoinedLocation', () => {
-  test('an empty Location sent after one is dropped, as the first header is followed', () => {
+  test('an empty Location among repeats is dropped wherever it sits, as browsers follow the first that is not empty', () => {
     expect(firstJoinedLocation('/a, ')).toBe('/a');
     expect(firstJoinedLocation('/a, , ')).toBe('/a');
     expect(firstJoinedLocation('/files/Smith, John.pdf, ')).toBe(
       '/files/Smith, John.pdf',
     );
-    // Nothing but empty ones: the value is left as it is, and names no target.
-    expect(firstJoinedLocation(', ')).toBe(', ');
+    expect(firstJoinedLocation('/a, , /b')).toBe('/a');
+    expect(firstJoinedLocation(', /b')).toBe('/b');
+    expect(firstJoinedLocation(', , /b')).toBe('/b');
+    expect(firstJoinedLocation('next, , next')).toBe('next');
+    // Nothing but empty ones: empty, as no Location at all.
+    expect(firstJoinedLocation(', ')).toBe('');
+    expect(firstJoinedLocation(', , ')).toBe('');
+  });
+
+  test('a long run of empty repeats is dropped, wherever it ends', () => {
+    // Scanned once: a server-sent run of `, ` must not cost its square (Node's regex
+    // engine takes about 3 s on a 40,000-repeat run that a backtracking trim reads).
+    const run = ', '.repeat(2_000_000);
+    expect(firstJoinedLocation(`/a${run}x`)).toBe('/a, x');
+    expect(firstJoinedLocation(`/a${run}`)).toBe('/a');
   });
 
   test('a header repeated whole, or a relative target that starts as one does, is split', () => {
@@ -1834,13 +1847,12 @@ describe('firstJoinedLocation', () => {
     expect(firstJoinedLocation('Smith, Smith, John')).toBe(
       'Smith, Smith, John',
     );
-    // A target holding `, ` itself, sent twice; and no empty target.
+    // A target holding `, ` itself, sent twice.
     expect(firstJoinedLocation('Smith, John.pdf, Smith, John.pdf')).toBe(
       'Smith, John.pdf',
     );
-    expect(firstJoinedLocation(', ')).toBe(', ');
-    // A target that starts with `, ` itself, sent twice.
-    expect(firstJoinedLocation(', a, , a')).toBe(', a');
+    // Read as an empty repeat then `a` twice: the two cannot be told apart.
+    expect(firstJoinedLocation(', a, , a')).toBe('a');
     expect(firstJoinedLocation('a, a, b')).toBe('a, a, b');
   });
 

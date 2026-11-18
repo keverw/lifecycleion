@@ -484,6 +484,11 @@ export class CookieJar {
    * store while no cookie can have gone 30 days unused.
    */
   private earliestAccessTime = Infinity;
+  /**
+   * Set while `fromJSON` applies a payload in its own order: the limits wait until it is
+   * stored again least recently used first, so they evict the stalest.
+   */
+  private isHoldingLimits = false;
 
   constructor(options?: CookieJarOptions) {
     assertOptionsObject(options, 'CookieJar options', true);
@@ -884,7 +889,9 @@ export class CookieJar {
    * cookies created in the same millisecond keep their place in the header.
    *
    * Each cookie carries the time it was last used as `lastAccessedAt`: a restore orders
-   * recency by that time, and cookies that share one by payload order, so a restored jar
+   * recency by that time, and cookies that share one by payload order - creation order,
+   * not the order they were used in within that millisecond, which is not saved, as
+   * browsers save only the time (the cookies one request sends share one). A restored jar
    * keeps the cookies used in the last 30 days safe from its jar-wide limit, and only
    * those, and evicts the least recently used first - during the restore too, which
    * stores them least recently used first.
@@ -960,12 +967,16 @@ export class CookieJar {
    * A cookie that has expired by the time it is restored is left out of the jar and out
    * of the count, as `setCookie` leaves it out.
    *
-   * The jar's limits apply as each cookie is stored, in payload order, so a payload past
-   * them comes back short (see {@link CookieJar}).
+   * Entries are applied in payload order, as one `setCookie` after another: of entries
+   * with the same name, domain, path and host-only flag, the last replaces the others,
+   * or deletes the cookie when it has expired, however recently each was used. The jar's
+   * limits then apply as the cookies are stored least recently used first, so a payload
+   * past them comes back short of its stalest cookies, wherever they sit in it (see
+   * {@link CookieJar}).
    *
    * @returns How many cookies the jar holds once restored. Compare against
    *          `data.cookies.length` to learn whether any were refused; entries of the same
-   *          name, domain, path and host-only flag are one cookie, the last one stored.
+   *          identity are one cookie, the last in the payload.
    * @throws {TypeError} When `data.cookies` cannot be read or is not an array, its length
    *         cannot be read, or it holds a non-object or an element that cannot be read. The
    *         jar is left as it was.
@@ -1110,33 +1121,56 @@ export class CookieJar {
     this.earliestAccessTime = Infinity;
     this.lastCreationTime = -Infinity;
 
-    // Stored least recently used first, so each eviction pass the limits run as the jar
-    // fills sees the stalest cookies first, as the saved jar's would; each keeps its place
-    // in the payload, its creation order, as the order it was created in.
-    const now = Date.now();
-    const recency = (cookie: Cookie): number => {
-      const lastAccessedAt: unknown = cookie.lastAccessedAt;
-      return typeof lastAccessedAt === 'number' && lastAccessedAt < now
-        ? lastAccessedAt
-        : now;
-    };
+    // Applied in payload order with the limits held, as one `setCookie` after another
+    // would apply them: a later entry of the same identity replaces an earlier one, or
+    // deletes it when it has expired, however recently either was used. Each keeps its
+    // place in the payload, its creation order, as the order it was created in.
     const firstOrder = this.creationClock;
     this.creationClock += prepared.length;
-    const byRecency = prepared
-      .map((cookie, index) => ({
-        cookie,
-        creationOrder: firstOrder + index + 1,
-      }))
-      .sort((a, b) => recency(a.cookie) - recency(b.cookie));
+    this.isHoldingLimits = true;
 
-    for (const { cookie, creationOrder } of byRecency) {
-      this.storeCookie(cookie, undefined, creationOrder);
+    try {
+      for (const [index, cookie] of prepared.entries()) {
+        this.storeCookie(cookie, undefined, firstOrder + index + 1);
+      }
+    } finally {
+      this.isHoldingLimits = false;
+    }
+
+    // Then stored again least recently used first, the limits applied after each, so each
+    // eviction pass sees the stalest cookies first, as the saved jar's would. Cookies used
+    // at one time keep payload order: the access clock counted them in it.
+    const survivors: Array<{
+      site: string;
+      key: string;
+      stored: StoredCookie;
+    }> = [];
+
+    for (const [site, bucket] of this.buckets) {
+      for (const [key, stored] of bucket) {
+        survivors.push({ site, key, stored });
+      }
+    }
+
+    survivors.sort((a, b) => byLeastRecentlyUsed(a.stored, b.stored));
+    this.clearBuckets();
+    this.cookieCount = 0;
+    this.earliestAccessTime = Infinity;
+
+    for (const { site, key, stored } of survivors) {
+      stored.lastAccess = ++this.accessClock;
+      this.getOrCreateBucket(site).set(key, stored);
+      this.cookieCount++;
+      this.earliestAccessTime = Math.min(
+        this.earliestAccessTime,
+        stored.lastAccessTime,
+      );
+      this.enforceLimits(site);
     }
 
     // What the jar holds once every entry is stored, not each entry `setCookie` took: an
-    // entry of the same identity stored after another - the more recently used, or the
-    // later of two used at once - replaces it, or deletes it when it has expired, and
-    // neither leaves two cookies behind.
+    // entry of the same identity stored after another replaces it, or deletes it when it
+    // has expired, and neither leaves two cookies behind.
     return this.cookieCount;
   }
 
@@ -1384,7 +1418,9 @@ export class CookieJar {
     this.earliestAccessTime = Math.min(this.earliestAccessTime, lastAccessTime);
     this.lastCreationTime = Math.max(this.lastCreationTime, creationTime);
 
-    this.enforceLimits(site);
+    if (!this.isHoldingLimits) {
+      this.enforceLimits(site);
+    }
 
     return this.buckets.get(site)?.has(key) === true;
   }

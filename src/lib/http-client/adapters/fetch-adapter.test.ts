@@ -3420,6 +3420,78 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     expect(returnCalls).toBe(2);
   });
 
+  test('an abort while an iterated body read is stalled settles the send and asks the iterator to return()', async () => {
+    // A polyfill's body whose `next()` never settles once started, with no `cancel` or a
+    // `cancel` that does not end the read: the abort alone must end the wait.
+    for (const hasCancel of [false, true]) {
+      const controller = new AbortController();
+      let returnCalls = 0;
+      let cancelCalls = 0;
+      let nextStarted: () => void = () => {};
+      const started = new Promise<void>((resolve) => {
+        nextStarted = resolve;
+      });
+      const body = {
+        [Symbol.asyncIterator]: () => ({
+          next: () => {
+            nextStarted();
+            return new Promise<never>(() => {});
+          },
+          return: () => {
+            returnCalls++;
+            return Promise.resolve({ done: true, value: undefined });
+          },
+        }),
+        ...(hasCancel
+          ? {
+              cancel: () => {
+                cancelCalls++;
+              },
+            }
+          : {}),
+      };
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          type: 'basic',
+          headers: new Headers(),
+          body,
+          arrayBuffer: () => Promise.reject(new Error('not read whole')),
+        });
+
+      const sent = new FetchAdapter()
+        .send({
+          requestURL: 'https://local.test/data',
+          method: 'GET',
+          headers: {},
+          maxResponseBytes: 100,
+          signal: controller.signal,
+        })
+        .then(
+          () => 'answered',
+          (error: unknown) => (error as Error).name,
+        );
+
+      await started;
+      controller.abort();
+
+      // Only to tell a hang from an answer: an answer arrives before it either way.
+      const outcome = await Promise.race([
+        sent,
+        new Promise<'hung'>((resolve) =>
+          setTimeout(() => resolve('hung'), 2000),
+        ),
+      ]);
+
+      expect({ hasCancel, outcome, returnCalls, cancelCalls }).toEqual({
+        hasCancel,
+        outcome: 'AbortError',
+        returnCalls: 1,
+        cancelCalls: hasCancel ? 1 : 0,
+      });
+    }
+  });
+
   test('a body whose Symbol.asyncIterator throws when read is read whole through arrayBuffer()', async () => {
     const body = {
       get [Symbol.asyncIterator](): never {

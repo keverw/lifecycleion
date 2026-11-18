@@ -1121,12 +1121,17 @@ function hasXMLHttpRequestGlobal(): boolean {
  * (`a, a`): fetch and XHR join repeats into the same text, so the two cannot be told
  * apart. Two different targets the first of which has a query or fragment (`/a?x, /b`)
  * are followed as one. A server percent-encodes the space in such a value. An empty
- * `Location` sent after one (`/a, `) is dropped first, as the first header is the one
- * followed where repeats are kept apart.
+ * `Location` among them (`/a, `, `, /b`, `/a, , /b`) is dropped first, wherever it sits,
+ * as browsers follow the first that is not empty; one made of nothing else (`, `) is
+ * empty, as no `Location` at all. A single value holding `, , ` or starting or ending
+ * with `, ` cannot be told from one joined with an empty repeat, and is read as one.
  */
 export function firstJoinedLocation(value: string): string {
-  const withoutEmptyRepeats = value.replace(/(?:, )+$/, '');
-  const joined = withoutEmptyRepeats === '' ? value : withoutEmptyRepeats;
+  // Split and joined once each, so a long run of `, ` costs its length, not its square.
+  const joined = value
+    .split(', ')
+    .filter((part) => part !== '')
+    .join(', ');
   // The repeated unit is split as any value is: `/a, /b` sent twice is `/a`.
   const candidate = repeatedTarget(joined) ?? joined;
   const separator = candidate.search(
@@ -1176,9 +1181,9 @@ function repeatedTarget(value: string): string | undefined {
 /**
  * Keeps the first value of a repeated `Location` in a lowercased header record, in place,
  * for an adapter whose transport joined the repeats as `a, b` (fetch, XHR). Its first
- * value is kept, as Node's `res.headers` keeps it, rather than followed and reported as
- * the one mangled URL `a,%20b`. See {@link firstJoinedLocation} for where it splits: a
- * single value with a raw space (`/files/Smith, John.pdf`) is kept whole and
+ * value that is not empty is kept, as browsers follow it and NodeAdapter keeps it,
+ * rather than followed and reported as the one mangled URL `a,%20b`. See
+ * {@link firstJoinedLocation} for where it splits: a single value with a raw space (`/files/Smith, John.pdf`) is kept whole and
  * percent-encoded when followed, as NodeAdapter and browsers follow it.
  */
 export function keepFirstJoinedLocation(

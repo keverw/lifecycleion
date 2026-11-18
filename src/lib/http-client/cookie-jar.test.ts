@@ -3817,6 +3817,42 @@ describe('CookieJar - accepting and expiring cookies', () => {
     ]);
   });
 
+  test('fromJSON() applies entries of one identity in payload order, however recently each was used', () => {
+    const now = Date.now();
+    const cookie = (value: string, lastAccessedAt: number, fields = {}) => ({
+      name: 'sid',
+      value,
+      domain: 'example.com',
+      path: '/',
+      createdAt: now - 10_000,
+      lastAccessedAt,
+      ...fields,
+    });
+
+    // A later replacement used less recently than the entry it replaces still replaces it.
+    const replaced = new CookieJar();
+
+    expect(
+      replaced.fromJSON({
+        cookies: [cookie('old', now - 1000), cookie('new', now - 4000)],
+      }),
+    ).toBe(1);
+    expect(replaced.getAllCookies().map((c) => c.value)).toEqual(['new']);
+
+    // A later expired entry - a logout - deletes it, used less recently or not.
+    for (const deletion of [
+      cookie('', now - 4000, { expires: new Date(now - 1000) }),
+      cookie('', now - 4000, { maxAge: 0 }),
+    ]) {
+      const loggedOut = new CookieJar();
+
+      expect(
+        loggedOut.fromJSON({ cookies: [cookie('live', now - 1000), deletion] }),
+      ).toBe(0);
+      expect(loggedOut.getCookieHeaderString('https://example.com/')).toBe('');
+    }
+  });
+
   test('a leading full stop that maps to a dot is refused, as only a written leading dot is dropped', () => {
     const jar = new CookieJar();
     const cookie = (domain: string) => ({

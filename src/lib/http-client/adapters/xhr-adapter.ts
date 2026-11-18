@@ -923,12 +923,24 @@ export class XHRAdapter implements HTTPAdapter {
           ) {
             // Read and acted on again, not taken from `answeredSoFar`: an answer whose read
             // threw above may read now, and is then kept, so an `error` after it is the
-            // stream error over it. Read uncached only where it still cannot be.
-            const answer = readAndActOnAnswer() ?? takeAnswer();
+            // stream error over it. Read uncached only where it still cannot be - an XHR
+            // that reports progress before its state - and then held to the same status
+            // rule, as `load` holds it.
+            let answer = readAndActOnAnswer();
 
             // Ended by the answer, read for the first time here.
             if (didSettle) {
               return;
+            }
+
+            if (answer === undefined) {
+              const status = xhr.status;
+
+              if (endOnMalformedStatus(status)) {
+                return;
+              }
+
+              answer = takeAnswer(status);
             }
 
             // Told by its URL alone, whatever the status reads.
@@ -1585,10 +1597,13 @@ function parseXHRResponseHeaders(
         result['set-cookie'] = [existing, value];
       }
     } else if (key === 'location') {
-      // The first line's value: the others are repeats, and the value is not joined.
+      // The first line's value that is not empty, as browsers follow it: the others are
+      // repeats, and the value is not joined.
       locationLines++;
+      const kept = result['location'];
 
-      if (locationLines === 1) {
+      // Trimmed already, so an empty one is `''`.
+      if (kept === undefined || (kept === '' && value !== '')) {
         result['location'] = value;
       }
     } else {
@@ -1607,7 +1622,8 @@ function parseXHRResponseHeaders(
   // A `Location` on one line may be one the XHR joined from repeats (a browser joins
   // them): its first value is kept, rather than standing as the one mangled URL
   // `a,%20b` that an XHR outside a browser would follow and `detectedRedirectURL` would
-  // report. One given on lines of its own already is its first value, whole.
+  // report. One given on lines of its own already is its first value that is not
+  // empty, whole.
   if (locationLines === 1) {
     keepFirstJoinedLocation(result);
   }

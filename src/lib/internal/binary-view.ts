@@ -265,30 +265,13 @@ export function arrayBufferKindOf(
 }
 
 /**
- * Whether `value` presents as bytes by its prototype chain - a typed array, `DataView` or
- * buffer, from any realm, or a `Proxy` over one - read off each prototype's own data
- * (a typed array prototype's `BYTES_PER_ELEMENT`, a `DataView`'s or buffer's
- * `Symbol.toStringTag`) rather than by `instanceof`, which only knows this realm. For a
- * value {@link readBinaryByteLength} cannot measure, to tell bytes it must refuse from a
- * value that is not bytes at all. A prototype chain that throws answers no.
- */
-export function presentsAsBinary(value: object): boolean {
-  return someInPrototypeChain(
-    value,
-    (prototype) =>
-      Object.getOwnPropertyDescriptor(prototype, 'BYTES_PER_ELEMENT') !==
-        undefined || isBinaryTag(ownToStringTag(prototype), true),
-  );
-}
-
-/**
  * Whether `value`'s prototype chain holds a buffer's own prototype - an `ArrayBuffer` or
  * `SharedArrayBuffer`, from any realm - told by its `Symbol.toStringTag`, read off the
  * prototypes so a `Proxy`'s `get` trap is not run. A chain that throws answers no.
  */
 export function hasBufferTagInChain(value: object): boolean {
   return someInPrototypeChain(value, (prototype) =>
-    isBinaryTag(ownToStringTag(prototype), false),
+    isBufferTag(ownToStringTag(prototype)),
   );
 }
 
@@ -339,13 +322,9 @@ function ownToStringTag(prototype: object): unknown {
   return Object.getOwnPropertyDescriptor(prototype, Symbol.toStringTag)?.value;
 }
 
-/** A buffer's tag, or - with `isViewIncluded` - a `DataView`'s. */
-function isBinaryTag(tag: unknown, isViewIncluded: boolean): boolean {
-  return (
-    tag === 'ArrayBuffer' ||
-    tag === 'SharedArrayBuffer' ||
-    (isViewIncluded && tag === 'DataView')
-  );
+/** A buffer's tag: an `ArrayBuffer`'s or a `SharedArrayBuffer`'s. */
+function isBufferTag(tag: unknown): boolean {
+  return tag === 'ArrayBuffer' || tag === 'SharedArrayBuffer';
 }
 
 /**

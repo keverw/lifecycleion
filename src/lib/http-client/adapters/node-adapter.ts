@@ -7,6 +7,7 @@ import {
   asciiLowercase,
   asciiUppercase,
   isBlankText,
+  trimHTTPWhitespace,
 } from '../../internal/ascii-text';
 import {
   arrayBufferKindOf,
@@ -1969,7 +1970,10 @@ export class NodeAdapter implements HTTPAdapter {
           // malformed, as a status line Node's parser cannot read is, and is answered as
           // that one is - a transport error - rather than handed on for the client to
           // refuse as this adapter's own invalid answer.
-          // A response with no status at all is as malformed.
+          // A response with no status at all is as malformed. An upload it cuts short ends
+          // as that transport error, its progress where it stopped, as one a reset cuts
+          // short does: this adapter reports the bytes sent, so no final event claims the
+          // rest, which the browser adapters, knowing no bytes, send with any answer.
           if (
             res.statusCode === undefined ||
             isMalformedServerStatus(res.statusCode)
@@ -2051,6 +2055,7 @@ export class NodeAdapter implements HTTPAdapter {
           const responseTask = (async () => {
             const status = res.statusCode ?? 0;
             const headers = normalizeResponseHeaders(res.headers);
+            keepFirstNonEmptyLocation(headers, res.rawHeaders);
             // The answer when taking delivery of the body fails: a stream error with the
             // real status and headers, since the server answered.
             const streamErrorResponse = (
@@ -4855,6 +4860,42 @@ function normalizeResponseHeaders(
   }
 
   return result;
+}
+
+/**
+ * Node keeps the first of repeated `Location` headers, an empty one too, and drops the
+ * rest; browsers follow the first that is not empty, and so does this adapter, which
+ * reads it from the raw headers when the first is empty. An empty `Location` with none
+ * after it stays empty, read as no `Location` at all.
+ */
+function keepFirstNonEmptyLocation(
+  headers: Record<string, string | string[]>,
+  rawHeaders: unknown,
+): void {
+  const location = headers['location'];
+
+  if (
+    typeof location !== 'string' ||
+    trimHTTPWhitespace(location) !== '' ||
+    !Array.isArray(rawHeaders)
+  ) {
+    return;
+  }
+
+  for (let index = 0; index + 1 < rawHeaders.length; index += 2) {
+    const name: unknown = rawHeaders[index];
+    const value: unknown = rawHeaders[index + 1];
+
+    if (
+      typeof name === 'string' &&
+      typeof value === 'string' &&
+      asciiLowercase(name) === 'location' &&
+      trimHTTPWhitespace(value) !== ''
+    ) {
+      defineEntry(headers, 'location', value);
+      return;
+    }
+  }
 }
 
 function snapshotEffectiveRequestHeaders(

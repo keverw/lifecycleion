@@ -530,6 +530,32 @@ describe('XHRAdapter', () => {
     expect((failure as Error | null)?.name).toBe('AbortError');
   });
 
+  test('a status no server may send, first read past the limit by an XHR that shows no state, ends the send the same way', async () => {
+    // An XHR outside a browser that reports progress while its state still reads as
+    // before the headers: the answer is first read past the limit, and held to the rule.
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/odd',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1000,
+    });
+
+    lastXHR.readyState = 1;
+    lastXHR.status = 99;
+    lastXHR.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+    lastXHR.simulateDownloadProgress(1001, 0);
+
+    const answer = await promise;
+
+    expect(answer.status).toBe(0);
+    expect(answer.isTransportError).toBe(true);
+    expect(answer.headers).toEqual({});
+    expect(answer.errorCause?.message).toBe(
+      'Server answered with an invalid status code (got 99)',
+    );
+    expect(lastXHR.abortCalled).toBe(true);
+  });
+
   test('sets responseType to arraybuffer', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({
@@ -1653,6 +1679,30 @@ describe('XHRAdapter', () => {
     expect(response.detectedRedirectURL).toBe(
       'https://api.test/login?next=/a,%20/b',
     );
+  });
+
+  test('an empty Location line is passed over for the first that is not empty, as browsers follow it', async () => {
+    const located: unknown[] = [];
+
+    for (const lines of [
+      'location: \r\nlocation: /b\r\nlocation: /c\r\n',
+      'location: \r\nlocation: \r\n',
+    ]) {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 302;
+      lastXHR.responseURL = 'https://api.test/start';
+      lastXHR.getAllResponseHeadersResult = lines;
+      lastXHR.response = textBody('');
+      lastXHR.simulateLoad();
+      located.push((await promise).headers.location);
+    }
+
+    expect(located).toEqual(['/b', '']);
   });
 
   test('a header on lines of its own is joined, as a browser joins it', async () => {
