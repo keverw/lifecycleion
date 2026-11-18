@@ -367,16 +367,15 @@ export class XHRAdapter implements HTTPAdapter {
        * `abortQuietly`).
        */
       const stopCancelledSend = (): void => {
-        const wasEndedOnStatus = didEndOnMalformedStatus;
-
         try {
           captureAnswer();
         } catch {
           // Nothing more was read to carry out.
         }
 
-        // That read ended the send on a malformed status, the XHR stopped with it.
-        if (!wasEndedOnStatus && didEndOnMalformedStatus) {
+        // A malformed status ended the send, by that read or before it: settled, the XHR
+        // stopped with it.
+        if (didEndOnMalformedStatus) {
           return;
         }
 
@@ -511,6 +510,40 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         return captured ?? takeAnswer(xhr.status);
+      };
+
+      /**
+       * `answer`, or the redirect the browser followed where `responseURL` shows it only
+       * now: an XHR outside a browser may report the URL it ended at only by `load`, after
+       * a status and headers read with none. Such an answer is the followed redirect, as
+       * one seen at the headers is: the final page's status and headers are not its own.
+       */
+      const withRedirectSeenAtLoad = (
+        answer: AnsweredHeaders | undefined,
+      ): AnsweredHeaders | undefined => {
+        if (answer === undefined || answer.redirectURL !== undefined) {
+          return answer;
+        }
+
+        const reportedURL: unknown = xhr.responseURL;
+        const responseURL = typeof reportedURL === 'string' ? reportedURL : '';
+
+        if (responseURL === '' || responseURL === answer.responseURL) {
+          return answer;
+        }
+
+        if (
+          compareResponseURL(responseURL, dispatchedURL).kind !== 'redirected'
+        ) {
+          return answer;
+        }
+
+        return {
+          status: answer.status,
+          headers: {},
+          responseURL,
+          redirectURL: responseURL,
+        };
       };
 
       // --- Abort signal ---
@@ -1050,7 +1083,7 @@ export class XHRAdapter implements HTTPAdapter {
           // Read before any progress callback, as everything this listener reports is: the
           // answer, captured once (see `answeredAtHeaders`).
           // Read here for the first time by an XHR that showed no state before `load`.
-          const answer = answerToActOn(captureAnswer());
+          const answer = withRedirectSeenAtLoad(answerToActOn(captureAnswer()));
 
           // Ended by the answer: a malformed status.
           if (answer === undefined) {

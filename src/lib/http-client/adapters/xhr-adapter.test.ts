@@ -6676,3 +6676,61 @@ describe('XHRAdapter - a body past the limit before the XHR shows a status', () 
     expect(xhr.abortCalled).toBe(true);
   });
 });
+
+test('a redirect an XHR outside a browser reports only at load is the followed redirect, not the page it led to', async () => {
+  const promise = new XHRAdapter().send({
+    requestURL: 'https://api.test/x',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 1000,
+  });
+  const xhr = lastXHR;
+
+  // The status and headers arrive with no URL to say where they came from.
+  xhr.simulateHeadersReceived(200, 'content-type: text/plain\r\n');
+  xhr.responseURL = 'https://api.test/y';
+  xhr.readyState = 4;
+  xhr.response = new TextEncoder().encode('final page').buffer;
+  xhr.simulateLoad();
+  const response = await promise;
+
+  expect(response.status).toBe(0);
+  expect(response.wasRedirectDetected).toBe(true);
+  expect(response.detectedRedirectURL).toBe('https://api.test/y');
+  expect(response.body).toBeNull();
+});
+
+test('a malformed status inside send() with the signal aborted there too stops the XHR once', async () => {
+  const controller = new AbortController();
+  let abortCalls = 0;
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- put back as it was, below
+  const originalSend = FakeXHR.prototype.send;
+  FakeXHR.prototype.send = function (this: FakeXHR) {
+    this.abort = () => {
+      abortCalls++;
+      this.readyState = 0;
+    };
+    this.simulateHeadersReceived(99);
+    controller.abort();
+  };
+
+  try {
+    const outcome = await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/odd',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+      })
+      .then(
+        () => 'resolved',
+        (error: unknown) => (error as Error).name,
+      );
+
+    expect(abortCalls).toBe(1);
+    // Answered as the malformed status, read before the cancel.
+    expect(outcome).toBe('resolved');
+  } finally {
+    FakeXHR.prototype.send = originalSend;
+  }
+});

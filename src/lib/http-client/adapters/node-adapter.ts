@@ -25,7 +25,7 @@ import {
   nonRetryableAdapterErrorFrom,
   unsendableBodyError,
 } from '../internal/adapter-error';
-import { concatChunks } from '../internal/concat-chunks';
+import { BodyBytes } from '../internal/body-bytes';
 import { isPlainRecord } from '../internal/plain-record';
 import { byteProgressEvent, completeProgressEvent } from '../internal/progress';
 import {
@@ -2820,7 +2820,10 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            const chunks: Buffer[] = [];
+            // Small chunks copied into shared blocks (see `BodyBytes`): Node emits one
+            // `Buffer` per chunk the server sent, and a body sent a byte at a time would
+            // otherwise hold an object per byte, far past `maxResponseBytes` in memory.
+            const gathered = new BodyBytes(maxResponseBytes);
             let loadedBytes = 0;
 
             // Deduplication guard — when Content-Length is known and the last
@@ -2842,12 +2845,12 @@ export class NodeAdapter implements HTTPAdapter {
               // Counted before the chunk is kept, so a body over the limit is never held
               // whole: what was gathered is dropped with it.
               if (loadedBytes > maxResponseBytes) {
-                chunks.length = 0;
+                gathered.clear();
                 refuseTooLargeBody();
                 return;
               }
 
-              chunks.push(chunk);
+              gathered.append(chunk, chunk.length);
 
               // progress: -1 when Content-Length is absent (chunked transfer,
               // compressed response, etc.) — callers treat -1 as "length unknown".
@@ -2867,7 +2870,7 @@ export class NodeAdapter implements HTTPAdapter {
               // landed after the last chunk already failed it, and Node still emits `'end'`.
               // What it gathered is let go, as on every other way out.
               if (activeBufferedResponse === undefined) {
-                chunks.length = 0;
+                gathered.clear();
                 return;
               }
 
@@ -2884,7 +2887,7 @@ export class NodeAdapter implements HTTPAdapter {
               // Cancelled from that event: the request is already answered, and the body
               // is not copied for no one.
               if (activeBufferedResponse === undefined) {
-                chunks.length = 0;
+                gathered.clear();
                 return;
               }
 
@@ -2901,9 +2904,7 @@ export class NodeAdapter implements HTTPAdapter {
               // it instead, where a factory is called - for a 2xx alone.
               let responseBody: Uint8Array | null;
               try {
-                responseBody = hasBody
-                  ? concatChunks(chunks, loadedBytes)
-                  : null;
+                responseBody = hasBody ? gathered.bytes() : null;
               } catch (error) {
                 settleBufferedStreamError(
                   error instanceof RangeError
@@ -2918,7 +2919,7 @@ export class NodeAdapter implements HTTPAdapter {
 
               // The pieces let go once copied: an early-ack upload still running keeps
               // this closure alive, and would hold the body twice over until it finishes.
-              chunks.length = 0;
+              gathered.clear();
 
               settleResponse({
                 status,
@@ -2939,7 +2940,7 @@ export class NodeAdapter implements HTTPAdapter {
               // finishes.
               // Also on the guarded way out, for a response a cancel or timeout already
               // answered: its abort listener cannot reach these.
-              chunks.length = 0;
+              gathered.clear();
 
               if (!activeBufferedResponse) {
                 return;
@@ -4939,7 +4940,7 @@ function resolveAdapterResponse(
 // even once the body is fully written: `req.end()` runs synchronously in the request
 // executor for every bodiless request, so a `writableEnded` guard here would make
 // `AbortController.abort()` and every timeout a no-op on the transport - the promise
-// rejecting while the response kept streaming into `chunks[]` and the connection
+// rejecting while the response kept streaming into its buffer and the connection
 // stayed open. Only `destroyed` is worth skipping, and the `catch` covers a socket
 // that is already gone answering `ERR_SOCKET_CLOSED` - and a patched request refusing
 // its `destroyed` read, which most callers reach from an emitter, a timer or an

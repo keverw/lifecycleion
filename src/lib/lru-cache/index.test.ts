@@ -132,14 +132,14 @@ describe('LRUCache', () => {
   });
 
   describe('TTL expiration', () => {
-    test('a write scans the entries for expired ones only once one may have expired', () => {
+    test('a write reclaims expired entries without scanning the live ones, under steady writes too', () => {
       const originalNow = Date.now;
       let currentTime = 1000;
 
       try {
         Date.now = () => currentTime;
-        const cache = new LRUCache<string, string>(1000, {
-          defaultTtl: 60_000,
+        const cache = new LRUCache<string, string>(100_000, {
+          defaultTtl: 1000,
         });
         const internal = cache as unknown as {
           map: Map<string, unknown>;
@@ -151,33 +151,43 @@ describe('LRUCache', () => {
           return entries();
         };
 
-        // Every entry still live: no scan.
-        for (let index = 0; index < 100; index++) {
-          cache.set(`key${index}`, 'value');
-        }
-
         cache.set('short', 'value', 10);
+        currentTime += 11;
         cache.set('after', 'value');
 
-        expect(scans).toBe(0);
-
-        // Past the earliest expiry: one scan reclaims it, and none follows until the next.
-        currentTime += 11;
-        cache.set('next', 'value');
-        cache.set('next2', 'value');
-
-        expect(scans).toBe(1);
         expect(cache.has('short')).toBe(false);
-        expect(cache.size).toBe(103);
 
-        currentTime += 61_000;
-        cache.set('last', 'value');
+        // Ten writes a millisecond for three seconds: an entry expires every millisecond
+        // once the first second has passed, each reclaimed by a later write.
+        for (let tick = 0; tick < 3000; tick++) {
+          currentTime++;
 
-        expect(scans).toBe(2);
-        expect(cache.size).toBe(1);
+          for (let index = 0; index < 10; index++) {
+            cache.set(`key${tick}-${index}`, 'value');
+          }
+        }
+
+        expect(scans).toBe(0);
+        // The last second's writes and the one at its edge, which is still live: an entry
+        // expires once past its time, not at it.
+        expect(cache.size).toBe(10_010);
+        expect(cache.has('key1999-0')).toBe(true);
+        expect(cache.has('key1998-9')).toBe(false);
       } finally {
         Date.now = originalNow;
       }
+    });
+
+    test('an entry overwritten again and again before it expires keeps the expiry heap small', () => {
+      const cache = new LRUCache<string, number>(10, { defaultTtl: 60_000 });
+
+      for (let index = 0; index < 10_000; index++) {
+        cache.set('same', index);
+      }
+
+      const { expiryHeap } = cache as unknown as { expiryHeap: unknown[] };
+      expect(expiryHeap.length).toBeLessThanOrEqual(34);
+      expect(cache.get('same')).toBe(9999);
     });
 
     test('a write in a cache holding no entry that can expire scans nothing', () => {
@@ -1719,4 +1729,70 @@ describe('LRUCache', () => {
       );
     });
   });
+});
+
+test('a write reports the expired entries it reclaims least recently used first, as cleanupExpired() does', () => {
+  const originalNow = Date.now;
+  let currentTime = 1000;
+
+  try {
+    Date.now = () => currentTime;
+    const expired: string[] = [];
+    const cache = new LRUCache<string, string>(100, {
+      onChange: (event) => {
+        if (event.reason === 'expired') {
+          expired.push(event.key);
+        }
+      },
+    });
+
+    // Expiring in the reverse of the order they are used in.
+    cache.set('a', 'value', 30);
+    cache.set('b', 'value', 20);
+    cache.set('c', 'value', 10);
+    cache.get('a');
+    currentTime += 31;
+    cache.set('next', 'value');
+
+    expect(expired).toEqual(['b', 'c', 'a']);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test('a removed entry that could expire is let go of by the expiry heap, its value with it', () => {
+  const cache = new LRUCache<string, { payload: string }>(100, {
+    defaultTtl: 60 * 60 * 1000,
+  });
+
+  for (let index = 0; index < 10; index++) {
+    cache.set(`key${index}`, { payload: 'x'.repeat(1024) });
+  }
+
+  // Deleted and replaced, none of them reaching the top.
+  cache.delete('key0');
+  cache.set('key1', { payload: 'replaced' });
+  cache.delete('key2');
+
+  const { expiryHeap } = cache as unknown as {
+    expiryHeap: Array<{ key: unknown; entry: unknown }>;
+  };
+  const held = expiryHeap.filter((node) => node.entry !== undefined);
+
+  expect(expiryHeap.length).toBe(11);
+  expect(held.map((node) => node.key).sort()).toEqual([
+    'key1',
+    'key3',
+    'key4',
+    'key5',
+    'key6',
+    'key7',
+    'key8',
+    'key9',
+  ]);
+  expect(
+    expiryHeap
+      .filter((node) => node.entry === undefined)
+      .every((node) => node.key === undefined),
+  ).toBe(true);
 });

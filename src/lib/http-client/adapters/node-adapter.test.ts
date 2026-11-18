@@ -15332,3 +15332,50 @@ test('a server status below 100 mid-upload ends the upload as the transport erro
     });
   }
 });
+
+test('a buffered body sent in one-byte chunks holds about its own size while it arrives, not an object per chunk', async () => {
+  // Node emits one Buffer per chunk the server sent; kept one by one, 400,000 of them
+  // held over 30 MiB on Bun, where copied into shared blocks they hold a few.
+  const count = 400_000;
+  const wire = Buffer.from(
+    'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n' +
+      '1\r\nx\r\n'.repeat(count) +
+      '0\r\n\r\n',
+  );
+  const server = net.createServer((socket) => {
+    socket.once('data', () => {
+      socket.end(wire);
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    Bun.gc(true);
+    const usedBefore = process.memoryUsage();
+    let heldBytes = Number.NaN;
+    const response = await new NodeAdapter().send(
+      makeAdapterRequest(`http://127.0.0.1:${String(port)}/`, {
+        maxResponseBytes: count,
+        onDownloadProgress: (event) => {
+          // Measured with every chunk but the last kept, before the join.
+          if (event.loaded === count - 1) {
+            Bun.gc(true);
+            const used = process.memoryUsage();
+            heldBytes =
+              used.heapUsed +
+              used.arrayBuffers -
+              (usedBefore.heapUsed + usedBefore.arrayBuffers);
+          }
+        },
+      }),
+    );
+
+    expect(response.body?.length).toBe(count);
+    expect(heldBytes).toBeLessThan(12 * 1024 * 1024);
+  } finally {
+    server.close();
+  }
+});

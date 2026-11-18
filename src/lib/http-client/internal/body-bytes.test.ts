@@ -17,20 +17,28 @@ function appendAll(body: BodyBytes, chunks: Uint8Array[]): Uint8Array {
 }
 
 describe('BodyBytes', () => {
-  test('a body that fills its one block exactly is that block, not joined again', () => {
-    // A limit of 6 makes the first block 6 bytes.
-    const body = new BodyBytes(6);
-    const bytes = appendAll(body, [
-      counting(2),
-      counting(3, 2),
-      counting(1, 5),
-    ]);
+  test('a body of one small chunk is copied once, into a block its own size', () => {
+    const chunk = counting(2048);
+    const body = new BodyBytes(64 * 1024 * 1024);
+    body.append(chunk, chunk.length);
+    const bytes = body.bytes();
 
-    expect([...bytes]).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(bytes).not.toBe(chunk);
+    expect(Buffer.from(bytes).equals(Buffer.from(chunk))).toBe(true);
     expect(Object.getPrototypeOf(bytes)).toBe(Uint8Array.prototype);
-    expect(bytes.buffer.byteLength).toBe(6);
-    // Not joined again: the same buffer each time.
+    // The block itself, not a 16 KiB block joined again into one of 2,048 bytes.
+    expect(bytes.buffer.byteLength).toBe(2048);
     expect(body.bytes()).toBe(bytes);
+  });
+
+  test('clear() lets go of every byte kept', () => {
+    const body = new BodyBytes(100_000);
+    body.append(counting(10), 10);
+    body.append(counting(20_000), 20_000);
+    body.clear();
+    body.append(counting(3, 7), 3);
+
+    expect([...body.bytes()]).toEqual([7, 8, 9]);
   });
 
   test('a body shorter than its block is kept in a buffer of its own size', () => {

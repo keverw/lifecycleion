@@ -156,7 +156,12 @@ import {
   isAnsweredBodyOverLimit,
   makeResponseTooLargeError,
 } from './internal/response-limit';
-import { readBinaryByteLength } from '../internal/binary-view';
+import {
+  arrayBufferKindOf,
+  plainBytesView,
+  readBinaryByteLength,
+  readTypedArrayBuffer,
+} from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
   parseRetryAfterMS,
@@ -3852,6 +3857,11 @@ export class BaseHTTPClient {
                 maxResponseBytes,
                 false,
               );
+            } else if (typeof answeredBodySize === 'number') {
+              adapterResponse.body = fixedAnsweredBody(
+                answeredBody,
+                answeredBodySize,
+              ) as Uint8Array;
             }
           }
         }
@@ -6092,6 +6102,50 @@ function answeredBodySizeOf(body: unknown): number | 'string' | null {
   return typeof body === 'object' && body !== null
     ? readBinaryByteLength(body)
     : null;
+}
+
+/**
+ * `body` - bytes measured at `size` - or, where its memory can change size (a resizable
+ * `ArrayBuffer` or growable `SharedArrayBuffer`, or a view over one), a fixed copy of those
+ * `size` bytes, so the bytes held to `maxResponseBytes` are the ones delivered whatever
+ * grows the memory later. A buffer is copied as an `ArrayBuffer`, a view as a
+ * `Uint8Array`. Read through the intrinsic getters, as the body was measured.
+ */
+function fixedAnsweredBody(body: object, size: number): unknown {
+  // Nothing to copy, nor to read off a detached buffer: an empty body is none.
+  if (size === 0) {
+    return body;
+  }
+
+  const isBuffer = arrayBufferKindOf(body) !== undefined;
+  const bytes = isBuffer
+    ? new Uint8Array(body as ArrayBufferLike, 0, size)
+    : plainBytesView(body as ArrayBufferView);
+  const buffer = isBuffer
+    ? (body as ArrayBufferLike)
+    : readTypedArrayBuffer(bytes);
+
+  if (!canChangeSize(buffer)) {
+    return body;
+  }
+
+  const copy = new Uint8Array(size);
+  copy.set(bytes.subarray(0, size));
+
+  return isBuffer ? copy.buffer : copy;
+}
+
+/** Whether `buffer` is a resizable `ArrayBuffer` or a growable `SharedArrayBuffer`. */
+function canChangeSize(buffer: ArrayBufferLike): boolean {
+  if (arrayBufferKindOf(buffer) === 'ArrayBuffer') {
+    // `undefined` where the runtime has no resizable buffers, which leaves it fixed.
+    return Reflect.get(ArrayBuffer.prototype, 'resizable', buffer) === true;
+  }
+
+  return (
+    typeof SharedArrayBuffer === 'function' &&
+    Reflect.get(SharedArrayBuffer.prototype, 'growable', buffer) === true
+  );
 }
 
 /**

@@ -18482,3 +18482,41 @@ describe('a bytes body handed to a retry- or redirect-phase interceptor', () => 
     ]);
   });
 });
+
+test.each([
+  ['a length-tracking view', (buffer: ArrayBuffer) => new Uint8Array(buffer)],
+  ['the buffer itself', (buffer: ArrayBuffer) => buffer],
+] as const)(
+  "a custom adapter's body over a resizable buffer is delivered as the bytes measured against maxResponseBytes: %s",
+  async (_label, makeBody) => {
+    const buffer = new ArrayBuffer(4, { maxByteLength: 64 });
+    new Uint8Array(buffer).set([1, 2, 3, 4]);
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/octet-stream' },
+            body: makeBody(buffer) as Uint8Array,
+          }),
+      },
+      baseURL: 'http://example.test',
+      maxResponseBytes: 8,
+    });
+
+    const response = await client
+      .get('/x')
+      .onAttemptEnd(() => {
+        // Grown past the limit once measured, before the body is delivered.
+        buffer.resize(16);
+      })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(response.isFailed).toBe(false);
+    expect([...new Uint8Array(response.body as ArrayBuffer)]).toEqual([
+      1, 2, 3, 4,
+    ]);
+  },
+);

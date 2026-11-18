@@ -82,6 +82,10 @@ type CacheEntry<V> = {
   value: V;
   expires?: number;
   size: number;
+  /** Its place in the LRU order: higher is more recently used. */
+  order: number;
+  /** Its node in the expiry heap, for an entry that can expire. */
+  expiryNode?: ExpiryNode<unknown, unknown>;
 };
 
 export type LRUCacheChangeEvent<K, V> =
@@ -119,6 +123,72 @@ const VALID_CHANGE_REASONS: ReadonlySet<LRUCacheChangeReason> = new Set([
   'skip',
 ]);
 
+/**
+ * An expirable entry in `LRUCache`'s expiry heap. Its `key` and `entry` are dropped once
+ * the entry is removed, so a node left in the heap holds neither, nor the value.
+ */
+type ExpiryNode<K, V> = {
+  key: K | undefined;
+  entry: CacheEntry<V> | undefined;
+  expires: number;
+};
+
+/** Adds `node` to the min-heap `heap`, ordered by `expires`. */
+function pushExpiry<K, V>(
+  heap: ExpiryNode<K, V>[],
+  node: ExpiryNode<K, V>,
+): void {
+  let index = heap.push(node) - 1;
+
+  while (index > 0) {
+    const parent = (index - 1) >> 1;
+
+    if (heap[parent].expires <= node.expires) {
+      break;
+    }
+
+    heap[index] = heap[parent];
+    index = parent;
+  }
+
+  heap[index] = node;
+}
+
+/** Takes the soonest-expiring node off the non-empty min-heap `heap`. */
+function popExpiry<K, V>(heap: ExpiryNode<K, V>[]): ExpiryNode<K, V> {
+  const top = heap[0];
+  const last = heap.pop() as ExpiryNode<K, V>;
+
+  if (heap.length > 0) {
+    let index = 0;
+
+    for (;;) {
+      const left = index * 2 + 1;
+
+      if (left >= heap.length) {
+        break;
+      }
+
+      const right = left + 1;
+      const child =
+        right < heap.length && heap[right].expires < heap[left].expires
+          ? right
+          : left;
+
+      if (heap[child].expires >= last.expires) {
+        break;
+      }
+
+      heap[index] = heap[child];
+      index = child;
+    }
+
+    heap[index] = last;
+  }
+
+  return top;
+}
+
 export class LRUCache<K, V> {
   private maxEntries: number;
   private maxSize?: number; // Optional maximum size in bytes
@@ -127,9 +197,12 @@ export class LRUCache<K, V> {
   private cleanupInterval = 60 * 1000; // Run cleanup once per minute at most
   private currentSize = 0; // Track current total size in bytes
   private expirableEntryCount = 0; // Track how many entries currently have expirations
-  // No live entry expires before this: a lower bound, so a write scans for expired entries
-  // only once one may have expired. Recomputed by every scan.
-  private earliestExpiry = Infinity;
+  // Every expirable entry by its expiry, soonest first, so a write reclaims the expired
+  // ones without scanning the live ones. A node whose entry has since been removed or
+  // replaced is stale: dropped when it reaches the top, or when the heap is rebuilt.
+  private readonly expiryHeap: ExpiryNode<K, V>[] = [];
+  // The next entry's `order`, given on every write and every use.
+  private nextOrder = 0;
   private sizeCalculator?: (value: V) => number; // Optional function to calculate item size
   private onChange?: (event: LRUCacheChangeEvent<K, V>) => void | Promise<void>;
   private onChangeReasons?: ReadonlySet<LRUCacheChangeReason>;
@@ -280,6 +353,7 @@ export class LRUCache<K, V> {
 
       // Move to end of LRU (most recently used)
       this.map.delete(key);
+      entry.order = this.nextOrder++;
       this.map.set(key, entry);
 
       // Run periodic cleanup if needed
@@ -304,12 +378,9 @@ export class LRUCache<K, V> {
     const changeEvents = this.createLocalChangeQueue();
 
     // Reclaim expired entries before deciding whether this write is a fresh insert,
-    // an overwrite, or a skipped oversized write. Only once one may have expired (see
-    // `earliestExpiry`), so a cache whose entries are all still live - or that holds none
-    // that can expire - does not scan every entry on each write.
-    if (this.expirableEntryCount > 0 && Date.now() > this.earliestExpiry) {
-      this.cleanupExpiredInternal(changeEvents);
-    }
+    // an overwrite, or a skipped oversized write: taken off the top of `expiryHeap`, so
+    // the cost follows the entries that expired, not the entries held.
+    this.reclaimExpired(changeEvents);
     const existingEntry = this.map.get(key);
 
     // Oversized writes are skipped before mutating live entries so they remain a true no-op.
@@ -346,12 +417,18 @@ export class LRUCache<K, V> {
     const expires = ttl && ttl > 0 ? Date.now() + ttl : undefined;
 
     // Add new entry
-    this.map.set(key, { value, expires, size });
+    const entry: CacheEntry<V> = {
+      value,
+      expires,
+      size,
+      order: this.nextOrder++,
+    };
+    this.map.set(key, entry);
     this.currentSize += size;
 
     if (expires !== undefined) {
       this.expirableEntryCount++;
-      this.earliestExpiry = Math.min(this.earliestExpiry, expires);
+      this.trackExpiry(key, entry, expires);
     }
 
     // Record the write after state is updated so observers see the final value.
@@ -401,7 +478,7 @@ export class LRUCache<K, V> {
     this.map.clear();
     this.currentSize = 0;
     this.expirableEntryCount = 0;
-    this.earliestExpiry = Infinity;
+    this.expiryHeap.length = 0;
     this.lastCleanup = Date.now();
 
     // Flush this operation's queued events after the cache has been reset.
@@ -442,21 +519,72 @@ export class LRUCache<K, V> {
   ): number {
     let removed = 0;
     const now = Date.now();
-    let earliestExpiry = Infinity;
 
     for (const [key, entry] of this.map.entries()) {
       if (entry.expires && now > entry.expires) {
         this.removeEntry(key, 'expired', changeEvents);
         removed++;
-      } else if (entry.expires !== undefined) {
-        earliestExpiry = Math.min(earliestExpiry, entry.expires);
       }
     }
 
-    this.earliestExpiry = earliestExpiry;
     this.lastCleanup = now;
 
     return removed;
+  }
+
+  /**
+   * Removes every entry `expiryHeap` shows expired, least recently used first, as a full
+   * cleanup removes them: found by expiry, then ordered by use.
+   */
+  private reclaimExpired(changeEvents: LRUCacheChangeEvent<K, V>[]): void {
+    const heap = this.expiryHeap;
+
+    if (heap.length === 0) {
+      return;
+    }
+
+    const now = Date.now();
+    const expired: ExpiryNode<K, V>[] = [];
+
+    while (heap.length > 0 && now > heap[0].expires) {
+      const node = popExpiry(heap);
+
+      // Stale: the entry was removed or replaced since.
+      if (node.entry !== undefined) {
+        expired.push(node);
+      }
+    }
+
+    expired.sort(
+      (a, b) =>
+        (a.entry as CacheEntry<V>).order - (b.entry as CacheEntry<V>).order,
+    );
+
+    for (const { key } of expired) {
+      this.removeEntry(key as K, 'expired', changeEvents);
+    }
+  }
+
+  /**
+   * Adds `entry` to `expiryHeap`, rebuilt from the live entries first once stale nodes
+   * make up most of it - an entry overwritten again and again before it expires - so it
+   * holds no more than about twice the expirable entries.
+   */
+  private trackExpiry(key: K, entry: CacheEntry<V>, expires: number): void {
+    const heap = this.expiryHeap;
+
+    if (heap.length >= 2 * this.expirableEntryCount + 32) {
+      const live = heap.filter((node) => node.entry !== undefined);
+      heap.length = 0;
+
+      for (const node of live) {
+        pushExpiry(heap, node);
+      }
+    }
+
+    const node: ExpiryNode<K, V> = { key, entry, expires };
+    entry.expiryNode = node;
+    pushExpiry(heap, node);
   }
 
   private isBufferValue(value: unknown): value is { length: number } {
@@ -807,6 +935,14 @@ export class LRUCache<K, V> {
 
     if (entry.expires !== undefined) {
       this.expirableEntryCount--;
+    }
+
+    // Its heap node lets go of it, and of the value, rather than holding both until it
+    // reaches the top.
+    if (entry.expiryNode !== undefined) {
+      entry.expiryNode.key = undefined;
+      entry.expiryNode.entry = undefined;
+      entry.expiryNode = undefined;
     }
 
     this.map.delete(key);

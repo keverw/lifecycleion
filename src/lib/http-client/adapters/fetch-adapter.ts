@@ -471,6 +471,9 @@ export class FetchAdapter implements HTTPAdapter {
 /** How many empty chunks a body read takes between the waits that let timers run. */
 const EMPTY_CHUNKS_PER_YIELD = 64;
 
+/** What `readBodyWithin`'s `take` answers when the timers are due a turn. */
+const YIELD_DUE: unique symbol = Symbol('yield due');
+
 /** What a body read waiting on its next chunk is answered with by an abort. */
 const ABORTED_READ = Symbol('aborted read');
 
@@ -480,7 +483,9 @@ const ABORTED_READ = Symbol('aborted read');
  *
  * With a limit, the body is read chunk by chunk and counted as it arrives, so a body over
  * it is cancelled - the rest neither downloaded nor held - rather than buffered whole by
- * `arrayBuffer()` and refused afterwards. Without one, or without a `body` that is a web
+ * `arrayBuffer()` and refused afterwards; one whose `Content-Length` says it is within the
+ * limit, counts what `fetch` hands over, and frames the body alone, is read by
+ * `arrayBuffer()`. Without one, or without a `body` that is a web
  * stream or async-iterable (a test double, an XHR-based polyfill), it is read whole through
  * `arrayBuffer()`, and checked after where there is a limit.
  */
@@ -560,6 +565,20 @@ async function readResponseBody(
       );
     }
 
+    const bytes = await readWholeBody(response, body, signal);
+    return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
+  }
+
+  // A body whose `Content-Length` counts what `fetch` hands over, and is within the
+  // limit, is read whole by the runtime's own `arrayBuffer()`: HTTP's framing ends the
+  // body at that length, so it cannot pass the limit, and a small answer read a chunk at a
+  // time in JS costs about a third more. Checked after all the same. Not beside a
+  // `Transfer-Encoding`, which frames the body instead: Bun's `fetch` reads a chunked
+  // body whole past the `Content-Length` sent with it.
+  if (
+    declaredLength !== undefined &&
+    answered.headers['transfer-encoding'] === undefined
+  ) {
     const bytes = await readWholeBody(response, body, signal);
     return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
   }
@@ -693,17 +712,17 @@ async function readBodyWithin(
 
   /**
    * Counts and keeps one chunk: `RESPONSE_TOO_LARGE` once the body passes the limit, the
-   * body let go.
+   * body let go, or `YIELD_DUE` when the timers are to be let run before the next one.
+   * Synchronous, so a chunk with bytes costs no wait of its own.
    */
-  const take = async (
+  const take = (
     chunk: unknown,
-  ): Promise<typeof RESPONSE_TOO_LARGE | undefined> => {
+  ): typeof RESPONSE_TOO_LARGE | typeof YIELD_DUE | undefined => {
     const byteLength = isUint8ArrayValue(chunk)
       ? readBinaryByteLength(chunk)
       : null;
 
     if (byteLength === null) {
-      letGo();
       throw new TypeError(
         'FetchAdapter response body yielded a chunk that is not a Uint8Array',
       );
@@ -722,13 +741,7 @@ async function readBodyWithin(
     if (byteLength === 0) {
       emptyChunks += 1;
 
-      if (emptyChunks % EMPTY_CHUNKS_PER_YIELD === 0) {
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, 0);
-        });
-      }
-
-      return undefined;
+      return emptyChunks % EMPTY_CHUNKS_PER_YIELD === 0 ? YIELD_DUE : undefined;
     }
 
     loadedBytes += byteLength;
@@ -817,7 +830,11 @@ async function readBodyWithin(
       try {
         const step = settled.value;
 
-        if (typeof step !== 'object' || step === null) {
+        // Any object, a callable one included, as `for await` takes.
+        if (
+          step === null ||
+          (typeof step !== 'object' && typeof step !== 'function')
+        ) {
           throw new TypeError(
             'FetchAdapter response body iterator answered with a non-object',
           );
@@ -839,8 +856,6 @@ async function readBodyWithin(
 
       throwIfAborted();
 
-      let chunks: unknown[];
-
       if (isTextChunkAccepted && typeof value === 'string') {
         let text = heldUnit + value;
         heldUnit = '';
@@ -850,25 +865,31 @@ async function readBodyWithin(
           text = text.slice(0, -1);
         }
 
-        chunks = [encodeText(text)];
+        value = encodeText(text);
       } else if (heldUnit !== '') {
-        chunks = [encodeText(heldUnit), value];
+        // Never empty, as U+FFFD, so it never asks for the yield.
+        const held = encodeText(heldUnit);
         heldUnit = '';
-      } else {
-        chunks = [value];
-      }
 
-      for (const chunk of chunks) {
-        if ((await take(chunk)) === RESPONSE_TOO_LARGE) {
+        if (take(held) === RESPONSE_TOO_LARGE) {
           return RESPONSE_TOO_LARGE;
         }
       }
+
+      const outcome = take(value);
+
+      if (outcome === RESPONSE_TOO_LARGE) {
+        return RESPONSE_TOO_LARGE;
+      }
+
+      if (outcome === YIELD_DUE) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      }
     }
 
-    if (
-      heldUnit !== '' &&
-      (await take(encodeText(heldUnit))) === RESPONSE_TOO_LARGE
-    ) {
+    if (heldUnit !== '' && take(encodeText(heldUnit)) === RESPONSE_TOO_LARGE) {
       return RESPONSE_TOO_LARGE;
     }
 

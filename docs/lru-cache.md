@@ -162,7 +162,7 @@ If a single value is larger than `maxSize`, `set()` skips the write and leaves a
 
 TTL expiration is checked with a strict `now > expires` comparison, so an entry remains valid at the exact `createdAt + ttl` timestamp and expires immediately after that boundary is passed.
 
-After inserting the new value, `set()` removes any expired entries currently in the cache before enforcing entry-count and size limits. This means a write can reduce `size` and `byteSize` by deleting unrelated expired entries.
+Before writing the new value, `set()` removes any expired entries currently in the cache, least recently used first, as `cleanupExpired()` does, so an expired entry under the same key is replaced as a fresh insert and the entry-count and size limits count only live entries. This means a write can reduce `size` and `byteSize` by deleting unrelated expired entries. It finds them without reading the live ones, so the cost follows how many entries expired, not how many the cache holds.
 
 ### delete
 

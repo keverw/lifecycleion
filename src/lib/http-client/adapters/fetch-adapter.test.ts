@@ -4,8 +4,10 @@ import {
   beforeAll,
   describe,
   expect,
+  spyOn,
   test,
 } from 'bun:test';
+import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { FetchAdapter } from './fetch-adapter';
 import { materializeRequestHeaders } from '../internal/header-utils';
@@ -4136,4 +4138,125 @@ describe('FetchAdapter - a body that only fails to decode', () => {
       server.close();
     }
   });
+});
+
+test('a bounded body read takes an iterator result that is a function object, as for await does', async () => {
+  const step = (isDone: boolean, value?: Uint8Array) =>
+    Object.assign(() => undefined, { done: isDone, value });
+  const steps = [step(false, new Uint8Array([1, 2])), step(true)];
+  (globalThis as any).fetch = () =>
+    Promise.resolve({
+      status: 200,
+      type: 'basic',
+      headers: new Headers(),
+      body: {
+        [Symbol.asyncIterator]: () => ({
+          next: () => Promise.resolve(steps.shift()),
+        }),
+      },
+      arrayBuffer: () => Promise.reject(new Error('not read whole')),
+    });
+
+  const response = await new FetchAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 100,
+  });
+
+  expect(response.isStreamError).toBeUndefined();
+  expect([...(response.body as Uint8Array)]).toEqual([1, 2]);
+});
+
+test('a body whose Content-Length is within the limit is read by the runtime, not a chunk at a time', async () => {
+  let getReaderCalls = 0;
+  (globalThis as any).fetch = () => {
+    const response = new Response('abc', {
+      headers: { 'content-length': '3' },
+    });
+    const body = response.body as ReadableStream<Uint8Array>;
+    const getReader = body.getReader.bind(body);
+    Object.defineProperty(body, 'getReader', {
+      value: (...args: []) => {
+        getReaderCalls++;
+        return getReader(...args);
+      },
+    });
+    return Promise.resolve(response);
+  };
+
+  const response = await new FetchAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 100,
+  });
+
+  expect(new TextDecoder().decode(response.body as Uint8Array)).toBe('abc');
+  expect(getReaderCalls).toBe(0);
+});
+
+test('a body read by the runtime past a Content-Length it understated is still refused as too large', async () => {
+  // A test double's: a server's body ends at its Content-Length.
+  (globalThis as any).fetch = () =>
+    Promise.resolve(
+      new Response('x'.repeat(200), { headers: { 'content-length': '3' } }),
+    );
+
+  const response = await new FetchAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 100,
+  });
+
+  expect(response.streamErrorCode).toBe('response_too_large');
+  expect(response.body).toBeNull();
+});
+
+test('a body with a Transfer-Encoding beside its Content-Length is read a chunk at a time, held to the limit', async () => {
+  // A chunked body framed past the Content-Length sent with it, which Bun's fetch reads.
+  const chunk = Buffer.alloc(256 * 1024, 97);
+  const server = net.createServer((socket) => {
+    socket.on('error', () => undefined);
+    socket.once('data', () => {
+      socket.write(
+        'HTTP/1.1 200 OK\r\nContent-Length: 10\r\nTransfer-Encoding: chunked\r\n\r\n',
+      );
+
+      for (let index = 0; index < 8; index++) {
+        socket.write(`${chunk.length.toString(16)}\r\n`);
+        socket.write(chunk);
+        socket.write('\r\n');
+      }
+
+      socket.end('0\r\n\r\n');
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = server.address() as AddressInfo;
+  const arrayBuffer = spyOn(Response.prototype, 'arrayBuffer');
+  (globalThis as any).fetch = originalFetch;
+
+  try {
+    const response = await new FetchAdapter().send({
+      requestURL: `http://127.0.0.1:${String(port)}/`,
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 512 * 1024,
+    });
+
+    expect(arrayBuffer).not.toHaveBeenCalled();
+    // Refused as too large where the runtime reads the chunks; a runtime that refuses the
+    // header pair fails it as a network error.
+    expect(
+      response.streamErrorCode === 'response_too_large' ||
+        response.isTransportError === true,
+    ).toBe(true);
+  } finally {
+    arrayBuffer.mockRestore();
+    server.close();
+  }
 });

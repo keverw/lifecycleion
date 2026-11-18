@@ -800,6 +800,31 @@ describe('deepClone', () => {
       expect(cloned.packet).not.toBe(original.packet);
     });
 
+    test("a subclass given the built-in's own name is copied as the subclass it is", () => {
+      const NamedBytes = (() => {
+        class Uint8Array extends globalThis.Uint8Array {
+          public tag = 'x';
+        }
+        return Uint8Array;
+      })();
+      const NamedBuffer = (() => {
+        class ArrayBuffer extends globalThis.ArrayBuffer {
+          public tag = 'y';
+        }
+        return ArrayBuffer;
+      })();
+      const bytes = new NamedBytes([1, 2]);
+      const buffer = new NamedBuffer(2);
+      const cloned = deepClone({ bytes, buffer });
+
+      expect(cloned.bytes).toBeInstanceOf(NamedBytes);
+      expect(cloned.bytes.tag).toBe('x');
+      expect([...cloned.bytes]).toEqual([1, 2]);
+      expect(cloned.bytes).not.toBe(bytes);
+      expect(cloned.buffer).toBeInstanceOf(NamedBuffer);
+      expect(cloned.buffer.tag).toBe('y');
+    });
+
     test('a resizable buffer stays resizable', () => {
       const resizable = new (
         ArrayBuffer as unknown as new (

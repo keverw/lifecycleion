@@ -1241,7 +1241,8 @@ function bufferConstructor(kind: BufferKind): BufferConstructorLike {
  * own constructor, by the shared `slice` and its species, so its instance fields - a
  * private field its methods read - are set up as they are for any instance of it. Told
  * by the prototype's own constructor and its name, not by `instanceof`, which a `Buffer`
- * fails where the globals are another realm's (a jsdom test environment).
+ * fails where the globals are another realm's (a jsdom test environment), and by its
+ * parent: a class given the built-in's name has the built-in's own prototype there.
  */
 function isSubclass(
   original: object,
@@ -1250,10 +1251,15 @@ function isSubclass(
 ): boolean {
   const prototype = Object.getPrototypeOf(original) as object | null;
 
+  if (prototype === null || prototype === Base.prototype) {
+    return false;
+  }
+
+  // A class given the built-in's name (`class Uint8Array extends Uint8Array`) has a
+  // prototype named as the built-in's is, but its parent is named so too.
   return (
-    prototype !== null &&
-    prototype !== Base.prototype &&
-    !isBasePrototype(prototype, baseName)
+    !isBasePrototype(prototype, baseName) ||
+    isBasePrototype(Reflect.getPrototypeOf(prototype) ?? {}, baseName)
   );
 }
 

@@ -16,7 +16,12 @@ const BLOCK_BYTES = 16 * 1024;
  * bytes are copied once, by the join. A smaller one is copied into a block shared with the
  * chunks around it, so what is held follows the bytes read, not how finely the server
  * split them: a body sent in one-byte chunks holds about its own size, not one array per
- * byte. Blocks are added only as bytes arrive, whatever length the body declares.
+ * byte. Blocks are added only as bytes arrive, whatever length the body declares. The
+ * first is the size of the first chunk copied into it, so a body of one small chunk fills
+ * it exactly and is that block, copied once.
+ *
+ * A chunk kept as it is must not change before the join: the runtime's streams hand over
+ * each chunk in memory of its own. One whose length changes by then fails the join.
  */
 export class BodyBytes {
   private readonly parts: Uint8Array[] = [];
@@ -48,7 +53,7 @@ export class BodyBytes {
 
     while (offset < byteLength) {
       if (this.block === undefined || this.filled === this.block.length) {
-        this.startBlock();
+        this.startBlock(byteLength - offset);
       }
 
       const block = this.block as Uint8Array;
@@ -79,6 +84,15 @@ export class BodyBytes {
     return concatChunks(this.parts, this.written);
   }
 
+  /** Lets go of every byte kept, for a body that will not be joined. */
+  public clear(): void {
+    this.parts.length = 0;
+    this.block = undefined;
+    this.blockStart = 0;
+    this.filled = 0;
+    this.written = 0;
+  }
+
   /** Adds the block's bytes copied since the last part as a part of their own. */
   private endPart(): void {
     if (this.block !== undefined && this.filled > this.blockStart) {
@@ -93,11 +107,13 @@ export class BodyBytes {
     }
   }
 
-  private startBlock(): void {
+  /** Starts a block for `pending` more bytes of a small chunk. */
+  private startBlock(pending: number): void {
+    const isFirst = this.block === undefined && this.parts.length === 0;
     this.endPart();
     // Never past what the limit leaves: a body over it is refused before it is appended.
     this.block = new Uint8Array(
-      Math.min(BLOCK_BYTES, this.maxBytes - this.written),
+      Math.min(isFirst ? pending : BLOCK_BYTES, this.maxBytes - this.written),
     );
     this.blockStart = 0;
     this.filled = 0;
