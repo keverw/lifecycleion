@@ -556,6 +556,44 @@ describe('XHRAdapter', () => {
     expect(lastXHR.abortCalled).toBe(true);
   });
 
+  test('a redirect the browser followed is the redirect whatever status the page it led to reads', async () => {
+    // Read at the headers, first past the limit by an XHR that shows no state, and on load.
+    for (const at of ['headers', 'progress', 'load'] as const) {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+      });
+
+      lastXHR.responseURL = 'https://api.test/elsewhere';
+
+      if (at === 'headers') {
+        lastXHR.simulateHeadersReceived(99);
+      } else if (at === 'progress') {
+        lastXHR.readyState = 1;
+        lastXHR.status = 99;
+        lastXHR.simulateDownloadProgress(1001, 0);
+      } else {
+        lastXHR.status = 99;
+        lastXHR.response = textBody('');
+        lastXHR.simulateLoad();
+      }
+
+      const response = await promise;
+
+      expect({
+        at,
+        wasRedirectDetected: response.wasRedirectDetected,
+        isTransportError: response.isTransportError,
+      }).toEqual({
+        at,
+        wasRedirectDetected: true,
+        isTransportError: undefined,
+      });
+    }
+  });
+
   test('sets responseType to arraybuffer', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({
@@ -1703,6 +1741,33 @@ describe('XHRAdapter', () => {
     }
 
     expect(located).toEqual(['/b', '']);
+  });
+
+  test('a Location line joined with empty repeats keeps its first value that is not empty', async () => {
+    const located: unknown[] = [];
+
+    for (const lines of [
+      'location: /a, \r\n',
+      'location: /a, , \r\n',
+      'Location: , /b\r\n',
+      'location: , \r\n',
+      'location: /a  \r\n',
+    ]) {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 302;
+      lastXHR.responseURL = 'https://api.test/start';
+      lastXHR.getAllResponseHeadersResult = lines;
+      lastXHR.response = textBody('');
+      lastXHR.simulateLoad();
+      located.push((await promise).headers.location);
+    }
+
+    expect(located).toEqual(['/a', '/a', '/b', '', '/a']);
   });
 
   test('a header on lines of its own is joined, as a browser joins it', async () => {

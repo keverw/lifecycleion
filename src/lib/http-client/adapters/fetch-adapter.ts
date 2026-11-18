@@ -735,13 +735,14 @@ async function readBodyWithin(
       throwIfAborted();
 
       try {
-        // Adopted, and handed both outcomes, so a `next()` left behind by an abort that
-        // later rejects is observed.
-        const next = adoptPromise(iterator.next());
+        // The wake set before `next()` is called, so an abort from within it ends the wait
+        // too. Adopted, and handed both outcomes, so a `next()` left behind by an abort
+        // that later rejects is observed; one that throws rejects the wait.
+        const readingIterator = iterator;
         settled = await new Promise<{ value: unknown } | typeof ABORTED_READ>(
           (resolve, reject) => {
             wakeOnAbort = () => resolve(ABORTED_READ);
-            next.then(resolve, reject);
+            adoptPromise(readingIterator.next()).then(resolve, reject);
           },
         );
       } catch (error) {
@@ -825,13 +826,25 @@ async function readBodyWithin(
         return RESPONSE_TOO_LARGE;
       }
 
-      chunks.push(chunk as Uint8Array);
+      // Copied as it is read, as the Fetch standard's body read copies it: a source may
+      // hand over the same buffer again with the next chunk's bytes. A string's bytes are
+      // the encoder's own.
+      chunks.push(
+        chunk === value
+          ? copyChunk(chunk as Uint8Array, byteLength)
+          : (chunk as Uint8Array),
+      );
     }
 
     // A cancel can end the stream as if finished; what it read is not the whole body.
     throwIfAborted();
 
     return concatChunks(chunks, loadedBytes);
+  } catch (error) {
+    // Every failure lets the body go - an iterator that failed or answered with what is
+    // no step included - so a polyfill's stream does not hold its socket.
+    letGo();
+    throw error;
   } finally {
     if (iterator !== undefined && !isIteratorEnded) {
       endIteratorQuietly(iterator);
@@ -839,6 +852,16 @@ async function readBodyWithin(
 
     stopWatching();
   }
+}
+
+/**
+ * A plain `Uint8Array` of `chunk`'s `byteLength` bytes, owned, copied through its internal
+ * slots.
+ */
+function copyChunk(chunk: Uint8Array, byteLength: number): Uint8Array {
+  const copy = new Uint8Array(byteLength);
+  copy.set(chunk);
+  return copy;
 }
 
 /** Asks an iterator left early to `return()`, without waiting on it or minding a refusal. */

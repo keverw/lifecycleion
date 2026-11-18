@@ -301,8 +301,11 @@ export class LRUCache<K, V> {
     const changeEvents = this.createLocalChangeQueue();
 
     // Reclaim expired entries before deciding whether this write is a fresh insert,
-    // an overwrite, or a skipped oversized write.
-    this.cleanupExpiredInternal(changeEvents);
+    // an overwrite, or a skipped oversized write. A cache holding none that can expire has
+    // none to reclaim, so its writes do not scan every entry.
+    if (this.expirableEntryCount > 0) {
+      this.cleanupExpiredInternal(changeEvents);
+    }
     const existingEntry = this.map.get(key);
 
     // Oversized writes are skipped before mutating live entries so they remain a true no-op.

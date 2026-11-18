@@ -106,20 +106,21 @@ export function clientSendFn(sendFn: SendFn<unknown>): SendFn<unknown> {
 }
 
 /**
- * Whether `value` is an `AbortSignal`: tagged as one, a subclass of this realm's, or one
- * whose chain holds a prototype tagged as one - another realm's subclass included.
+ * Whether `value` is an `AbortSignal`: tagged as one, an instance of this realm's - a
+ * polyfill installed as the global may define no tag - or one whose chain holds a
+ * prototype tagged as one, a subclass with a tag of its own from any realm. A tag getter
+ * or `Proxy` trap that throws answers no, so the caller is told what was expected.
  */
 function isAbortSignal(value: object): boolean {
-  if (Object.prototype.toString.call(value) === '[object AbortSignal]') {
-    return true;
-  }
-
   try {
-    if (typeof AbortSignal === 'function' && value instanceof AbortSignal) {
+    if (
+      Object.prototype.toString.call(value) === '[object AbortSignal]' ||
+      (typeof AbortSignal === 'function' && value instanceof AbortSignal)
+    ) {
       return true;
     }
   } catch {
-    // A Proxy whose trap throws: told by its chain below, which answers no.
+    // Told by its chain below, which answers no for one that throws.
   }
 
   return hasOwnToStringTagInChain(value, 'AbortSignal');

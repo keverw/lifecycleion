@@ -339,8 +339,9 @@ function isBufferTag(tag: unknown): boolean {
  * `null` - a value no getter recognizes (a `Proxy`, which has no internal slots), a host
  * without one of the intrinsics - means "no usable measurement", and every caller fails
  * closed on it, the way every other bound here does on a measurement it could not take:
- * as "assume it does not fit", or, for an HTTP adapter's body, as no body at all. A detached buffer, or a view over one, measures `0`:
- * the getters read it as empty, which is what it holds.
+ * as "assume it does not fit", or, for an HTTP adapter's body, as no body at all. A
+ * detached buffer, or a view over one, measures `0`: the getters read it as empty, which
+ * is what it holds.
  */
 export function readBinaryByteLength(value: object): number | null {
   for (const getter of [

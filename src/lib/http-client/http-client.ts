@@ -3811,9 +3811,6 @@ export class BaseHTTPClient {
           locationHeader(adapterResponse.headers) !== undefined;
 
         if (adapterResponse.isStreamed !== true && !isNullish(answeredBody)) {
-          // Measured once, by the internal slot (see `answeredBodySizeOf`).
-          const answeredBodySize = answeredBodySizeOf(answeredBody);
-
           if (!hasResponseBody(sentRequest.method, adapterResponse.status)) {
             // A bodiless answer (a `HEAD`, a `204`) has no body, as no adapter hands one
             // over: a custom adapter's stray one there is dropped rather than delivered -
@@ -3823,37 +3820,42 @@ export class BaseHTTPClient {
             // A transport failure's body is never delivered, so it is dropped, and the
             // answer keeps its own failure (and cause), whatever the body's size or type.
             adapterResponse.body = null;
-          } else if (adapterResponse.isStreamError === true) {
-            // A stream error keeps its own failure too: its body is never delivered.
-          } else if (answeredBodySize === null) {
-            // Bytes or a string, measured: anything else - a `Blob`, a plain object, a
-            // `true`, a `Proxy` over bytes or a value that only inherits from a view's
-            // prototype - has no size to hold to `maxResponseBytes` and is no body the
-            // response is typed to carry, so it is refused as the adapter's malformed
-            // answer, as an invalid status is, whatever the content type or the limit.
-            // Except on a redirect, which is read as the bodiless 3xx it is followed or
-            // refused as.
-            if (!isRedirectAnswer) {
-              throw new TypeError(
-                `HTTPClient adapter answered with an invalid body (got ${describeValue(answeredBody)})`,
+          } else if (adapterResponse.isStreamError !== true) {
+            // A stream error keeps its own failure, its body never delivered, so only a
+            // body that is delivered is measured: once, by the internal slot (see
+            // `answeredBodySizeOf`).
+            const answeredBodySize = answeredBodySizeOf(answeredBody);
+
+            if (answeredBodySize === null) {
+              // Bytes or a string, measured: anything else - a `Blob`, a plain object, a
+              // `true`, a `Proxy` over bytes or a value that only inherits from a view's
+              // prototype - has no size to hold to `maxResponseBytes` and is no body the
+              // response is typed to carry, so it is refused as the adapter's malformed
+              // answer, as an invalid status is, whatever the content type or the limit.
+              // Except on a redirect, which is read as the bodiless 3xx it is followed or
+              // refused as.
+              if (!isRedirectAnswer) {
+                throw new TypeError(
+                  `HTTPClient adapter answered with an invalid body (got ${describeValue(answeredBody)})`,
+                );
+              }
+
+              adapterResponse.body = null;
+            } else if (
+              // A plain `ArrayBuffer` or a string too: outside the type, but
+              // `_buildResponse` delivers either, so they are bodies the limit must see.
+              answeredBodySize === 'string'
+                ? isAnsweredBodyOverLimit(answeredBody, maxResponseBytes)
+                : answeredBodySize > maxResponseBytes
+            ) {
+              adapterResponse.body = null;
+              adapterResponse.isStreamError = true;
+              adapterResponse.streamErrorCode = 'response_too_large';
+              adapterResponse.errorCause = makeResponseTooLargeError(
+                maxResponseBytes,
+                false,
               );
             }
-
-            adapterResponse.body = null;
-          } else if (
-            // A plain `ArrayBuffer` or a string too: outside the type, but `_buildResponse`
-            // delivers either, so they are bodies the limit must see.
-            answeredBodySize === 'string'
-              ? isAnsweredBodyOverLimit(answeredBody, maxResponseBytes)
-              : answeredBodySize > maxResponseBytes
-          ) {
-            adapterResponse.body = null;
-            adapterResponse.isStreamError = true;
-            adapterResponse.streamErrorCode = 'response_too_large';
-            adapterResponse.errorCause = makeResponseTooLargeError(
-              maxResponseBytes,
-              false,
-            );
           }
         }
 

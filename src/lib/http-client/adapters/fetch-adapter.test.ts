@@ -2557,16 +2557,13 @@ describe('FetchAdapter - joining body chunks', () => {
     return response.body as Uint8Array;
   }
 
-  test('a lone chunk that owns its buffer is the body as it is, not copied', async () => {
-    const chunk = new Uint8Array([1, 2, 3]);
-    const body = await readChunks([chunk]);
-
-    expect(body).toBe(chunk);
-  });
-
-  test('a lone chunk that shares its buffer, or is a Buffer, is copied into a plain array of its own', async () => {
+  test('a lone chunk, whatever its buffer, is copied into a plain array of its own', async () => {
     const shared = new Uint8Array([9, 1, 2, 3, 9]);
-    for (const chunk of [shared.subarray(1, 4), Buffer.from([1, 2, 3])]) {
+    for (const chunk of [
+      new Uint8Array([1, 2, 3]),
+      shared.subarray(1, 4),
+      Buffer.from([1, 2, 3]),
+    ]) {
       const body = await readChunks([chunk]);
 
       expect(body).not.toBe(chunk);
@@ -3210,7 +3207,7 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     ['grows', 5],
     ['shrinks', 1],
   ])(
-    'a chunk whose buffer %s after it is read fails the body read, not as a corrupt body',
+    'a chunk whose buffer %s after it is read keeps the bytes it held when read',
     async (_label, newLength) => {
       const buffer = new ArrayBuffer(3, { maxByteLength: 8 });
       const chunk = new Uint8Array(buffer);
@@ -3247,10 +3244,8 @@ describe('FetchAdapter - body chunk types and sizes', () => {
       });
 
       expect(response.status).toBe(200);
-      expect(response.body).toBeNull();
-      expect(response.isStreamError).toBe(true);
-      expect(response.streamErrorCode).toBe('stream_response_error');
-      expect(response.errorCause).toBeInstanceOf(TypeError);
+      expect(response.isStreamError).toBeUndefined();
+      expect([...(response.body as Uint8Array)]).toEqual([1, 2, 3]);
     },
   );
 
@@ -3489,6 +3484,147 @@ describe('FetchAdapter - body chunk types and sizes', () => {
         returnCalls: 1,
         cancelCalls: hasCancel ? 1 : 0,
       });
+    }
+  });
+
+  test('an abort from within an iterated body read settles the send and asks the iterator to return()', async () => {
+    // A polyfill's `next()` that aborts the signal itself, then never settles: the abort
+    // lands before the wait on that `next()` has begun.
+    const controller = new AbortController();
+    let returnCalls = 0;
+    const body = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          controller.abort();
+          return new Promise<never>(() => {});
+        },
+        return: () => {
+          returnCalls++;
+          return Promise.resolve({ done: true, value: undefined });
+        },
+      }),
+      destroy: () => {},
+    };
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body,
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+
+    const sent = new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 100,
+        signal: controller.signal,
+      })
+      .then(
+        () => 'answered',
+        (error: unknown) => (error as Error).name,
+      );
+
+    // Only to tell a hang from an answer: an answer arrives before it either way.
+    const outcome = await Promise.race([
+      sent,
+      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 2000)),
+    ]);
+
+    expect({ outcome, returnCalls }).toEqual({
+      outcome: 'AbortError',
+      returnCalls: 1,
+    });
+  });
+
+  test('a bounded body read keeps each chunk as it was read when the source reuses its buffer', async () => {
+    const scratch = new Uint8Array(1);
+    let index = 0;
+    const body = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          index++;
+
+          if (index > 3) {
+            return Promise.resolve({ done: true, value: undefined });
+          }
+
+          scratch[0] = index;
+          return Promise.resolve({ done: false, value: scratch });
+        },
+      }),
+    };
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body,
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+    });
+
+    expect(Array.from(response.body ?? [])).toEqual([1, 2, 3]);
+  });
+
+  test('a body whose iterator fails is let go of', async () => {
+    const shapes: Array<[string, () => AsyncIterator<unknown>]> = [
+      [
+        'asyncIterator() throws',
+        () => {
+          throw new Error('no iterator');
+        },
+      ],
+      [
+        'next() answers a non-object',
+        () =>
+          ({
+            next: () => Promise.resolve(5),
+          }) as unknown as AsyncIterator<unknown>,
+      ],
+      [
+        'next() rejects',
+        () => ({
+          next: () => Promise.reject(new Error('read failed')),
+        }),
+      ],
+    ];
+
+    for (const [shape, iterate] of shapes) {
+      let destroyCalls = 0;
+      const body = {
+        [Symbol.asyncIterator]: iterate,
+        destroy: () => {
+          destroyCalls++;
+        },
+      };
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          type: 'basic',
+          headers: new Headers(),
+          body,
+          arrayBuffer: () => Promise.reject(new Error('not read whole')),
+        });
+
+      await new FetchAdapter()
+        .send({
+          requestURL: 'https://local.test/data',
+          method: 'GET',
+          headers: {},
+          maxResponseBytes: 100,
+        })
+        .catch(() => {});
+
+      expect({ shape, destroyCalls }).toEqual({ shape, destroyCalls: 1 });
     }
   });
 

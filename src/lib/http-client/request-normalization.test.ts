@@ -2357,6 +2357,38 @@ test('an AbortSignal subclass with a tag of its own is taken, as signal() and as
   ).toThrow('HTTPRequestBuilder signal must be an AbortSignal');
 });
 
+test('a signal() value whose tag getter or Proxy trap throws is refused as not an AbortSignal', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+
+  for (const value of [
+    new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('boom');
+        },
+      },
+    ),
+    {
+      get [Symbol.toStringTag](): string {
+        throw new Error('tag getter');
+      },
+    },
+  ]) {
+    let thrown: unknown;
+    try {
+      client.get('/x').signal(value as AbortSignal);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect((thrown as Error).message).toStartWith(
+      'HTTPRequestBuilder signal must be an AbortSignal',
+    );
+  }
+});
+
 test('a nullish signal() clears the signal, as the signal option and the other setters read one', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({ status: 200, body: 'ok' }));
@@ -3112,6 +3144,32 @@ test('an array response header Node keeps once keeps its first value; others are
   expect(response.status).toBe(200);
   expect(response.body).toEqual({ ok: true });
   expect(response.headers.link).toBe('<a>, <b>');
+});
+
+test('an adapter answer whose first Location is empty is followed to the first that is not, as the built-in adapters follow it', async () => {
+  const answers: Array<Record<string, string | string[]>> = [
+    { location: ['', '/next'] },
+    { Location: '', location: '/next' },
+  ];
+
+  for (const headers of answers) {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/r', () => ({ status: 302, headers }));
+    adapter.routes.get('/next', () => ({ status: 200, body: 'ok' }));
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://a.test',
+      followRedirects: true,
+    })
+      .get('/r')
+      .send();
+
+    expect({ headers, status: response.status, body: response.body }).toEqual({
+      headers,
+      status: 200,
+      body: 'ok',
+    });
+  }
 });
 
 test('a filter field a callback kind does not take is allowed when it is nullish', () => {

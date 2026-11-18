@@ -114,6 +114,7 @@ import {
 import {
   derivedRedirectFields,
   isCrossOrigin,
+  firstNonEmptyValue,
   isRequestBodyBytes,
   mergeObservedHeaders,
 } from '../utils';
@@ -4882,6 +4883,8 @@ function keepFirstNonEmptyLocation(
     return;
   }
 
+  const locations: string[] = [];
+
   for (let index = 0; index + 1 < rawHeaders.length; index += 2) {
     const name: unknown = rawHeaders[index];
     const value: unknown = rawHeaders[index + 1];
@@ -4889,12 +4892,16 @@ function keepFirstNonEmptyLocation(
     if (
       typeof name === 'string' &&
       typeof value === 'string' &&
-      asciiLowercase(name) === 'location' &&
-      trimHTTPWhitespace(value) !== ''
+      asciiLowercase(name) === 'location'
     ) {
-      defineEntry(headers, 'location', value);
-      return;
+      locations.push(value);
     }
+  }
+
+  const kept = firstNonEmptyValue(locations);
+
+  if (kept !== undefined) {
+    defineEntry(headers, 'location', kept);
   }
 }
 

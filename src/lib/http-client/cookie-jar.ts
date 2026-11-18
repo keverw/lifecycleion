@@ -185,11 +185,11 @@ export interface Cookie {
    * keeps it: kept by a later one that replaced it (RFC 6265 §5.3 step 11.3), and, for a
    * cookie stored now - a `Set-Cookie`, or `setCookie` with no `createdAt` - no earlier
    * than any cookie stored since the jar was last emptied, so one stored after the clock
-   * stepped back still comes after them. It orders the `Cookie` header. Written by `toJSON` only where it
-   * differs from {@link createdAt}, so a restored jar orders its header as this one did;
-   * `setCookie` takes it as given, a time later than `createdAt` included, a time later
-   * than now as now, and as `createdAt` when absent. `getAllCookies` and the other reads
-   * leave it out.
+   * stepped back still comes after them. It orders the `Cookie` header. Written by
+   * `toJSON` only where it differs from {@link createdAt}, so a restored jar orders its
+   * header as this one did; `setCookie` takes it as given, a time later than `createdAt`
+   * included, a time later than now as now, and as `createdAt` when absent.
+   * `getAllCookies` and the other reads leave it out.
    */
   firstCreatedAt?: number;
 }
@@ -484,11 +484,6 @@ export class CookieJar {
    * store while no cookie can have gone 30 days unused.
    */
   private earliestAccessTime = Infinity;
-  /**
-   * Set while `fromJSON` applies a payload in its own order: the limits wait until it is
-   * stored again least recently used first, so they evict the stalest.
-   */
-  private isHoldingLimits = false;
 
   constructor(options?: CookieJarOptions) {
     assertOptionsObject(options, 'CookieJar options', true);
@@ -1127,14 +1122,9 @@ export class CookieJar {
     // place in the payload, its creation order, as the order it was created in.
     const firstOrder = this.creationClock;
     this.creationClock += prepared.length;
-    this.isHoldingLimits = true;
 
-    try {
-      for (const [index, cookie] of prepared.entries()) {
-        this.storeCookie(cookie, undefined, firstOrder + index + 1);
-      }
-    } finally {
-      this.isHoldingLimits = false;
+    for (const [index, cookie] of prepared.entries()) {
+      this.storeCookie(cookie, undefined, firstOrder + index + 1);
     }
 
     // Then stored again least recently used first, the limits applied after each, so each
@@ -1158,13 +1148,7 @@ export class CookieJar {
     this.earliestAccessTime = Infinity;
 
     for (const { site, key, stored } of survivors) {
-      stored.lastAccess = ++this.accessClock;
-      this.getOrCreateBucket(site).set(key, stored);
-      this.cookieCount++;
-      this.earliestAccessTime = Math.min(
-        this.earliestAccessTime,
-        stored.lastAccessTime,
-      );
+      this.fileStored(site, key, stored);
       this.enforceLimits(site);
     }
 
@@ -1179,7 +1163,9 @@ export class CookieJar {
   /**
    * {@link setCookie}, with what {@link storeParsed} has already worked out for the
    * cookie's normalized domain - its site, and whether it is kept for that host alone -
-   * so a `Set-Cookie` with a `Domain` looks neither up again.
+   * so a `Set-Cookie` with a `Domain` looks neither up again. A cookie `fromJSON` restores,
+   * with its `restoredCreationOrder`, is stored with the limits held: `fromJSON` applies
+   * them once the payload is in, least recently used first, so they evict the stalest.
    */
   private storeCookie(
     cookie: CookieInput,
@@ -1395,13 +1381,7 @@ export class CookieJar {
       ? replaced.creationOrder
       : (restoredCreationOrder ?? ++this.creationClock);
 
-    const bucket = this.getOrCreateBucket(site);
-
-    if (!bucket.has(key)) {
-      this.cookieCount++;
-    }
-
-    bucket.set(key, {
+    this.fileStored(site, key, {
       cookie: stored,
       // `domain` is in its normal form already, so matching it normalizes nothing.
       preparedDomain: {
@@ -1411,18 +1391,37 @@ export class CookieJar {
       },
       creationTime,
       creationOrder,
-      lastAccess: ++this.accessClock,
+      lastAccess: 0,
       lastAccessTime,
       expiresAt: lifetime.expiresAt,
     });
-    this.earliestAccessTime = Math.min(this.earliestAccessTime, lastAccessTime);
     this.lastCreationTime = Math.max(this.lastCreationTime, creationTime);
 
-    if (!this.isHoldingLimits) {
+    if (restoredCreationOrder === undefined) {
       this.enforceLimits(site);
     }
 
     return this.buckets.get(site)?.has(key) === true;
+  }
+
+  /**
+   * Files `stored` under `site` and `key`, replacing what is there, as used last by the
+   * access clock, and keeps the jar's count and earliest use with it. The limits are the
+   * caller's to apply.
+   */
+  private fileStored(site: string, key: string, stored: StoredCookie): void {
+    const bucket = this.getOrCreateBucket(site);
+
+    if (!bucket.has(key)) {
+      this.cookieCount++;
+    }
+
+    stored.lastAccess = ++this.accessClock;
+    bucket.set(key, stored);
+    this.earliestAccessTime = Math.min(
+      this.earliestAccessTime,
+      stored.lastAccessTime,
+    );
   }
 
   /** {@link collectCookies} for a caller handing all of them over: they count as used. */
@@ -2032,7 +2031,8 @@ export class CookieJar {
       return;
     }
 
-    // RFC 6265bis §5.7: `SameSite=None` without `Secure` is ignored, as browsers ignore it.
+    // RFC 6265bis §5.7: a cookie with `SameSite=None` and no `Secure` is not stored at
+    // all, as browsers refuse it whole.
     if (parsed.sameSite === 'None' && parsed.secure !== true) {
       return;
     }

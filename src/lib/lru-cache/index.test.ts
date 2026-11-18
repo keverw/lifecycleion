@@ -132,6 +132,31 @@ describe('LRUCache', () => {
   });
 
   describe('TTL expiration', () => {
+    test('a write scans the entries for expired ones only while some can expire', () => {
+      const cache = new LRUCache<string, string>(1000);
+      const internal = cache as unknown as {
+        map: Map<string, unknown>;
+      };
+      const entries = internal.map.entries.bind(internal.map);
+      let scans = 0;
+      internal.map.entries = () => {
+        scans++;
+        return entries();
+      };
+
+      for (let index = 0; index < 100; index++) {
+        cache.set(`key${index}`, 'value');
+      }
+
+      expect(scans).toBe(0);
+
+      cache.set('expiring', 'value', 60_000);
+      cache.set('after', 'value');
+
+      expect(scans).toBe(1);
+      expect(cache.size).toBe(102);
+    });
+
     test('should support manual cleanup of expired entries', () => {
       const originalNow = Date.now;
       let currentTime = 1000;

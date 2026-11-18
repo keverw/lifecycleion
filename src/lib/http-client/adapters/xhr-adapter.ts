@@ -63,7 +63,8 @@ import {
   isBrowserEnvironment,
   isAmbiguousSetCookieLine,
   isCrossOrigin,
-  keepFirstJoinedLocation,
+  firstJoinedLocation,
+  firstNonEmptyValue,
   resolveBrowserDispatchURL,
   stripURLCredentials,
 } from '../utils';
@@ -393,11 +394,13 @@ export class XHRAdapter implements HTTPAdapter {
       /**
        * The answer as the XHR has it now, its URL taken as `answeringURL`: the one read the
        * adapter acts on, so none resolves a `Location` against a URL the browser upgraded.
-       * A redirect the browser followed is told by its URL alone, which is all it is
-       * reported by: its headers are the final page's, so they are not read, and one that
-       * cannot be read does not lose the redirect.
+       * A redirect the browser followed is told by its URL alone, whatever the status
+       * reads, which is all it is reported by: its headers are the final page's, so they
+       * are not read, and one that cannot be read does not lose the redirect. Any other
+       * answer is held to the status rule first (see `endOnMalformedStatus`): `undefined`
+       * when that ended the send.
        */
-      const takeAnswer = (status: number = xhr.status): AnsweredHeaders => {
+      const takeAnswer = (status: number): AnsweredHeaders | undefined => {
         // A string or none: an XHR outside a browser may have no `responseURL` at all, which
         // says nothing of a redirect.
         const reportedURL: unknown = xhr.responseURL;
@@ -416,6 +419,10 @@ export class XHRAdapter implements HTTPAdapter {
             ? comparison.upgradedURL
             : dispatchedURL;
 
+        if (redirectURL === undefined && endOnMalformedStatus(status)) {
+          return undefined;
+        }
+
         return {
           status,
           headers:
@@ -432,6 +439,7 @@ export class XHRAdapter implements HTTPAdapter {
        * one - and so ends the send where it is first read, before the headers or body are
        * read or any of it reported (see `malformedStatusAnswer`), the XHR stopped - or, for
        * a send the caller has cancelled, as that cancel. Settled once, whichever reads it.
+       * Asked by `takeAnswer` alone, once it has seen no redirect the browser followed.
        */
       const endOnMalformedStatus = (status: number): boolean => {
         if (status === 0 || !isMalformedServerStatus(status)) {
@@ -457,21 +465,32 @@ export class XHRAdapter implements HTTPAdapter {
         return true;
       };
 
-      /** The answer, read the first time there is one (see `endOnMalformedStatus`). */
+      /** The answer, read the first time there is one (see `takeAnswer`). */
       const captureAnswer = (): AnsweredHeaders | undefined => {
         if (answeredAtHeaders === undefined && xhr.readyState >= 2) {
           const status = xhr.status;
 
-          if (endOnMalformedStatus(status)) {
-            return undefined;
-          }
-
-          if (status > 0) {
+          if (status !== 0) {
             answeredAtHeaders = takeAnswer(status);
           }
         }
 
         return answeredAtHeaders;
+      };
+
+      /**
+       * The answer a listener acts on: `captured`, as it read it, or the answer read now
+       * for an XHR that showed none before (one outside a browser may report progress or
+       * `load` first). `undefined` once the send has ended, by that read or before it.
+       */
+      const answerToActOn = (
+        captured: AnsweredHeaders | undefined,
+      ): AnsweredHeaders | undefined => {
+        if (didSettle) {
+          return undefined;
+        }
+
+        return captured ?? takeAnswer(xhr.status);
       };
 
       // --- Abort signal ---
@@ -816,12 +835,12 @@ export class XHRAdapter implements HTTPAdapter {
         status !== 0 && !hasResponseBody(method, status);
 
       /**
-       * Act on the answer as it is first read: a redirect the browser followed ends the send, and
-       * any other ends the upload - and the send too, for a body whose `Content-Length`
-       * says up front it is past `maxResponseBytes`, as FetchAdapter refuses one before
-       * reading it, so it is not downloaded first. Only where that length counts the body
-       * itself (see `isKnownUncodedBody`), and only for an answer with a body: a `HEAD`'s
-       * `Content-Length` is the `GET`'s.
+       * Act on the answer as it is first read: a redirect the browser followed ends the
+       * send, and any other ends the upload - and the send too, for a body whose
+       * `Content-Length` says up front it is past `maxResponseBytes`, as FetchAdapter
+       * refuses one before reading it, so it is not downloaded first. Only where that
+       * length counts the body itself (see `isKnownUncodedBody`), and only for an answer
+       * with a body: a `HEAD`'s `Content-Length` is the `GET`'s.
        */
       const onAnswered = (answer: AnsweredHeaders): void => {
         if (
@@ -926,21 +945,11 @@ export class XHRAdapter implements HTTPAdapter {
             // stream error over it. Read uncached only where it still cannot be - an XHR
             // that reports progress before its state - and then held to the same status
             // rule, as `load` holds it.
-            let answer = readAndActOnAnswer();
+            const answer = answerToActOn(readAndActOnAnswer());
 
             // Ended by the answer, read for the first time here.
-            if (didSettle) {
-              return;
-            }
-
             if (answer === undefined) {
-              const status = xhr.status;
-
-              if (endOnMalformedStatus(status)) {
-                return;
-              }
-
-              answer = takeAnswer(status);
+              return;
             }
 
             // Told by its URL alone, whatever the status reads.
@@ -1020,17 +1029,13 @@ export class XHRAdapter implements HTTPAdapter {
           // response regardless of adapter.
           // Read before any progress callback, as everything this listener reports is: the
           // answer, captured once (see `answeredAtHeaders`).
-          const captured = captureAnswer();
           // Read here for the first time by an XHR that showed no state before `load`.
-          const loadedStatus =
-            captured === undefined ? xhr.status : captured.status;
+          const answer = answerToActOn(captureAnswer());
 
           // Ended by the answer: a malformed status.
-          if (didSettle || endOnMalformedStatus(loadedStatus)) {
+          if (answer === undefined) {
             return;
           }
-
-          const answer = captured ?? takeAnswer(loadedStatus);
 
           // A redirect is seen here only by an XHR that reported none of it before. The
           // final upload event fires before the body is read, so a refused body sees it
@@ -1534,8 +1539,9 @@ function readResponseBody(
  * `AdapterResponse.headers` contract. Any other header but `Location` given on
  * more than one line - by an XHR outside a browser - is joined with `, ` as a
  * browser joins it, so both forms read the same. A repeated `Location` keeps its
- * first value: the first line's, whole, when the XHR gives each on a line of its
- * own, and otherwise the first of one the XHR joined, as FetchAdapter keeps it.
+ * first value that is not empty: the first such line's, whole, when the XHR gives
+ * each on a line of its own (the first line when all are empty), and otherwise the
+ * first of one the XHR joined, as FetchAdapter keeps it.
  *
  * Note: browsers unconditionally block `Set-Cookie` and `Set-Cookie2` from
  * `getAllResponseHeaders()` per the XHR spec, so the `set-cookie` array
@@ -1546,7 +1552,11 @@ function parseXHRResponseHeaders(
   raw: string,
 ): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
-  let locationLines = 0;
+  const locations: string[] = [];
+  // The first `Location` line's value with its end as it came, CR aside: a line the XHR
+  // joined from repeats ends in `, ` when the last was empty, which trimming would turn
+  // into a `,` that reads as part of the URL.
+  let firstLocationLine: string | undefined;
 
   if (!raw) {
     return result;
@@ -1597,15 +1607,15 @@ function parseXHRResponseHeaders(
         result['set-cookie'] = [existing, value];
       }
     } else if (key === 'location') {
-      // The first line's value that is not empty, as browsers follow it: the others are
-      // repeats, and the value is not joined.
-      locationLines++;
-      const kept = result['location'];
-
-      // Trimmed already, so an empty one is `''`.
-      if (kept === undefined || (kept === '' && value !== '')) {
-        result['location'] = value;
+      // Kept below: lines of their own are repeats, and not joined.
+      if (locations.length === 0) {
+        firstLocationLine = line
+          .slice(colonIndex + 1)
+          .replace(/^[\t\n\r ]+/, '')
+          .replace(/\r$/, '');
       }
+
+      locations.push(value);
     } else {
       const existing = Object.hasOwn(result, key) ? result[key] : undefined;
 
@@ -1622,10 +1632,13 @@ function parseXHRResponseHeaders(
   // A `Location` on one line may be one the XHR joined from repeats (a browser joins
   // them): its first value is kept, rather than standing as the one mangled URL
   // `a,%20b` that an XHR outside a browser would follow and `detectedRedirectURL` would
-  // report. One given on lines of its own already is its first value that is not
-  // empty, whole.
-  if (locationLines === 1) {
-    keepFirstJoinedLocation(result);
+  // report. Of lines of their own, the first that is not empty is kept whole, as
+  // browsers follow it, or the first when all are.
+  if (firstLocationLine !== undefined) {
+    result['location'] =
+      locations.length === 1
+        ? trimHTTPWhitespace(firstJoinedLocation(firstLocationLine))
+        : (firstNonEmptyValue(locations) ?? locations[0]);
   }
 
   return result;

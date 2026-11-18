@@ -1121,19 +1121,56 @@ function hasXMLHttpRequestGlobal(): boolean {
  * (`a, a`): fetch and XHR join repeats into the same text, so the two cannot be told
  * apart. Two different targets the first of which has a query or fragment (`/a?x, /b`)
  * are followed as one. A server percent-encodes the space in such a value. An empty
- * `Location` among them (`/a, `, `, /b`, `/a, , /b`) is dropped first, wherever it sits,
- * as browsers follow the first that is not empty; one made of nothing else (`, `) is
- * empty, as no `Location` at all. A single value holding `, , ` or starting or ending
- * with `, ` cannot be told from one joined with an empty repeat, and is read as one.
+ * `Location` among them (`/a, `, `, /b`, `/a, , /b`) is dropped first, as browsers follow
+ * the first that is not empty; one made of nothing else (`, `) is empty, as no
+ * `Location` at all. One at the start or end is dropped even past a `?` or `#`, as a
+ * single value neither starts nor ends with a space; one between two others only before
+ * the first `?` or `#`, so a query or fragment holding `, , `
+ * (`/search?q=a, , b`) is kept whole, unless the value is one target repeated around it
+ * (`/a?x, , /a?x`). A path holding `, , ` (`/files/a, , b.pdf`) cannot be told from one
+ * joined with an empty repeat, and is read as one.
  */
 export function firstJoinedLocation(value: string): string {
   // Split and joined once each, so a long run of `, ` costs its length, not its square.
-  const joined = value
-    .split(', ')
-    .filter((part) => part !== '')
-    .join(', ');
-  // The repeated unit is split as any value is: `/a, /b` sent twice is `/a`.
-  const candidate = repeatedTarget(joined) ?? joined;
+  const parts = value.split(', ');
+  let start = 0;
+  let end = parts.length;
+
+  while (start < end && parts[start] === '') {
+    start++;
+  }
+
+  while (end > start && parts[end - 1] === '') {
+    end--;
+  }
+
+  const kept: string[] = [];
+  let isInQuery = false;
+
+  for (let index = start; index < end; index++) {
+    const part = parts[index];
+
+    if (part === '' && !isInQuery) {
+      continue;
+    }
+
+    kept.push(part);
+    isInQuery ||= /[?#]/.test(part);
+  }
+
+  const joined = kept.join(', ');
+  // The repeated unit is split as any value is: `/a, /b` sent twice is `/a`. Looked for
+  // with every empty repeat dropped, so a target with a query sent twice around an empty
+  // one (`/a?x, , /a?x`) is still that target.
+  const candidate =
+    repeatedTarget(
+      joined.includes(', , ')
+        ? parts
+            .slice(start, end)
+            .filter((part) => part !== '')
+            .join(', ')
+        : joined,
+    ) ?? joined;
   const separator = candidate.search(
     /, (?:\/|\.\.?\/|\?|#|[a-z][a-z\d+.-]*:\/\/)/i,
   );
@@ -1183,8 +1220,9 @@ function repeatedTarget(value: string): string | undefined {
  * for an adapter whose transport joined the repeats as `a, b` (fetch, XHR). Its first
  * value that is not empty is kept, as browsers follow it and NodeAdapter keeps it,
  * rather than followed and reported as the one mangled URL `a,%20b`. See
- * {@link firstJoinedLocation} for where it splits: a single value with a raw space (`/files/Smith, John.pdf`) is kept whole and
- * percent-encoded when followed, as NodeAdapter and browsers follow it.
+ * {@link firstJoinedLocation} for where it splits: a single value with a raw space
+ * (`/files/Smith, John.pdf`) is kept whole and percent-encoded when followed, as
+ * NodeAdapter and browsers follow it.
  */
 export function keepFirstJoinedLocation(
   headers: Record<string, string | string[]>,
@@ -1194,6 +1232,16 @@ export function keepFirstJoinedLocation(
   if (typeof location === 'string') {
     headers['location'] = firstJoinedLocation(location);
   }
+}
+
+/**
+ * The first of a repeated header's values that is not empty or HTTP whitespace alone,
+ * as browsers follow the first `Location` that is not empty, or `undefined` when none is.
+ */
+export function firstNonEmptyValue(
+  values: readonly string[],
+): string | undefined {
+  return values.find((value) => trimHTTPWhitespace(value) !== '');
 }
 
 /**
@@ -1288,7 +1336,8 @@ const SINGLE_VALUE_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
  *
  * - Non–`set-cookie` values: an array (a mock or custom adapter's repeated
  *   header) is read as Node's `res.headers` reads a repeated header - the first
- *   value of a header that holds one ({@link SINGLE_VALUE_RESPONSE_HEADERS}),
+ *   value of a header that holds one ({@link SINGLE_VALUE_RESPONSE_HEADERS}; for
+ *   `location`, the first that is not empty, as browsers follow it),
  *   the others joined with `', '`.
  * - `set-cookie`: stored as `string[]` — each array entry is one full
  *   `Set-Cookie` header line (one cookie). A single string value becomes a
@@ -1356,14 +1405,19 @@ export function normalizeAdapterResponseHeaders(
     } else {
       // As Node's `res.headers` reads a repeated header - an array, or keys that
       // differ only by case: the first value of one that can hold only one
-      // (`location`, `content-type`), and the rest joined.
+      // (`content-type`), and the rest joined. A `Location`'s first that is not empty,
+      // as the built-in adapters keep it, or its first when all are.
       const existing = Object.hasOwn(result, lower) ? result[lower] : undefined;
       const all =
         existing === undefined ? lines : [existing as string, ...lines];
       defineEntry(
         result,
         lower,
-        SINGLE_VALUE_RESPONSE_HEADERS.has(lower) ? all[0] : all.join(', '),
+        lower === 'location'
+          ? (firstNonEmptyValue(all) ?? all[0])
+          : SINGLE_VALUE_RESPONSE_HEADERS.has(lower)
+            ? all[0]
+            : all.join(', '),
       );
     }
   }

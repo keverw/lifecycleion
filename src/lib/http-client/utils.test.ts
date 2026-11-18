@@ -1052,6 +1052,23 @@ describe('normalizeAdapterResponseHeaders', () => {
     });
   });
 
+  test('a repeated Location keeps its first value that is not empty, or its first when all are', () => {
+    expect(
+      normalizeAdapterResponseHeaders({ location: ['', ' ', '/next', '/b'] })
+        .location,
+    ).toBe('/next');
+    expect(
+      normalizeAdapterResponseHeaders({ Location: '', location: '/next' })
+        .location,
+    ).toBe('/next');
+    expect(
+      normalizeAdapterResponseHeaders({ location: ['/a', ''] }).location,
+    ).toBe('/a');
+    expect(
+      normalizeAdapterResponseHeaders({ location: ['', ''] }).location,
+    ).toBe('');
+  });
+
   test('keys that collide after lowercasing are read as a repeated header', () => {
     expect(
       normalizeAdapterResponseHeaders({
@@ -1809,7 +1826,7 @@ test('serializeBody refuses a body whose prototype answers differently once it h
 });
 
 describe('firstJoinedLocation', () => {
-  test('an empty Location among repeats is dropped wherever it sits, as browsers follow the first that is not empty', () => {
+  test('an empty Location among repeats is dropped, as browsers follow the first that is not empty', () => {
     expect(firstJoinedLocation('/a, ')).toBe('/a');
     expect(firstJoinedLocation('/a, , ')).toBe('/a');
     expect(firstJoinedLocation('/files/Smith, John.pdf, ')).toBe(
@@ -1822,6 +1839,21 @@ describe('firstJoinedLocation', () => {
     // Nothing but empty ones: empty, as no Location at all.
     expect(firstJoinedLocation(', ')).toBe('');
     expect(firstJoinedLocation(', , ')).toBe('');
+  });
+
+  test('a query or fragment holding `, , ` is kept whole, unless one target is repeated around it, and only a leading or trailing empty repeat is dropped past it', () => {
+    expect(firstJoinedLocation('/search?q=a, , b')).toBe('/search?q=a, , b');
+    expect(firstJoinedLocation('https://h.test/p?csv=1, , 3#f')).toBe(
+      'https://h.test/p?csv=1, , 3#f',
+    );
+    expect(firstJoinedLocation('/p#a, , b')).toBe('/p#a, , b');
+    expect(firstJoinedLocation('/search?q=a, , b, ')).toBe('/search?q=a, , b');
+    expect(firstJoinedLocation(', /search?q=a, , b')).toBe('/search?q=a, , b');
+    expect(firstJoinedLocation('/a, , /b')).toBe('/a');
+    // One target with a query, repeated around an empty one, is that target.
+    expect(firstJoinedLocation('/a?x, , /a?x')).toBe('/a?x');
+    expect(firstJoinedLocation('/a#f, , /a#f')).toBe('/a#f');
+    expect(firstJoinedLocation('/a?x, /a?x, , /a?x')).toBe('/a?x');
   });
 
   test('a long run of empty repeats is dropped, wherever it ends', () => {
