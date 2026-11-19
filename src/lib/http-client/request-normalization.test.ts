@@ -18560,6 +18560,109 @@ test.each([
   },
 );
 
+class LyingBytes extends Uint8Array {
+  public override get byteLength(): number {
+    return 0;
+  }
+
+  public override get length(): number {
+    return 0;
+  }
+}
+
+class LyingBuffer extends ArrayBuffer {
+  public override get byteLength(): number {
+    return 0;
+  }
+}
+
+const customAdapterAnswering = (body: unknown): HTTPClient =>
+  new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream' },
+          body: body as Uint8Array,
+        }),
+    },
+    baseURL: 'http://example.test',
+  });
+
+test.each([
+  [
+    'a Uint8Array subclass whose own getters report 0',
+    () => LyingBytes.of(1, 2, 3, 4),
+  ],
+  [
+    'a Uint8Array with an own byteLength',
+    () =>
+      Object.defineProperty(Uint8Array.of(1, 2, 3, 4), 'byteLength', {
+        value: 2,
+      }),
+  ],
+  ['a Buffer', () => Buffer.from([1, 2, 3, 4])],
+  [
+    "another realm's Uint8Array",
+    () => vm.runInNewContext('Uint8Array.of(1, 2, 3, 4)') as Uint8Array,
+  ],
+] as const)(
+  "a custom adapter's body that is %s is delivered as a plain Uint8Array of its measured length",
+  async (_label, makeBody) => {
+    const response = await customAdapterAnswering(makeBody()).get('/x').send();
+    const body = response.body as Uint8Array;
+
+    expect(response.isFailed).toBe(false);
+    expect(Object.getPrototypeOf(body)).toBe(Uint8Array.prototype);
+    expect(Object.hasOwn(body, 'byteLength')).toBe(false);
+    expect(body.byteLength).toBe(4);
+    expect([...body]).toEqual([1, 2, 3, 4]);
+  },
+);
+
+test.each([
+  [
+    'an ArrayBuffer subclass whose own getter reports 0',
+    () => {
+      const buffer = new LyingBuffer(4);
+      new Uint8Array(buffer).set([1, 2, 3, 4]);
+      return buffer;
+    },
+  ],
+  [
+    'an ArrayBuffer with an own byteLength',
+    () =>
+      Object.defineProperty(Uint8Array.of(1, 2, 3, 4).buffer, 'byteLength', {
+        value: 2,
+      }),
+  ],
+  [
+    "another realm's ArrayBuffer",
+    () => vm.runInNewContext('Uint8Array.of(1, 2, 3, 4).buffer') as ArrayBuffer,
+  ],
+] as const)(
+  "a custom adapter's body that is %s is delivered as a plain ArrayBuffer of its measured length",
+  async (_label, makeBody) => {
+    const sent = makeBody();
+    const response = await customAdapterAnswering(sent).get('/x').send();
+    const body = response.body as ArrayBuffer;
+
+    expect(response.isFailed).toBe(false);
+    expect(body).not.toBe(sent);
+    expect(Object.getPrototypeOf(body)).toBe(ArrayBuffer.prototype);
+    expect(body.byteLength).toBe(4);
+    expect([...new Uint8Array(body)]).toEqual([1, 2, 3, 4]);
+  },
+);
+
+test("a custom adapter's plain ArrayBuffer over fixed memory is delivered as it is", async () => {
+  const sent = Uint8Array.of(1, 2, 3, 4).buffer;
+  const response = await customAdapterAnswering(sent).get('/x').send();
+
+  expect(response.body).toBe(sent);
+});
+
 type GrowableBuffer = { byteLength: number; grow?: (n: number) => void };
 const makeGrowableShared = (): GrowableBuffer =>
   new (

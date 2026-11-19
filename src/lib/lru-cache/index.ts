@@ -641,12 +641,13 @@ export class LRUCache<K, V> {
     // A buffer or view - shared, from another realm, or one whose own `byteLength` lies -
     // measured through its internal slots. Told first by its internal slot (a view) or,
     // for what is not an array, the tag its prototypes carry (a buffer), so any other
-    // object is not put through the getters, each of which throws for it.
+    // object is not put through the getters, each of which throws for it. A plain object
+    // is told apart by its prototype alone, without the walk.
     const byteLength =
       typeof value === 'object' &&
       value !== null &&
       (ArrayBuffer.isView(value) ||
-        (!Array.isArray(value) && hasBufferTagInChain(value)))
+        (!Array.isArray(value) && mayBeBuffer(value)))
         ? readBinaryByteLength(value)
         : null;
 
@@ -977,6 +978,27 @@ export class LRUCache<K, V> {
       throw new RangeError(message);
     }
   }
+}
+
+/**
+ * Whether `value`, an object that is not an array or a view, may be a buffer: never a
+ * plain object or one with no prototype, which carry no buffer's tag, so the common case
+ * skips the walk; otherwise, whether a prototype in its chain carries a buffer's tag (see
+ * `hasBufferTagInChain`). A prototype that cannot be read answers no, as the walk does.
+ */
+function mayBeBuffer(value: object): boolean {
+  let prototype: unknown;
+  try {
+    prototype = Object.getPrototypeOf(value);
+  } catch {
+    return false;
+  }
+
+  if (prototype === Object.prototype || prototype === null) {
+    return false;
+  }
+
+  return hasBufferTagInChain(value);
 }
 
 /**

@@ -162,7 +162,6 @@ import {
   plainBytesView,
   readBinaryByteLength,
   readViewBuffer,
-  typedArrayNameOf,
 } from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
@@ -3591,9 +3590,10 @@ export class BaseHTTPClient {
           });
         }
         // The request's own bytes, handed a built-in adapter uncopied (see
-        // `adapterRequestBody`): marked as the client's, so `NodeAdapter` writes them
-        // without a copy of its own for each attempt (see `markClientOwnedBody`).
-        if (isBuiltInSend && isRequestBodyBytes(adapterRequest.body)) {
+        // `adapterRequestBody`): marked as the client's for `NodeAdapter`, the one adapter
+        // that reads the mark, so it writes them without a copy of its own for each
+        // attempt (see `markClientOwnedBody`).
+        if (isBuiltInNodeSend && isRequestBodyBytes(adapterRequest.body)) {
           markClientOwnedBody(adapterRequest, adapterRequest.body);
         }
         // Told when the adapter has settled a failure of the stream this attempt's factory
@@ -6116,10 +6116,13 @@ function answeredBodySizeOf(body: unknown): number | 'string' | null {
  * `SharedArrayBuffer`), or is a view over such memory, a copy of those `size` bytes in
  * memory of its own, so the bytes held to `maxResponseBytes` are the ones delivered
  * whatever changes the memory later, as XHRAdapter copies a shared body. A buffer is
- * copied as an `ArrayBuffer`, a view as a `Uint8Array`. A view of another type over fixed,
- * unshared memory (a `DataView`, an `Int16Array`) is a plain `Uint8Array` over its bytes,
- * not copied, so a view is delivered as a `Uint8Array` whatever memory it is over. Read
- * through the intrinsic getters, as the body was measured.
+ * copied as an `ArrayBuffer`, a view as a `Uint8Array`. A view over fixed, unshared
+ * memory - a `DataView`, an `Int16Array`, a `Buffer`, a subclass - is a plain `Uint8Array`
+ * over its bytes, not copied, so a view is delivered as a `Uint8Array` whatever memory it
+ * is over, and reports the length it was measured at. A buffer over such memory is
+ * delivered as it is only when it is this realm's plain `ArrayBuffer`; any other - a
+ * subclass, another realm's, one with properties of its own - is copied, for the same
+ * reason. Read through the intrinsic getters, as the body was measured.
  */
 function fixedAnsweredBody(body: object, size: number): unknown {
   const isBuffer = arrayBufferKindOf(body) !== undefined;
@@ -6135,9 +6138,17 @@ function fixedAnsweredBody(body: object, size: number): unknown {
     : readViewBuffer(body as ArrayBufferView);
 
   if (fixedUnsharedByteLength(buffer) !== null) {
-    return isBuffer || typedArrayNameOf(body) === 'Uint8Array'
-      ? body
-      : plainBytesView(body as ArrayBufferView);
+    if (!isBuffer) {
+      return plainBytesView(body as ArrayBufferView);
+    }
+
+    // This realm's own `ArrayBuffer`, with nothing of its own to report another length.
+    if (
+      Object.getPrototypeOf(body) === ArrayBuffer.prototype &&
+      Reflect.ownKeys(body).length === 0
+    ) {
+      return body;
+    }
   }
 
   const copy = (

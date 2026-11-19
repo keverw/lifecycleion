@@ -17,7 +17,9 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import * as zlib from 'node:zlib';
 import { NodeAdapter } from './node-adapter';
+import { FetchAdapter } from './fetch-adapter';
 import * as concatChunksModule from '../internal/concat-chunks';
+import { BodyBytes } from '../internal/body-bytes';
 import { listenForStreamFailureSettled } from '../internal/stream-failure-settled';
 import {
   arrayBufferKindOf,
@@ -241,6 +243,41 @@ test('a buffered body that cannot be joined settles as a stream error, not an un
     expect((response.errorCause as Error).cause).toBe(tooLarge);
   } finally {
     concatSpy.mockRestore();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('a buffered body whose chunk cannot be kept settles as a stream error, not an uncaught exception', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Length': '4' });
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  // As a block that cannot be allocated fails.
+  const failure = new RangeError('Array buffer allocation failed');
+  const appendSpy = spyOn(BodyBytes.prototype, 'append').mockImplementation(
+    () => {
+      throw failure;
+    },
+  );
+  try {
+    const response = await new NodeAdapter().send(
+      makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+    expect(response.streamErrorCode).toBe('stream_response_error');
+    expect((response.errorCause as Error).message).toContain(
+      'Response body could not be kept',
+    );
+    expect((response.errorCause as Error).cause).toBe(failure);
+  } finally {
+    appendSpy.mockRestore();
     await new Promise((resolve) => server.close(resolve));
   }
 });
@@ -15485,6 +15522,57 @@ describe("a client's byte body through NodeAdapter", () => {
       expect(copies).toHaveLength(0);
     } finally {
       from.mockRestore();
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+
+  test('is marked as the client’s own for NodeAdapter alone, the one adapter that reads the mark', async () => {
+    const server = http.createServer((request, response) => {
+      request.resume();
+      request.on('end', () => response.end('ok'));
+    });
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+    const { port } = server.address() as AddressInfo;
+    const key = Symbol.for('lifecycleion.clientOwnedRequestBody.v1');
+    const define = spyOn(Object, 'defineProperty');
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(
+      ((): Promise<Response> =>
+        Promise.resolve(new Response('ok'))) as unknown as typeof fetch,
+    );
+    const marks = (): number =>
+      define.mock.calls.filter(([, property]) => property === key).length;
+
+    try {
+      const fetchClient = new HTTPClient({
+        adapter: new FetchAdapter(),
+        baseURL: 'http://example.test',
+      });
+      define.mockClear();
+      await fetchClient
+        .put('/')
+        .body(Uint8Array.of(1, 2, 3))
+        .send();
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(marks()).toBe(0);
+
+      fetchSpy.mockRestore();
+      const nodeClient = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${port}`,
+      });
+      define.mockClear();
+      await nodeClient
+        .put('/')
+        .body(Uint8Array.of(1, 2, 3))
+        .send();
+      expect(marks()).toBe(1);
+    } finally {
+      define.mockRestore();
+      fetchSpy.mockRestore();
       await new Promise<void>((done) => {
         server.close(() => done());
       });

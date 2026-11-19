@@ -56,9 +56,10 @@ export function deferredJSONRawBody(text: string): PendingBody {
 /**
  * A token for a copy of the bytes or form an attempt sends; see `pendingByToken`. The
  * body is the attempt's own, which no caller holds and nothing changes once it is sent -
- * the adapter is handed a copy of a form, and a built-in network adapter copies bytes as
- * it is called (see `adapterRequestBody`) - so the copy taken when an observer is first
- * handed it is the body sent.
+ * a form, and a custom adapter's bytes, are handed over as copies, and a built-in network
+ * adapter's bytes are the client's own, which it neither changes nor transfers (see
+ * `adapterRequestBody`) - so the copy taken when an observer is first handed it is the
+ * body sent.
  */
 export function deferredBodyCopy(body: Uint8Array | FormData): PendingBody {
   return deferred(() => cloneBodyValue(body));

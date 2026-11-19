@@ -2854,7 +2854,20 @@ export class NodeAdapter implements HTTPAdapter {
                 return;
               }
 
-              gathered.append(chunk, chunk.length);
+              // A block that cannot be allocated is a stream error, as a join that fails
+              // at `'end'` is: thrown from this listener, it would be an uncaught
+              // exception, and the request would never settle. The rest of the body is
+              // not read, as for one past the limit.
+              try {
+                gathered.append(chunk, chunk.length);
+              } catch (error) {
+                tearDownAfterResponse();
+                settleBufferedStreamError(
+                  'Response body could not be kept',
+                  error as Error,
+                );
+                return;
+              }
 
               // progress: -1 when Content-Length is absent (chunked transfer,
               // compressed response, etc.) — callers treat -1 as "length unknown".
@@ -3348,10 +3361,10 @@ export class NodeAdapter implements HTTPAdapter {
           // String or Uint8Array body — write in chunks so upload progress fires
           // at meaningful granularity rather than one giant 100% event at the end.
           const body = classifiedBody.body;
-          // Copied here, before `send()` first awaits: the client hands this adapter the
-          // request's bytes uncopied, relying on it (see `isBuiltInNetworkSend`) - unless
-          // they are the client's own copy, which nothing else can change, written as
-          // they are (see `markClientOwnedBody`).
+          // The client's own bytes, marked as its copy, are written as they are: nothing
+          // else holds them (see `markClientOwnedBody`). Any other request's - one this
+          // adapter is driven with directly - are copied here, before `send()` first
+          // awaits, so a change the caller makes after the call does not reach the wire.
           const bytes =
             typeof body === 'string'
               ? Buffer.from(body, 'utf8')
