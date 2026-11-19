@@ -6,6 +6,7 @@ import type { HTTPRequestOptions, HTTPResponse } from './types';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
 import { UNSUPPORTED_REQUEST_BODY_MESSAGE } from './utils';
+import { releaseRequestBody } from './internal/request-body-copy';
 
 // Captures the context passed to sendFn so tests can inspect it.
 function makeSendFn(
@@ -62,6 +63,15 @@ function makeSendFn(
   };
 
   return { sendFn, getContext: () => capturedContext, requireContext };
+}
+
+/**
+ * The body a send function was handed, a JSON body's copy read back from its text as the
+ * client reads it when an interceptor first looks.
+ */
+function sentBody(ctx: BuilderSendContext<unknown>): unknown {
+  releaseRequestBody(ctx.options.body);
+  return ctx.options.body;
 }
 
 function makeBuilder<T = unknown>(
@@ -257,7 +267,7 @@ describe('HTTPRequestBuilder', () => {
     test('forwards body via .json()', async () => {
       const { builder, requireContext } = makeBuilder();
       await builder.json({ a: 1 }).send();
-      expect(requireContext().options.body).toEqual({ a: 1 });
+      expect(sentBody(requireContext())).toEqual({ a: 1 });
     });
 
     test('forwards body via .text()', async () => {
@@ -355,7 +365,11 @@ describe('HTTPRequestBuilder', () => {
         await builder.send();
 
         expect(reads).toBe(1);
-        expect(requireContext().options[key]).toEqual(firstValues[key]);
+        expect(
+          key === 'body'
+            ? sentBody(requireContext())
+            : requireContext().options[key],
+        ).toEqual(firstValues[key]);
       },
     );
 
@@ -653,63 +667,6 @@ describe('HTTPRequestBuilder', () => {
       expect(wasCancelCalled).toBe(true);
     });
 
-    test("a cancel made before a caller's send function wires its cancel function after a wait is held and passed to it", async () => {
-      const { sendFn } = makeSendFn();
-      const reasons: Array<string | undefined> = [];
-      let release = (): void => undefined;
-      const waited = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      const builder = new HTTPRequestBuilder(
-        'GET',
-        '/test',
-        async (ctx: BuilderSendContext<unknown>) => {
-          await waited;
-          ctx.callbacks.setCancelFn((reason) => {
-            reasons.push(reason);
-            return 'cancelled';
-          });
-          return sendFn(ctx);
-        },
-      );
-
-      const sent = builder.send();
-
-      expect(builder.cancel('why')).toBe('cancelled');
-      release();
-      await sent;
-      expect(reasons).toEqual(['why']);
-    });
-
-    test('a cancel function that answers nothing is read as having cancelled, then as already cancelled', async () => {
-      let calls = 0;
-      const { builder } = makeBuilder(undefined, (ctx) => {
-        ctx.callbacks.setCancelFn(() => {
-          calls++;
-        });
-      });
-
-      const sent = builder.send();
-      expect(builder.cancel()).toBe('cancelled');
-      expect(builder.cancel()).toBe('already_cancelled');
-      await sent;
-      expect(calls).toBe(2);
-    });
-
-    test("a caller's send function that settles leaves nothing to forward a cancel to", async () => {
-      let calls = 0;
-      const { builder } = makeBuilder(undefined, (ctx) => {
-        ctx.callbacks.setCancelFn(() => {
-          calls++;
-          return 'cancelled';
-        });
-      });
-
-      await builder.send();
-      expect(builder.cancel()).toBe('already_settled');
-      expect(calls).toBe(0);
-    });
-
     test('passes reason string to cancelFn', async () => {
       let capturedReason: string | undefined;
 
@@ -938,7 +895,7 @@ test('a body is copied when it is handed to a setter, so a later change to it is
     set(builder);
     change();
     await builder.send();
-    forwarded.push(requireContext().options.body);
+    forwarded.push(sentBody(requireContext()));
   }
 
   expect(forwarded[0]).toEqual({ a: 1, nested: { b: 2 } });
@@ -957,7 +914,7 @@ test('a body is copied when it is handed to a setter, so a later change to it is
   optionBody.a = 2;
   await optionBuilder.send();
 
-  expect(requireContext().options.body).toEqual({ a: 1 });
+  expect(sentBody(requireContext())).toEqual({ a: 1 });
 });
 
 test('a body whose getter or toJSON throws throws from the setter, and the builder keeps its body', async () => {
@@ -985,7 +942,7 @@ test('a body whose getter or toJSON throws throws from the setter, and the build
 
   await builder.send();
 
-  expect(requireContext().options.body).toEqual({ kept: true });
+  expect(sentBody(requireContext())).toEqual({ kept: true });
 });
 
 test('a JSON body is kept as the data it serializes to', async () => {
@@ -998,7 +955,7 @@ test('a JSON body is kept as the data it serializes to', async () => {
     .json({ when, point: new Point(), dropped: undefined, list: [undefined] })
     .send();
 
-  const body = requireContext().options.body as Record<string, unknown>;
+  const body = sentBody(requireContext()) as Record<string, unknown>;
   expect(body).toEqual({
     when: '2020-01-02T03:04:05.000Z',
     point: { x: 1 },
@@ -1569,25 +1526,11 @@ test('a byte body whose prototype is a Proxy is copied without running its traps
   expect(trapCalls).toBe(0);
 });
 
-test("a builder's own send function is handed a JSON body it may change and send on", async () => {
-  const adapter = new MockAdapter();
-  const received: unknown[] = [];
-  adapter.routes.post('/x', (request) => {
-    received.push(request.body);
-    return { status: 200, body: 'ok' };
-  });
-  const client = new HTTPClient({
-    adapter,
-    baseURL: 'https://api.example.com',
-  });
-  const builder = new HTTPRequestBuilder('POST', '/x', (ctx) => {
-    const body = ctx.options.body as Record<string, unknown>;
-    body.traceID = 't1';
-    return client.post('/x').json(body).send();
-  }).json({ a: 1 });
+test("the entry exports HTTPRequestBuilder as a type only, and a client's methods make one", async () => {
+  const entry: Record<string, unknown> = await import('./index');
+  expect(Object.hasOwn(entry, 'HTTPRequestBuilder')).toBe(false);
+  expect(Object.hasOwn(entry, 'HTTPClient')).toBe(true);
 
-  const response = await builder.send();
-
-  expect(response.status).toBe(200);
-  expect(received).toEqual([{ a: 1, traceID: 't1' }]);
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  expect(client.get('/x')).toBeInstanceOf(HTTPRequestBuilder);
 });

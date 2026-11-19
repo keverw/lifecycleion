@@ -1,6 +1,7 @@
 export { HTTPClient } from './http-client';
 export type { HTTPSubClient } from './http-client';
-export { HTTPRequestBuilder } from './http-request-builder';
+// Made by the client's request methods: exported to annotate with, not to construct.
+export type { HTTPRequestBuilder } from './http-request-builder';
 export { CookieJar } from './cookie-jar';
 export { FetchAdapter } from './adapters/fetch-adapter';
 

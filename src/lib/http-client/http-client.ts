@@ -35,7 +35,7 @@ import {
   cancelTrackedRequest,
 } from './request-tracker';
 import type { RequestInfo, TrackedRequest } from './request-tracker';
-import { HTTPRequestBuilder, clientSendFn } from './http-request-builder';
+import { HTTPRequestBuilder } from './http-request-builder';
 import {
   RequestInterceptorManager,
   isInterceptorCancel,
@@ -483,8 +483,8 @@ export class BaseHTTPClient {
 
   private _disabled = false;
 
-  /** What every builder of this client sends through; see `clientSendFn`. */
-  private readonly _sendFn = clientSendFn((ctx) => this._execute(ctx));
+  /** What every builder of this client sends through. */
+  private readonly _sendFn: SendFn<unknown> = this._execute.bind(this);
 
   constructor(
     config: HTTPClientConfig = {},

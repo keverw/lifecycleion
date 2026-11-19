@@ -20,10 +20,10 @@ type CopyRecord =
 
 /**
  * The record of each JSON body copy caller code has not been given. One is forgotten as
- * caller code is given it, which may keep it and change it in place - an interceptor that
- * reads its request's `body` (see `handedRequest` in interceptors.ts), or a builder's own
- * send function (see `releaseRequestBody`). Nothing else gives a request's body to caller
- * code: an attempt's observers are handed their own, parsed back from the text sent.
+ * caller code is given it, which may keep it and change it in place: an interceptor that
+ * reads its request's `body` (see `handedRequest` in interceptors.ts, and
+ * `releaseRequestBody`). Nothing else gives a request's body to caller code: an attempt's
+ * observers are handed their own, parsed back from the text sent.
  */
 const recordByCopy = new WeakMap<object, CopyRecord>();
 
@@ -236,14 +236,13 @@ export function isUnfilledRequestBody(body: unknown): boolean {
 }
 
 /**
- * Called as a request's body is handed to caller code - an interceptor that reads it, or a
- * builder's own send function - which may keep it and change it in place: a copy still
- * empty is filled (see `fillRequestBody`), and since its text no longer says what it
- * serializes to, its record is forgotten, and the copy is serialized from then on as any
- * other value is. `parsed`, the data a filter read the copy as, fills it in place of a
- * parse: handed over by one copy at most, so no two share nested objects. A fill that
- * throws leaves the record, and the copy still sent as its text. Any other value is left
- * as it is.
+ * Called as a request's body is handed to caller code - an interceptor that reads it -
+ * which may keep it and change it in place: a copy still empty is filled (see
+ * `fillRequestBody`), and since its text no longer says what it serializes to, its record
+ * is forgotten, and the copy is serialized from then on as any other value is. `parsed`,
+ * the data a filter read the copy as, fills it in place of a parse: handed over by one
+ * copy at most, so no two share nested objects. A fill that throws leaves the record, and
+ * the copy still sent as its text. Any other value is left as it is.
  */
 export function releaseRequestBody(body: unknown, parsed?: object): void {
   if (typeof body !== 'object' || body === null) {

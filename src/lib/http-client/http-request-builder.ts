@@ -12,10 +12,7 @@ import {
   lowerCaseHeaderName,
 } from './internal/header-utils';
 import { isBlankText } from '../internal/ascii-text';
-import {
-  copyRequestBody,
-  releaseRequestBody,
-} from './internal/request-body-copy';
+import { copyRequestBody } from './internal/request-body-copy';
 import { isFormData, isMethodlessFormData } from './internal/form-entries';
 import {
   assertKnownFields,
@@ -53,15 +50,11 @@ export interface BuilderCallbacks<T> {
   setNextRetryAt: (timestampMS: number | null) => void;
   setStartedAt: (timestampMS: number) => void;
   /**
-   * Wires the function `cancel()` forwards to while the request is in flight, answering
-   * what that did. An answer that is not a {@link CancelResult} (nothing, from
-   * `() => controller.abort()`) reads as `'cancelled'` the first time a cancel reaches it,
-   * and as `'already_cancelled'` after. A cancel made before it is wired is held, and
-   * passed to it as it is wired; one held by a send function that settles without wiring
-   * one cannot be applied, and the builder ends as that function leaves it. Once a caller's
-   * send function settles, nothing is forwarded.
+   * Wires the function `cancel()` forwards to while the request is in flight, which
+   * answers what that did. A cancel held while `send()` set the request up is passed to
+   * it as it is wired.
    */
-  setCancelFn: (fn: (reason?: string) => CancelResult | void) => void;
+  setCancelFn: (fn: (reason?: string) => CancelResult) => void;
   /** A cancel the builder held while `send()` set the request up; see `cancel()`. */
   getSetupCancel: () => { reason: string | undefined } | null;
 }
@@ -99,20 +92,6 @@ const REQUEST_OPTION_FIELDS = fieldNames<HTTPRequestOptions>({
   onAttemptEnd: true,
   streamResponse: true,
 });
-
-/**
- * The send functions `HTTPClient`s build their builders with, one per client, which read a
- * JSON body copy through its text (see `copyRequestBody`). Any other is caller code -
- * `HTTPRequestBuilder` is exported - handed the body released (see `releaseRequestBody`),
- * so it may keep and change it.
- */
-const clientSendFns = new WeakSet<object>();
-
-/** Record `sendFn` as an `HTTPClient`'s own; see `clientSendFns`. */
-export function clientSendFn(sendFn: SendFn<unknown>): SendFn<unknown> {
-  clientSendFns.add(sendFn);
-  return sendFn;
-}
 
 /**
  * Whether `value` is an `AbortSignal`: tagged as one, an instance of this realm's - a
@@ -170,16 +149,10 @@ export class HTTPRequestBuilder<T = unknown> {
   private _nextRetryAt: number | null = null;
   private _startedAt: number | null = null;
   private _completedAt: number | null = null;
-  private _cancelFn: ((reason?: string) => CancelResult | void) | null = null;
-  /** Whether a cancel has reached `_cancelFn`, forwarded or held and then passed to it. */
-  private _didReachCancelFn = false;
+  private _cancelFn: ((reason?: string) => CancelResult) | null = null;
   /** A cancel made after `send()` began but before the request could be cancelled. */
   private _setupCancel: { reason: string | undefined } | null = null;
-  /**
-   * Set once the request's setup is over: for an `HTTPClient`'s own send function, once
-   * its synchronous setup has returned, and for a caller's, once its send settles; see
-   * `_sendRequest`.
-   */
+  /** Set once the client's synchronous setup has returned; see `_sendRequest`. */
   private _isSetupDone = false;
   private _preSendCancelReason: string | undefined = undefined;
 
@@ -546,28 +519,13 @@ export class HTTPRequestBuilder<T = unknown> {
     }
 
     // Answered by the request itself while it is in flight: `'cancelled'` only when this
-    // call is what cancelled it. A caller's send function may wire one that answers
-    // something else (nothing, as `() => controller.abort()` does): the first cancel to
-    // reach it is passed on as `'cancelled'`, and any after as `'already_cancelled'`.
+    // call is what cancelled it.
     if (this._cancelFn) {
-      const result: unknown = this._cancelFn(reason);
-      const didReach = this._didReachCancelFn;
-      this._didReachCancelFn = true;
-
-      if (
-        result === 'cancelled' ||
-        result === 'already_cancelled' ||
-        result === 'already_settled'
-      ) {
-        return result;
-      }
-
-      return didReach ? 'already_cancelled' : 'cancelled';
+      return this._cancelFn(reason);
     }
 
     // Setup is over and wired no cancel function: the request failed during setup (its
-    // `send()` rejection is on its way), or a caller's send function settled without one,
-    // so there is nothing to cancel.
+    // `send()` rejection is on its way), so there is nothing to cancel.
     if (this._isSetupDone) {
       // A cancel held during that setup still ends the builder cancelled; see `send()`.
       return this._setupCancel ? 'already_cancelled' : 'already_settled';
@@ -632,10 +590,6 @@ export class HTTPRequestBuilder<T = unknown> {
   }
 
   private async _sendRequest<U>(): Promise<HTTPResponse<U>> {
-    if (!clientSendFns.has(this._sendFn)) {
-      releaseRequestBody(this._body);
-    }
-
     const pending = this._sendFn({
       method: this._method,
       path: this._path,
@@ -691,7 +645,6 @@ export class HTTPRequestBuilder<T = unknown> {
           this._cancelFn = fn;
           // A cancel made while the request was being set up; see `cancel()`.
           if (this._setupCancel) {
-            this._didReachCancelFn = true;
             fn(this._setupCancel.reason);
           }
         },
@@ -699,23 +652,10 @@ export class HTTPRequestBuilder<T = unknown> {
     });
     // The client's setup runs synchronously inside that call, up to wiring the request's
     // cancel function - so once it returns, a request with none has already failed (or
-    // was cancelled), and `cancel()` holds nothing. A caller's send function may wire its
-    // cancel function later, after a wait of its own: until it does, or its request
-    // settles, a cancel is held for it as during the client's setup.
-    if (clientSendFns.has(this._sendFn)) {
-      this._isSetupDone = true;
-    }
+    // was cancelled), and `cancel()` holds nothing.
+    this._isSetupDone = true;
 
-    try {
-      return (await pending) as unknown as HTTPResponse<U>;
-    } finally {
-      this._isSetupDone = true;
-
-      // A caller's request is over once its send settles, whatever state it left.
-      if (!clientSendFns.has(this._sendFn)) {
-        this._cancelFn = null;
-      }
-    }
+    return (await pending) as unknown as HTTPResponse<U>;
   }
 
   // --- Private helpers ---
