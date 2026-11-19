@@ -6,8 +6,8 @@ import type { AdapterRequest } from '../types';
  * Marks `body`, the bytes `request` carries, as `HTTPClient`'s own: a copy it took when
  * the body was handed over, which nothing outside the client holds, handed to a built-in
  * network adapter uncopied (see `isBuiltInNetworkSend`). `NodeAdapter` writes such bytes
- * as they are rather than copying them again for each attempt. Not put on a request with
- * a stream factory, which `NodeAdapter` calls on the request, so it could reach them.
+ * as they are rather than copying them again for each attempt. The client calls a stream
+ * factory with `this` undefined, so the factory never reaches them either.
  *
  * Under a `Symbol.for` key, so a `NodeAdapter` from another bundle finds it, and not
  * enumerable, so an adapter that spreads the request into a new object does not carry it

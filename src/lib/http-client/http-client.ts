@@ -3460,14 +3460,11 @@ export class BaseHTTPClient {
           // Forward the builder's streaming factory to each adapter attempt.
           // NodeAdapter invokes it only for a 2xx response with a body, letting the caller
           // create attempt-local writable state when a retry happens.
-          // Called on the receiver the adapter calls it on, so a factory reading `this`
-          // reads the receiver it would if the adapter called it directly.
+          // Called as a plain function, with `this` undefined, as the client's other
+          // callbacks are: the request the adapter calls it on is the client's own.
           streamResponse:
             typeof streamResponse === 'function'
-              ? function (
-                  this: unknown,
-                  ...args: Parameters<typeof streamResponse>
-                ) {
+              ? (...args: Parameters<typeof streamResponse>) => {
                   // A cancel, as the factory's own `null` is: no sink is opened.
                   if (isAbandoned) {
                     return null;
@@ -3492,7 +3489,7 @@ export class BaseHTTPClient {
                   }
                   const returned: unknown = Reflect.apply(
                     streamResponse,
-                    this,
+                    undefined,
                     args,
                   );
                   const watched = watchStreamFactoryAnswer(
@@ -3595,14 +3592,8 @@ export class BaseHTTPClient {
         }
         // The request's own bytes, handed a built-in adapter uncopied (see
         // `adapterRequestBody`): marked as the client's, so `NodeAdapter` writes them
-        // without a copy of its own for each attempt (see `markClientOwnedBody`). Not
-        // with a stream factory, which `NodeAdapter` calls on this request: what it reads
-        // as `this.body` could change the bytes while they are written.
-        if (
-          isBuiltInSend &&
-          typeof streamResponse !== 'function' &&
-          isRequestBodyBytes(adapterRequest.body)
-        ) {
+        // without a copy of its own for each attempt (see `markClientOwnedBody`).
+        if (isBuiltInSend && isRequestBodyBytes(adapterRequest.body)) {
           markClientOwnedBody(adapterRequest, adapterRequest.body);
         }
         // Told when the adapter has settled a failure of the stream this attempt's factory

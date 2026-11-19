@@ -15436,7 +15436,7 @@ describe("a client's byte body through NodeAdapter", () => {
     }
   });
 
-  test('is copied as it is sent when a stream factory, called on the request, could reach it', async () => {
+  test('is not copied with a stream factory, which the client calls with this undefined', async () => {
     let serverDigest = '';
     const server = http.createServer((request, response) => {
       // Answered before the body is read, so the factory runs while it is written.
@@ -15453,35 +15453,38 @@ describe("a client's byte body through NodeAdapter", () => {
       server.listen(0, '127.0.0.1', done);
     });
     const { port } = server.address() as AddressInfo;
-    const body = crypto.randomBytes(8 * 1024 * 1024);
-    let didChange = false;
+    const body = crypto.randomBytes(SIZE);
+    const receivers: unknown[] = [];
+    const from = spyOn(Buffer, 'from');
 
     try {
       const client = new HTTPClient({
         adapter: new NodeAdapter(),
         baseURL: `http://127.0.0.1:${port}`,
       });
-      const response = await client
+      const builder = client
         .put('/')
         .body(new Uint8Array(body))
         .streamResponse(function (this: unknown) {
-          const held = (this as { body?: unknown } | undefined)?.body;
-          if (held instanceof Uint8Array) {
-            held.fill(0);
-            didChange = true;
-          }
+          receivers.push(this);
           return new Writable({
             write(_chunk, _encoding, callback) {
               callback();
             },
           });
-        })
-        .send();
+        });
+      from.mockClear();
+      const response = await builder.send();
 
       expect(response.status).toBe(200);
-      expect(didChange).toBe(true);
+      expect(receivers).toEqual([undefined]);
       expect(serverDigest).toBe(digest(body));
+      const copies = from.mock.calls.filter(
+        ([value]) => value instanceof Uint8Array && value.byteLength === SIZE,
+      );
+      expect(copies).toHaveLength(0);
     } finally {
+      from.mockRestore();
       await new Promise<void>((done) => {
         server.close(() => done());
       });
