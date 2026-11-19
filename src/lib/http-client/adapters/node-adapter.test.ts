@@ -15379,3 +15379,153 @@ test('a buffered body sent in one-byte chunks holds about its own size while it 
     server.close();
   }
 });
+
+describe("a client's byte body through NodeAdapter", () => {
+  const SIZE = 300_007;
+  const digest = (bytes: Uint8Array): string =>
+    crypto.createHash('sha256').update(bytes).digest('hex');
+
+  test('is written from the client’s own copy, intact across a retry and a 307 replay', async () => {
+    const received: string[] = [];
+    let againCalls = 0;
+    const server = http.createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        received.push(digest(Buffer.concat(chunks)));
+        if (request.url === '/start') {
+          response.writeHead(307, { location: '/again' }).end();
+        } else if (++againCalls === 1) {
+          response.writeHead(503).end();
+        } else {
+          response.end('ok');
+        }
+      });
+    });
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+    const { port } = server.address() as AddressInfo;
+    const body = crypto.randomBytes(SIZE);
+    const sent = new Uint8Array(body);
+    const from = spyOn(Buffer, 'from');
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${port}`,
+        followRedirects: true,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+      });
+      const builder = client.put('/start').body(sent);
+      from.mockClear();
+      const response = await builder.send();
+
+      expect(response.status).toBe(200);
+      expect(received).toEqual([digest(body), digest(body), digest(body)]);
+      // Not copied again by the adapter, for any of the three attempts.
+      const copies = from.mock.calls.filter(
+        ([value]) => value instanceof Uint8Array && value.byteLength === SIZE,
+      );
+      expect(copies).toHaveLength(0);
+    } finally {
+      from.mockRestore();
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+
+  test('is copied as it is sent when a stream factory, called on the request, could reach it', async () => {
+    let serverDigest = '';
+    const server = http.createServer((request, response) => {
+      // Answered before the body is read, so the factory runs while it is written.
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.write('x');
+      const hash = crypto.createHash('sha256');
+      request.on('data', (chunk: Buffer) => hash.update(chunk));
+      request.on('end', () => {
+        serverDigest = hash.digest('hex');
+        response.end('y');
+      });
+    });
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+    const { port } = server.address() as AddressInfo;
+    const body = crypto.randomBytes(8 * 1024 * 1024);
+    let didChange = false;
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${port}`,
+      });
+      const response = await client
+        .put('/')
+        .body(new Uint8Array(body))
+        .streamResponse(function (this: unknown) {
+          const held = (this as { body?: unknown } | undefined)?.body;
+          if (held instanceof Uint8Array) {
+            held.fill(0);
+            didChange = true;
+          }
+          return new Writable({
+            write(_chunk, _encoding, callback) {
+              callback();
+            },
+          });
+        })
+        .send();
+
+      expect(response.status).toBe(200);
+      expect(didChange).toBe(true);
+      expect(serverDigest).toBe(digest(body));
+    } finally {
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+
+  test('a direct caller whose request is marked with other bytes still has its own copied', async () => {
+    const received: string[] = [];
+    const server = http.createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        received.push(digest(Buffer.concat(chunks)));
+        response.end('ok');
+      });
+    });
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+    const { port } = server.address() as AddressInfo;
+    const body = new Uint8Array(SIZE).fill(1);
+    const original = digest(body);
+    const request = {
+      requestURL: `http://127.0.0.1:${port}/`,
+      method: 'PUT',
+      headers: {},
+      body,
+    };
+    Object.defineProperty(
+      request,
+      Symbol.for('lifecycleion.clientOwnedRequestBody.v1'),
+      { value: new Uint8Array(SIZE) },
+    );
+
+    try {
+      const sending = new NodeAdapter().send(request);
+      body.fill(2);
+      await sending;
+
+      expect(received).toEqual([original]);
+    } finally {
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+});

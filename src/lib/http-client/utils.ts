@@ -236,7 +236,8 @@ export function buildURL(
       // No path to join: the base as written, with no slash the caller did not ask for.
       url = `${baseURL}${path}`;
     } else {
-      // Avoid double slashes when joining base + path
+      // Avoid double slashes when joining base + path. The base's path is a prefix, not
+      // a boundary: dot segments in `path` are resolved later, as any URL's are.
       const base = baseURL.endsWith('/') ? baseURL.slice(0, -1) : baseURL;
       const p = path.startsWith('/') ? path : `/${path}`;
       url = `${base}${p}`;

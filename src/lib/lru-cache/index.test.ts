@@ -1809,15 +1809,13 @@ describe('LRUCache', () => {
     });
 
     test('fails set() when sizing an entry it read fails, as sizing the value itself does', () => {
-      const unsizable = new Proxy([1], {
-        getPrototypeOf: () => {
-          throw new Error('proto');
-        },
-      });
+      // `Array.isArray` throws for a revoked `Proxy`.
+      const { proxy: unsizable, revoke } = Proxy.revocable([1], {});
+      revoke();
       const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
 
-      expect(() => cache.set('top', unsizable)).toThrow('proto');
-      expect(() => cache.set('nested', [unsizable])).toThrow('proto');
+      expect(() => cache.set('top', unsizable)).toThrow(TypeError);
+      expect(() => cache.set('nested', [unsizable])).toThrow(TypeError);
       expect(cache.size).toBe(0);
     });
 
@@ -1926,4 +1924,34 @@ test('a removed entry that could expire is let go of by the expiry heap, its val
       .filter((node) => node.entry === undefined)
       .every((node) => node.key === undefined),
   ).toBe(true);
+});
+
+test('the default size of a buffer or view is its byte length, read from its internal slots, from any realm', () => {
+  class LyingBytes extends Uint8Array {
+    public override get byteLength(): number {
+      return 0;
+    }
+  }
+  const kinds: Array<[string, () => object]> = [
+    ['a SharedArrayBuffer', () => new SharedArrayBuffer(600)],
+    [
+      'another realm’s ArrayBuffer',
+      () => runInNewContext('new ArrayBuffer(600)') as object,
+    ],
+    ['a Uint8Array whose byteLength getter lies', () => new LyingBytes(600)],
+    ['a DataView', () => new DataView(new ArrayBuffer(600))],
+    ['a Buffer', () => Buffer.alloc(600)],
+  ];
+
+  for (const [, make] of kinds) {
+    const sized = new LRUCache<string, object>(10, { maxSize: 10_000 });
+    sized.set('a', make());
+    expect(sized.byteSize).toBe(600);
+
+    const bounded = new LRUCache<string, object>(10, { maxSize: 1000 });
+    bounded.set('a', make());
+    bounded.set('b', make());
+    expect(bounded.byteSize).toBeLessThanOrEqual(1000);
+    expect(bounded.has('a')).toBe(false);
+  }
 });

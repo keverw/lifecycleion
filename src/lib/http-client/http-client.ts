@@ -187,6 +187,7 @@ import {
 } from './internal/transport-refusal';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
 import { listenForUploadSourceWait } from './internal/upload-source-wait';
+import { markClientOwnedBody } from './internal/client-owned-body';
 import { listenForStreamFailureSettled } from './internal/stream-failure-settled';
 import { formEntries, isFormData } from './internal/form-entries';
 import {
@@ -3592,6 +3593,18 @@ export class BaseHTTPClient {
             }
           });
         }
+        // The request's own bytes, handed a built-in adapter uncopied (see
+        // `adapterRequestBody`): marked as the client's, so `NodeAdapter` writes them
+        // without a copy of its own for each attempt (see `markClientOwnedBody`). Not
+        // with a stream factory, which `NodeAdapter` calls on this request: what it reads
+        // as `this.body` could change the bytes while they are written.
+        if (
+          isBuiltInSend &&
+          typeof streamResponse !== 'function' &&
+          isRequestBodyBytes(adapterRequest.body)
+        ) {
+          markClientOwnedBody(adapterRequest, adapterRequest.body);
+        }
         // Told when the adapter has settled a failure of the stream this attempt's factory
         // started, before it fires the factory's signal: a cancel a cleanup listener on
         // that signal makes is then no stand-in for the failure. Only for the built-in
@@ -5971,8 +5984,8 @@ function snapshotClientConfigFields(config: SubClientConfig) {
  * before one existed may be handed any value - one a caller may still hold - so its copy
  * is taken at once (`'now'`).
  *
- * Bytes and form data are sent as the request's own body: copied for the adapter, where
- * it may change them, by `adapterRequestBody`.
+ * Bytes and form data are sent as the request's own body: copied by `adapterRequestBody`
+ * for an adapter that may change them.
  */
 function buildAttemptBodies(
   rawBody: unknown,
@@ -6035,7 +6048,7 @@ function buildAttemptBodies(
  * The body an adapter is handed: a copy taken for this attempt, so an adapter that changes
  * or transfers what it was handed leaves the request's own body - the next attempt's, and
  * a replay's - alone. Bytes are the request's own when the `send` called is a built-in
- * network adapter's (`isBuiltInSend`), which copies them as it is called (see
+ * network adapter's (`isBuiltInSend`), which neither changes nor transfers them (see
  * `isBuiltInNetworkSend`); a form is copied for every adapter, as NodeAdapter reads its
  * entries while the upload runs.
  */
@@ -6119,25 +6132,21 @@ function answeredBodySizeOf(body: unknown): number | 'string' | null {
  */
 function fixedAnsweredBody(body: object, size: number): unknown {
   const isBuffer = arrayBufferKindOf(body) !== undefined;
-  const buffer = isBuffer
-    ? (body as ArrayBufferLike)
-    : readViewBuffer(body as ArrayBufferView);
-
-  if (fixedUnsharedByteLength(buffer) !== null) {
-    if (isBuffer || typedArrayNameOf(body) === 'Uint8Array') {
-      return body;
-    }
-
-    // Nothing to read off a buffer detached since.
-    return size === 0
-      ? new Uint8Array(0)
-      : plainBytesView(body as ArrayBufferView);
-  }
 
   // Nothing to copy, nor to read off a buffer detached since: an empty body is a fixed
   // empty one, as the memory under it could grow after it was measured.
   if (size === 0) {
     return isBuffer ? new ArrayBuffer(0) : new Uint8Array(0);
+  }
+
+  const buffer = isBuffer
+    ? (body as ArrayBufferLike)
+    : readViewBuffer(body as ArrayBufferView);
+
+  if (fixedUnsharedByteLength(buffer) !== null) {
+    return isBuffer || typedArrayNameOf(body) === 'Uint8Array'
+      ? body
+      : plainBytesView(body as ArrayBufferView);
   }
 
   const copy = (

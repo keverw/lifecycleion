@@ -2,6 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { HTTPClient } from './http-client';
 import {
   BUILT_IN_NETWORK_SEND_KEY,
+  CLIENT_OWNED_BODY_KEY,
   REQUEST_BODY_SETTLED_KEY,
   UPLOAD_SOURCE_STALL_GRACE_MS,
   UPLOAD_SOURCE_WAIT_LISTENER_KEY,
@@ -1192,4 +1193,5 @@ test('the marks shared between the client and the adapters are global-registry s
   // in both copies.
   expect(Symbol.keyFor(BUILT_IN_NETWORK_SEND_KEY)).toBeString();
   expect(Symbol.keyFor(UPLOAD_SOURCE_WAIT_LISTENER_KEY)).toBeString();
+  expect(Symbol.keyFor(CLIENT_OWNED_BODY_KEY)).toBeString();
 });

@@ -326,8 +326,7 @@ When no `sizeCalculator` is provided the cache uses a built-in estimator:
 | `boolean`                                 | 4 bytes                                          |
 | `number`                                  | 8 bytes (double precision)                       |
 | `string`                                  | 2 bytes per character (UTF-16)                   |
-| `Buffer`                                  | Actual buffer length                             |
-| `TypedArray` / `DataView` / `ArrayBuffer` | Actual byte length                               |
+| `TypedArray` / `DataView` / `ArrayBuffer` | Actual byte length, from any realm               |
 | `Array`                                   | 40 bytes + recursive sum of element sizes        |
 | `Object`                                  | Estimated from JSON string length (min 40 bytes) |
 | Non-serializable object                   | 1000 bytes (fallback)                            |

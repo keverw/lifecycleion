@@ -26,9 +26,10 @@ export function markBuiltInNetworkAdapter(
 
 /**
  * Whether `send`, read from `adapter`, is a built-in network adapter's own. One neither
- * changes nor transfers the bytes it is handed, and copies them before `send` returns -
- * `NodeAdapter` writes from a copy of its own (`Buffer.from`), and `fetch` and XHR copy
- * them as the request is built - so the client need not copy a byte body for it. A form
+ * changes nor transfers the bytes it is handed - `fetch` and XHR copy them as the request
+ * is built, and `NodeAdapter` writes them as they are when the client marks them as its
+ * own (see `markClientOwnedBody`), from a copy of its own otherwise - so the client need
+ * not copy a byte body for it. A form
  * is still copied: `NodeAdapter` reads its entries as it writes each part, while the
  * upload runs - which a `307` can answer, and the client move on from, long before it
  * ends. An adapter that is not one is not, and neither is a built-in whose

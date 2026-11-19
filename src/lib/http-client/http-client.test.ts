@@ -12165,3 +12165,28 @@ function makeQuietSink(): WritableLike {
     destroy: () => {},
   };
 }
+
+test("dot segments in a path resolve past baseURL's path, which is a prefix, not a boundary", async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/admin', () => ({ status: 200 }));
+  adapter.routes.get('/tenant-a/users/..%2F..%2Fadmin', () => ({
+    status: 200,
+  }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'https://api.test/tenant-a',
+  });
+
+  for (const path of ['/users/../../admin', '/users/%2e%2e/%2e%2e/admin']) {
+    const response = await client.get(path).send();
+    expect(response.requestURL).toBe('https://api.test/admin');
+  }
+
+  // Encoded with `encodeURIComponent`, the value stays one segment.
+  const encoded = await client
+    .get(`/users/${encodeURIComponent('../../admin')}`)
+    .send();
+  expect(encoded.requestURL).toBe(
+    'https://api.test/tenant-a/users/..%2F..%2Fadmin',
+  );
+});

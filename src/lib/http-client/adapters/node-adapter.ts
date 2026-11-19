@@ -74,6 +74,7 @@ import {
   notifyUploadSourceWait,
   readUploadSourceWaitListener,
 } from '../internal/upload-source-wait';
+import { isClientOwnedBody } from '../internal/client-owned-body';
 import {
   notifyStreamFailureSettled,
   readStreamFailureSettledListener,
@@ -545,6 +546,9 @@ export class NodeAdapter implements HTTPAdapter {
     // other members are. See `listenForUploadSourceWait`.
     const uploadSourceWaitListener =
       readUploadSourceWaitListener(adapterRequest);
+    // `HTTPClient`'s own bytes, when it built this request: written as they are. The
+    // mark read once, here, against the body as read (see `markClientOwnedBody`).
+    const isOwnedBody = isClientOwnedBody(adapterRequest, fields.body);
     // `HTTPClient`'s, when it built this request: told when a stream failure is settled,
     // before the factory's signal fires (see `listenForStreamFailureSettled`).
     const streamFailureSettledListener =
@@ -3345,11 +3349,15 @@ export class NodeAdapter implements HTTPAdapter {
           // at meaningful granularity rather than one giant 100% event at the end.
           const body = classifiedBody.body;
           // Copied here, before `send()` first awaits: the client hands this adapter the
-          // request's bytes uncopied, relying on it (see `isBuiltInNetworkSend`).
+          // request's bytes uncopied, relying on it (see `isBuiltInNetworkSend`) - unless
+          // they are the client's own copy, which nothing else can change, written as
+          // they are (see `markClientOwnedBody`).
           const bytes =
             typeof body === 'string'
               ? Buffer.from(body, 'utf8')
-              : plainBodyBytes(body);
+              : isOwnedBody
+                ? viewBytesOf(body)
+                : plainBodyBytes(body);
 
           req.setHeader('Content-Length', bytes.length.toString());
 
@@ -4534,14 +4542,15 @@ function copyToOwnMemory(bytes: Uint8Array): Buffer {
 }
 
 /**
- * The bytes a view holds (a `crl` entry, or a `ca` or `mtls` value: see `tlsMaterial`),
- * as a plain Buffer over the same memory - a view, not a copy - read through its internal
- * slots rather than its own `buffer`, `byteOffset` and `byteLength`, which a subclass or
- * an own property can override. Read so, the bytes
- * validated, copied and compared are the bytes `tls` reads from the view, not a prefix
- * it reports. A view over a detached buffer - a Buffer, any other typed array, or a
- * `DataView` - reads as empty, as a Buffer's own `toString` reads it, and so is refused
- * as any empty value is rather than throwing as the `Buffer` constructor does.
+ * The bytes a view holds (a `crl` entry, a `ca` or `mtls` value - see `tlsMaterial` - or
+ * a body the client marked as its own: see `markClientOwnedBody`), as a plain Buffer over
+ * the same memory - a view, not a copy - read through its internal slots rather than its
+ * own `buffer`, `byteOffset` and `byteLength`, which a subclass or an own property can
+ * override. Read so, the bytes validated, copied, compared and written are the bytes the
+ * view holds, not a prefix it reports. A view over a detached buffer - a Buffer, any
+ * other typed array, or a `DataView` - reads as empty, as a Buffer's own `toString` reads
+ * it, and so a TLS value is refused as any empty value is rather than throwing as the
+ * `Buffer` constructor does.
  */
 function viewBytesOf(view: ArrayBufferView): Buffer {
   if (readBinaryByteLength(view) === 0) {

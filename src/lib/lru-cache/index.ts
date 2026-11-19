@@ -1,4 +1,8 @@
 import { safeHandleCallback } from '../safe-handle-callback';
+import {
+  hasBufferTagInChain,
+  readBinaryByteLength,
+} from '../internal/binary-view';
 import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 import {
   holdsOwnIndex,
@@ -160,33 +164,45 @@ function popExpiry<K, V>(heap: ExpiryNode<K, V>[]): ExpiryNode<K, V> {
   const last = heap.pop() as ExpiryNode<K, V>;
 
   if (heap.length > 0) {
-    let index = 0;
-
-    for (;;) {
-      const left = index * 2 + 1;
-
-      if (left >= heap.length) {
-        break;
-      }
-
-      const right = left + 1;
-      const child =
-        right < heap.length && heap[right].expires < heap[left].expires
-          ? right
-          : left;
-
-      if (heap[child].expires >= last.expires) {
-        break;
-      }
-
-      heap[index] = heap[child];
-      index = child;
-    }
-
-    heap[index] = last;
+    siftDownExpiry(heap, 0, last);
   }
 
   return top;
+}
+
+/**
+ * Puts `node` at `start` of `heap`, or below it: moved down past each child that expires
+ * sooner, where the subtrees below `start` are min-heaps already.
+ */
+function siftDownExpiry<K, V>(
+  heap: ExpiryNode<K, V>[],
+  start: number,
+  node: ExpiryNode<K, V>,
+): void {
+  let index = start;
+
+  for (;;) {
+    const left = index * 2 + 1;
+
+    if (left >= heap.length) {
+      break;
+    }
+
+    const right = left + 1;
+    const child =
+      right < heap.length && heap[right].expires < heap[left].expires
+        ? right
+        : left;
+
+    if (heap[child].expires >= node.expires) {
+      break;
+    }
+
+    heap[index] = heap[child];
+    index = child;
+  }
+
+  heap[index] = node;
 }
 
 export class LRUCache<K, V> {
@@ -571,42 +587,26 @@ export class LRUCache<K, V> {
    * entry overwritten again and again before it expires, or many removed - so it holds no
    * more than about twice the expirable entries. Run as a node is added or let go of, so
    * the rebuild's cost is spread over at least as many of them as it drops. The live nodes
-   * sorted by expiry are the new heap, as a sorted array is a valid min-heap.
+   * are moved to the front, in place, and made a min-heap again from the bottom up.
    */
   private compactExpiryHeap(): void {
     const heap = this.expiryHeap;
 
     if (heap.length >= 2 * this.expirableEntryCount + 32) {
-      const live = heap.filter((node) => node.entry !== undefined);
-      live.sort((a, b) => a.expires - b.expires);
-      heap.length = 0;
+      let live = 0;
 
-      for (const node of live) {
-        heap.push(node);
+      for (const node of heap) {
+        if (node.entry !== undefined) {
+          heap[live++] = node;
+        }
+      }
+
+      heap.length = live;
+
+      for (let index = (live >> 1) - 1; index >= 0; index--) {
+        siftDownExpiry(heap, index, heap[index]);
       }
     }
-  }
-
-  private isBufferValue(value: unknown): value is { length: number } {
-    const globalBuffer = (
-      globalThis as {
-        Buffer?: unknown;
-      }
-    ).Buffer;
-
-    if (globalBuffer === undefined) {
-      return false;
-    }
-
-    const bufferConstructor = globalBuffer as {
-      isBuffer?: (value: unknown) => boolean;
-    };
-
-    return (
-      typeof globalBuffer === 'function' &&
-      typeof bufferConstructor.isBuffer === 'function' &&
-      bufferConstructor.isBuffer(value)
-    );
   }
 
   /**
@@ -636,12 +636,22 @@ export class LRUCache<K, V> {
     const primitive = primitiveSize(value);
     if (primitive !== undefined) {
       return primitive;
-    } else if (this.isBufferValue(value)) {
-      return value.length; // Buffer size in bytes
-    } else if (ArrayBuffer.isView(value)) {
-      return value.byteLength; // TypedArray size
-    } else if (value instanceof ArrayBuffer) {
-      return value.byteLength; // ArrayBuffer size
+    }
+
+    // A buffer or view - shared, from another realm, or one whose own `byteLength` lies -
+    // measured through its internal slots. Told first by its internal slot (a view) or,
+    // for what is not an array, the tag its prototypes carry (a buffer), so any other
+    // object is not put through the getters, each of which throws for it.
+    const byteLength =
+      typeof value === 'object' &&
+      value !== null &&
+      (ArrayBuffer.isView(value) ||
+        (!Array.isArray(value) && hasBufferTagInChain(value)))
+        ? readBinaryByteLength(value)
+        : null;
+
+    if (byteLength !== null) {
+      return byteLength;
     } else if (Array.isArray(value)) {
       // Made for the outermost array only: a value with none needs none.
       sizing ??= {

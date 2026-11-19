@@ -140,6 +140,30 @@ describe('BodyBytes', () => {
     expect(bytes[100 + 300]).toBe(300 % 256);
   });
 
+  test('a small body read in many chunks holds no more than about twice its size', () => {
+    const heldBytes = (body: BodyBytes): number => {
+      const { parts, block } = body as unknown as {
+        parts: Uint8Array[];
+        block: Uint8Array | undefined;
+      };
+      const buffers = new Set([
+        ...parts.map((part) => part.buffer),
+        ...(block ? [block.buffer] : []),
+      ]);
+      return [...buffers].reduce((sum, buffer) => sum + buffer.byteLength, 0);
+    };
+
+    for (const count of [2, 3, 100, 1000]) {
+      const body = new BodyBytes(1_000_000);
+      for (let index = 0; index < count; index++) {
+        body.append(counting(1, index), 1);
+      }
+
+      expect(heldBytes(body)).toBeLessThanOrEqual(2 * count);
+      expect([...body.bytes()]).toEqual([...counting(count)]);
+    }
+  });
+
   test('a chunk past maxBytes throws a RangeError rather than looping for a block', () => {
     const body = new BodyBytes(4);
     body.append(counting(4), 4);

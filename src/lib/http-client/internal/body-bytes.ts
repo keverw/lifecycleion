@@ -19,15 +19,16 @@ const KEEP_BYTES = 4 * 1024;
  * {@link concatChunks}. A chunk of {@link KEEP_BYTES} or more that spans at least half
  * the fixed, unshared buffer it is a view over is kept as it is, so its bytes are copied
  * once, by the join. Any other is copied into a block shared with the chunks around it -
- * what is left of it past the block it starts in going into one of its own size, past
- * {@link BLOCK_BYTES} - so what is held follows the bytes read, not how finely the server
- * split them nor how much of a larger buffer each piece is a view over: at most about
- * twice the body's size. A body sent in one-byte chunks holds
- * about its own size, not one array per byte, and one handed over as small views over a
- * socket's read buffer does not hold the rest of each buffer.
+ * what is left of it past the block it starts in going into one of its own size - so what
+ * is held follows the bytes read, not how finely the server split them nor how much of a
+ * larger buffer each piece is a view over: at most about twice the body's size. A body
+ * sent in one-byte chunks holds about its own size, not one array per byte, and one handed
+ * over as small views over a socket's read buffer does not hold the rest of each buffer.
  * Blocks are added only as bytes arrive, whatever length the body declares. The first is
  * the size of the first chunk copied into it, so a body of one small chunk fills it
- * exactly and is that block, copied once.
+ * exactly and is that block, copied once; each after is as large as what has been read so
+ * far, up to {@link BLOCK_BYTES}, or as what is left of the chunk being copied, whichever
+ * is larger.
  *
  * A chunk kept as it is must not change before the join: the runtime's streams hand over
  * each chunk in memory of its own. One whose buffer is detached by then fails the join.
@@ -126,11 +127,15 @@ export class BodyBytes {
     const isFirst = this.block === undefined && this.parts.length === 0;
     this.endPart();
     // Never past what the limit leaves: a body over it is refused before it is appended.
-    // What is left of a chunk once the block before fills, past a block's size, gets a
-    // block of its own size, so it is copied in one piece rather than many.
+    // A later block grows with what has been read, up to a block's size, so its unused
+    // end is never more than the body holds already; and what is left of a chunk once the
+    // block before fills, past that, gets a block of its own size, so it is copied in one
+    // piece rather than many.
     this.block = new Uint8Array(
       Math.min(
-        isFirst ? pending : Math.max(BLOCK_BYTES, pending),
+        isFirst
+          ? pending
+          : Math.max(pending, Math.min(BLOCK_BYTES, this.written)),
         this.maxBytes - this.written,
       ),
     );
