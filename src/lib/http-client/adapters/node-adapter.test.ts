@@ -13518,7 +13518,7 @@ test('bytes trickled behind an answered 205 hold its connection for three window
   }
 }, 30_000);
 
-test('an answered 205 keeps its connection for a whole quiet window after its upload ends', async () => {
+test('an answered 205 does not count a quiet window its upload ended inside, and keeps its connection past it', async () => {
   // The upload ends inside the first window, 1.5 s before it would, and the 205's bytes
   // come after it would have: that window was not quiet, so they are read rather than
   // the connection let go.
