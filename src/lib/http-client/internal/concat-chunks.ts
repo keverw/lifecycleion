@@ -1,6 +1,5 @@
 import {
-  arrayBufferKindOf,
-  isResizableBuffer,
+  fixedUnsharedByteLength,
   readBinaryByteLength,
   readTypedArrayBuffer,
   readTypedArrayByteOffset,
@@ -82,8 +81,6 @@ function isWholeOfPlainBuffer(chunk: Uint8Array, byteLength: number): boolean {
 
   return (
     Object.getPrototypeOf(buffer) === ArrayBuffer.prototype &&
-    arrayBufferKindOf(buffer) === 'ArrayBuffer' &&
-    !isResizableBuffer(buffer) &&
-    readBinaryByteLength(buffer) === byteLength
+    fixedUnsharedByteLength(buffer) === byteLength
   );
 }

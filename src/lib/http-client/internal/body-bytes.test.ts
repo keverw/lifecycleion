@@ -124,6 +124,22 @@ describe('BodyBytes', () => {
     expect(bytes.length).toBe(8 * 1024);
   });
 
+  test('a large chunk that is copied goes into one block of its own size, not many small ones', () => {
+    // A 4 MiB view over a 64 MiB buffer, too little of it to keep, after a few bytes.
+    const read = new Uint8Array(64 * 1024 * 1024);
+    read.set(counting(4 * 1024 * 1024));
+    const piece = read.subarray(0, 4 * 1024 * 1024);
+    const body = new BodyBytes(100 * 1024 * 1024);
+    body.append(counting(100), 100);
+    body.append(piece, piece.length);
+    const bytes = body.bytes();
+    const { parts } = body as unknown as { parts: Uint8Array[] };
+
+    expect(parts.map((part) => part.length)).toEqual([100, 4 * 1024 * 1024]);
+    expect(bytes.length).toBe(100 + 4 * 1024 * 1024);
+    expect(bytes[100 + 300]).toBe(300 % 256);
+  });
+
   test('a chunk past maxBytes throws a RangeError rather than looping for a block', () => {
     const body = new BodyBytes(4);
     body.append(counting(4), 4);

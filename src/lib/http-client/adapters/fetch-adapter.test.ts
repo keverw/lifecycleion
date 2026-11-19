@@ -3245,31 +3245,20 @@ describe('FetchAdapter - body chunk types and sizes', () => {
   }
 
   test.each([
-    ['grows', 5],
-    ['shrinks', 1],
+    ['under 4 KiB', 'grows', 3, 5],
+    ['under 4 KiB', 'shrinks', 3, 1],
+    ['of 4 KiB or more', 'grows', 20_000, 40_000],
+    ['of 4 KiB or more', 'shrinks', 20_000, 1],
   ])(
-    'a chunk under 4 KiB whose buffer %s after it is read keeps the bytes it held when read',
-    async (_label, newLength) => {
-      const response = await sendResized(3, newLength);
+    'a chunk %s whose resizable buffer %s after it is read keeps the bytes it held when read',
+    async (_size, _label, byteLength, newLength) => {
+      const response = await sendResized(byteLength, newLength);
 
       expect(response.status).toBe(200);
       expect(response.isStreamError).toBeUndefined();
-      expect([...(response.body as Uint8Array)]).toEqual([7, 7, 7]);
-    },
-  );
-
-  test.each([
-    ['grows', 40_000],
-    ['shrinks', 1],
-  ])(
-    'a chunk of 4 KiB or more whose buffer %s after it is read fails as a stream error, not joined wrong',
-    async (_label, newLength) => {
-      const response = await sendResized(20_000, newLength);
-
-      expect(response.status).toBe(200);
-      expect(response.isStreamError).toBe(true);
-      expect(response.streamErrorCode).toBe('stream_response_error');
-      expect(response.body).toBeNull();
+      const body = response.body as Uint8Array;
+      expect(body.length).toBe(byteLength);
+      expect(body.every((byte) => byte === 7)).toBe(true);
     },
   );
 

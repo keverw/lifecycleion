@@ -158,10 +158,11 @@ import {
 } from './internal/response-limit';
 import {
   arrayBufferKindOf,
-  isResizableBuffer,
+  fixedUnsharedByteLength,
   plainBytesView,
   readBinaryByteLength,
   readViewBuffer,
+  typedArrayNameOf,
 } from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
@@ -3805,9 +3806,9 @@ export class BaseHTTPClient {
         // reading at the limit, but a custom adapter may hand over a body of any size, and
         // the limit is the client's promise, not only theirs.
         const answeredBody: unknown = adapterResponse.body;
-        // A redirect, whose body is never delivered: one followed is left unread, as a
-        // browser leaves it, and one not followed ends as a synthetic status-0 answer
-        // (`unfollowedRedirectAnswer`), as a browser's manual redirect shows none.
+        // A redirect, whose body is not the request's answer: one followed is handed only to
+        // its redirect-phase observers, and one not followed ends as a synthetic status-0
+        // answer (`unfollowedRedirectAnswer`), as a browser's manual redirect shows none.
         const isRedirectAnswer =
           adapterResponse.isTransportError !== true &&
           REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
@@ -6111,22 +6112,26 @@ function answeredBodySizeOf(body: unknown): number | 'string' | null {
  * `SharedArrayBuffer`), or is a view over such memory, a copy of those `size` bytes in
  * memory of its own, so the bytes held to `maxResponseBytes` are the ones delivered
  * whatever changes the memory later, as XHRAdapter copies a shared body. A buffer is
- * copied as an `ArrayBuffer`, a view as a `Uint8Array`. Read through the intrinsic
- * getters, as the body was measured.
+ * copied as an `ArrayBuffer`, a view as a `Uint8Array`. A view of another type over fixed,
+ * unshared memory (a `DataView`, an `Int16Array`) is a plain `Uint8Array` over its bytes,
+ * not copied, so a view is delivered as a `Uint8Array` whatever memory it is over. Read
+ * through the intrinsic getters, as the body was measured.
  */
 function fixedAnsweredBody(body: object, size: number): unknown {
-  const bodyKind = arrayBufferKindOf(body);
-  const isBuffer = bodyKind !== undefined;
+  const isBuffer = arrayBufferKindOf(body) !== undefined;
   const buffer = isBuffer
     ? (body as ArrayBufferLike)
     : readViewBuffer(body as ArrayBufferView);
-  const bufferKind = isBuffer ? bodyKind : arrayBufferKindOf(buffer);
 
-  if (
-    bufferKind !== 'SharedArrayBuffer' &&
-    !isResizableBuffer(buffer, bufferKind)
-  ) {
-    return body;
+  if (fixedUnsharedByteLength(buffer) !== null) {
+    if (isBuffer || typedArrayNameOf(body) === 'Uint8Array') {
+      return body;
+    }
+
+    // Nothing to read off a buffer detached since.
+    return size === 0
+      ? new Uint8Array(0)
+      : plainBytesView(body as ArrayBufferView);
   }
 
   // Nothing to copy, nor to read off a buffer detached since: an empty body is a fixed

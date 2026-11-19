@@ -18518,6 +18518,48 @@ test.each([
   },
 );
 
+test.each([
+  [
+    'an Int16Array over fixed memory',
+    () => new Int16Array(Uint8Array.of(1, 2, 3, 4).buffer),
+  ],
+  [
+    'a DataView over fixed memory',
+    () => new DataView(Uint8Array.of(1, 2, 3, 4).buffer),
+  ],
+  [
+    'an Int16Array over shared memory',
+    () => {
+      const view = new Int16Array(new SharedArrayBuffer(4));
+      new Uint8Array(view.buffer).set([1, 2, 3, 4]);
+      return view;
+    },
+  ],
+] as const)(
+  "a custom adapter's body that is %s is delivered as a Uint8Array over its bytes",
+  async (_label, makeBody) => {
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/octet-stream' },
+            body: makeBody() as unknown as Uint8Array,
+          }),
+      },
+      baseURL: 'http://example.test',
+    });
+
+    const response = await client.get('/x').send();
+    const body = response.body as Uint8Array;
+
+    expect(response.isFailed).toBe(false);
+    expect(Object.prototype.toString.call(body)).toBe('[object Uint8Array]');
+    expect([...body]).toEqual([1, 2, 3, 4]);
+  },
+);
+
 type GrowableBuffer = { byteLength: number; grow?: (n: number) => void };
 const makeGrowableShared = (): GrowableBuffer =>
   new (

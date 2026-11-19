@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { runInNewContext } from 'node:vm';
 import {
+  fixedUnsharedByteLength,
   hasBufferTagInChain,
   hasOwnToStringTagInChain,
   isResizableBuffer,
@@ -64,6 +65,19 @@ describe('buffer reads', () => {
     expect(isResizableBuffer(new SharedArrayBuffer(4))).toBe(false);
     expect(isResizableBuffer(new Uint8Array(resizable))).toBe(false);
     expect(isResizableBuffer({ resizable: true })).toBe(false);
+  });
+
+  test('fixedUnsharedByteLength measures only a fixed, unshared ArrayBuffer, from any realm', () => {
+    const foreign = runInNewContext('new ArrayBuffer(6)') as ArrayBuffer;
+
+    expect(fixedUnsharedByteLength(new ArrayBuffer(4))).toBe(4);
+    expect(fixedUnsharedByteLength(foreign)).toBe(6);
+    expect(
+      fixedUnsharedByteLength(new ArrayBuffer(4, { maxByteLength: 8 })),
+    ).toBeNull();
+    expect(fixedUnsharedByteLength(new SharedArrayBuffer(4))).toBeNull();
+    expect(fixedUnsharedByteLength(new Uint8Array(4))).toBeNull();
+    expect(fixedUnsharedByteLength({ byteLength: 4 })).toBeNull();
   });
 
   test('readViewBuffer reads the buffer of a typed array and of a DataView', () => {

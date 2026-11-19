@@ -41,7 +41,7 @@ import {
 } from '../internal/response-limit';
 import {
   arrayBufferKindOf,
-  isResizableBuffer,
+  fixedUnsharedByteLength,
   plainBytesView,
 } from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
@@ -1579,10 +1579,7 @@ function readResponseBody(
     // a chunk over one, so no other code can change or resize the body once it is read.
     if (bufferKind !== undefined) {
       const bytes = new Uint8Array(response as ArrayBuffer);
-      const isFixed =
-        bufferKind === 'ArrayBuffer' &&
-        !isResizableBuffer(response, bufferKind);
-      return isFixed ? bytes : bytes.slice();
+      return fixedUnsharedByteLength(response) !== null ? bytes : bytes.slice();
     }
 
     // A view rather than the buffer itself - happy-dom answers `responseType =

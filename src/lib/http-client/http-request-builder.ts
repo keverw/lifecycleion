@@ -52,7 +52,16 @@ export interface BuilderCallbacks<T> {
   setNextRetryDelayMS: (delayMS: number | null) => void;
   setNextRetryAt: (timestampMS: number | null) => void;
   setStartedAt: (timestampMS: number) => void;
-  setCancelFn: (fn: (reason?: string) => CancelResult) => void;
+  /**
+   * Wires the function `cancel()` forwards to while the request is in flight, answering
+   * what that did. An answer that is not a {@link CancelResult} (nothing, from
+   * `() => controller.abort()`) reads as `'cancelled'` the first time a cancel reaches it,
+   * and as `'already_cancelled'` after. A cancel made before it is wired is held, and
+   * passed to it as it is wired; one held by a send function that settles without wiring
+   * one cannot be applied, and the builder ends as that function leaves it. Once a caller's
+   * send function settles, nothing is forwarded.
+   */
+  setCancelFn: (fn: (reason?: string) => CancelResult | void) => void;
   /** A cancel the builder held while `send()` set the request up; see `cancel()`. */
   getSetupCancel: () => { reason: string | undefined } | null;
 }
@@ -161,10 +170,16 @@ export class HTTPRequestBuilder<T = unknown> {
   private _nextRetryAt: number | null = null;
   private _startedAt: number | null = null;
   private _completedAt: number | null = null;
-  private _cancelFn: ((reason?: string) => CancelResult) | null = null;
+  private _cancelFn: ((reason?: string) => CancelResult | void) | null = null;
+  /** Whether a cancel has reached `_cancelFn`, forwarded or held and then passed to it. */
+  private _didReachCancelFn = false;
   /** A cancel made after `send()` began but before the request could be cancelled. */
   private _setupCancel: { reason: string | undefined } | null = null;
-  /** Set once `send()`'s synchronous setup has returned; see `_sendRequest`. */
+  /**
+   * Set once the request's setup is over: for an `HTTPClient`'s own send function, once
+   * its synchronous setup has returned, and for a caller's, once its send settles; see
+   * `_sendRequest`.
+   */
   private _isSetupDone = false;
   private _preSendCancelReason: string | undefined = undefined;
 
@@ -531,13 +546,28 @@ export class HTTPRequestBuilder<T = unknown> {
     }
 
     // Answered by the request itself while it is in flight: `'cancelled'` only when this
-    // call is what cancelled it.
+    // call is what cancelled it. A caller's send function may wire one that answers
+    // something else (nothing, as `() => controller.abort()` does): the first cancel to
+    // reach it is passed on as `'cancelled'`, and any after as `'already_cancelled'`.
     if (this._cancelFn) {
-      return this._cancelFn(reason);
+      const result: unknown = this._cancelFn(reason);
+      const didReach = this._didReachCancelFn;
+      this._didReachCancelFn = true;
+
+      if (
+        result === 'cancelled' ||
+        result === 'already_cancelled' ||
+        result === 'already_settled'
+      ) {
+        return result;
+      }
+
+      return didReach ? 'already_cancelled' : 'cancelled';
     }
 
     // Setup is over and wired no cancel function: the request failed during setup (its
-    // `send()` rejection is on its way), so there is nothing to cancel.
+    // `send()` rejection is on its way), or a caller's send function settled without one,
+    // so there is nothing to cancel.
     if (this._isSetupDone) {
       // A cancel held during that setup still ends the builder cancelled; see `send()`.
       return this._setupCancel ? 'already_cancelled' : 'already_settled';
@@ -661,6 +691,7 @@ export class HTTPRequestBuilder<T = unknown> {
           this._cancelFn = fn;
           // A cancel made while the request was being set up; see `cancel()`.
           if (this._setupCancel) {
+            this._didReachCancelFn = true;
             fn(this._setupCancel.reason);
           }
         },
@@ -668,11 +699,23 @@ export class HTTPRequestBuilder<T = unknown> {
     });
     // The client's setup runs synchronously inside that call, up to wiring the request's
     // cancel function - so once it returns, a request with none has already failed (or
-    // was cancelled), and `cancel()` holds nothing.
-    this._isSetupDone = true;
-    const response = await pending;
+    // was cancelled), and `cancel()` holds nothing. A caller's send function may wire its
+    // cancel function later, after a wait of its own: until it does, or its request
+    // settles, a cancel is held for it as during the client's setup.
+    if (clientSendFns.has(this._sendFn)) {
+      this._isSetupDone = true;
+    }
 
-    return response as unknown as HTTPResponse<U>;
+    try {
+      return (await pending) as unknown as HTTPResponse<U>;
+    } finally {
+      this._isSetupDone = true;
+
+      // A caller's request is over once its send settles, whatever state it left.
+      if (!clientSendFns.has(this._sendFn)) {
+        this._cancelFn = null;
+      }
+    }
   }
 
   // --- Private helpers ---

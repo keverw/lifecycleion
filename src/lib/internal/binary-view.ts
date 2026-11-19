@@ -142,6 +142,21 @@ export function readViewBuffer(view: ArrayBufferView): ArrayBufferLike {
 }
 
 /**
+ * `buffer`'s byte length where it is a fixed-length, unshared `ArrayBuffer` from any realm
+ * - memory no other thread writes and that cannot change size, so bytes over it may be
+ * kept as they are - read once through the intrinsic getters; `null` for anything else, a
+ * resizable `ArrayBuffer` and any `SharedArrayBuffer` included, whose bytes are copied by
+ * whatever keeps them.
+ */
+export function fixedUnsharedByteLength(buffer: object): number | null {
+  const byteLength = callByteLengthGetter(ARRAY_BUFFER_BYTE_LENGTH, buffer);
+
+  return byteLength === null || isResizableBuffer(buffer, 'ArrayBuffer')
+    ? null
+    : byteLength;
+}
+
+/**
  * Whether `buffer` can change size - a resizable `ArrayBuffer` or a growable
  * `SharedArrayBuffer`, from any realm - told through the intrinsic getters. `false` for a
  * fixed buffer, for anything that is not one, and on a runtime with no resizable buffers,

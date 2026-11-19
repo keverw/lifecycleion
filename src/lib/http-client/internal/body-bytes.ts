@@ -1,7 +1,6 @@
 import { concatChunks } from './concat-chunks';
 import {
-  arrayBufferKindOf,
-  readBinaryByteLength,
+  fixedUnsharedByteLength,
   readTypedArrayBuffer,
   readTypedArrayByteOffset,
 } from '../../internal/binary-view';
@@ -18,18 +17,20 @@ const KEEP_BYTES = 4 * 1024;
 /**
  * A response body's bytes, kept as each chunk is read and joined once by
  * {@link concatChunks}. A chunk of {@link KEEP_BYTES} or more that spans at least half
- * the unshared buffer it is a view over is kept as it is, so its bytes are copied once, by
- * the join. Any other is copied into a block shared with the chunks around it, so what is
- * held follows the bytes read, not how finely the server split them nor how much of a
- * larger buffer each piece is a view over: at most about twice the body's size. A body
- * sent in one-byte chunks holds about its own size, not one array per byte, and one handed
- * over as small views over a socket's read buffer does not hold the rest of each buffer.
+ * the fixed, unshared buffer it is a view over is kept as it is, so its bytes are copied
+ * once, by the join. Any other is copied into a block shared with the chunks around it -
+ * what is left of it past the block it starts in going into one of its own size, past
+ * {@link BLOCK_BYTES} - so what is held follows the bytes read, not how finely the server
+ * split them nor how much of a larger buffer each piece is a view over: at most about
+ * twice the body's size. A body sent in one-byte chunks holds
+ * about its own size, not one array per byte, and one handed over as small views over a
+ * socket's read buffer does not hold the rest of each buffer.
  * Blocks are added only as bytes arrive, whatever length the body declares. The first is
  * the size of the first chunk copied into it, so a body of one small chunk fills it
  * exactly and is that block, copied once.
  *
  * A chunk kept as it is must not change before the join: the runtime's streams hand over
- * each chunk in memory of its own. One whose length changes by then fails the join.
+ * each chunk in memory of its own. One whose buffer is detached by then fails the join.
  */
 export class BodyBytes {
   private readonly parts: Uint8Array[] = [];
@@ -125,8 +126,13 @@ export class BodyBytes {
     const isFirst = this.block === undefined && this.parts.length === 0;
     this.endPart();
     // Never past what the limit leaves: a body over it is refused before it is appended.
+    // What is left of a chunk once the block before fills, past a block's size, gets a
+    // block of its own size, so it is copied in one piece rather than many.
     this.block = new Uint8Array(
-      Math.min(isFirst ? pending : BLOCK_BYTES, this.maxBytes - this.written),
+      Math.min(
+        isFirst ? pending : Math.max(BLOCK_BYTES, pending),
+        this.maxBytes - this.written,
+      ),
     );
     this.blockStart = 0;
     this.filled = 0;
@@ -134,19 +140,14 @@ export class BodyBytes {
 }
 
 /**
- * Whether `chunk` may be kept as it is: over an unshared `ArrayBuffer`, whose `byteLength`
- * bytes are at least half of it, measured through the intrinsic getters, so keeping the
- * chunk holds no more than twice what it counts. A chunk over shared memory is copied as
- * it is read instead, as another thread could write it before the join.
+ * Whether `chunk` may be kept as it is: over a fixed, unshared `ArrayBuffer`, whose
+ * `byteLength` bytes are at least half of it, measured through the intrinsic getters, so
+ * keeping the chunk holds no more than twice what it counts. A chunk over shared or
+ * resizable memory is copied as it is read instead, as another thread could write it, or
+ * other code resize it, before the join.
  */
 function isKeptAsIs(chunk: Uint8Array, byteLength: number): boolean {
-  const buffer = readTypedArrayBuffer(chunk);
-
-  if (arrayBufferKindOf(buffer) !== 'ArrayBuffer') {
-    return false;
-  }
-
-  const bufferBytes = readBinaryByteLength(buffer);
+  const bufferBytes = fixedUnsharedByteLength(readTypedArrayBuffer(chunk));
 
   return bufferBytes !== null && byteLength * 2 >= bufferBytes;
 }

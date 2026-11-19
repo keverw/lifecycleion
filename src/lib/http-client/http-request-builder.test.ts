@@ -647,9 +647,67 @@ describe('HTTPRequestBuilder', () => {
         });
       });
 
-      await builder.send();
+      const sent = builder.send();
       expect(builder.cancel()).toBe('cancelled');
+      await sent;
       expect(wasCancelCalled).toBe(true);
+    });
+
+    test("a cancel made before a caller's send function wires its cancel function after a wait is held and passed to it", async () => {
+      const { sendFn } = makeSendFn();
+      const reasons: Array<string | undefined> = [];
+      let release = (): void => undefined;
+      const waited = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const builder = new HTTPRequestBuilder(
+        'GET',
+        '/test',
+        async (ctx: BuilderSendContext<unknown>) => {
+          await waited;
+          ctx.callbacks.setCancelFn((reason) => {
+            reasons.push(reason);
+            return 'cancelled';
+          });
+          return sendFn(ctx);
+        },
+      );
+
+      const sent = builder.send();
+
+      expect(builder.cancel('why')).toBe('cancelled');
+      release();
+      await sent;
+      expect(reasons).toEqual(['why']);
+    });
+
+    test('a cancel function that answers nothing is read as having cancelled, then as already cancelled', async () => {
+      let calls = 0;
+      const { builder } = makeBuilder(undefined, (ctx) => {
+        ctx.callbacks.setCancelFn(() => {
+          calls++;
+        });
+      });
+
+      const sent = builder.send();
+      expect(builder.cancel()).toBe('cancelled');
+      expect(builder.cancel()).toBe('already_cancelled');
+      await sent;
+      expect(calls).toBe(2);
+    });
+
+    test("a caller's send function that settles leaves nothing to forward a cancel to", async () => {
+      let calls = 0;
+      const { builder } = makeBuilder(undefined, (ctx) => {
+        ctx.callbacks.setCancelFn(() => {
+          calls++;
+          return 'cancelled';
+        });
+      });
+
+      await builder.send();
+      expect(builder.cancel()).toBe('already_settled');
+      expect(calls).toBe(0);
     });
 
     test('passes reason string to cancelFn', async () => {
@@ -662,8 +720,9 @@ describe('HTTPRequestBuilder', () => {
         });
       });
 
-      await builder.send();
+      const sent = builder.send();
       builder.cancel('user_navigated_away');
+      await sent;
       expect(capturedReason).toBe('user_navigated_away');
     });
 
@@ -677,8 +736,9 @@ describe('HTTPRequestBuilder', () => {
         });
       });
 
-      await builder.send();
+      const sent = builder.send();
       builder.cancel();
+      await sent;
       expect(capturedReason).toBeUndefined();
     });
 
