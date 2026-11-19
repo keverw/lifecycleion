@@ -18621,6 +18621,34 @@ test.each([
   },
 );
 
+test("a custom adapter's view over part of its buffer - a pooled Buffer - is delivered as a copy of the body alone", async () => {
+  // As Node's pool hands one out: a small Buffer at the start of a larger buffer.
+  const pooled = Buffer.from(new ArrayBuffer(8192), 0, 5).fill(6);
+  const slice = new Uint8Array(new ArrayBuffer(16), 4, 5).fill(7);
+
+  for (const [sent, bytes] of [
+    [pooled, [6, 6, 6, 6, 6]],
+    [slice, [7, 7, 7, 7, 7]],
+  ] as const) {
+    const response = await customAdapterAnswering(sent).get('/x').send();
+    const body = response.body as Uint8Array;
+
+    expect(body.byteOffset).toBe(0);
+    expect(body.buffer.byteLength).toBe(5);
+    expect(body.buffer).not.toBe(sent.buffer);
+    expect([...body]).toEqual([...bytes]);
+  }
+});
+
+test("a custom adapter's view over all of its buffer is delivered over that buffer, not copied", async () => {
+  const sent = Uint8Array.of(1, 2, 3, 4);
+  const response = await customAdapterAnswering(new DataView(sent.buffer))
+    .get('/x')
+    .send();
+
+  expect((response.body as Uint8Array).buffer).toBe(sent.buffer);
+});
+
 test.each([
   [
     'an ArrayBuffer subclass whose own getter reports 0',

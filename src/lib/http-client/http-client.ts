@@ -6116,10 +6116,12 @@ function answeredBodySizeOf(body: unknown): number | 'string' | null {
  * `SharedArrayBuffer`), or is a view over such memory, a copy of those `size` bytes in
  * memory of its own, so the bytes held to `maxResponseBytes` are the ones delivered
  * whatever changes the memory later, as XHRAdapter copies a shared body. A buffer is
- * copied as an `ArrayBuffer`, a view as a `Uint8Array`. A view over fixed, unshared
- * memory - a `DataView`, an `Int16Array`, a `Buffer`, a subclass - is a plain `Uint8Array`
- * over its bytes, not copied, so a view is delivered as a `Uint8Array` whatever memory it
- * is over, and reports the length it was measured at. A buffer over such memory is
+ * copied as an `ArrayBuffer`, a view as a `Uint8Array`. A view over all of a fixed,
+ * unshared buffer - a `DataView`, an `Int16Array`, a `Buffer`, a subclass - is a plain
+ * `Uint8Array` over its bytes, not copied; one over part of such a buffer - a pooled
+ * `Buffer` - is copied, so the body's `buffer` holds the body alone. A view is delivered
+ * as a `Uint8Array` whatever memory it is over, and reports the length it was measured
+ * at. A buffer over such memory is
  * delivered as it is only when it is this realm's plain `ArrayBuffer`; any other - a
  * subclass, another realm's, one with properties of its own - is copied, for the same
  * reason. Read through the intrinsic getters, as the body was measured.
@@ -6137,9 +6139,17 @@ function fixedAnsweredBody(body: object, size: number): unknown {
     ? (body as ArrayBufferLike)
     : readViewBuffer(body as ArrayBufferView);
 
-  if (fixedUnsharedByteLength(buffer) !== null) {
+  const bufferByteLength = fixedUnsharedByteLength(buffer);
+
+  if (bufferByteLength !== null) {
     if (!isBuffer) {
-      return plainBytesView(body as ArrayBufferView);
+      const view = plainBytesView(body as ArrayBufferView);
+
+      // A view over all of its buffer, as is; over part of one - a pooled `Buffer` - a
+      // copy, so the body's `buffer` holds the body alone.
+      return view.byteOffset === 0 && size === bufferByteLength
+        ? view
+        : view.slice();
     }
 
     // This realm's own `ArrayBuffer`, with nothing of its own to report another length.

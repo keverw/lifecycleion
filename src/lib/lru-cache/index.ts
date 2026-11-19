@@ -1,6 +1,6 @@
 import { safeHandleCallback } from '../safe-handle-callback';
 import {
-  hasBufferTagInChain,
+  hasBufferTagInChainFrom,
   readBinaryByteLength,
 } from '../internal/binary-view';
 import { copyArrayValue, readArrayLength } from '../internal/array-copy';
@@ -981,10 +981,19 @@ export class LRUCache<K, V> {
 }
 
 /**
+ * The prototypes `mayBeBuffer` has found carry no buffer's tag in their chain, so the
+ * instances of a class are walked once, not each time one is sized. Weak, so a class let
+ * go is not kept. A chain changed after it was walked is not walked again: the answer only
+ * picks how an estimate is made.
+ */
+const prototypesWithoutBufferTag = new WeakSet<object>();
+
+/**
  * Whether `value`, an object that is not an array or a view, may be a buffer: never a
- * plain object or one with no prototype, which carry no buffer's tag, so the common case
- * skips the walk; otherwise, whether a prototype in its chain carries a buffer's tag (see
- * `hasBufferTagInChain`). A prototype that cannot be read answers no, as the walk does.
+ * plain object or one with no prototype, which carry no buffer's tag, nor an instance of
+ * a prototype already found to carry none; otherwise, whether a prototype in its chain
+ * carries a buffer's tag (see `hasBufferTagInChainFrom`). A prototype that cannot be read
+ * answers no, as the walk does.
  */
 function mayBeBuffer(value: object): boolean {
   let prototype: unknown;
@@ -998,7 +1007,19 @@ function mayBeBuffer(value: object): boolean {
     return false;
   }
 
-  return hasBufferTagInChain(value);
+  if (prototypesWithoutBufferTag.has(prototype as object)) {
+    return false;
+  }
+
+  // Walked from the prototype read above, not read again: a `Proxy` answering another one
+  // the second time cannot have this one remembered. Remembered only for a walk that
+  // finished, so a chain that throws partway is no answer about it.
+  const hasTag = hasBufferTagInChainFrom(prototype as object);
+  if (hasTag === false) {
+    prototypesWithoutBufferTag.add(prototype as object);
+  }
+
+  return hasTag === true;
 }
 
 /**

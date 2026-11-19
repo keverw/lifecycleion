@@ -2,8 +2,8 @@ import { STREAM_FAILURE_SETTLED_LISTENER_KEY } from '../consts';
 import {
   notifyHiddenRequestListener,
   readHiddenRequestListener,
-  setHiddenRequestListener,
 } from './hidden-request-listener';
+import { setHiddenMember } from './hidden-member';
 import type { AdapterRequest } from '../types';
 
 /** Told that the adapter has settled a stream failure, before it fires the factory's signal. */
@@ -27,11 +27,7 @@ export function listenForStreamFailureSettled(
   request: AdapterRequest,
   listener: StreamFailureSettledListener,
 ): void {
-  setHiddenRequestListener(
-    request,
-    STREAM_FAILURE_SETTLED_LISTENER_KEY,
-    listener,
-  );
+  setHiddenMember(request, STREAM_FAILURE_SETTLED_LISTENER_KEY, listener);
 }
 
 /**

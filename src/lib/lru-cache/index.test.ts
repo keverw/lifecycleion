@@ -1926,6 +1926,28 @@ test('a removed entry that could expire is let go of by the expiry heap, its val
   ).toBe(true);
 });
 
+test('a Proxy whose prototype reads differently each time does not change how another cache sizes a buffer', () => {
+  let reads = 0;
+  const shifty = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        reads += 1;
+        if (reads === 1) {
+          return ArrayBuffer.prototype;
+        }
+        throw new Error('read again');
+      },
+    },
+  );
+  new LRUCache<string, object>(10, { maxSize: 10_000 }).set('p', shifty);
+
+  const bounded = new LRUCache<string, object>(10, { maxSize: 1000 });
+  bounded.set('big', new ArrayBuffer(2000));
+
+  expect(bounded.has('big')).toBe(false);
+});
+
 test('the default size of a buffer or view is its byte length, read from its internal slots, from any realm', () => {
   class LyingBytes extends Uint8Array {
     public override get byteLength(): number {

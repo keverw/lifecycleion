@@ -13519,8 +13519,9 @@ test('bytes trickled behind an answered 205 hold its connection for three window
 }, 30_000);
 
 test('an answered 205 keeps its connection for a whole quiet window after its upload ends', async () => {
-  // The upload ends just before the first window does, and the 205's bytes come after:
-  // that window was not quiet, so they are read rather than the connection let go.
+  // The upload ends inside the first window, 1.5 s before it would, and the 205's bytes
+  // come after it would have: that window was not quiet, so they are read rather than
+  // the connection let go.
   const parked: Array<() => void> = [];
   const req = new MockClientRequest((_data, callback) => {
     parked.push(() => callback?.(null));
@@ -13547,7 +13548,7 @@ test('an answered 205 keeps its connection for a whole quiet window after its up
 
     expect(response.status).toBe(205);
 
-    await new Promise((resolve) => setTimeout(resolve, 4500));
+    await new Promise((resolve) => setTimeout(resolve, 3500));
     while (!req.ended) {
       parked.shift()?.();
       await new Promise((resolve) => setImmediate(resolve));

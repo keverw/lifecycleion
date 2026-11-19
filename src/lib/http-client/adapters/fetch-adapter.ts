@@ -860,6 +860,12 @@ async function readBodyWithin(
         if (isHighSurrogate(text.charCodeAt(text.length - 1))) {
           heldUnit = text.slice(-1);
           text = text.slice(0, -1);
+
+          // Text all held for the chunk after: no empty chunk, which counts toward a
+          // yield. One that arrived empty still counts, held unit or not.
+          if (text === '' && value !== '') {
+            continue;
+          }
         }
 
         value = encodeText(text);

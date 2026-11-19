@@ -3609,6 +3609,81 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     }
   });
 
+  test('a text chunk that is only a held high surrogate is not counted as an empty chunk', async () => {
+    const pairs = 128;
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body: {
+          *[Symbol.asyncIterator]() {
+            for (let index = 0; index < pairs; index++) {
+              yield '\uD83D';
+              yield '\uDE00';
+            }
+          },
+        },
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+    const timers = spyOn(globalThis, 'setTimeout');
+
+    try {
+      timers.mockClear();
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+      });
+
+      expect((response.body as Uint8Array).length).toBe(pairs * 4);
+      // No yield for empty chunks: every chunk carried text.
+      expect(timers.mock.calls.filter(([, delay]) => delay === 0)).toHaveLength(
+        0,
+      );
+    } finally {
+      timers.mockRestore();
+    }
+  });
+
+  test('empty text chunks after a held high surrogate still count toward a yield', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body: {
+          *[Symbol.asyncIterator]() {
+            yield '\uD83D';
+            for (let index = 0; index < 256; index++) {
+              yield '';
+            }
+          },
+        },
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+    const timers = spyOn(globalThis, 'setTimeout');
+
+    try {
+      timers.mockClear();
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+      });
+
+      // The held half, unpaired, is U+FFFD.
+      expect([...(response.body as Uint8Array)]).toEqual([0xef, 0xbf, 0xbd]);
+      expect(
+        timers.mock.calls.filter(([, delay]) => delay === 0).length,
+      ).toBeGreaterThan(0);
+    } finally {
+      timers.mockRestore();
+    }
+  });
+
   test('a surrogate pair split across two text chunks is read as the one character it is', async () => {
     /** The body of an iterable yielding `chunks`, read under `maxResponseBytes`. */
     async function read(chunks: unknown[], maxResponseBytes: number) {

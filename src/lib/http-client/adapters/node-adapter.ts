@@ -2857,14 +2857,23 @@ export class NodeAdapter implements HTTPAdapter {
               // A block that cannot be allocated is a stream error, as a join that fails
               // at `'end'` is: thrown from this listener, it would be an uncaught
               // exception, and the request would never settle. The rest of the body is
-              // not read, as for one past the limit.
+              // not read, as for one past the limit, and in its order: the response is
+              // let go before the teardown, so nothing the teardown sets off answers it
+              // first.
               try {
                 gathered.append(chunk, chunk.length);
               } catch (error) {
+                gathered.clear();
+                activeBufferedResponse = undefined;
                 tearDownAfterResponse();
-                settleBufferedStreamError(
-                  'Response body could not be kept',
-                  error as Error,
+                settleResponse(
+                  streamErrorResponse(
+                    'stream_response_error',
+                    makeResponseStreamError(
+                      'Response body could not be kept',
+                      error as Error,
+                    ),
+                  ),
                 );
                 return;
               }

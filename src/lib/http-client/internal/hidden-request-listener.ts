@@ -1,15 +1,6 @@
-import { readHiddenMember, setHiddenMember } from './hidden-member';
+import { readHiddenMember } from './hidden-member';
 import { reportCallbackError } from '../../safe-handle-callback';
 import type { AdapterRequest } from '../types';
-
-/** Puts `listener` on `request` under `key` (see `setHiddenMember`). */
-export function setHiddenRequestListener(
-  request: AdapterRequest,
-  key: symbol,
-  listener: (...args: never[]) => void,
-): void {
-  setHiddenMember(request, key, listener);
-}
 
 /** The listener on `request` under `key`, if it carries one (see `readHiddenMember`). */
 export function readHiddenRequestListener<
