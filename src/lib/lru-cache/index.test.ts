@@ -1971,6 +1971,34 @@ test('a buffer whose chain runs past the walk’s cap is measured through its sl
   expect(cache.has('second')).toBe(false);
 });
 
+test('a chain that cannot be walked to its end is walked once, and its values still measured through their slots', () => {
+  let prototypeReads = 0;
+  // A prototype whose own prototype cannot be read: the walk stops there, with no answer.
+  const unreadable = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        prototypeReads++;
+        throw new Error('no prototype');
+      },
+    },
+  );
+  const prototype = Object.create(unreadable) as object;
+  const cache = new LRUCache<string, object>(10, { maxSize: 100_000 });
+
+  cache.set('object', Object.create(prototype) as object);
+  const readsAfterFirst = prototypeReads;
+  cache.set('another', Object.create(prototype) as object);
+  cache.set('buffer', Object.setPrototypeOf(new ArrayBuffer(2000), prototype));
+
+  expect(readsAfterFirst).toBeGreaterThan(0);
+  expect(prototypeReads).toBe(readsAfterFirst);
+  // Still measured through its slots: its 2000 bytes, not an object's estimate.
+  cache.delete('object');
+  cache.delete('another');
+  expect(cache.byteSize).toBe(2000);
+});
+
 test('a buffer whose prototype was replaced with one carrying no buffer’s tag is estimated as an object', () => {
   class Holder {}
   const prototypes: Array<object | null> = [

@@ -1011,6 +1011,14 @@ export class LRUCache<K, V> {
 const prototypesWithoutBufferTag = new WeakSet<object>();
 
 /**
+ * The prototypes whose chain `mayBeBuffer` could not walk to its end - one that throws
+ * partway, or runs on past the walk's cap - so their instances are measured through their
+ * slots without walking the chain again. Weak, and not walked again if the chain changes,
+ * as above: the answer only picks how an estimate is made.
+ */
+const prototypesWithUnwalkedChain = new WeakSet<object>();
+
+/**
  * Whether `value`, an object that is not an array or a view, may be a buffer: never a
  * plain object or one with no prototype, which carry no buffer's tag, nor an instance of
  * a prototype already found to carry none; otherwise, whether a prototype in its chain
@@ -1034,14 +1042,20 @@ function mayBeBuffer(value: object): boolean {
     return false;
   }
 
+  if (prototypesWithUnwalkedChain.has(prototype as object)) {
+    return true;
+  }
+
   // Walked from the prototype read above, not read again: a `Proxy` answering another one
-  // the second time cannot have this one remembered. Remembered only for a walk that
-  // finished: a chain that throws partway, or runs on past the walk's cap, is no answer
-  // about it, and the value is measured through the slots instead, which tell a buffer
-  // whatever its chain.
+  // the second time cannot have this one remembered. A chain that throws partway, or runs
+  // on past the walk's cap, is no answer about it: its value is measured through the
+  // slots instead, which tell a buffer whatever its chain, and so is every later instance
+  // of its prototype.
   const hasTag = hasBufferTagInChainFrom(prototype as object);
   if (hasTag === false) {
     prototypesWithoutBufferTag.add(prototype as object);
+  } else if (hasTag === null) {
+    prototypesWithUnwalkedChain.add(prototype as object);
   }
 
   return hasTag !== false;

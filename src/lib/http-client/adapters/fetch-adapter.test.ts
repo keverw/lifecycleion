@@ -2065,6 +2065,81 @@ describe('FetchAdapter TLS certificate failures', () => {
   }, 30_000);
 });
 
+describe('FetchAdapter - a request aborted before it is sent', () => {
+  test.each([
+    'already aborted',
+    'cancelled from the 0% upload callback',
+  ] as const)(
+    "one %s is not dispatched, reports no upload end and rejects with the signal's reason",
+    async (when) => {
+      let fetchCalls = 0;
+      // A `fetch` that sends whatever it is handed, an aborted signal included.
+      (globalThis as any).fetch = () => {
+        fetchCalls++;
+        return Promise.resolve(new Response('ok', { status: 200 }));
+      };
+      const controller = new AbortController();
+      const reason = new Error('caller gave up');
+      if (when === 'already aborted') {
+        controller.abort(reason);
+      }
+      const events: number[] = [];
+
+      const rejection = await new FetchAdapter()
+        .send({
+          requestURL: 'https://local.test/upload',
+          method: 'POST',
+          headers: {},
+          body: 'abc',
+          signal: controller.signal,
+          onUploadProgress: (event) => {
+            events.push(event.progress);
+            if (event.progress === 0) {
+              controller.abort(reason);
+            }
+          },
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+
+      expect(rejection).toBe(reason);
+      expect(fetchCalls).toBe(0);
+      expect(events).toEqual(when === 'already aborted' ? [] : [0]);
+    },
+  );
+
+  test('one aborted with no reason of its own rejects with an AbortError', async () => {
+    let fetchCalls = 0;
+    (globalThis as any).fetch = () => {
+      fetchCalls++;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+    const signal = {
+      aborted: true,
+      reason: undefined,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    } as unknown as AbortSignal;
+
+    const rejection = await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        signal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+
+    expect(rejection?.name).toBe('AbortError');
+    expect(fetchCalls).toBe(0);
+  });
+});
+
 describe('FetchAdapter aborts while reading the body', () => {
   /** Hangs the body read, then rejects with the signal's reason verbatim. */
   function stubBodyRejectingWithReason(headers: Record<string, string> = {}) {

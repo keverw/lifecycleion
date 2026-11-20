@@ -208,6 +208,10 @@ const MONTH_AND_YEAR = new RegExp(
  * An HTTP-date is measured from `now`, the client's clock, as got, ky and Python's urllib3
  * measure it - not from the response's `Date`, so a client clock behind or ahead of the
  * server's lengthens or shortens the wait by the difference.
+ *
+ * A number of seconds too large for a finite number of milliseconds is `Infinity`: longer
+ * than any `maxRetryAfterMS`, which the client caps at its longest timer, so the request
+ * ends as `retry_after_too_long` rather than waiting.
  */
 export function parseRetryAfterMS(
   value: string | undefined,

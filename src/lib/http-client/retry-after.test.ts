@@ -11,6 +11,11 @@ import type {
 const NOW = Date.UTC(2026, 10, 8, 12, 0, 0);
 
 describe('parseRetryAfterMS', () => {
+  test('a number of seconds too large for a finite number of milliseconds is Infinity', () => {
+    expect(parseRetryAfterMS('9'.repeat(400), NOW)).toBe(Infinity);
+    expect(parseRetryAfterMS('9'.repeat(306), NOW)).toBe(Infinity);
+  });
+
   test.each([
     ['120', 120_000],
     ['0', 0],
@@ -456,6 +461,30 @@ describe('HTTPClient and Retry-After', () => {
     expect(events[0].nextRetryDelayMS).toBeUndefined();
     expect(events[0].retrySuppressedReason).toBe('retry_after_too_long');
   });
+
+  test.each([
+    ['the default', undefined],
+    ['Infinity', Infinity],
+  ] as const)(
+    'a Retry-After too large for a finite number is past a maxRetryAfterMS of %s, and not retried',
+    async (_cap, maxRetryAfterMS) => {
+      const { client, calls } = clientAnswering(
+        { status: 503, retryAfter: '9'.repeat(400) },
+        { ...fixed, maxRetryAfterMS },
+      );
+      const events: AttemptEndEvent[] = [];
+      const response = await client
+        .get('/x')
+        .onAttemptEnd((event) => events.push(event))
+        .send();
+
+      expect(calls()).toBe(1);
+      expect(response.status).toBe(503);
+      expect(events).toHaveLength(1);
+      expect(events[0].willRetry).toBe(false);
+      expect(events[0].retrySuppressedReason).toBe('retry_after_too_long');
+    },
+  );
 
   test("a Retry-After past the cap but within the policy's own delay is retried after that delay", async () => {
     const event = await scheduledDelay(

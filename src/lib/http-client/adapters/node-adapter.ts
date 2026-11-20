@@ -2578,40 +2578,39 @@ export class NodeAdapter implements HTTPAdapter {
 
             // --- Normal buffered response ---
 
-            // Settles with `response` once the response is torn down - its socket, and
-            // any decoder still inflating it. In this order: the response is let go
-            // before the teardown, so nothing the teardown sets off answers it first.
-            const settleAfterTeardown = (
+            // Settles the buffered response with `response`, letting it go first. With
+            // `shouldTearDown`, the response is torn down between the two - its socket,
+            // and any decoder still inflating it - as for a body whose rest is not read,
+            // so the rest is neither read nor decoded into nothing: let go before the
+            // teardown, so nothing the teardown sets off answers it first. Without it, for
+            // a body whose stream has already ended or failed, nothing is left to tear
+            // down.
+            const settleBufferedResponse = (
               response: Omit<AdapterResponse, 'effectiveRequestHeaders'>,
+              { shouldTearDown }: { shouldTearDown: boolean },
             ): void => {
               activeBufferedResponse = undefined;
-              runTeardownGuarded(tearDownAfterResponse);
+              if (shouldTearDown) {
+                runTeardownGuarded(tearDownAfterResponse);
+              }
               settleResponse(response);
-            };
-
-            // A body whose rest is not read fails as a stream error with the real
-            // status, torn down so the rest is neither read nor decoded into nothing.
-            const settleWithRestUnread = (
-              streamErrorCode: NonNullable<AdapterResponse['streamErrorCode']>,
-              errorCause: Error,
-            ): void => {
-              settleAfterTeardown(
-                streamErrorResponse(streamErrorCode, errorCause),
-              );
             };
 
             // A body too large to hold: the server answered, and what failed is taking
             // delivery of what it sent.
             const refuseTooLargeBody = (): void => {
-              settleWithRestUnread(
-                'response_too_large',
-                // `streamResponse` is only offered where it would help: a factory is
-                // called for a 2xx alone, so any other status is buffered whatever the
-                // request asked for.
-                makeResponseTooLargeError(
-                  maxResponseBytes,
-                  isSuccessStatus(status),
+              settleBufferedResponse(
+                streamErrorResponse(
+                  'response_too_large',
+                  // `streamResponse` is only offered where it would help: a factory is
+                  // called for a 2xx alone, so any other status is buffered whatever
+                  // the request asked for.
+                  makeResponseTooLargeError(
+                    maxResponseBytes,
+                    isSuccessStatus(status),
+                  ),
                 ),
+                { shouldTearDown: true },
               );
             };
 
@@ -2658,7 +2657,10 @@ export class NodeAdapter implements HTTPAdapter {
                 return;
               }
 
-              settleAfterTeardown({ status, headers, body: null });
+              settleBufferedResponse(
+                { status, headers, body: null },
+                { shouldTearDown: true },
+              );
             };
 
             // Whether a body is still going out: being written, or written and ended with
@@ -2886,15 +2888,11 @@ export class NodeAdapter implements HTTPAdapter {
                 cause ?? requestErrorAfterResponse,
               );
 
-              // The rest of the body not read, as for one past the limit.
-              if (isRestUnread) {
-                settleWithRestUnread('stream_response_error', error);
-                return;
-              }
-
-              activeBufferedResponse = undefined;
-              settleResponse(
+              // Torn down when the rest of the body is not read, as for one past the
+              // limit.
+              settleBufferedResponse(
                 streamErrorResponse('stream_response_error', error),
+                { shouldTearDown: isRestUnread },
               );
             };
 

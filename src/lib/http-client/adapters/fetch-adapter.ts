@@ -234,15 +234,24 @@ export class FetchAdapter implements HTTPAdapter {
 
     // Read through the guarded accessor before anything is dispatched, as the other
     // adapters read it: `fetch` reads the signal's internal state, not the getter, so a
-    // signal whose `aborted` throws would otherwise go out unrefused. An aborted one is
-    // `fetch`'s to reject, with its reason. The failure paths below read it quietly.
+    // signal whose `aborted` throws would otherwise go out unrefused. The failure paths
+    // below read it quietly.
     const wasAbortedAtDispatch = isSignalAborted(signal);
 
     // Fire 0% upload progress - once every refusal above has passed, so a request refused
-    // before anything is sent, an aborted one included, reports no upload start. One that
-    // cancels here aborts the signal `fetch` is handed, which rejects with it.
+    // before anything is sent, an aborted one included, reports no upload start.
     if (!wasAbortedAtDispatch) {
       guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+    }
+
+    // Aborted before it is sent - already, or by a cancel from that callback: not
+    // dispatched, as the other adapters dispatch none, and rejected as the runtime's
+    // `fetch` rejects it, with the signal's reason. A `fetch` that would send it anyway
+    // (a polyfill or test double that ignores an aborted signal) is never called, so no
+    // request goes out and no upload end is reported for it. Read quietly after the
+    // callback, as every read after the guarded one above is.
+    if (wasAbortedAtDispatch || isSignalAbortedQuietly(signal)) {
+      throw abortReasonOf(signal);
     }
 
     let response: Response;
@@ -318,9 +327,8 @@ export class FetchAdapter implements HTTPAdapter {
     };
     // A body that will not be read is let go of: a polyfill's Node `Readable` would
     // otherwise hold its socket until the server closed it.
-    const answeredResponse = response;
     const letGoOfBody = (): void => {
-      cancelBodyQuietly(readUnknownMember(answeredResponse, 'body'));
+      cancelBodyQuietly(readUnknownMember(response, 'body'));
     };
 
     // Each read once and guarded, as a polyfill's or test double's response may carry any
@@ -926,6 +934,15 @@ async function readBodyWithin(
 /** Asks an iterator left early to `return()`, without waiting on it or minding a refusal. */
 function endIteratorQuietly(iterator: AsyncIterator<unknown>): void {
   callQuietly(readUnknownMember(iterator, 'return'), iterator);
+}
+
+/**
+ * What the runtime's `fetch` rejects with for an aborted `signal`: its reason, read
+ * guarded, or an `AbortError` for a signal that holds none.
+ */
+function abortReasonOf(signal: AbortSignal | undefined): unknown {
+  const reason = readUnknownMember(signal, 'reason');
+  return reason === undefined ? makeAbortError() : reason;
 }
 
 /**

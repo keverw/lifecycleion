@@ -43,6 +43,8 @@
 
 import { types } from 'node:util';
 import { plainBytesView } from '../../internal/binary-view';
+import { callQuietly } from '../../internal/call-quietly';
+import { readUnknownMember } from '../../internal/read-member';
 import { markNonRetryableAdapterError } from './adapter-error';
 import { formEntries } from './form-entries';
 import { measureMultipartEntries } from './multipart-format';
@@ -208,7 +210,7 @@ export async function serializeMultipartFormData(
       try {
         while (true) {
           if (req.destroyed) {
-            void cancelReaderQuietly(reader);
+            callQuietly(readUnknownMember(reader, 'cancel'), reader);
             break;
           }
 
@@ -224,7 +226,7 @@ export async function serializeMultipartFormData(
           // Cancelling the reader ends the read as done, and the `req.destroyed` checks
           // below take it from there.
           const cancelOnClose = (): void => {
-            void cancelReaderQuietly(reader);
+            callQuietly(readUnknownMember(reader, 'cancel'), reader);
           };
 
           req.once('close', cancelOnClose);
@@ -247,7 +249,7 @@ export async function serializeMultipartFormData(
           }
 
           if (req.destroyed) {
-            void cancelReaderQuietly(reader);
+            callQuietly(readUnknownMember(reader, 'cancel'), reader);
             break;
           }
 
@@ -302,7 +304,7 @@ export async function serializeMultipartFormData(
           // check, after the loop, has no equivalent problem - bytes that were never
           // written need no undoing.
           if (partBytes + bytes.byteLength > partSize) {
-            void cancelReaderQuietly(reader);
+            callQuietly(readUnknownMember(reader, 'cancel'), reader);
 
             // What actually went on the wire, and the chunk that was refused, kept
             // apart: counting the refused chunk into the written total would name up to
@@ -331,7 +333,7 @@ export async function serializeMultipartFormData(
         // `isDone` exit costs nothing by coming through here too. Not waited on, here or
         // above: a custom `stream()` whose `cancel` never settles would otherwise hold back
         // the write failure or refusal on its way out, and leave the upload unsettled.
-        void cancelReaderQuietly(reader);
+        callQuietly(readUnknownMember(reader, 'cancel'), reader);
       }
 
       if (!req.destroyed && partBytes !== partSize) {
@@ -361,16 +363,6 @@ export async function serializeMultipartFormData(
 
   // Closing delimiter that tells the server there are no more parts.
   await write(closingDelimiter);
-}
-
-async function cancelReaderQuietly(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-): Promise<void> {
-  try {
-    await reader.cancel();
-  } catch {
-    // Best-effort cancellation only. Preserve the original request outcome.
-  }
 }
 
 /**
