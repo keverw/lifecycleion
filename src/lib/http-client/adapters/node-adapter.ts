@@ -2448,6 +2448,12 @@ export class NodeAdapter implements HTTPAdapter {
                     ? readUnknownMember(writable, 'reason')
                     : undefined;
 
+                // Read before the teardown, as a factory that threw reports them: the
+                // headers the request went out with.
+                const effectiveHeaders = snapshotEffectiveRequestHeaders(
+                  req,
+                  request.headers,
+                );
                 // A teardown that throws is reported, and the decline still answers.
                 runTeardownGuarded(tearDownAfterResponse);
                 const abortErr = makeAbortError(
@@ -2455,11 +2461,13 @@ export class NodeAdapter implements HTTPAdapter {
                 );
                 // Hidden, as the tags beside it are: the caller's reason is not carried
                 // into `JSON.stringify`, `Object.keys` or a spread of the error. With it,
-                // the answer it declined, so its `Set-Cookie` is still stored.
+                // the answer it declined, so its `Set-Cookie` is still stored, and the
+                // headers that were sent, for the observers.
                 defineHiddenTags(abortErr, {
                   [STREAM_FACTORY_CANCEL_KEY]: cancelReason ?? true,
                   [STREAM_ABORT_STATUS_KEY]: status,
                   [STREAM_ABORT_HEADERS_KEY]: headers,
+                  [EFFECTIVE_REQUEST_HEADERS_KEY]: effectiveHeaders,
                 });
                 failRequest(abortErr);
                 // After the reject, as for a factory that threw.
@@ -2570,23 +2578,31 @@ export class NodeAdapter implements HTTPAdapter {
 
             // --- Normal buffered response ---
 
-            // A body too large to hold fails as a stream error with the real status:
-            // the server answered, and what failed is taking delivery of what it sent.
-            // The response is torn down - its socket, and any decoder still inflating it -
-            // so the rest of the body is neither read nor decoded into nothing.
-            const refuseTooLargeBody = (): void => {
+            // A body whose rest is not read fails as a stream error with the real
+            // status, the response torn down - its socket, and any decoder still
+            // inflating it - so the rest is neither read nor decoded into nothing. In
+            // this order: the response is let go before the teardown, so nothing the
+            // teardown sets off answers it first.
+            const settleWithRestUnread = (
+              streamErrorCode: NonNullable<AdapterResponse['streamErrorCode']>,
+              errorCause: Error,
+            ): void => {
               activeBufferedResponse = undefined;
               runTeardownGuarded(tearDownAfterResponse);
-              settleResponse(
-                streamErrorResponse(
-                  'response_too_large',
-                  // `streamResponse` is only offered where it would help: a factory is
-                  // called for a 2xx alone, so any other status is buffered whatever the
-                  // request asked for.
-                  makeResponseTooLargeError(
-                    maxResponseBytes,
-                    isSuccessStatus(status),
-                  ),
+              settleResponse(streamErrorResponse(streamErrorCode, errorCause));
+            };
+
+            // A body too large to hold: the server answered, and what failed is taking
+            // delivery of what it sent.
+            const refuseTooLargeBody = (): void => {
+              settleWithRestUnread(
+                'response_too_large',
+                // `streamResponse` is only offered where it would help: a factory is
+                // called for a 2xx alone, so any other status is buffered whatever the
+                // request asked for.
+                makeResponseTooLargeError(
+                  maxResponseBytes,
+                  isSuccessStatus(status),
                 ),
               );
             };
@@ -2859,23 +2875,20 @@ export class NodeAdapter implements HTTPAdapter {
                 return;
               }
 
-              activeBufferedResponse = undefined;
+              const error = makeResponseStreamError(
+                message,
+                cause ?? requestErrorAfterResponse,
+              );
 
-              // The rest of the body not read, as for one past the limit, and in its
-              // order: the response is let go before the teardown, so nothing the
-              // teardown sets off answers it first.
+              // The rest of the body not read, as for one past the limit.
               if (isRestUnread) {
-                runTeardownGuarded(tearDownAfterResponse);
+                settleWithRestUnread('stream_response_error', error);
+                return;
               }
 
+              activeBufferedResponse = undefined;
               settleResponse(
-                streamErrorResponse(
-                  'stream_response_error',
-                  makeResponseStreamError(
-                    message,
-                    cause ?? requestErrorAfterResponse,
-                  ),
-                ),
+                streamErrorResponse('stream_response_error', error),
               );
             };
 

@@ -1,5 +1,6 @@
 import {
   fixedUnsharedByteLength,
+  isPlainArrayBuffer,
   readBinaryByteLength,
   readTypedArrayBuffer,
   readTypedArrayByteOffset,
@@ -65,8 +66,9 @@ export function concatChunks(
 
 /**
  * Whether `chunk` is a plain `Uint8Array` of `byteLength` bytes spanning the whole of a
- * plain `ArrayBuffer` that is neither resizable nor shared. Read through the intrinsic
- * getters, so a value's own claims about its buffer or extent count for nothing.
+ * plain `ArrayBuffer` (see `isPlainArrayBuffer`) that is neither resizable nor shared.
+ * Read through the intrinsic getters, so a value's own claims about its buffer or extent
+ * count for nothing.
  */
 function isWholeOfPlainBuffer(chunk: Uint8Array, byteLength: number): boolean {
   if (
@@ -80,7 +82,6 @@ function isWholeOfPlainBuffer(chunk: Uint8Array, byteLength: number): boolean {
   const buffer = readTypedArrayBuffer(chunk);
 
   return (
-    Object.getPrototypeOf(buffer) === ArrayBuffer.prototype &&
-    fixedUnsharedByteLength(buffer) === byteLength
+    isPlainArrayBuffer(buffer) && fixedUnsharedByteLength(buffer) === byteLength
   );
 }

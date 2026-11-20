@@ -1243,6 +1243,117 @@ describe('NodeAdapter observer request headers', () => {
     expect(observedHeaders?.['content-length']).toBe('999');
   });
 
+  test.each([
+    ['the attempt is given up on', false],
+    ['the adapter rejects with its signal’s reason', true],
+  ])(
+    'a cancel whose reason carries sent headers reports none of them when %s',
+    async (_label, isReasonRethrown) => {
+      const reason = Object.assign(new Error('stop'), {
+        [EFFECTIVE_REQUEST_HEADERS_KEY]: { authorization: 'Bearer other' },
+      });
+      const controller = new AbortController();
+      let observedHeaders: Record<string, unknown> | undefined;
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (request) =>
+          new Promise<AdapterResponse>((_resolve, reject) => {
+            if (isReasonRethrown) {
+              request.signal?.addEventListener('abort', () => {
+                reject(request.signal?.reason as Error);
+              });
+            }
+          }),
+      };
+      const client = new HTTPClient({ adapter });
+      client.addErrorObserver((_err, req) => {
+        observedHeaders = { ...req.headers };
+      });
+
+      const pending = client
+        .get('https://example.test/x')
+        .signal(controller.signal)
+        .send();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      controller.abort(reason);
+      const response = await pending;
+
+      expect(response.isCancelled).toBe(true);
+      expect(observedHeaders).toBeDefined();
+      expect(observedHeaders?.authorization).toBeUndefined();
+    },
+  );
+
+  test('a cancel while an async stream factory sets up reports the request NodeAdapter sent', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('body');
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    let observedHeaders: Record<string, unknown> | undefined;
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${port}`,
+      });
+      client.addErrorObserver((_err, req) => {
+        observedHeaders = { ...req.headers };
+      });
+      const builder = client.get('/stream').streamResponse(async () => {
+        builder.cancel('stop');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return new Writable({
+          write(_chunk, _encoding, callback) {
+            callback();
+          },
+        });
+      });
+
+      const response = await builder.send();
+
+      expect(response.isCancelled).toBe(true);
+      expect(observedHeaders?.host).toBe(`127.0.0.1:${port}`);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  test('a stream factory that declines reports the request NodeAdapter sent', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('body');
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    let observedHeaders: Record<string, unknown> | undefined;
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${port}`,
+      });
+      client.addErrorObserver((_err, req) => {
+        observedHeaders = { ...req.headers };
+      });
+
+      const response = await client
+        .get('/stream')
+        .streamResponse(() => null)
+        .send();
+
+      expect(response.isCancelled).toBe(true);
+      expect(observedHeaders?.host).toBe(`127.0.0.1:${port}`);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   test('response-stream aborts without stream metadata are not misclassified as user cancellation', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'node',

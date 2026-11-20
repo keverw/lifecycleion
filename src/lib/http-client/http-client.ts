@@ -163,6 +163,7 @@ import {
   plainBytesView,
   readBinaryByteLength,
   readViewBuffer,
+  isPlainArrayBuffer,
 } from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
@@ -4342,16 +4343,23 @@ export class BaseHTTPClient {
           }
         }
 
-        // Once the adapter has answered, an exit below reports what it said it sent - to
-        // the retry phase's error observers, the final error and a cancel alike - and,
+        // An exit below reports what the adapter said it sent - on its answer, or on the
+        // error it failed with, a cancel during a stream factory's setup among them - to
+        // the retry phase's error observers, the final error and a cancel alike, and,
         // through `answeredStatus`, the status it answered with.
-        const reportedSentRequest = didAdapterResolve
-          ? sentRequestForObservedAdapterError(
+        // Not off the caller's own abort reason - an attempt given up on throws it, and
+        // `fetch` rejects with its signal's - which carries nothing the adapter sent.
+        const isCallerAbortReason =
+          isAbandoned ||
+          (cancelSignal.aborted &&
+            error === readUnknownMember(cancelSignal, 'reason'));
+        const reportedSentRequest = isCallerAbortReason
+          ? observedSentRequest
+          : sentRequestForObservedAdapterError(
               sentRequest,
               error,
               observedSentRequest,
-            )
-          : sentRequest;
+            );
 
         // The attempt ended by a cancel: reported to `onAttemptEnd` with the status `send()`
         // resolved with, if it had, and to the caller with its reason.
@@ -4417,11 +4425,7 @@ export class BaseHTTPClient {
               effectiveRequestHeaders:
                 getEffectiveRequestHeadersFromError(error),
             },
-            sentRequest: sentRequestForObservedAdapterError(
-              sentRequest,
-              error,
-              observedSentRequest,
-            ),
+            sentRequest: reportedSentRequest,
             attemptCount: attemptNumber,
             wasCancelled: false,
             wasTimeout: isTimedOut,
@@ -4455,13 +4459,7 @@ export class BaseHTTPClient {
           // drop the tagged status and headers, letting a post-header failure reach the
           // generic network path as a retryable `status: 0`.
           if (isCancelOutcome()) {
-            return endCancelled(
-              sentRequestForObservedAdapterError(
-                sentRequest,
-                error,
-                observedSentRequest,
-              ),
-            );
+            return endCancelled(reportedSentRequest);
           }
 
           // A browser-fired XHR timeout over an answer is a timeout, as the client's own is.
@@ -4549,7 +4547,7 @@ export class BaseHTTPClient {
 
               return {
                 adapterResponse: null,
-                sentRequest,
+                sentRequest: reportedSentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: true,
                 wasTimeout: false,
@@ -4605,11 +4603,7 @@ export class BaseHTTPClient {
 
           return {
             adapterResponse: null,
-            sentRequest: sentRequestForObservedAdapterError(
-              sentRequest,
-              error,
-              observedSentRequest,
-            ),
+            sentRequest: reportedSentRequest,
             attemptCount: attemptNumber,
             wasCancelled: false,
             wasTimeout: didTimeoutThisAttempt,
@@ -6167,17 +6161,6 @@ function fixedAnsweredBody(body: object, size: number): unknown {
   ).slice();
 
   return isBuffer ? copy.buffer : copy;
-}
-
-/**
- * Whether `buffer` is this realm's own `ArrayBuffer`, with nothing of its own - a
- * `byteLength` getter, say - to report another length than it holds.
- */
-function isPlainArrayBuffer(buffer: ArrayBufferLike): boolean {
-  return (
-    Object.getPrototypeOf(buffer) === ArrayBuffer.prototype &&
-    Reflect.ownKeys(buffer).length === 0
-  );
 }
 
 /**

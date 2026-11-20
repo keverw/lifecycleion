@@ -1808,17 +1808,6 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(40 + 100_000 + 1000);
     });
 
-    test('fails set() when sizing an entry it read fails, as sizing the value itself does', () => {
-      // `Array.isArray` throws for a revoked `Proxy`.
-      const { proxy: unsizable, revoke } = Proxy.revocable([1], {});
-      revoke();
-      const cache = new LRUCache<string, unknown>(5, { maxSize: 100_000 });
-
-      expect(() => cache.set('top', unsizable)).toThrow(TypeError);
-      expect(() => cache.set('nested', [unsizable])).toThrow(TypeError);
-      expect(cache.size).toBe(0);
-    });
-
     test("estimates an array value's size by index, not through its own reduce", () => {
       const value = ['abc'];
       Object.defineProperty(value, 'reduce', { value: () => 1_000_000 });
@@ -1946,6 +1935,24 @@ test('a Proxy whose prototype reads differently each time does not change how an
   bounded.set('big', new ArrayBuffer(2000));
 
   expect(bounded.has('big')).toBe(false);
+});
+
+test('a revoked Proxy, alone or in an array, is sized with the fallback estimate rather than failing set()', () => {
+  const { proxy, revoke } = Proxy.revocable({}, {});
+  revoke();
+  const cache = new LRUCache<string, unknown>(10, { maxSize: 100_000 });
+
+  cache.set('alone', proxy);
+  expect(cache.byteSize).toBe(1000);
+
+  cache.set('in an array', [proxy]);
+  expect(cache.has('in an array')).toBe(true);
+  expect(cache.byteSize).toBe(1000 + 40 + 1000);
+
+  const revocableFunction = Proxy.revocable(() => undefined, {});
+  revocableFunction.revoke();
+  cache.set('function', revocableFunction.proxy);
+  expect(cache.byteSize).toBe(1000 + 40 + 1000 + 100);
 });
 
 test('a buffer whose chain runs past the walk’s cap is measured through its slots, every time', () => {

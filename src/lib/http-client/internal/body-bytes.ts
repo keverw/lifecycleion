@@ -31,9 +31,10 @@ const KEEP_BYTES = 4 * 1024;
  * is larger.
  *
  * A chunk kept as it is must not change before the join: the runtime's streams hand over
- * each chunk in memory of its own. A source that may not - one that may reuse a buffer
- * for the next chunk - is read with `isEveryChunkCopied`, which copies every chunk as it
- * is appended. A kept chunk whose buffer is detached by then fails the join.
+ * each chunk in memory of its own. A source that refills one buffer for each chunk has
+ * the chunks kept as they are read as its last fill, as the runtime's own `arrayBuffer()`
+ * and a Node stream's consumers read them. One whose buffer is detached by then fails the
+ * join.
  */
 export class BodyBytes {
   private readonly parts: Uint8Array[] = [];
@@ -43,18 +44,10 @@ export class BodyBytes {
   private blockStart = 0;
   private filled = 0;
   private written = 0;
-  private readonly isEveryChunkCopied: boolean;
 
-  /**
-   * `maxBytes` bounds every block; no more than it may be appended in all. With
-   * `isEveryChunkCopied`, no chunk is kept as it is.
-   */
-  constructor(
-    maxBytes: number,
-    { isEveryChunkCopied = false }: { isEveryChunkCopied?: boolean } = {},
-  ) {
+  /** `maxBytes` bounds every block; no more than it may be appended in all. */
+  constructor(maxBytes: number) {
     this.maxBytes = maxBytes;
-    this.isEveryChunkCopied = isEveryChunkCopied;
   }
 
   /**
@@ -67,11 +60,7 @@ export class BodyBytes {
       throw new RangeError('BodyBytes cannot hold more than its maxBytes');
     }
 
-    if (
-      !this.isEveryChunkCopied &&
-      byteLength >= KEEP_BYTES &&
-      isKeptAsIs(chunk, byteLength)
-    ) {
+    if (byteLength >= KEEP_BYTES && isKeptAsIs(chunk, byteLength)) {
       this.endPart();
       this.parts.push(chunk);
       this.written += byteLength;

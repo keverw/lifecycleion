@@ -142,6 +142,17 @@ export function readViewBuffer(view: ArrayBufferView): ArrayBufferLike {
 }
 
 /**
+ * Whether `buffer` is this realm's own `ArrayBuffer`, with nothing of its own - a
+ * `byteLength` getter, say - to report another length than it holds.
+ */
+export function isPlainArrayBuffer(buffer: object): boolean {
+  return (
+    Object.getPrototypeOf(buffer) === ArrayBuffer.prototype &&
+    Reflect.ownKeys(buffer).length === 0
+  );
+}
+
+/**
  * `buffer`'s byte length where it is a fixed-length, unshared `ArrayBuffer` from any realm
  * - memory no other thread writes and that cannot change size, so bytes over it may be
  * kept as they are - read once through the intrinsic getters; `null` for anything else, a

@@ -640,6 +640,15 @@ export class LRUCache<K, V> {
       return primitive;
     }
 
+    let isArray: boolean;
+    try {
+      isArray = Array.isArray(value);
+    } catch {
+      // A revoked `Proxy`, which nothing can be read from: the fallback for what it was
+      // made over - an object, or a function.
+      return typeof value === 'object' ? UNSIZED_VALUE_BYTES : 100;
+    }
+
     // A buffer or view - shared, from another realm, or one whose own `byteLength` lies -
     // measured through its internal slots. Told first by its internal slot (a view) or,
     // for what is not an array, the tag its prototypes carry (a buffer), so any other
@@ -650,14 +659,14 @@ export class LRUCache<K, V> {
     const byteLength =
       typeof value === 'object' &&
       value !== null &&
-      (ArrayBuffer.isView(value) ||
-        (!Array.isArray(value) && mayBeBuffer(value)))
+      (ArrayBuffer.isView(value) || (!isArray && mayBeBuffer(value)))
         ? readBinaryByteLength(value)
         : null;
 
     if (byteLength !== null) {
       return byteLength;
-    } else if (Array.isArray(value)) {
+    } else if (isArray) {
+      const items = value as unknown[];
       // Made for the outermost array only: a value with none needs none.
       sizing ??= {
         visiting: new WeakSet(),
@@ -665,14 +674,14 @@ export class LRUCache<K, V> {
         sizedOrder: [],
       };
 
-      if (sizing.visiting.has(value)) {
+      if (sizing.visiting.has(items)) {
         return UNSIZED_VALUE_BYTES; // Circular
       }
 
       // Met again - shared between two entries, say - it is one array, already counted:
       // walked again, `[a, a]` nested 22 deep would take half a second and count 2^22
       // copies.
-      if (sizing.sized.has(value)) {
+      if (sizing.sized.has(items)) {
         return 8;
       }
 
@@ -680,7 +689,7 @@ export class LRUCache<K, V> {
         return UNSIZED_VALUE_BYTES;
       }
 
-      sizing.visiting.add(value);
+      sizing.visiting.add(items);
 
       // Rough estimate for arrays: their own entries, by index, not through the array's
       // own `reduce`, which a cached value may replace - a hole, one its prototype fills
@@ -689,10 +698,8 @@ export class LRUCache<K, V> {
       // read takes the fallback estimate a circular array does, rather than failing
       // `set()`: an array whose length is not one an array can have, an entry whose read
       // throws - with the entries around it still counted - and, once for the rest of the
-      // array, an index whose presence cannot be told. A failure sizing an entry it did
-      // read is not caught here.
-      const items = value as unknown[];
-
+      // array, an index whose presence cannot be told. An entry that cannot be sized - a
+      // revoked `Proxy` - takes it too, as the value itself does.
       try {
         let length: number;
 
@@ -831,8 +838,8 @@ export class LRUCache<K, V> {
 
         return estimatedSize;
       } finally {
-        sizing.visiting.delete(value);
-        markSized(sizing, value);
+        sizing.visiting.delete(items);
+        markSized(sizing, items);
       }
     } else if (typeof value === 'object') {
       try {
