@@ -374,6 +374,7 @@ export class LRUCache<K, V> {
         return undefined;
       }
 
+      this.map.delete(key);
       this.placeAsMostRecent(key, entry);
 
       // Run periodic cleanup if needed
@@ -977,12 +978,12 @@ export class LRUCache<K, V> {
   }
 
   /**
-   * Puts `entry` at the end of the map, the most recently used place, and gives it the
-   * `order` that says so: the map's order is what eviction reads, and `order` is what an
-   * expired batch is reported in (see `reclaimExpired`), so they change together.
+   * Puts `entry` under `key`, which is not in the map, at its end - the most recently used
+   * place - and gives it the `order` that says so: the map's order is what eviction reads,
+   * and `order` is what an expired batch is reported in (see `reclaimExpired`), so they
+   * change together.
    */
   private placeAsMostRecent(key: K, entry: CacheEntry<V>): void {
-    this.map.delete(key);
     entry.order = this.nextOrder++;
     this.map.set(key, entry);
   }

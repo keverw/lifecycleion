@@ -2576,7 +2576,7 @@ export class NodeAdapter implements HTTPAdapter {
             // so the rest of the body is neither read nor decoded into nothing.
             const refuseTooLargeBody = (): void => {
               activeBufferedResponse = undefined;
-              tearDownAfterResponse();
+              runTeardownGuarded(tearDownAfterResponse);
               settleResponse(
                 streamErrorResponse(
                   'response_too_large',
@@ -2635,7 +2635,7 @@ export class NodeAdapter implements HTTPAdapter {
               }
 
               activeBufferedResponse = undefined;
-              tearDownAfterResponse();
+              runTeardownGuarded(tearDownAfterResponse);
               settleResponse({ status, headers, body: null });
             };
 
@@ -2865,7 +2865,7 @@ export class NodeAdapter implements HTTPAdapter {
               // order: the response is let go before the teardown, so nothing the
               // teardown sets off answers it first.
               if (isRestUnread) {
-                tearDownAfterResponse();
+                runTeardownGuarded(tearDownAfterResponse);
               }
 
               settleResponse(

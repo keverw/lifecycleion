@@ -2,8 +2,8 @@ import { STREAM_FAILURE_SETTLED_LISTENER_KEY } from '../consts';
 import {
   notifyHiddenRequestListener,
   readHiddenRequestListener,
-} from './hidden-request-listener';
-import { setHiddenMember } from './hidden-member';
+  setHiddenMember,
+} from './hidden-member';
 import type { AdapterRequest } from '../types';
 
 /** Told that the adapter has settled a stream failure, before it fires the factory's signal. */

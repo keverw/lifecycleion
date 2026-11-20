@@ -3552,6 +3552,39 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     });
   });
 
+  test('an iterable body that refills one buffer for each chunk is read as the bytes each chunk held', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body: {
+          async *[Symbol.asyncIterator]() {
+            const shared = new Uint8Array(8192);
+            for (const byte of [0x41, 0x42, 0x43]) {
+              await Promise.resolve();
+              shared.fill(byte);
+              yield shared;
+            }
+          },
+        },
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1_000_000,
+    });
+
+    const body = response.body as Uint8Array;
+    expect(body.length).toBe(3 * 8192);
+    expect([body[0], body[8192], body[16_384], body[24_575]]).toEqual([
+      0x41, 0x42, 0x43, 0x43,
+    ]);
+  });
+
   test('a text chunk whose UTF-16 units are exactly the bytes the limit has left is read', async () => {
     (globalThis as any).fetch = () =>
       Promise.resolve({

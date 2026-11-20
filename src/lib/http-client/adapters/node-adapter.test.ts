@@ -24,6 +24,7 @@ import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import * as zlib from 'node:zlib';
+import * as responseDecoding from '../internal/response-decoding';
 import { NodeAdapter } from './node-adapter';
 import { FetchAdapter } from './fetch-adapter';
 import * as concatChunksModule from '../internal/concat-chunks';
@@ -290,6 +291,67 @@ test('a buffered body whose chunk cannot be kept settles as a stream error, not 
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test.each([
+  ['a buffered body past maxResponseBytes', 200, 'response_too_large'],
+  ['a buffered body whose chunk cannot be kept', 200, 'stream_response_error'],
+  ['a 205 whose bytes are declared past maxResponseBytes', 205, undefined],
+] as const)(
+  '%s settles when its teardown throws, the throw reported',
+  async (label, status, code) => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(status, { 'Content-Length': '4' });
+      res.end('body');
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const address = server.address() as AddressInfo;
+    const teardownFailure = new Error('teardown');
+    const { createResponseBodySource } = responseDecoding;
+    const sourceSpy = spyOn(
+      responseDecoding,
+      'createResponseBodySource',
+    ).mockImplementation((...args) => ({
+      ...createResponseBodySource(...args),
+      release: () => {
+        throw teardownFailure;
+      },
+    }));
+    const appendSpy =
+      label === 'a buffered body whose chunk cannot be kept'
+        ? spyOn(BodyBytes.prototype, 'append').mockImplementation(() => {
+            throw new RangeError('Array buffer allocation failed');
+          })
+        : undefined;
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+
+    try {
+      const response = await new NodeAdapter().send(
+        makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+          maxResponseBytes:
+            label === 'a buffered body whose chunk cannot be kept' ? 1000 : 2,
+        }),
+      );
+
+      expect(response.status).toBe(status);
+      expect(response.streamErrorCode).toBe(code);
+      expect(reports.map((report) => (report as Error).cause)).toEqual([
+        teardownFailure,
+      ]);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      appendSpy?.mockRestore();
+      sourceSpy.mockRestore();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  },
+);
 
 test('a buffered body cancelled from its final progress event is not joined', async () => {
   const server = http.createServer((_req, res) => {

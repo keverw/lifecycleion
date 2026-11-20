@@ -2,8 +2,8 @@ import { UPLOAD_SOURCE_WAIT_LISTENER_KEY } from '../consts';
 import {
   notifyHiddenRequestListener,
   readHiddenRequestListener,
-} from './hidden-request-listener';
-import { setHiddenMember } from './hidden-member';
+  setHiddenMember,
+} from './hidden-member';
 import type { AdapterRequest } from '../types';
 
 /** Told `true` when a body writer parks on its source, and `false` when it comes back. */

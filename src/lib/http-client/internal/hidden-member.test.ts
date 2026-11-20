@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { notifyHiddenRequestListener } from './hidden-request-listener';
+import { notifyHiddenRequestListener } from './hidden-member';
 
 test("a hidden request listener's first throw is reported, and the work that told it goes on", () => {
   const reports: unknown[] = [];

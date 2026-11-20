@@ -114,13 +114,13 @@ function isAbortSignal(value: object): boolean {
   return hasOwnToStringTagInChain(value, 'AbortSignal');
 }
 
-/** Set by `createRequestBuilder` for the one builder it makes; see the constructor. */
-let isCreatingBuilder = false;
+/** What `createRequestBuilder` hands the constructor; see there. Never exported. */
+const BUILDER_TOKEN = Symbol('HTTPRequestBuilder');
 
 /**
  * A builder for `sendFn`, an `HTTPClient`'s own. The only way one is made: the class is
  * exported as a type alone, and its constructor, still reachable through a builder's
- * `constructor`, throws when called any other way.
+ * `constructor`, throws without the token this hands it.
  */
 export function createRequestBuilder<T>(
   method: HTTPMethod,
@@ -128,12 +128,13 @@ export function createRequestBuilder<T>(
   sendFn: SendFn<T>,
   options?: HTTPRequestOptions,
 ): HTTPRequestBuilder<T> {
-  isCreatingBuilder = true;
-  try {
-    return new HTTPRequestBuilder<T>(method, path, sendFn, options);
-  } finally {
-    isCreatingBuilder = false;
-  }
+  return new HTTPRequestBuilder<T>(
+    BUILDER_TOKEN,
+    method,
+    path,
+    sendFn,
+    options,
+  );
 }
 
 /**
@@ -179,6 +180,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _preSendCancelReason: string | undefined = undefined;
 
   constructor(
+    token: typeof BUILDER_TOKEN,
     method: HTTPMethod,
     path: string,
     sendFn: SendFn<T>,
@@ -187,14 +189,12 @@ export class HTTPRequestBuilder<T = unknown> {
     // Made only by a client (see `createRequestBuilder`): a send function of the caller's
     // would be handed request options it cannot read - a JSON body is an empty copy whose
     // text only the client can reach - so the request would go out wrong rather than not
-    // at all. Cleared before any option is read, so an option getter run while this one
-    // is made cannot construct one directly.
-    if (!isCreatingBuilder) {
+    // at all.
+    if (token !== BUILDER_TOKEN) {
       throw new TypeError(
         "HTTPRequestBuilder is made by an HTTPClient's request methods (client.get(), client.post() and the rest), not constructed directly",
       );
     }
-    isCreatingBuilder = false;
 
     this._method = method;
     this._path = path;

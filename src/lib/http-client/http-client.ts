@@ -6117,15 +6117,15 @@ function answeredBodySizeOf(body: unknown): number | 'string' | null {
  * `SharedArrayBuffer`), or is a view over such memory, a copy of those `size` bytes in
  * memory of its own, so the bytes held to `maxResponseBytes` are the ones delivered
  * whatever changes the memory later, as XHRAdapter copies a shared body. A buffer is
- * copied as an `ArrayBuffer`, a view as a `Uint8Array`. A view over all of a fixed,
- * unshared buffer - a `DataView`, an `Int16Array`, a `Buffer`, a subclass - is a plain
- * `Uint8Array` over its bytes, not copied; one over part of such a buffer - a pooled
- * `Buffer` - is copied, so the body's `buffer` holds the body alone. A view is delivered
- * as a `Uint8Array` whatever memory it is over, and reports the length it was measured
- * at. A buffer over such memory is
- * delivered as it is only when it is this realm's plain `ArrayBuffer`; any other - a
- * subclass, another realm's, one with properties of its own - is copied, for the same
- * reason. Read through the intrinsic getters, as the body was measured.
+ * copied as an `ArrayBuffer`, a view as a `Uint8Array`. A buffer over fixed, unshared
+ * memory is delivered as it is only when it is this realm's plain `ArrayBuffer` (see
+ * `isPlainArrayBuffer`); any other - a subclass, another realm's, one with properties of
+ * its own - is copied, so what is delivered reports the length it was measured at. A view
+ * over all of such a plain buffer (a `DataView`, an `Int16Array`, a `Buffer`, a subclass)
+ * is a plain `Uint8Array` over its bytes, not copied; one over part of a buffer (a pooled
+ * `Buffer`) or over any other is copied, so the body's `buffer` holds the body alone and
+ * is held to the same rule. A view is delivered as a `Uint8Array` whatever
+ * memory it is over. Read through the intrinsic getters, as the body was measured.
  */
 function fixedAnsweredBody(body: object, size: number): unknown {
   const isBuffer = arrayBufferKindOf(body) !== undefined;
@@ -6146,18 +6146,16 @@ function fixedAnsweredBody(body: object, size: number): unknown {
     if (!isBuffer) {
       const view = plainBytesView(body as ArrayBufferView);
 
-      // A view over all of its buffer, as is; over part of one - a pooled `Buffer` - a
-      // copy, so the body's `buffer` holds the body alone.
-      return view.byteOffset === 0 && size === bufferByteLength
+      // A view over all of a plain buffer, as is; over part of one - a pooled `Buffer` -
+      // or over any other buffer, a copy, so the body's `buffer` holds the body alone.
+      return view.byteOffset === 0 &&
+        size === bufferByteLength &&
+        isPlainArrayBuffer(buffer)
         ? view
         : view.slice();
     }
 
-    // This realm's own `ArrayBuffer`, with nothing of its own to report another length.
-    if (
-      Object.getPrototypeOf(body) === ArrayBuffer.prototype &&
-      Reflect.ownKeys(body).length === 0
-    ) {
+    if (isPlainArrayBuffer(buffer)) {
       return body;
     }
   }
@@ -6169,6 +6167,17 @@ function fixedAnsweredBody(body: object, size: number): unknown {
   ).slice();
 
   return isBuffer ? copy.buffer : copy;
+}
+
+/**
+ * Whether `buffer` is this realm's own `ArrayBuffer`, with nothing of its own - a
+ * `byteLength` getter, say - to report another length than it holds.
+ */
+function isPlainArrayBuffer(buffer: ArrayBufferLike): boolean {
+  return (
+    Object.getPrototypeOf(buffer) === ArrayBuffer.prototype &&
+    Reflect.ownKeys(buffer).length === 0
+  );
 }
 
 /**

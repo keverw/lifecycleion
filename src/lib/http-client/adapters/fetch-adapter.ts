@@ -558,7 +558,7 @@ async function readResponseBody(
         () => {
           cancelBodyQuietly(body);
         },
-        true,
+        'iterable',
         signal,
       );
     }
@@ -586,7 +586,7 @@ async function readResponseBody(
     () => {
       cancelBodyQuietly(reader);
     },
-    false,
+    'web-stream',
     signal,
   );
 }
@@ -673,7 +673,7 @@ function letGoOnAbort(
  * over the limit is never held whole.
  *
  * Each chunk must be a `Uint8Array`, from any realm, told and measured by its internal
- * slot rather than by the `byteLength` it reports - or, where `isTextChunkAccepted`, a
+ * slot rather than by the `byteLength` it reports - or, from an `'iterable'` source, a
  * string, taken as its UTF-8 bytes. Anything else is refused with the `TypeError` the
  * Fetch standard's `arrayBuffer()` rejects with for the same stream, and the body let go:
  * an `ArrayBuffer` or `DataView` chunk would be counted but joined as zeros, and one with
@@ -683,11 +683,18 @@ async function readBodyWithin(
   source: AsyncIterable<unknown>,
   maxResponseBytes: number,
   cancel: () => void,
-  isTextChunkAccepted: boolean,
+  sourceKind: 'web-stream' | 'iterable',
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
-  // Kept as read, a small chunk copied (see `BodyBytes`).
-  const body = new BodyBytes(maxResponseBytes);
+  const isTextChunkAccepted = sourceKind === 'iterable';
+  // Kept as read, a small chunk copied (see `BodyBytes`). Every chunk of an iterable
+  // copied: a polyfill's or a test double's source may hand over one buffer again and
+  // again, filled anew for each chunk. A web stream's are kept, as the runtime's own
+  // `arrayBuffer()` keeps them: a stream that refills one buffer reads as its last fill
+  // there too, and the runtime's `fetch` hands over each chunk in memory of its own.
+  const body = new BodyBytes(maxResponseBytes, {
+    isEveryChunkCopied: sourceKind === 'iterable',
+  });
   let loadedBytes = 0;
   let emptyChunks = 0;
   let encoder: TextEncoder | undefined;

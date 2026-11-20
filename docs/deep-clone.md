@@ -7,6 +7,7 @@ Deep clone utility that creates a true deep copy of a value, cloning nested stru
 - [Usage](#usage)
 - [API](#api)
   - [deepClone](#deepclone)
+    - [Options](#options)
 - [Supported Types](#supported-types)
 - [Notes](#notes)
 

@@ -18649,7 +18649,7 @@ test("a custom adapter's view over all of its buffer is delivered over that buff
   expect((response.body as Uint8Array).buffer).toBe(sent.buffer);
 });
 
-test.each([
+const unusualBuffers = [
   [
     'an ArrayBuffer subclass whose own getter reports 0',
     () => {
@@ -18669,7 +18669,9 @@ test.each([
     "another realm's ArrayBuffer",
     () => vm.runInNewContext('Uint8Array.of(1, 2, 3, 4).buffer') as ArrayBuffer,
   ],
-] as const)(
+] as const;
+
+test.each(unusualBuffers)(
   "a custom adapter's body that is %s is delivered as a plain ArrayBuffer of its measured length",
   async (_label, makeBody) => {
     const sent = makeBody();
@@ -18681,6 +18683,23 @@ test.each([
     expect(Object.getPrototypeOf(body)).toBe(ArrayBuffer.prototype);
     expect(body.byteLength).toBe(4);
     expect([...new Uint8Array(body)]).toEqual([1, 2, 3, 4]);
+  },
+);
+
+test.each(unusualBuffers)(
+  "a custom adapter's view over all of %s is delivered over a plain ArrayBuffer of its measured length",
+  async (_label, makeBuffer) => {
+    const sent = makeBuffer();
+    const response = await customAdapterAnswering(new Uint8Array(sent))
+      .get('/x')
+      .send();
+    const body = response.body as Uint8Array;
+
+    expect(response.isFailed).toBe(false);
+    expect(body.buffer).not.toBe(sent);
+    expect(Object.getPrototypeOf(body.buffer)).toBe(ArrayBuffer.prototype);
+    expect(body.buffer.byteLength).toBe(4);
+    expect([...body]).toEqual([1, 2, 3, 4]);
   },
 );
 
