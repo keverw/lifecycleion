@@ -23,7 +23,10 @@ import {
   assertOptionalHeaderRecord,
   isPlainRecord,
 } from '../internal/plain-record';
-import { describeValue } from '../../internal/describe-value';
+import {
+  describeNumberOrType,
+  describeValue,
+} from '../../internal/describe-value';
 import {
   connectRefusal,
   makeAbortError,
@@ -838,7 +841,7 @@ export class MockAdapter implements HTTPAdapter {
       const status: unknown = mockResponse.status;
       if (!isStatusCode(status)) {
         throw new TypeError(
-          `MockAdapter route returned status ${typeof status === 'number' ? String(status) : typeof status}; a response status is an integer from 100 to 999 (use transportError for a network failure)`,
+          `MockAdapter route returned status ${describeNumberOrType(status)}; a response status is an integer from 100 to 999 (use transportError for a network failure)`,
         );
       }
     });
@@ -1110,7 +1113,7 @@ function readMockTransportError(transportError: unknown): {
   const status: unknown = options.status;
   if (status !== undefined && !isAdapterStatus(status)) {
     throw new TypeError(
-      `MockAdapter route returned transportError status ${typeof status === 'number' ? String(status) : typeof status}; it is 0, or an integer from 100 to 999`,
+      `MockAdapter route returned transportError status ${describeNumberOrType(status)}; it is 0, or an integer from 100 to 999`,
     );
   }
 

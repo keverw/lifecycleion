@@ -3380,6 +3380,27 @@ describe('MockAdapter - invalid route status and delayed abort', () => {
         (error: unknown) => error as Error,
       );
     expect(rejection?.message).toContain('returned status 1000;');
+
+    // A null is named as null, as the client names it.
+    adapter.routes.get('/null', () => ({
+      status: null as unknown as number,
+    }));
+    adapter.routes.get('/transport-null', () => ({
+      status: 200,
+      transportError: { status: null as unknown as number },
+    }));
+    for (const [requestURL, expected] of [
+      ['/null', 'returned status null;'],
+      ['/transport-null', 'returned transportError status null;'],
+    ] as const) {
+      const nullRejection = await adapter
+        .send(makeAdapterRequest({ requestURL }))
+        .then(
+          () => undefined,
+          (error: unknown) => error as Error,
+        );
+      expect(nullRejection?.message).toContain(expected);
+    }
   });
 
   test('an abort during the response delay rejects as every other abort does', async () => {

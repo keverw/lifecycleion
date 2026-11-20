@@ -810,7 +810,7 @@ export function normalizeFilterMethods(
   }
   if (!Array.isArray(methods)) {
     throw new TypeError(
-      `${label} filter methods must be an array of method names (got ${typeof methods})`,
+      `${label} filter methods must be an array of method names (got ${describeValue(methods)})`,
     );
   }
   // Copied first, by index, as the other lists are (see `copyArrayValue`): the caller's
@@ -970,7 +970,7 @@ export function assertSupportedAdapterRuntimeAndConfig(
     const value: unknown = config[name];
     if (!isNullish(value) && typeof value !== 'boolean') {
       throw new TypeError(
-        `HTTPClient ${name} must be a boolean (got ${typeof value})`,
+        `HTTPClient ${name} must be a boolean (got ${describeValue(value)})`,
       );
     }
   }
@@ -978,7 +978,7 @@ export function assertSupportedAdapterRuntimeAndConfig(
   const userAgent: unknown = config.userAgent;
   if (!isNullish(userAgent) && typeof userAgent !== 'string') {
     throw new TypeError(
-      `HTTPClient userAgent must be a string (got ${typeof userAgent})`,
+      `HTTPClient userAgent must be a string (got ${describeValue(userAgent)})`,
     );
   }
 

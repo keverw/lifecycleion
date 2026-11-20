@@ -9,7 +9,10 @@ import { isSignalAbortedQuietly } from './internal/request-fields';
 import { isAbortError } from './internal/adapter-error';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
-import { describeValue } from '../internal/describe-value';
+import {
+  describeNumberOrType,
+  describeValue,
+} from '../internal/describe-value';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -3746,7 +3749,7 @@ export class BaseHTTPClient {
         const candidateStatus: unknown = adapterResponse.status;
         if (!isAdapterStatus(candidateStatus)) {
           throw new TypeError(
-            `HTTPClient adapter answered with an invalid status (got ${typeof candidateStatus === 'number' ? String(candidateStatus) : typeof candidateStatus})`,
+            `HTTPClient adapter answered with an invalid status (got ${describeNumberOrType(candidateStatus)})`,
           );
         }
         answeredStatus = candidateStatus;

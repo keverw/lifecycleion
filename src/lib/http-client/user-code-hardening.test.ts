@@ -662,3 +662,33 @@ test.each([
     expect(sends).toBe(1);
   },
 );
+
+test.each([
+  ['null', null],
+  ['undefined', undefined],
+  ['string', '200'],
+  ['99', 99],
+] as const)(
+  'an adapter that answers with a status of %s is refused naming what it sent',
+  async (got, status) => {
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            status,
+            headers: {},
+            body: null,
+          } as unknown as AdapterResponse),
+      },
+    });
+    const builder = client.get('https://api.example.com/x');
+
+    await builder.send();
+
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(String(builder.error?.cause)).toContain(
+      `HTTPClient adapter answered with an invalid status (got ${got})`,
+    );
+  },
+);

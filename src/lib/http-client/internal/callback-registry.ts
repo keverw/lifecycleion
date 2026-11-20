@@ -268,7 +268,7 @@ function copyFilterLists(
     }
     if (!Array.isArray(value)) {
       throw new TypeError(
-        `${label} filter ${field} must be an array (got ${typeof value})`,
+        `${label} filter ${field} must be an array (got ${describeValue(value)})`,
       );
     }
     const allowed = field === 'phases' ? kind.phases : rule.allowed;

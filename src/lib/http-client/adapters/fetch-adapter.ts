@@ -311,6 +311,18 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
+    // The server answered, so the upload ended: reported as 100% on every answered path,
+    // fetch having no real per-chunk progress.
+    const reportUploadEnded = (): void => {
+      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+    };
+    // A body that will not be read is let go of: a polyfill's Node `Readable` would
+    // otherwise hold its socket until the server closed it.
+    const answeredResponse = response;
+    const letGoOfBody = (): void => {
+      cancelBodyQuietly(readUnknownMember(answeredResponse, 'body'));
+    };
+
     // Each read once and guarded, as a polyfill's or test double's response may carry any
     // getter. One that throws fails the same way on every attempt, so it is refused as
     // non-retryable rather than repeating a request the server answered, and its body let go.
@@ -328,9 +340,8 @@ export class FetchAdapter implements HTTPAdapter {
         responseHeadersForBody = extractFetchHeaders(response.headers);
       }
     } catch (error) {
-      cancelBodyQuietly(readUnknownMember(response, 'body'));
-      // The server answered, so the upload ended, as on every other answered path.
-      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+      letGoOfBody();
+      reportUploadEnded();
 
       // A cancellation stays a cancellation, as on the body read below.
       if (isAbortError(error) || isSignalAbortedQuietly(signal)) {
@@ -350,7 +361,7 @@ export class FetchAdapter implements HTTPAdapter {
       // Even though the client will classify this as redirect_disabled, the
       // browser completed the fetch operation. Emit terminal progress so the
       // browser adapters match the server/mock adapters' completion semantics.
-      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+      reportUploadEnded();
 
       // Not for a request that callback cancelled, which reports no completion, as a
       // cancelled download never does: the client sorts the redirect from the cancel.
@@ -369,11 +380,10 @@ export class FetchAdapter implements HTTPAdapter {
     // A status no server may send, which a runtime's `fetch` may hand on (Bun's passes
     // `099` as `99` and `000` as `0`, where Node's refuses the response): answered as one a
     // runtime could not read at all is (see `malformedStatusAnswer`), its body let go. Not
-    // a browser's opaque response, whose `0` hides the real status. The server answered,
-    // so the upload ended, as on every other answered path.
+    // a browser's opaque response, whose `0` hides the real status.
     if (isMalformedServerStatus(status) && responseType !== 'opaque') {
-      cancelBodyQuietly(readUnknownMember(response, 'body'));
-      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+      letGoOfBody();
+      reportUploadEnded();
 
       // A cancellation stays a cancellation, as on the reads above.
       if (isSignalAbortedQuietly(signal)) {
@@ -383,17 +393,16 @@ export class FetchAdapter implements HTTPAdapter {
       return malformedStatusAnswer(status);
     }
 
-    // Fire 100% upload progress (fetch has no real per-chunk progress). Download progress
-    // fires once the body has been read and passed the limit, below.
-    guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+    // The upload's 100% here; the download's once the body has been read and passed the
+    // limit, below.
+    reportUploadEnded();
 
     // A cancel from that callback ends the request as a cancel over the answer, as the
     // body read below ends one, and as NodeAdapter ends it: a bodiless answer has no read
     // to stop, and would otherwise resolve as though it had not been cancelled.
-    // The body is let go of, as on every abort once the headers are in: a polyfill's Node
-    // `Readable` would hold its socket until the server closed it.
+    // The body is let go of, as on every abort once the headers are in.
     if (isSignalAbortedQuietly(signal)) {
-      cancelBodyQuietly(readUnknownMember(response, 'body'));
+      letGoOfBody();
       throw markResponseStreamAbort(
         makeAbortError(),
         status,

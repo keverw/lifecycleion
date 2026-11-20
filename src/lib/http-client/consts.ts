@@ -1,3 +1,4 @@
+import { describeNumberOrType } from '../internal/describe-value';
 import { isNullish } from '../internal/is-nullish';
 import { assertDurationMS, clampTimerDelayMS } from '../internal/timer-limits';
 import type { AdapterType, HTTPMethod } from './types';
@@ -154,7 +155,7 @@ export function validateMaxResponseBytes(
     requested <= 0
   ) {
     throw new TypeError(
-      `${label} must be a positive integer, or Infinity for no limit (got ${typeof requested === 'number' ? String(requested) : typeof requested})`,
+      `${label} must be a positive integer, or Infinity for no limit (got ${describeNumberOrType(requested)})`,
     );
   }
 }

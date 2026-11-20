@@ -2448,8 +2448,8 @@ export class NodeAdapter implements HTTPAdapter {
                     ? readUnknownMember(writable, 'reason')
                     : undefined;
 
-                // Read before the teardown, as a factory that threw reports them: the
-                // headers the request went out with.
+                // The headers the request went out with, as a factory that threw reports
+                // them.
                 const effectiveHeaders = snapshotEffectiveRequestHeaders(
                   req,
                   request.headers,

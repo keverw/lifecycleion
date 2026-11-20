@@ -290,7 +290,7 @@ async function runInterceptors(
     const candidate: unknown = result;
     if (typeof candidate !== 'object') {
       throw new TypeError(
-        `[HTTPClient] Interceptor returned a value that is not a request, a cancel or null (got ${typeof candidate}).`,
+        `[HTTPClient] Interceptor returned a value that is not a request, a cancel or null (got ${describeValue(candidate)}).`,
       );
     }
 
