@@ -31,10 +31,11 @@ const KEEP_BYTES = 4 * 1024;
  * is larger.
  *
  * A chunk kept as it is must not change before the join: the runtime's streams hand over
- * each chunk in memory of its own. A source that refills one buffer for each chunk has
- * the chunks kept as they are read as its last fill, as the runtime's own `arrayBuffer()`
- * and a Node stream's consumers read them. One whose buffer is detached by then fails the
- * join.
+ * each chunk in memory of its own. Over a source that refills one buffer for each chunk,
+ * then, what is read depends on whether each chunk is copied or kept (see above): one
+ * copied as it is read holds the bytes it was handed, and one kept as it is reads as the
+ * buffer's last fill, as every chunk does through the runtime's own `arrayBuffer()` and a
+ * Node stream's consumers. One whose buffer is detached by then fails the join.
  */
 export class BodyBytes {
   private readonly parts: Uint8Array[] = [];

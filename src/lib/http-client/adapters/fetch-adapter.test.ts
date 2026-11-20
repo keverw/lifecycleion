@@ -3552,6 +3552,73 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     });
   });
 
+  test.each([
+    ['an iterable', 100, [0x41, 0x42, 0x43]],
+    ['an iterable', 4096, [0x43, 0x43, 0x43]],
+    ['a web stream', 100, [0x41, 0x42, 0x43]],
+    ['a web stream', 4096, [0x43, 0x43, 0x43]],
+  ])(
+    '%s body that refills one buffer of %i bytes for each chunk is read as %j',
+    async (source, chunkBytes, expected) => {
+      // A small chunk is copied as it is read; one of 4 KiB or more that is all of its
+      // buffer is kept as it is, so it is read as the buffer's last fill.
+      const shared = new Uint8Array(chunkBytes);
+      const fills = [0x41, 0x42, 0x43];
+      let body: unknown;
+
+      if (source === 'an iterable') {
+        body = {
+          async *[Symbol.asyncIterator]() {
+            for (const byte of fills) {
+              await Promise.resolve();
+              shared.fill(byte);
+              yield shared;
+            }
+          },
+        };
+      } else {
+        let pulls = 0;
+        body = new ReadableStream(
+          {
+            pull(controller) {
+              if (pulls === fills.length) {
+                controller.close();
+                return;
+              }
+
+              shared.fill(fills[pulls++]);
+              controller.enqueue(shared);
+            },
+          },
+          // Pulled only when read: each fill is read before the next.
+          { highWaterMark: 0 },
+        );
+      }
+
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          type: 'basic',
+          headers: new Headers(),
+          body,
+          arrayBuffer: () => Promise.reject(new Error('not read whole')),
+        });
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1_000_000,
+      });
+
+      const read = response.body as Uint8Array;
+      expect(read.length).toBe(3 * chunkBytes);
+      expect([read[0], read[chunkBytes], read[2 * chunkBytes]]).toEqual(
+        expected,
+      );
+    },
+  );
+
   test('a text chunk whose UTF-16 units are exactly the bytes the limit has left is read', async () => {
     (globalThis as any).fetch = () =>
       Promise.resolve({

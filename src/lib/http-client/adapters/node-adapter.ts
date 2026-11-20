@@ -2578,18 +2578,26 @@ export class NodeAdapter implements HTTPAdapter {
 
             // --- Normal buffered response ---
 
+            // Settles with `response` once the response is torn down - its socket, and
+            // any decoder still inflating it. In this order: the response is let go
+            // before the teardown, so nothing the teardown sets off answers it first.
+            const settleAfterTeardown = (
+              response: Omit<AdapterResponse, 'effectiveRequestHeaders'>,
+            ): void => {
+              activeBufferedResponse = undefined;
+              runTeardownGuarded(tearDownAfterResponse);
+              settleResponse(response);
+            };
+
             // A body whose rest is not read fails as a stream error with the real
-            // status, the response torn down - its socket, and any decoder still
-            // inflating it - so the rest is neither read nor decoded into nothing. In
-            // this order: the response is let go before the teardown, so nothing the
-            // teardown sets off answers it first.
+            // status, torn down so the rest is neither read nor decoded into nothing.
             const settleWithRestUnread = (
               streamErrorCode: NonNullable<AdapterResponse['streamErrorCode']>,
               errorCause: Error,
             ): void => {
-              activeBufferedResponse = undefined;
-              runTeardownGuarded(tearDownAfterResponse);
-              settleResponse(streamErrorResponse(streamErrorCode, errorCause));
+              settleAfterTeardown(
+                streamErrorResponse(streamErrorCode, errorCause),
+              );
             };
 
             // A body too large to hold: the server answered, and what failed is taking
@@ -2650,9 +2658,7 @@ export class NodeAdapter implements HTTPAdapter {
                 return;
               }
 
-              activeBufferedResponse = undefined;
-              runTeardownGuarded(tearDownAfterResponse);
-              settleResponse({ status, headers, body: null });
+              settleAfterTeardown({ status, headers, body: null });
             };
 
             // Whether a body is still going out: being written, or written and ended with

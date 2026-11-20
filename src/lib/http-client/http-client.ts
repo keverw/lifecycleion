@@ -3686,7 +3686,7 @@ export class BaseHTTPClient {
         // left to the engine's error for reading a field of `undefined`.
         if (!isObjectLike(rawAdapterResponse)) {
           throw new TypeError(
-            `HTTPClient adapter answered with no response object (got ${rawAdapterResponse === null ? 'null' : typeof rawAdapterResponse})`,
+            `HTTPClient adapter answered with no response object (got ${describeValue(rawAdapterResponse)})`,
           );
         }
         const headers = rawAdapterResponse.headers;
@@ -4287,6 +4287,24 @@ export class BaseHTTPClient {
         const answeredBeforeFailure =
           abortedResponse ?? factoryAnsweredResponse ?? announcedResponse;
 
+        // Every exit below, the jar's failure among them, reports what the adapter said it
+        // sent - on its answer, or on the error it failed with, a cancel during a stream
+        // factory's setup among them - to the retry phase's error observers, the final
+        // error and a cancel alike, with the status it answered with.
+        // Not off the caller's own abort reason - an attempt given up on throws it, and
+        // `fetch` rejects with its signal's - which carries nothing the adapter sent.
+        const isCallerAbortReason =
+          isAbandoned ||
+          (cancelSignal.aborted &&
+            error === readUnknownMember(cancelSignal, 'reason'));
+        const reportedSentRequest = isCallerAbortReason
+          ? observedSentRequest
+          : sentRequestForObservedAdapterError(
+              sentRequest,
+              error,
+              observedSentRequest,
+            );
+
         if (cookieJar && answeredBeforeFailure) {
           try {
             cookieJar.processResponseHeaders(
@@ -4317,11 +4335,7 @@ export class BaseHTTPClient {
 
               return {
                 adapterResponse: null,
-                sentRequest: sentRequestForObservedAdapterError(
-                  sentRequest,
-                  error,
-                  observedSentRequest,
-                ),
+                sentRequest: reportedSentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: false,
                 wasTimeout: false,
@@ -4342,24 +4356,6 @@ export class BaseHTTPClient {
             }
           }
         }
-
-        // An exit below reports what the adapter said it sent - on its answer, or on the
-        // error it failed with, a cancel during a stream factory's setup among them - to
-        // the retry phase's error observers, the final error and a cancel alike, and,
-        // through `answeredStatus`, the status it answered with.
-        // Not off the caller's own abort reason - an attempt given up on throws it, and
-        // `fetch` rejects with its signal's - which carries nothing the adapter sent.
-        const isCallerAbortReason =
-          isAbandoned ||
-          (cancelSignal.aborted &&
-            error === readUnknownMember(cancelSignal, 'reason'));
-        const reportedSentRequest = isCallerAbortReason
-          ? observedSentRequest
-          : sentRequestForObservedAdapterError(
-              sentRequest,
-              error,
-              observedSentRequest,
-            );
 
         // The attempt ended by a cancel: reported to `onAttemptEnd` with the status `send()`
         // resolved with, if it had, and to the caller with its reason.
