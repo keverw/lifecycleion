@@ -1948,6 +1948,45 @@ test('a Proxy whose prototype reads differently each time does not change how an
   expect(bounded.has('big')).toBe(false);
 });
 
+test('a buffer whose chain runs past the walk’s cap is measured through its slots, every time', () => {
+  let prototype: object = ArrayBuffer.prototype;
+  for (let link = 0; link < 70; link++) {
+    prototype = Object.create(prototype) as object;
+  }
+  const deepBuffer = (): ArrayBuffer =>
+    Object.setPrototypeOf(new ArrayBuffer(2000), prototype) as ArrayBuffer;
+  const cache = new LRUCache<string, object>(10, { maxSize: 1000 });
+
+  cache.set('first', deepBuffer());
+  cache.set('second', deepBuffer());
+
+  expect(cache.has('first')).toBe(false);
+  expect(cache.has('second')).toBe(false);
+});
+
+test('a buffer whose prototype was replaced with one carrying no buffer’s tag is estimated as an object', () => {
+  class Holder {}
+  const prototypes: Array<object | null> = [
+    null,
+    Object.prototype,
+    Holder.prototype,
+  ];
+
+  for (const prototype of prototypes) {
+    const cache = new LRUCache<string, object>(10, { maxSize: 1000 });
+    const buffer = Object.setPrototypeOf(
+      new ArrayBuffer(1_000_000),
+      prototype,
+    ) as object;
+
+    cache.set('buffer', buffer);
+
+    // Its JSON text, `{}`, not its million bytes: see `sizeCalculator` for such values.
+    expect(cache.has('buffer')).toBe(true);
+    expect(cache.byteSize).toBeLessThan(1000);
+  }
+});
+
 test('the default size of a buffer or view is its byte length, read from its internal slots, from any realm', () => {
   class LyingBytes extends Uint8Array {
     public override get byteLength(): number {

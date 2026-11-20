@@ -1,12 +1,12 @@
-import { readHiddenMember } from './hidden-member';
+import { readUnknownMember } from '../../internal/read-member';
 import { reportCallbackError } from '../../safe-handle-callback';
 import type { AdapterRequest } from '../types';
 
-/** The listener on `request` under `key`, if it carries one (see `readHiddenMember`). */
+/** The listener on `request` under `key`, if it carries one (see `setHiddenMember`). */
 export function readHiddenRequestListener<
   Listener extends (...args: never[]) => void,
 >(request: AdapterRequest, key: symbol): Listener | undefined {
-  const listener = readHiddenMember(request, key);
+  const listener = readUnknownMember(request, key);
 
   return typeof listener === 'function' ? (listener as Listener) : undefined;
 }

@@ -1,6 +1,14 @@
 import { raceSentinel } from '../../internal/race-sentinel-test-utils';
 import { hostileRejections } from '../../internal/hostile-promise-test-utils';
-import { describe, expect, test, beforeAll, afterAll, spyOn } from 'bun:test';
+import {
+  describe,
+  expect,
+  test,
+  beforeAll,
+  afterAll,
+  spyOn,
+  jest,
+} from 'bun:test';
 import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import * as fs from 'node:fs';
@@ -41,6 +49,7 @@ import {
   STREAM_ABORT_HEADERS_KEY,
   STREAM_ABORT_STATUS_KEY,
   UPLOAD_SOURCE_STALL_GRACE_MS,
+  UPLOAD_STALL_GRACE_MS,
 } from '../consts';
 import type {
   AdapterRequest,
@@ -13519,9 +13528,9 @@ test('bytes trickled behind an answered 205 hold its connection for three window
 }, 30_000);
 
 test('an answered 205 does not count a quiet window its upload ended inside, and keeps its connection past it', async () => {
-  // The upload ends inside the first window, 1.5 s before it would, and the 205's bytes
-  // come after it would have: that window was not quiet, so they are read rather than
-  // the connection let go.
+  // On fake timers, so the upload ends at a known point inside the first window: 1.5 s
+  // before its end. That window was not quiet, so the connection is kept past it; the
+  // next, which begins with the writer done and stays quiet, lets it go at its end.
   const parked: Array<() => void> = [];
   const req = new MockClientRequest((_data, callback) => {
     parked.push(() => callback?.(null));
@@ -13537,6 +13546,7 @@ test('an answered 205 does not count a quiet window its upload ended inside, and
       return req as unknown as http.ClientRequest;
     },
   );
+  jest.useFakeTimers();
 
   try {
     const response = await new NodeAdapter().send({
@@ -13548,21 +13558,26 @@ test('an answered 205 does not count a quiet window its upload ended inside, and
 
     expect(response.status).toBe(205);
 
-    await new Promise((resolve) => setTimeout(resolve, 3500));
+    jest.advanceTimersByTime(UPLOAD_STALL_GRACE_MS - 1500);
     while (!req.ended) {
       parked.shift()?.();
       await new Promise((resolve) => setImmediate(resolve));
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
 
+    // The first window's end, with the upload ended inside it.
+    jest.advanceTimersByTime(1500);
     expect(req.destroyed).toBe(false);
 
-    res.emit('data', Buffer.from('Reset Content'));
-    res.emit('end');
+    // Up to the second window's end, quiet with the writer done.
+    jest.advanceTimersByTime(UPLOAD_STALL_GRACE_MS - 1);
+    expect(req.destroyed).toBe(false);
+    jest.advanceTimersByTime(1);
+    expect(req.destroyed).toBe(true);
   } finally {
+    jest.useRealTimers();
     requestSpy.mockRestore();
   }
-}, 20_000);
+});
 
 /**
  * A request whose writes are accepted a tick later and whose `end()` leaves its last bytes
@@ -15473,6 +15488,81 @@ describe("a client's byte body through NodeAdapter", () => {
       });
     }
   });
+
+  test.each([
+    ['the body it was handed, returned as it is', false],
+    ['bytes of its own it returned', true],
+  ])(
+    'is not reached by an interceptor in any phase that keeps %s and changes it mid-upload',
+    async (_label, isOwnBytesReturned) => {
+      const received: string[] = [];
+      let againCalls = 0;
+      const server = http.createServer((request, response) => {
+        const chunks: Buffer[] = [];
+        request.on('data', (chunk: Buffer) => chunks.push(chunk));
+        request.on('end', () => {
+          received.push(digest(Buffer.concat(chunks)));
+          if (request.url === '/start') {
+            response.writeHead(307, { location: '/again' }).end();
+          } else if (++againCalls === 1) {
+            response.writeHead(503).end();
+          } else {
+            response.end('ok');
+          }
+        });
+      });
+      await new Promise<void>((done) => {
+        server.listen(0, '127.0.0.1', done);
+      });
+      const { port } = server.address() as AddressInfo;
+      const body = crypto.randomBytes(SIZE);
+      const kept: Uint8Array[] = [];
+      const phases: string[] = [];
+      let progressEvents = 0;
+
+      try {
+        const client = new HTTPClient({
+          adapter: new NodeAdapter(),
+          baseURL: `http://127.0.0.1:${port}`,
+          followRedirects: true,
+          retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+        });
+        client.addRequestInterceptor(
+          (request, phase) => {
+            phases.push(phase.type);
+            const handed = request.body as Uint8Array;
+            if (!isOwnBytesReturned) {
+              kept.push(handed);
+              return request;
+            }
+            const own = new Uint8Array(handed);
+            kept.push(own);
+            return { ...request, body: own };
+          },
+          { phases: ['initial', 'redirect', 'retry'] },
+        );
+        const response = await client
+          .put('/start')
+          .body(new Uint8Array(body))
+          .onUploadProgress(() => {
+            progressEvents++;
+            for (const bytes of kept) {
+              bytes.fill(0);
+            }
+          })
+          .send();
+
+        expect(response.status).toBe(200);
+        expect(phases).toEqual(['initial', 'redirect', 'retry']);
+        expect(progressEvents).toBeGreaterThan(3);
+        expect(received).toEqual([digest(body), digest(body), digest(body)]);
+      } finally {
+        await new Promise<void>((done) => {
+          server.close(() => done());
+        });
+      }
+    },
+  );
 
   test('is not copied with a stream factory, which the client calls with this undefined', async () => {
     let serverDigest = '';

@@ -347,8 +347,9 @@ export function hasOwnToStringTagInChain(value: object, tag: string): boolean {
 
 /**
  * Whether the chain from `prototype` - itself, then its prototypes - holds a buffer's own
- * prototype, told as `hasBufferTagInChain` tells it; `null` for a chain that throws, so a
- * caller can tell an answer from a failure to give one.
+ * prototype, told as `hasBufferTagInChain` tells it; `null` for a chain that throws or
+ * runs past {@link MAX_PROTOTYPE_DEPTH} links, so a caller can tell an answer from a
+ * failure to give one.
  */
 export function hasBufferTagInChainFrom(prototype: object): boolean | null {
   return matchInChainFrom(prototype, (link) =>
@@ -377,7 +378,8 @@ function someInPrototypeChain(
 
 /**
  * Whether `matches` holds for `prototype` or one of its prototypes, up to
- * {@link MAX_PROTOTYPE_DEPTH} links in all; `null` if the chain throws.
+ * {@link MAX_PROTOTYPE_DEPTH} links in all; `null` if the chain throws or goes on past
+ * them, neither being an answer about the whole chain.
  */
 function matchInChainFrom(
   prototype: object | null,
@@ -389,11 +391,11 @@ function matchInChainFrom(
         return true;
       }
 
-      if (depth === MAX_PROTOTYPE_DEPTH) {
-        break;
-      }
-
       prototype = Object.getPrototypeOf(prototype) as object | null;
+
+      if (depth === MAX_PROTOTYPE_DEPTH && prototype !== null) {
+        return null;
+      }
     }
   } catch {
     return null;

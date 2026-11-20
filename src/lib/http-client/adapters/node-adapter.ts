@@ -2838,6 +2838,47 @@ export class NodeAdapter implements HTTPAdapter {
 
             const totalBytes = declaredLength ?? 0;
 
+            // The body failed after the headers arrived: resolve with the real status as
+            // a stream error. The first of `'error'`, `'aborted'` and `'close'` answers, as do
+            // a body that cannot be joined at `'end'` and a chunk that cannot be kept, for
+            // which the rest is not read (`isRestUnread`).
+            const settleBufferedStreamError = (
+              message: string,
+              cause?: Error,
+              { isRestUnread = false }: { isRestUnread?: boolean } = {},
+            ): void => {
+              // The pieces let go, as `'end'` lets them go: an early-ack upload still
+              // running keeps this closure alive, and a body that failed part-way - a
+              // decoding failure near its end - would be held whole until the upload
+              // finishes.
+              // Also on the guarded way out, for a response a cancel or timeout already
+              // answered: its abort listener cannot reach these.
+              gathered.clear();
+
+              if (!activeBufferedResponse) {
+                return;
+              }
+
+              activeBufferedResponse = undefined;
+
+              // The rest of the body not read, as for one past the limit, and in its
+              // order: the response is let go before the teardown, so nothing the
+              // teardown sets off answers it first.
+              if (isRestUnread) {
+                tearDownAfterResponse();
+              }
+
+              settleResponse(
+                streamErrorResponse(
+                  'stream_response_error',
+                  makeResponseStreamError(
+                    message,
+                    cause ?? requestErrorAfterResponse,
+                  ),
+                ),
+              );
+            };
+
             body.on('data', (chunk: Buffer) => {
               // Nothing kept, or reported, for a response the request no longer has.
               if (activeBufferedResponse === undefined) {
@@ -2857,23 +2898,14 @@ export class NodeAdapter implements HTTPAdapter {
               // A block that cannot be allocated is a stream error, as a join that fails
               // at `'end'` is: thrown from this listener, it would be an uncaught
               // exception, and the request would never settle. The rest of the body is
-              // not read, as for one past the limit, and in its order: the response is
-              // let go before the teardown, so nothing the teardown sets off answers it
-              // first.
+              // not read, as for one past the limit.
               try {
                 gathered.append(chunk, chunk.length);
               } catch (error) {
-                gathered.clear();
-                activeBufferedResponse = undefined;
-                tearDownAfterResponse();
-                settleResponse(
-                  streamErrorResponse(
-                    'stream_response_error',
-                    makeResponseStreamError(
-                      'Response body could not be kept',
-                      error as Error,
-                    ),
-                  ),
+                settleBufferedStreamError(
+                  'Response body could not be kept',
+                  error as Error,
+                  { isRestUnread: true },
                 );
                 return;
               }
@@ -2953,36 +2985,6 @@ export class NodeAdapter implements HTTPAdapter {
                 body: responseBody,
               });
             });
-
-            // The body failed after the headers arrived: resolve with the real status as
-            // a stream error. The first of `'error'`, `'aborted'` and `'close'` answers.
-            const settleBufferedStreamError = (
-              message: string,
-              cause?: Error,
-            ): void => {
-              // The pieces let go, as `'end'` lets them go: an early-ack upload still
-              // running keeps this closure alive, and a body that failed part-way - a
-              // decoding failure near its end - would be held whole until the upload
-              // finishes.
-              // Also on the guarded way out, for a response a cancel or timeout already
-              // answered: its abort listener cannot reach these.
-              gathered.clear();
-
-              if (!activeBufferedResponse) {
-                return;
-              }
-
-              activeBufferedResponse = undefined;
-              settleResponse(
-                streamErrorResponse(
-                  'stream_response_error',
-                  makeResponseStreamError(
-                    message,
-                    cause ?? requestErrorAfterResponse,
-                  ),
-                ),
-              );
-            };
 
             body.on('error', (err: Error) => {
               settleBufferedStreamError('Response stream error', err);

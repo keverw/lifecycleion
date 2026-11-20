@@ -336,4 +336,6 @@ Within one value, an array met again - the same array in two places - counts 8 b
 
 The `Object` row applies to values that reach the object/JSON-size estimation branch. Values outside the listed branches, such as functions and symbols, fall back to the generic `Other non-object values` estimate.
 
+A buffer or view is measured as the cache's value or as an array's entry; one nested in an object is part of that object's JSON text. An `ArrayBuffer` or `SharedArrayBuffer` is told by its prototype chain, so one whose prototype was replaced with one that is not a buffer's (`Object.setPrototypeOf(buffer, null)`) is estimated as an object. For values like these, give the cache a `sizeCalculator`.
+
 These estimates are approximate. For accurate memory accounting provide a custom `sizeCalculator`.

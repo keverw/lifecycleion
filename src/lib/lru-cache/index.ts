@@ -86,7 +86,10 @@ type CacheEntry<V> = {
   value: V;
   expires?: number;
   size: number;
-  /** Its place in the LRU order: higher is more recently used. */
+  /**
+   * Its place in the LRU order: higher is more recently used. The map's order says the
+   * same, and both are set together, by `placeAsMostRecent` alone.
+   */
   order: number;
   /** Its node in the expiry heap, for an entry that can expire. */
   expiryNode?: ExpiryNode<unknown, unknown>;
@@ -371,10 +374,7 @@ export class LRUCache<K, V> {
         return undefined;
       }
 
-      // Move to end of LRU (most recently used)
-      this.map.delete(key);
-      entry.order = this.nextOrder++;
-      this.map.set(key, entry);
+      this.placeAsMostRecent(key, entry);
 
       // Run periodic cleanup if needed
       this.maybeCleanup(now);
@@ -441,9 +441,10 @@ export class LRUCache<K, V> {
       value,
       expires,
       size,
-      order: this.nextOrder++,
+      // Given below, with its place in the map.
+      order: 0,
     };
-    this.map.set(key, entry);
+    this.placeAsMostRecent(key, entry);
     this.currentSize += size;
 
     if (expires !== undefined) {
@@ -642,7 +643,9 @@ export class LRUCache<K, V> {
     // measured through its internal slots. Told first by its internal slot (a view) or,
     // for what is not an array, the tag its prototypes carry (a buffer), so any other
     // object is not put through the getters, each of which throws for it. A plain object
-    // is told apart by its prototype alone, without the walk.
+    // is told apart by its prototype alone, without the walk. So a buffer whose prototype
+    // was replaced with one carrying no buffer's tag is estimated as an object: trying the
+    // getters on every object would cost several times the rest of its estimate.
     const byteLength =
       typeof value === 'object' &&
       value !== null &&
@@ -973,6 +976,17 @@ export class LRUCache<K, V> {
     return true;
   }
 
+  /**
+   * Puts `entry` at the end of the map, the most recently used place, and gives it the
+   * `order` that says so: the map's order is what eviction reads, and `order` is what an
+   * expired batch is reported in (see `reclaimExpired`), so they change together.
+   */
+  private placeAsMostRecent(key: K, entry: CacheEntry<V>): void {
+    this.map.delete(key);
+    entry.order = this.nextOrder++;
+    this.map.set(key, entry);
+  }
+
   private assertNonNegativeFiniteNumber(value: number, message: string): void {
     if (!Number.isFinite(value) || value < 0) {
       throw new RangeError(message);
@@ -992,8 +1006,9 @@ const prototypesWithoutBufferTag = new WeakSet<object>();
  * Whether `value`, an object that is not an array or a view, may be a buffer: never a
  * plain object or one with no prototype, which carry no buffer's tag, nor an instance of
  * a prototype already found to carry none; otherwise, whether a prototype in its chain
- * carries a buffer's tag (see `hasBufferTagInChainFrom`). A prototype that cannot be read
- * answers no, as the walk does.
+ * carries a buffer's tag (see `hasBufferTagInChainFrom`), or that cannot be told. A
+ * prototype that cannot be read answers no: the value is a `Proxy`, which has no buffer's
+ * slots.
  */
 function mayBeBuffer(value: object): boolean {
   let prototype: unknown;
@@ -1013,13 +1028,15 @@ function mayBeBuffer(value: object): boolean {
 
   // Walked from the prototype read above, not read again: a `Proxy` answering another one
   // the second time cannot have this one remembered. Remembered only for a walk that
-  // finished, so a chain that throws partway is no answer about it.
+  // finished: a chain that throws partway, or runs on past the walk's cap, is no answer
+  // about it, and the value is measured through the slots instead, which tell a buffer
+  // whatever its chain.
   const hasTag = hasBufferTagInChainFrom(prototype as object);
   if (hasTag === false) {
     prototypesWithoutBufferTag.add(prototype as object);
   }
 
-  return hasTag === true;
+  return hasTag !== false;
 }
 
 /**

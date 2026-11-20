@@ -35,7 +35,7 @@ import {
   cancelTrackedRequest,
 } from './request-tracker';
 import type { RequestInfo, TrackedRequest } from './request-tracker';
-import { HTTPRequestBuilder } from './http-request-builder';
+import { createRequestBuilder } from './http-request-builder';
 import {
   RequestInterceptorManager,
   isInterceptorCancel,
@@ -142,6 +142,7 @@ import type {
   BuilderCallbacks,
   ResolvedBuilderOptions,
   BuilderSendContext,
+  HTTPRequestBuilder,
   SendFn,
 } from './http-request-builder';
 import type { CookieJar } from './cookie-jar';
@@ -648,7 +649,7 @@ export class BaseHTTPClient {
       );
     }
 
-    return new HTTPRequestBuilder<T>(
+    return createRequestBuilder<T>(
       normalizeStandardMethod(method),
       path,
       this._sendFn as SendFn<T>,

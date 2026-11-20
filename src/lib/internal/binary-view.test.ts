@@ -9,7 +9,7 @@ import {
 } from './binary-view';
 
 describe('prototype chain reads', () => {
-  test('a chain that never ends is read 64 prototypes deep and answers no', () => {
+  test('a chain that never ends is checked 64 prototypes deep, read one further to tell it goes on, and answers no', () => {
     let steps = 0;
     const endless = (): object =>
       new Proxy(
@@ -30,7 +30,7 @@ describe('prototype chain reads', () => {
     ]) {
       steps = 0;
       expect(read(endless())).toBe(false);
-      expect(steps).toBe(64);
+      expect(steps).toBe(65);
     }
   });
 

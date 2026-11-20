@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { runInNewContext } from 'node:vm';
-import { HTTPRequestBuilder } from './http-request-builder';
+import {
+  createRequestBuilder,
+  HTTPRequestBuilder,
+} from './http-request-builder';
 import type { BuilderSendContext } from './http-request-builder';
 import type { HTTPRequestOptions, HTTPResponse } from './types';
 import { HTTPClient } from './http-client';
@@ -83,11 +86,45 @@ function makeBuilder<T = unknown>(
     sideEffect,
   );
 
-  const builder = new HTTPRequestBuilder<T>('GET', '/test', sendFn as any);
+  const builder = createRequestBuilder<T>('GET', '/test', sendFn as any);
   return { builder, getContext, requireContext };
 }
 
 describe('HTTPRequestBuilder', () => {
+  describe('construction', () => {
+    type BuilderConstructor = new (...args: unknown[]) => HTTPRequestBuilder;
+
+    test('throws when constructed through a builder’s constructor, with a send function of the caller’s', () => {
+      const Builder = makeBuilder().builder.constructor as BuilderConstructor;
+      const { sendFn } = makeSendFn();
+
+      expect(() => new Builder('POST', '/x', sendFn)).toThrow(
+        /made by an HTTPClient's request methods/,
+      );
+    });
+
+    test('throws for a builder an option getter tries to construct while one is being made', async () => {
+      const Builder = makeBuilder().builder.constructor as BuilderConstructor;
+      let innerError: unknown;
+      const { sendFn, requireContext } = makeSendFn();
+      const options = {
+        get label() {
+          try {
+            new Builder('GET', '/inner', sendFn);
+          } catch (error) {
+            innerError = error;
+          }
+          return 'outer';
+        },
+      };
+
+      await createRequestBuilder('GET', '/test', sendFn, options).send();
+
+      expect(requireContext().options.label).toBe('outer');
+      expect(innerError).toBeInstanceOf(TypeError);
+    });
+  });
+
   describe('initial state', () => {
     test('state starts as pending', () => {
       const { builder } = makeBuilder();
@@ -225,7 +262,7 @@ describe('HTTPRequestBuilder', () => {
   describe('send() forwards context correctly', () => {
     test('forwards method and path', async () => {
       const { sendFn, requireContext } = makeSendFn();
-      const builder = new HTTPRequestBuilder('POST', '/users', sendFn);
+      const builder = createRequestBuilder('POST', '/users', sendFn);
       await builder.send();
       expect(requireContext().method).toBe('POST');
       expect(requireContext().path).toBe('/users');
@@ -361,7 +398,7 @@ describe('HTTPRequestBuilder', () => {
           },
         });
 
-        const builder = new HTTPRequestBuilder('GET', '/test', sendFn, options);
+        const builder = createRequestBuilder('GET', '/test', sendFn, options);
         await builder.send();
 
         expect(reads).toBe(1);
@@ -404,8 +441,8 @@ describe('HTTPRequestBuilder', () => {
         },
       };
 
-      expect(
-        () => new HTTPRequestBuilder('GET', '/test', sendFn, options),
+      expect(() =>
+        createRequestBuilder('GET', '/test', sendFn, options),
       ).toThrow();
       expect(events).toEqual([
         'read headers',
@@ -418,7 +455,7 @@ describe('HTTPRequestBuilder', () => {
 
     test('applies options passed to constructor', async () => {
       const { sendFn, requireContext } = makeSendFn();
-      const builder = new HTTPRequestBuilder('GET', '/test', sendFn, {
+      const builder = createRequestBuilder('GET', '/test', sendFn, {
         headers: { 'x-init': 'yes' },
         timeout: 1000,
         label: 'init-label',
@@ -433,24 +470,22 @@ describe('HTTPRequestBuilder', () => {
     test('constructor options reject empty or whitespace-only labels', () => {
       const { sendFn } = makeSendFn();
 
-      expect(
-        () =>
-          new HTTPRequestBuilder('GET', '/test', sendFn as any, {
-            label: '',
-          }),
+      expect(() =>
+        createRequestBuilder('GET', '/test', sendFn as any, {
+          label: '',
+        }),
       ).toThrow(/non-empty, non-whitespace/i);
 
-      expect(
-        () =>
-          new HTTPRequestBuilder('GET', '/test', sendFn as any, {
-            label: '   ',
-          }),
+      expect(() =>
+        createRequestBuilder('GET', '/test', sendFn as any, {
+          label: '   ',
+        }),
       ).toThrow(/non-empty, non-whitespace/i);
     });
 
     test('fluent headers() merge on top of constructor headers', async () => {
       const { sendFn, requireContext } = makeSendFn();
-      const builder = new HTTPRequestBuilder('GET', '/test', sendFn, {
+      const builder = createRequestBuilder('GET', '/test', sendFn, {
         headers: { 'x-init': 'yes' },
       });
 
@@ -782,7 +817,7 @@ test('headers() refuses a Headers, Map or array instead of dropping its entries'
     [['authorization', 'Bearer t']],
   ]) {
     const { sendFn } = makeSendFn();
-    const builder = new HTTPRequestBuilder('GET', '/x', sendFn);
+    const builder = createRequestBuilder('GET', '/x', sendFn);
     expect(() => builder.headers(value as never)).toThrow(
       'HTTPRequestBuilder headers must be a plain object',
     );
@@ -790,7 +825,7 @@ test('headers() refuses a Headers, Map or array instead of dropping its entries'
 
   // Nullish stays a no-op, and a null-prototype record is a plain record.
   const { sendFn } = makeSendFn();
-  const builder = new HTTPRequestBuilder('GET', '/x', sendFn);
+  const builder = createRequestBuilder('GET', '/x', sendFn);
   expect(builder.headers(null)).toBe(builder);
   const record = Object.assign(Object.create(null) as object, { 'x-a': '1' });
   expect(builder.headers(record as Record<string, string>)).toBe(builder);
@@ -908,7 +943,7 @@ test('a body is copied when it is handed to a setter, so a later change to it is
   // The same through the request options.
   const optionBody = { a: 1 };
   const { sendFn, requireContext } = makeSendFn();
-  const optionBuilder = new HTTPRequestBuilder('POST', '/x', sendFn, {
+  const optionBuilder = createRequestBuilder('POST', '/x', sendFn, {
     body: optionBody,
   });
   optionBody.a = 2;
@@ -933,11 +968,10 @@ test('a body whose getter or toJSON throws throws from the setter, and the build
 
   expect(() => builder.json(getterBody)).toThrow('getter failed');
   expect(() => builder.body(toJSONBody)).toThrow('toJSON failed');
-  expect(
-    () =>
-      new HTTPRequestBuilder('POST', '/x', makeSendFn().sendFn, {
-        body: toJSONBody,
-      }),
+  expect(() =>
+    createRequestBuilder('POST', '/x', makeSendFn().sendFn, {
+      body: toJSONBody,
+    }),
   ).toThrow('toJSON failed');
 
   await builder.send();

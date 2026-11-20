@@ -1,5 +1,6 @@
 import { BUILT_IN_NETWORK_SEND_KEY } from '../consts';
-import { readHiddenMember, setHiddenMember } from './hidden-member';
+import { readUnknownMember } from '../../internal/read-member';
+import { setHiddenMember } from './hidden-member';
 import type { HTTPAdapter } from '../types';
 
 /**
@@ -48,6 +49,6 @@ export function markBuiltInNetworkAdapter(
 export function isBuiltInNetworkSend(adapter: object, send: unknown): boolean {
   return (
     send !== undefined &&
-    readHiddenMember(adapter, BUILT_IN_NETWORK_SEND_KEY) === send
+    readUnknownMember(adapter, BUILT_IN_NETWORK_SEND_KEY) === send
   );
 }

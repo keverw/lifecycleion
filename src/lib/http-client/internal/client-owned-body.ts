@@ -1,5 +1,6 @@
 import { CLIENT_OWNED_BODY_KEY } from '../consts';
-import { readHiddenMember, setHiddenMember } from './hidden-member';
+import { readUnknownMember } from '../../internal/read-member';
+import { setHiddenMember } from './hidden-member';
 import type { AdapterRequest } from '../types';
 
 /**
@@ -23,7 +24,7 @@ export function markClientOwnedBody(
 
 /**
  * Whether `body` is the bytes `request` was marked with (see `markClientOwnedBody`); a
- * mark that cannot be read is none (see `readHiddenMember`).
+ * mark that cannot be read is none (see `setHiddenMember`).
  */
 export function isClientOwnedBody(
   request: AdapterRequest,
@@ -32,6 +33,6 @@ export function isClientOwnedBody(
   return (
     body !== null &&
     body !== undefined &&
-    readHiddenMember(request, CLIENT_OWNED_BODY_KEY) === body
+    readUnknownMember(request, CLIENT_OWNED_BODY_KEY) === body
   );
 }
