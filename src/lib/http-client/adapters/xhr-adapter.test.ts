@@ -1071,6 +1071,49 @@ describe('XHRAdapter', () => {
     },
   );
 
+  test('a growable SharedArrayBuffer that grows after it is measured is copied at the size that passed maxResponseBytes', async () => {
+    // The TypeScript lib in use does not declare growable shared buffers.
+    const GrowableSharedArrayBuffer = SharedArrayBuffer as unknown as new (
+      length: number,
+      options: { maxByteLength: number },
+    ) => SharedArrayBuffer & { grow(length: number): void };
+    const buffer = new GrowableSharedArrayBuffer(4, { maxByteLength: 8 });
+    new Uint8Array(buffer).set([1, 2, 3, 4]);
+    // Grown just before the copy, as another thread could grow it.
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- called with its receiver below
+    const original = Uint8Array.prototype.slice;
+    const slice = spyOn(Uint8Array.prototype, 'slice');
+    slice.mockImplementation(function (
+      this: Uint8Array,
+      ...args: [number?, number?]
+    ) {
+      if (buffer.byteLength === 4) {
+        buffer.grow(8);
+        new Uint8Array(buffer).fill(9, 4);
+      }
+      return Reflect.apply(original, this, args);
+    });
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/buffer',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 4,
+    });
+    lastXHR.status = 200;
+    lastXHR.response = buffer;
+    lastXHR.simulateLoad();
+    let response;
+    try {
+      response = await promise;
+    } finally {
+      slice.mockRestore();
+    }
+
+    expect(buffer.byteLength).toBe(8);
+    expect(response.isStreamError).toBeUndefined();
+    expect([...(response.body ?? [])]).toEqual([1, 2, 3, 4]);
+  });
+
   test('a fixed ArrayBuffer response is read in place, not copied', async () => {
     const buffer = new Uint8Array([104, 105]).buffer;
     const promise = new XHRAdapter().send({

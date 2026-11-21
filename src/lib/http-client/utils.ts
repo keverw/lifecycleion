@@ -15,6 +15,7 @@ import { isNullish } from '../internal/is-nullish';
 import { describeValue } from '../internal/describe-value';
 import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { copyArrayValue } from '../internal/array-copy';
+import { inKeyOrder } from './internal/param-array-copy';
 import { isFormData, isMethodlessFormData } from './internal/form-entries';
 import {
   MAX_PARAM_DEPTH,
@@ -217,14 +218,7 @@ function snapshotParamValue(
   }
 
   walk.ancestors.delete(value);
-  if (listsKeysInOrder(copy, keys)) {
-    return copy;
-  }
-
-  // An array's `length`, which it holds as its own and cannot let go, must be listed too;
-  // it is not enumerable, so `qs` still writes no entry for it.
-  const ownKeys = Array.isArray(copy) ? [...keys, 'length'] : keys;
-  return new Proxy(copy, { ownKeys: () => ownKeys });
+  return inKeyOrder(copy, keys);
 }
 
 /**
@@ -232,16 +226,6 @@ function snapshotParamValue(
  * buffer, or the `isBuffer` of a falsy `constructor`, which `qs` does not read.
  */
 const NOT_READ: unique symbol = Symbol('not read');
-
-/**
- * Whether `copy`, an object just filled with `keys` in turn, lists them in that order. It
- * does unless `keys` puts an index after a name - a `Proxy` may list its own that way -
- * since an ordinary object lists its index keys first.
- */
-function listsKeysInOrder(copy: object, keys: readonly string[]): boolean {
-  const listed = Object.keys(copy);
-  return listed.every((key, index) => key === keys[index]);
-}
 
 /**
  * Whether `qs` takes `value` for a buffer - an object whose `constructor`, read once by

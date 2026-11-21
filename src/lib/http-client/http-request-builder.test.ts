@@ -1449,6 +1449,23 @@ test('params writes a polyfill buffer as its text and a Proxy in its own key ord
   }
 });
 
+test('a top-level params Proxy over an array that lists its indices out of order is sent in its own key order, as qs and a nested one are', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  for (const path of ['/x', '/x?k=1']) {
+    const list = new Proxy(['a', 'b'], {
+      ownKeys: () => ['1', '0', 'length'],
+    });
+    const response = await client.get(path).params({ list }).send();
+
+    expect(decodeURIComponent(response.requestURL)).toContain(
+      'list[1]=b&list[0]=a',
+    );
+  }
+});
+
 test('a nested params Proxy over an array that lists its indices out of order, and an own constructor getter, are each read once into the query', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({ status: 200 }));
@@ -1461,7 +1478,6 @@ test('a nested params Proxy over an array that lists its indices out of order, a
         return ++reads;
       },
     };
-    // Nested, since `.params()` copies a top-level array by index.
     const list = new Proxy(['a', 'b'], {
       ownKeys: () => ['1', '0', 'length'],
     });

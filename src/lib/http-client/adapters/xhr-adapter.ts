@@ -43,6 +43,7 @@ import {
   arrayBufferKindOf,
   fixedUnsharedByteLength,
   plainBytesView,
+  readBinaryByteLength,
 } from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 import {
@@ -1564,30 +1565,37 @@ function readResponseBody(
   if (typeof response === 'object' && response !== null) {
     // Which buffer it is, if one, told once through the intrinsic getters.
     const bufferKind = arrayBufferKindOf(response);
+    const isView = bufferKind === undefined && ArrayBuffer.isView(response);
 
-    // Measured before any copy (through the intrinsic getters), so a body past the limit
-    // is refused without being held twice.
-    if (
-      (bufferKind !== undefined || ArrayBuffer.isView(response)) &&
-      isAnsweredBodyOverLimit(response, maxResponseBytes)
-    ) {
+    // Measured once, before any copy (through the intrinsic getters), so a body past the
+    // limit is refused without being held twice - and a copy takes no more than these
+    // bytes: a growable `SharedArrayBuffer` another thread grows after this is still
+    // copied at the size that passed.
+    const byteLength =
+      bufferKind !== undefined || isView
+        ? readBinaryByteLength(response)
+        : null;
+    if (byteLength !== null && byteLength > maxResponseBytes) {
       return RESPONSE_TOO_LARGE;
     }
+    const measured = byteLength ?? undefined;
 
     // Wrapped as it is when it is a fixed `ArrayBuffer`, which the XHR hands over and no
     // one else writes; copied when it is shared or resizable, as the other adapters copy
     // a chunk over one, so no other code can change or resize the body once it is read.
     if (bufferKind !== undefined) {
       const bytes = new Uint8Array(response as ArrayBuffer);
-      return fixedUnsharedByteLength(response) !== null ? bytes : bytes.slice();
+      return fixedUnsharedByteLength(response) !== null
+        ? bytes
+        : bytes.slice(0, measured);
     }
 
     // A view rather than the buffer itself - happy-dom answers `responseType =
     // 'arraybuffer'` with a `Uint8Array`, and a shim may hand over a Node `Buffer` -
     // from any realm (`ArrayBuffer.isView` reads the internal slot). Copied: a `Buffer`
     // may be a slice of a pooled slab, whose other bytes are not this body's.
-    if (ArrayBuffer.isView(response)) {
-      return plainBytesView(response).slice();
+    if (isView) {
+      return plainBytesView(response).slice(0, measured);
     }
   }
 
