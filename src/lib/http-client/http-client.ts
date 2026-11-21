@@ -3660,8 +3660,15 @@ export class BaseHTTPClient {
               },
               (error: unknown) => {
                 // Its tags taken off as an answered attempt's are, so a later replay of
-                // the error is no answer either.
-                void takeAdapterErrorTags(error).uploadOutcome;
+                // the error is no answer either - unless it is the abort's own reason,
+                // the caller's or the timer's, which is not this adapter's to read or
+                // change.
+                const isLateAbortReason =
+                  error === readUnknownMember(cancelSignal, 'reason') ||
+                  error === timeoutController.signal.reason;
+                if (!isLateAbortReason) {
+                  void takeAdapterErrorTags(error).uploadOutcome;
+                }
               },
             );
           },
@@ -4239,11 +4246,13 @@ export class BaseHTTPClient {
             error === readUnknownMember(cancelSignal, 'reason')) ||
           (timeoutController.signal.aborted &&
             error === timeoutController.signal.reason);
-        // Every tag read once, here, and taken off the error: what the caller is handed as
-        // the failure's `cause` carries none of them, so an error handed back as another
-        // request's rejection - replayed by a wrapping adapter - is no answer of that
-        // request's, and an error the adapter tagged but did not create (a caller's own)
-        // keeps no upload of this request alive or reports it for the next.
+        // Every tag read once, here, and the attempt's own - its answer, upload and sent
+        // headers - taken off the error, which the caller is handed as the failure's
+        // `cause`: one handed back as another request's rejection - replayed by a
+        // wrapping adapter - is no answer of that request's, and an error the adapter
+        // tagged but did not create (a caller's own) keeps no upload of this request
+        // alive or reports it for the next. The flags that classify the failure stay, so
+        // one handed back is still that failure (see `ATTEMPT_TAG_KEYS`).
         const tags = takeAdapterErrorTags(isAbortReason ? undefined : error);
         /**
          * The upload's own outcome, carried on the throw.
@@ -6371,36 +6380,86 @@ interface AdapterErrorTags {
   effectiveRequestHeaders: Record<string, string | string[]> | undefined;
 }
 
-/** The keys {@link takeAdapterErrorTags} reads, and takes off the error after. */
-const ADAPTER_ERROR_TAG_KEYS: readonly PropertyKey[] = [
+/**
+ * The tags that describe one attempt - the answer it had, its upload, the headers it
+ * sent - which {@link takeAdapterErrorTags} takes off the error once read. The flags
+ * that classify the failure stay - a non-retryable refusal, a caller's error carried, a
+ * stream factory's failure or decline, a browser's own XHR timeout - so a failure handed
+ * back again, by a wrapping adapter that caches it, is still that failure.
+ */
+const ATTEMPT_TAG_KEYS: readonly PropertyKey[] = [
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_STATUS_KEY,
   STREAM_ABORT_HEADERS_KEY,
-  STREAM_FACTORY_CANCEL_KEY,
-  STREAM_FACTORY_ERROR_FLAG,
-  XHR_BROWSER_TIMEOUT_FLAG,
-  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
-  NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
-  ADAPTER_ERROR_CARRIER_KEY,
   EFFECTIVE_REQUEST_HEADERS_KEY,
 ];
 
 /**
+ * The attempt tags {@link takeAdapterErrorTags} read off an error but could not take off
+ * it - a frozen error's, a `Proxy`'s that refuses - by key, with the value read: they
+ * belong to the attempt that read them, so the same value seen again is none for the
+ * next. A value set afresh since - an adapter re-tagging the error for another request -
+ * is read.
+ */
+const attemptTagsLeftOn = new WeakMap<object, Map<PropertyKey, unknown>>();
+
+/**
  * Every tag on the error an attempt's adapter rejected with, each read once through a
- * guard, then taken off it: the error is the failure's `cause` the caller is handed, and
- * one tag left on it would be read as an answer again wherever the error comes back as a
- * rejection - a wrapping adapter that replays the last failure for another request would
- * file this one's `Set-Cookie` under that one's URL. A tag that cannot be taken off - a
- * frozen error, a `Proxy` that refuses - stays; the read is what this attempt goes by.
- * `undefined` - the abort's own reason - has no tags.
+ * guard, and the attempt's own taken off it after (see `ATTEMPT_TAG_KEYS`): the error is
+ * the failure's `cause` the caller is handed, and an attempt tag left on it would be read
+ * as an answer again wherever the error comes back as a rejection - a wrapping adapter
+ * that replays the last failure for another request would file this one's `Set-Cookie`
+ * under that one's URL. One that cannot be taken off is remembered instead (see
+ * `attemptTagsLeftOn`). `undefined` - the abort's own reason - has no tags.
  */
 function takeAdapterErrorTags(error: unknown): AdapterErrorTags {
-  const isStreamAbort = isResponseStreamAbortError(error);
-  const tags: AdapterErrorTags = {
-    uploadOutcome: getRequestBodySettled(error),
-    isStreamAbort,
-    streamAbortInfo: getResponseStreamAbortInfo(error),
+  // The attempt tags, each read once into a record of this client's own, the ones an
+  // earlier attempt read and could not take off left out; the readers below read that.
+  const attempt: Record<PropertyKey, unknown> = Object.create(null) as Record<
+    PropertyKey,
+    unknown
+  >;
+
+  if (isObjectLike(error)) {
+    const readBefore = attemptTagsLeftOn.get(error);
+    const left = new Map<PropertyKey, unknown>();
+
+    for (const key of ATTEMPT_TAG_KEYS) {
+      const value = readUnknownMember(error, key);
+      if (value === undefined) {
+        continue;
+      }
+
+      if (!(readBefore?.has(key) === true && readBefore.get(key) === value)) {
+        attempt[key] = value;
+      }
+
+      let isTakenOff: boolean;
+      try {
+        isTakenOff = Reflect.deleteProperty(error, key);
+      } catch {
+        // A `Proxy` whose trap throws.
+        isTakenOff = false;
+      }
+
+      if (!isTakenOff) {
+        left.set(key, value);
+      }
+    }
+
+    if (left.size > 0) {
+      attemptTagsLeftOn.set(error, left);
+    } else if (readBefore !== undefined) {
+      attemptTagsLeftOn.delete(error);
+    }
+  }
+
+  return {
+    uploadOutcome: getRequestBodySettled(attempt),
+    isStreamAbort: isResponseStreamAbortError(attempt),
+    streamAbortInfo: getResponseStreamAbortInfo(attempt),
+    effectiveRequestHeaders: getEffectiveRequestHeadersFromError(attempt),
     factoryCancelValue: readUnknownMember(error, STREAM_FACTORY_CANCEL_KEY),
     isStreamFactoryError: hasAdapterMarker(error, STREAM_FACTORY_ERROR_FLAG),
     isXHRBrowserTimeout: isXHRBrowserTimeout(error),
@@ -6414,20 +6473,7 @@ function takeAdapterErrorTags(error: unknown): AdapterErrorTags {
     ),
     isAdapterErrorCarrier:
       readUnknownMember(error, ADAPTER_ERROR_CARRIER_KEY) === true,
-    effectiveRequestHeaders: getEffectiveRequestHeadersFromError(error),
   };
-
-  if (isObjectLike(error)) {
-    for (const key of ADAPTER_ERROR_TAG_KEYS) {
-      try {
-        Reflect.deleteProperty(error, key);
-      } catch {
-        // A `Proxy` whose trap throws: its tags stay, as a frozen error's do.
-      }
-    }
-  }
-
-  return tags;
 }
 
 /**

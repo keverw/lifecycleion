@@ -18,7 +18,7 @@ import {
 } from '../internal/console-test-utils';
 import { CookieJar } from './cookie-jar';
 import {
-  markNonRetryableAdapterError,
+  defineHiddenTags,
   markResponseStreamAbort,
 } from './internal/adapter-error';
 import { startTestServer, type TestServer } from './test-helpers/test-server';
@@ -4141,23 +4141,224 @@ describe('HTTPClient — adapter tags are taken off the error once read', () => 
     expect(jar.getCookiesFor('https://b.example/')).toEqual([]);
   });
 
-  test('a non-retryable flag is taken off the error the caller is handed too', async () => {
-    const failure = new Error('bad config');
-    markNonRetryableAdapterError(failure);
+  test('a non-retryable refusal handed back for the next request is still not retried', async () => {
+    // A wrapping adapter that caches a permanent refusal and rethrows it. Flagged as a
+    // configurable tag, so the client could take it off if it took the flags too.
+    const refusal = new Error('bad config');
+    defineHiddenTags(refusal, {
+      [NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]: true,
+    });
+    let calls = 0;
     const client = new HTTPClient({
       adapter: {
         getType: () => 'mock' as const,
-        send: (): Promise<AdapterResponse> => Promise.reject(failure),
+        send: (): Promise<AdapterResponse> => {
+          calls++;
+          return Promise.reject(refusal);
+        },
+      },
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+    });
+
+    for (const path of ['/first', '/second']) {
+      calls = 0;
+      const builder = client.get(`https://a.test${path}`);
+      await builder.send();
+
+      expect([path, builder.error?.code, calls]).toEqual([
+        path,
+        'adapter_error',
+        1,
+      ]);
+    }
+  });
+
+  test("a frozen stream abort's error replayed for another request is no answer of that request's", async () => {
+    const jar = new CookieJar();
+    let lastFailure: unknown;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock' as const,
+      send: (request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve().then(() => {
+          if (request.requestURL.startsWith('https://a.example/')) {
+            lastFailure = Object.freeze(
+              markResponseStreamAbort(new Error('boom'), 200, {
+                'set-cookie': ['sid=from-a; Path=/'],
+              }),
+            );
+          }
+          throw lastFailure;
+        }),
+    };
+    const client = new HTTPClient({ adapter, cookieJar: jar });
+
+    const responseA = await client.get('https://a.example/x').send();
+    expect(responseA.isStreamError).toBe(true);
+    expect(jar.getCookiesFor('https://a.example/')).toHaveLength(1);
+
+    const responseB = await client.get('https://b.example/y').send();
+    expect(responseB.isStreamError).toBe(false);
+    expect(responseB.status).toBe(0);
+    expect(jar.getCookiesFor('https://b.example/')).toEqual([]);
+  });
+
+  test("a late rejection with the caller's abort reason leaves that reason as it is", async () => {
+    // An adapter that ignores its signal past the abort grace, then rejects with the
+    // signal's reason: the caller's own object, read and changed by nothing.
+    let reads = 0;
+    const reason = new Error('caller reason');
+    Object.defineProperty(reason, REQUEST_BODY_SETTLED_KEY, {
+      configurable: true,
+      get: () => {
+        reads++;
+        return undefined;
+      },
+    });
+    let rejectedLate!: () => void;
+    const lateRejection = new Promise<void>((resolve) => {
+      rejectedLate = resolve;
+    });
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (request: AdapterRequest): Promise<AdapterResponse> =>
+          new Promise((_resolve, reject) => {
+            const signal = request.signal as AbortSignal;
+            signal.addEventListener(
+              'abort',
+              () => {
+                setTimeout(() => {
+                  // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+                  reject(signal.reason);
+                  setTimeout(rejectedLate, 0);
+                }, 1200);
+              },
+              { once: true },
+            );
+          }),
+      },
+    });
+    const controller = new AbortController();
+    const promise = client
+      .get('https://a.test/x')
+      .signal(controller.signal)
+      .send();
+    await Promise.resolve();
+    controller.abort(reason);
+
+    expect((await promise).isCancelled).toBe(true);
+    await lateRejection;
+    expect(reads).toBe(0);
+    expect(Object.hasOwn(reason, REQUEST_BODY_SETTLED_KEY)).toBe(true);
+  });
+
+  test('an upload tagged afresh on an error whose tags cannot be taken off is read', async () => {
+    // As NodeAdapter re-tags a caller's error with each request's upload: the error
+    // refuses every delete, so the first upload stays on it, and only the fresh one is
+    // this request's.
+    const shared = new Proxy(new Error('shared'), {
+      deleteProperty: () => false,
+    });
+    let upload = 0;
+    let isFreshTag = true;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (): Promise<AdapterResponse> =>
+          Promise.resolve().then(() => {
+            upload++;
+            if (isFreshTag) {
+              Object.defineProperty(shared, REQUEST_BODY_SETTLED_KEY, {
+                value: Promise.resolve(new Error(`upload ${upload}`)),
+                configurable: true,
+              });
+            }
+            throw shared;
+          }),
       },
     });
 
-    const builder = client.get('https://a.test/x');
-    await builder.send();
+    for (const expected of ['upload 1', 'upload 2']) {
+      const response = await client.post('https://a.test/x').json({}).send();
+      expect((await response.requestBodySettled)?.message).toBe(expected);
+    }
 
-    expect(builder.error?.code).toBe('adapter_error');
-    expect(builder.error?.cause).toBe(failure);
-    expect(Object.hasOwn(failure, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG)).toBe(
-      false,
+    // The same value seen again, not set afresh: an earlier request's, not this one's.
+    isFreshTag = false;
+    const stale = await client.post('https://a.test/x').json({}).send();
+    expect(await stale.requestBodySettled).toBeUndefined();
+  });
+
+  test("a stream factory's failure handed back for another request is still that failure", async () => {
+    const callerError = new Error('sink refused');
+    const carrier = new Error('sink refused', { cause: callerError });
+    defineHiddenTags(carrier, {
+      [NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG]: true,
+      [STREAM_FACTORY_ERROR_FLAG]: true,
+      [STREAM_ABORT_STATUS_KEY]: 200,
+      [STREAM_ABORT_HEADERS_KEY]: { 'set-cookie': ['sid=a; Path=/'] },
+    });
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (): Promise<AdapterResponse> => Promise.reject(carrier),
+      },
+      cookieJar: jar,
+    });
+
+    for (const host of ['a.test', 'b.test']) {
+      const builder = client.get(`https://${host}/x`);
+      await builder.send();
+
+      expect([host, builder.error?.code]).toEqual([host, 'stream_setup_error']);
+      expect(builder.error?.cause).toBe(callerError);
+    }
+    expect(jar.getCookiesFor('https://b.test/')).toEqual([]);
+  });
+
+  test("a late rejection with the attempt timer's reason leaves that reason as it is", async () => {
+    let reads = 0;
+    let timerReason: unknown;
+    let rejectedLate!: () => void;
+    const lateRejection = new Promise<void>((resolve) => {
+      rejectedLate = resolve;
+    });
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (request: AdapterRequest): Promise<AdapterResponse> =>
+          new Promise((_resolve, reject) => {
+            const signal = request.signal as AbortSignal;
+            signal.addEventListener(
+              'abort',
+              () => {
+                timerReason = signal.reason;
+                Object.defineProperty(timerReason, REQUEST_BODY_SETTLED_KEY, {
+                  configurable: true,
+                  get: () => {
+                    reads++;
+                    return undefined;
+                  },
+                });
+                setTimeout(() => {
+                  // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+                  reject(timerReason);
+                  setTimeout(rejectedLate, 0);
+                }, 1200);
+              },
+              { once: true },
+            );
+          }),
+      },
+      timeout: 20,
+    });
+
+    expect((await client.get('https://a.test/x').send()).isTimeout).toBe(true);
+    await lateRejection;
+    expect(reads).toBe(0);
+    expect(Object.hasOwn(timerReason as object, REQUEST_BODY_SETTLED_KEY)).toBe(
+      true,
     );
   });
 
