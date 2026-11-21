@@ -1,4 +1,5 @@
 import { graphemeBoundaryAtOrBefore } from './graphemes';
+import { isHighSurrogate, isLowSurrogate } from './surrogates';
 
 /**
  * The bounds one render may not exceed, shared by every renderer that walks caller data.
@@ -143,10 +144,10 @@ function isRegionalIndicator(codePoint: number): boolean {
 function codePointStartBefore(text: string, end: number): number {
   const low = text.charCodeAt(end - 1);
 
-  if (end >= 2 && low >= 0xdc00 && low <= 0xdfff) {
+  if (end >= 2 && isLowSurrogate(low)) {
     const high = text.charCodeAt(end - 2);
 
-    if (high >= 0xd800 && high <= 0xdbff) {
+    if (isHighSurrogate(high)) {
       return end - 2;
     }
   }
@@ -168,7 +169,7 @@ function graphemeSafeCut(text: string, limit: number): number {
   // A high surrogate immediately before the cut has its low half on the other side of it.
   const last = text.charCodeAt(cut - 1);
 
-  if (last >= 0xd800 && last <= 0xdbff) {
+  if (isHighSurrogate(last)) {
     cut -= 1;
   }
 

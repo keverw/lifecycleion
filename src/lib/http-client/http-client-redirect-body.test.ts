@@ -154,3 +154,92 @@ test.each([307, 308])(
     expect(finalRawBody).toEqual({ value: 2, extra: 3 });
   },
 );
+
+test.each([
+  ['a GET answered 307 to POST', 'GET', 307, 'POST', true],
+  ['a bodiless POST answered 302 to GET', 'POST', 302, 'GET', false],
+] as const)(
+  'a redirect-phase observer that rewrites the method of %s does not change which body headers the hop keeps',
+  async (_label, method, status, rewrittenMethod, isKept) => {
+    const sent: AdapterRequest[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request): Promise<AdapterResponse> => {
+        sent.push(request);
+        return Promise.resolve<AdapterResponse>(
+          sent.length === 1
+            ? {
+                status,
+                headers: { location: 'https://example.com/next' },
+                body: null,
+              }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+    const client = new HTTPClient({ adapter, followRedirects: true });
+    client.addResponseObserver(
+      (_response, request) => {
+        request.method = rewrittenMethod;
+      },
+      { phases: ['redirect'] },
+    );
+
+    const response = await client
+      .request(method, 'https://example.com/start')
+      .headers({
+        'content-type': 'application/json',
+        'content-language': 'en',
+      })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(sent).toHaveLength(2);
+    const hopHeaders = sent[1].headers;
+    expect(hopHeaders['content-type'] !== undefined).toBe(isKept);
+    expect(hopHeaders['content-language'] !== undefined).toBe(isKept);
+  },
+);
+
+test('a 303 answered mid-upload tears the upload down and names the redirect', async () => {
+  // The server answers before reading the body, so the upload is still going when the
+  // redirect is followed.
+  const server = createServer((request, response) => {
+    if (request.url === '/upload') {
+      response.writeHead(303, { location: '/next', 'content-length': '0' });
+      response.end();
+      return;
+    }
+    request.resume();
+    response.end('ok');
+  });
+  try {
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Expected a TCP server address');
+    }
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      followRedirects: true,
+      timeout: 5000,
+    });
+    // Far more than the socket buffers hold, so it cannot finish unread.
+    const response = await client
+      .post(`http://127.0.0.1:${address.port}/upload`)
+      .body(new Uint8Array(32 * 1024 * 1024))
+      .send();
+    const outcome = await response.requestBodySettled;
+
+    expect(response.status).toBe(200);
+    expect(outcome?.message).toBe(
+      'Request body upload ended: a redirect was followed',
+    );
+    expect((outcome?.cause as Error).name).toBe('AbortError');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

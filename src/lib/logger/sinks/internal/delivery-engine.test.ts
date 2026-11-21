@@ -21,6 +21,27 @@ const entry = (message: string): LogEntry => ({
 const tick = (ms = 0): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Whether what `start` returns settles before a timer of `ms`. The timer is set to the
+ * bound a bug would wait out, and armed before `start` runs, so that bug's own timer of
+ * the same length fires second.
+ */
+async function settlesBefore(
+  start: () => Promise<unknown>,
+  ms: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const sentinel = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+
+  try {
+    return await Promise.race([start().then(() => true), sentinel]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Wait until `predicate` holds: a reopen may come from the timer rather than at once. */
 async function until(
   predicate: () => boolean,
@@ -719,12 +740,9 @@ describe('DeliveryEngine', () => {
     write('a');
     destination.openAnswers = ['pending'];
 
-    const startedAt = Date.now();
-
-    await engine.close();
-
-    // The grace window (500 ms), not the 3 s budget.
-    expect(Date.now() - startedAt).toBeLessThan(1500);
+    // Done within the grace window (500 ms): before the 3 s budget a close waiting on
+    // that open would spend.
+    expect(await settlesBefore(() => engine.close(), 3000)).toBe(true);
     expect(reports.filter((failure) => failure.kind === 'close')).toHaveLength(
       1,
     );
@@ -745,17 +763,14 @@ describe('DeliveryEngine', () => {
     destination.openAnswers = ['pending'];
     await until(() => destination.opens.length === 2);
 
-    const startedAt = Date.now();
-
-    await engine.close();
-
-    // The 500 ms grace window, not the 5 s budget.
-    expect(Date.now() - startedAt).toBeLessThan(2500);
+    // Done within the 500 ms grace window: before the 5 s budget a close waiting on that
+    // open would spend.
+    expect(await settlesBefore(() => engine.close(), 5000)).toBe(true);
     expect(reports.filter((failure) => failure.kind === 'close')).toHaveLength(
       1,
     );
     destination.answerOpen({ status: 'unavailable' });
-  });
+  }, 10_000);
 
   test('close gives the first open its whole budget, even with a reconnect() waiting on it', async () => {
     const destination = new FakeDestination();
@@ -1203,7 +1218,7 @@ describe('DeliveryEngine', () => {
 
     write('a');
 
-    const startedAt = Date.now();
+    const opensBefore = destination.opens.length;
     const result = await engine.flush(5000);
 
     expect(result).toEqual({
@@ -1213,7 +1228,8 @@ describe('DeliveryEngine', () => {
       timedOut: false,
       entriesQueued: 1,
     });
-    expect(Date.now() - startedAt).toBeLessThan(1000);
+    // Answered by the one attempt made since the call: not a later one, not the deadline.
+    expect(destination.opens.length - opensBefore).toBe(1);
     await engine.close();
   });
 
@@ -1776,19 +1792,19 @@ describe('DeliveryEngine (one write at a time)', () => {
       openedAt.push(Date.now());
     };
 
-    write('a');
+    // The delay each reopen timer is armed with, read where it is armed.
+    const armReopen = spyOn(
+      engine as unknown as { armReopen: (delayMS: number) => void },
+      'armReopen',
+    );
 
-    const failedAt = Date.now();
+    write('a');
 
     destination.isOpen = false;
     destination.fail();
 
     // Due at once, not after the backoff's first step (20 ms here).
-    const reopenAtMS = (engine as unknown as { reopenAtMS?: number })
-      .reopenAtMS;
-
-    expect(reopenAtMS).toBeDefined();
-    expect((reopenAtMS ?? Infinity) - failedAt).toBeLessThan(10);
+    expect(armReopen.mock.calls).toEqual([[0]]);
     await until(() => destination.pendingLines().length === 1);
 
     // The reopened destination fails the write again: the same outage, so the backoff.
@@ -1799,6 +1815,7 @@ describe('DeliveryEngine (one write at a time)', () => {
     expect(openedAt[1] - openedAt[0]).toBeGreaterThanOrEqual(15);
 
     destination.succeed();
+    armReopen.mockRestore();
     await engine.close();
   });
 

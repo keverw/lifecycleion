@@ -1,5 +1,7 @@
-import { MAX_TIMER_MS } from '../internal/timer-limits';
-import type { HTTPMethod } from './types';
+import { describeNumberOrType } from '../internal/describe-value';
+import { isNullish } from '../internal/is-nullish';
+import { assertDurationMS, clampTimerDelayMS } from '../internal/timer-limits';
+import type { AdapterType, HTTPMethod } from './types';
 
 /**
  * HTTP responses that are plausibly transient and worth retrying when a retry
@@ -48,15 +50,22 @@ export const RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set([
 ]);
 
 /**
- * Methods RFC 9110 does not define as idempotent, so replaying one may apply
- * the same change twice.
+ * The methods RFC 9110 defines as idempotent, so a replay lands the resource in the
+ * same state as sending it once. An allow-list: every other method - `POST`, `PATCH`,
+ * and any custom one (`LOCK`, `MKCOL`, an RPC verb) - may apply its change twice, and is
+ * replayed only as a non-idempotent method is.
  *
- * `PUT` and `DELETE` are absent on purpose: both are idempotent by definition,
- * even though they mutate. Repeating them lands the resource in the same state
- * as doing it once, which is exactly what makes a replay safe.
+ * `PUT` and `DELETE` are here on purpose: both are idempotent by definition, even though
+ * they mutate.
  */
-export const NON_IDEMPOTENT_METHODS: ReadonlySet<HTTPMethod> =
-  new Set<HTTPMethod>(['POST', 'PATCH']);
+export const IDEMPOTENT_METHODS: ReadonlySet<HTTPMethod> = new Set<HTTPMethod>([
+  'GET',
+  'HEAD',
+  'OPTIONS',
+  'TRACE',
+  'PUT',
+  'DELETE',
+]);
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -70,25 +79,38 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 export { MAX_TIMER_MS } from '../internal/timer-limits';
 
 /**
+ * Reject a request timeout that {@link resolveRequestTimeoutMS} would refuse, without
+ * resolving it. Builders validate when the value is set but keep nullish as-is, so it
+ * still inherits the client value at dispatch. One check keeps both sites agreeing on
+ * what is invalid and on the error's label.
+ */
+export function validateRequestTimeoutMS(
+  requested: unknown,
+  label = 'HTTP request timeout',
+): asserts requested is number | null | undefined {
+  if (!isNullish(requested)) {
+    assertDurationMS(requested, label);
+  }
+}
+
+/**
  * The per-attempt timeout a request will actually run under.
  *
- * `HTTPClientConfig.timeout` and `HTTPRequestOptions.timeout` both document `<= 0` as
- * "disable the per-attempt timer", and that reading is kept. What used to be taken
- * literally is everything else a `number` can be: `NaN` - `Number(process.env.UNSET)` -
- * passed both the `> 0` check that arms the timer and the `<= 0` check that disables the
- * upload-settle wait, so the attempt ran with no timer while the wait re-armed a `NaN`
- * timer every millisecond and could never expire; `Infinity` did the same to the wait and
- * fired the attempt timer after 1 ms. `NaN` and a non-number now take the default.
- * `Infinity` is what a caller writes to mean "no timeout", and that is what `0` already
- * means, so it disables the timer rather than being bounded at a number nobody chose. A
- * finite value past {@link MAX_TIMER_MS} is clamped there, the closest wait a timer can
- * keep.
+ * Null and undefined select the configured default. `<= 0` disables the per-attempt
+ * timer, as `HTTPClientConfig.timeout` and `HTTPRequestOptions.timeout` document, and so
+ * does `Infinity`, which is what a caller writes to mean "no timeout". A finite value past
+ * {@link MAX_TIMER_MS} is clamped there, the closest wait a timer can keep. `NaN` and any
+ * non-nullish value that is not a number fail clearly: `NaN` - `Number(process.env.UNSET)`
+ * - fits neither "armed" nor "disabled", and would leave the attempt without a timer while
+ * the upload-settle wait could never expire.
  */
 export function resolveRequestTimeoutMS(
   requested: unknown,
   defaultMS: number = DEFAULT_TIMEOUT_MS,
+  label?: string,
 ): number {
-  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+  validateRequestTimeoutMS(requested, label);
+  if (isNullish(requested)) {
     return defaultMS;
   }
 
@@ -96,7 +118,61 @@ export function resolveRequestTimeoutMS(
     return 0;
   }
 
-  return Math.min(requested, MAX_TIMER_MS);
+  return clampTimerDelayMS(requested);
+}
+
+/**
+ * The most bytes of a buffered response body a client holds unless configured otherwise:
+ * 64 MiB. A buffered body is held whole in memory before it is parsed, so without a bound
+ * one oversized or endless response - a misrouted download, a hostile server - could take
+ * the process with it. A body meant to be that large belongs in `streamResponse`.
+ */
+export const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Reject a response size limit that {@link resolveMaxResponseBytes} would refuse, without
+ * resolving it. Builders validate when the value is set but keep nullish as-is, so it
+ * still inherits the client value at dispatch, as {@link validateRequestTimeoutMS} does
+ * for the timeout.
+ *
+ * A positive integer, or `Infinity` for no limit. `0` is refused rather than read as
+ * "disabled" the way a zero timeout is: a limit of nothing would fail every response with
+ * a body, and a caller who wants no limit says so with `Infinity`. A fraction, `NaN` and a
+ * non-number are refused for the reason `NaN` is refused for a timeout - each is a mistake
+ * upstream, not a request for a default.
+ */
+export function validateMaxResponseBytes(
+  requested: unknown,
+  label = 'HTTP request maxResponseBytes',
+): asserts requested is number | null | undefined {
+  if (isNullish(requested) || requested === Number.POSITIVE_INFINITY) {
+    return;
+  }
+
+  if (
+    typeof requested !== 'number' ||
+    !Number.isInteger(requested) ||
+    requested <= 0
+  ) {
+    throw new TypeError(
+      `${label} must be a positive integer, or Infinity for no limit (got ${describeNumberOrType(requested)})`,
+    );
+  }
+}
+
+/**
+ * The response size limit a request will actually run under: null and undefined select
+ * `defaultBytes`, anything else is validated by {@link validateMaxResponseBytes} and kept
+ * as given. `Infinity` is kept too, and adapters read it as no limit.
+ */
+export function resolveMaxResponseBytes(
+  requested: unknown,
+  defaultBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
+  label?: string,
+): number {
+  validateMaxResponseBytes(requested, label);
+
+  return isNullish(requested) ? defaultBytes : requested;
 }
 
 export const DEFAULT_REQUEST_ID_HEADER = 'x-local-client-request-id';
@@ -105,10 +181,38 @@ export const DEFAULT_REQUEST_ATTEMPT_HEADER = 'x-local-client-request-attempt';
 
 export const DEFAULT_USER_AGENT = 'lifecycleion-http-client';
 
+/**
+ * The base a path-only request URL is read against for MockAdapter: by the client, when
+ * no `baseURL` is configured, and by the adapter itself when driven directly with one.
+ */
+export const MOCK_ADAPTER_DEFAULT_BASE_URL = 'http://localhost';
+
 export const NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG =
   '_lifecycleion_non_retryable_http_client_callback_error';
 
+/** Terminal adapter configuration failures retain adapter_error classification. */
+export const NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG =
+  '_lifecycleion_non_retryable_http_adapter_error';
+
 export const STREAM_FACTORY_ERROR_FLAG = '_lifecycleion_stream_factory_error';
+
+/**
+ * Marks a response body's decoding failure - a corrupt compressed stream, bytes after it,
+ * too many stacked codings - as opposed to a transport failure. The client follows a
+ * redirect whose body only failed to decode, as browsers do: they never decode a body
+ * they are about to leave. Nor does it stop a retry the status asks for.
+ */
+export const RESPONSE_DECODE_ERROR_KEY = Symbol.for(
+  'lifecycleion.http-client.response-decode-error',
+);
+
+/**
+ * Marks an adapter's carrier for a failure that may be the caller's own error: the client
+ * reports the carrier's `cause`. A symbol, so it never reaches a serialized error.
+ */
+export const ADAPTER_ERROR_CARRIER_KEY = Symbol.for(
+  'lifecycleion.http-client.adapter-error-carrier',
+);
 
 /**
  * Attached to the AbortError thrown when a StreamResponseFactory returns null
@@ -127,11 +231,11 @@ export const RESPONSE_STREAM_ABORT_FLAG = '_lifecycleion_response_stream_abort';
  * paths that resolve.
  *
  * `requestBodySettled` is documented as present on every bodied request, and an
- * adapter that throws - a cancel, a timeout, a transport failure - had nowhere to
- * put it: the promise lives in the adapter's closure and the response object it
- * would have ridden on is never built. `HTTPClient` then omitted the field, and
- * `await undefined` is `undefined`, which is the documented value for *an upload
- * that went out in full*. A cancelled bodied `POST` reported a clean upload.
+ * adapter that throws - a cancel, a timeout, a transport failure - has nowhere else
+ * to put it: the promise lives in the adapter's closure and the response object it
+ * would ride on is never built. Without this key `HTTPClient` would omit the field,
+ * and `await undefined` is `undefined`, which is the documented value for *an upload
+ * that went out in full*: a cancelled bodied `POST` would report a clean upload.
  *
  * The value is the promise itself, never an error. `NodeAdapter`'s own promise
  * resolves with the upload's failure or with `undefined` and never rejects, so an
@@ -142,8 +246,8 @@ export const RESPONSE_STREAM_ABORT_FLAG = '_lifecycleion_response_stream_abort';
  *
  * A symbol rather than a string, unlike the boolean markers above it. This value
  * rides on an error that may be serialized at an IPC boundary, and `serializeError`
- * walks `getOwnPropertyNames` deliberately - so a string key put an internal
- * `Promise` into the payload as an empty object, and spent a node of that walk's
+ * walks `getOwnPropertyNames` deliberately - so a string key would put an internal
+ * `Promise` into the payload as an empty object, and spend a node of that walk's
  * budget on it, enumerable or not. Symbol keys are skipped by both that walk and
  * `JSON.stringify`. `Symbol.for`, not `Symbol`, for the reason `reportToHost` uses
  * the global registry: the adapter and the client are separate entry points, so a
@@ -154,12 +258,122 @@ export const REQUEST_BODY_SETTLED_KEY = Symbol.for(
 );
 
 /**
+ * The header-carrying tags an adapter puts on an error it throws: the request headers it
+ * sent, and a cut-off response's status and headers. Symbols, for the reason
+ * {@link REQUEST_BODY_SETTLED_KEY} is one: `serializeError` walks every own property
+ * *name*, hidden or not, and these carry the request's credentials and the response's
+ * `Set-Cookie`. Symbol keys are skipped by that walk and by `JSON.stringify`.
+ */
+export const EFFECTIVE_REQUEST_HEADERS_KEY = Symbol.for(
+  'lifecycleion.effectiveRequestHeaders.v1',
+);
+export const STREAM_ABORT_STATUS_KEY = Symbol.for(
+  'lifecycleion.streamAbortStatus.v1',
+);
+export const STREAM_ABORT_HEADERS_KEY = Symbol.for(
+  'lifecycleion.streamAbortHeaders.v1',
+);
+
+/**
+ * Marks a built-in network adapter - a `NodeAdapter`, `FetchAdapter` or `XHRAdapter` -
+ * with its class's `send`; see `isBuiltInNetworkSend`. And marks the request `HTTPClient`
+ * hands an adapter with the listener for the upload's source waits; see
+ * `listenForUploadSourceWait`. `Symbol.for`, not `Symbol`, for the reason
+ * {@link REQUEST_BODY_SETTLED_KEY} is: the client and each adapter are separate entry
+ * points, bundled without shared chunks, so a consumer importing both has two copies of
+ * the module that sets a mark and the one that reads it - a module-local registry in one
+ * copy would never be found by the other.
+ */
+export const BUILT_IN_NETWORK_SEND_KEY = Symbol.for(
+  'lifecycleion.builtInNetworkSend.v1',
+);
+export const UPLOAD_SOURCE_WAIT_LISTENER_KEY = Symbol.for(
+  'lifecycleion.uploadSourceWaitListener.v1',
+);
+/** Marks the bytes `HTTPClient` hands `NodeAdapter` as its own. */
+export const CLIENT_OWNED_BODY_KEY = Symbol.for(
+  'lifecycleion.clientOwnedRequestBody.v1',
+);
+export const STREAM_FAILURE_SETTLED_LISTENER_KEY = Symbol.for(
+  'lifecycleion.streamFailureSettledListener.v1',
+);
+
+/**
+ * How long an upload may make no progress after the response arrived before it is torn
+ * down. See `NodeAdapter`'s `watchForStalledUpload`.
+ *
+ * Progress here is coarse: `writeRequestBodyChunked` reports once per accepted
+ * `REQUEST_BODY_CHUNK_SIZE` chunk, once its write callback has run, so a receiver that
+ * has answered and then goes quiet for a moment - busy with what it already has, or a TCP
+ * window that closed while it works - reports nothing for the whole pause. Anything
+ * shorter than a pause like that cuts a body the server was still reading, which is the
+ * failure this watchdog exists to avoid, not to cause; at one second a two-second pause
+ * would truncate an 8 MiB upload at 6.8 MiB and hand the caller the early status as a
+ * clean success.
+ *
+ * Five seconds is past any such pause on a connection that is still alive. What is left
+ * is a bound rather than a promise: a receiver that stops reading for longer than this
+ * while still intending to read gets a truncated body, and the far more common shape - a
+ * proxy that has answered and will never read again - costs one idle socket for five to
+ * ten seconds, as the watchdog checks in five-second windows - longer where the runtime
+ * reports a late chunk accepted, which counts as progress and starts the window again (Bun
+ * does for a large body, and Node over TLS) - instead of one held to that server's timeout.
+ */
+export const UPLOAD_STALL_GRACE_MS = 5_000;
+
+/**
+ * How many whole {@link UPLOAD_STALL_GRACE_MS} windows with the upload's writer done
+ * NodeAdapter reads and drops the bytes behind an answered `205` for before it lets the
+ * connection go, however steadily they arrive: fifteen seconds from the answer when there
+ * is no upload, and up to twenty from the writer's end, as a window counts only once it
+ * began with the writer done - one whose body has ended counts, flushed or not, so a
+ * server that stops reading it does not hold the connection. A quiet window lets it go
+ * sooner. The bytes are ones the status says are not there, so this is room for a
+ * server that sends a short stray body slowly, not for one that streams.
+ */
+export const STRAY_205_DRAIN_WINDOWS = 3;
+
+/**
+ * How long the body writer may wait on its *source* after the response arrived before
+ * that is called a stall. `NodeAdapter`'s stall watchdog gives a writer parked on a
+ * `Blob.stream()` read this long, and `HTTPClient`'s wait on an attempt's upload counts
+ * a reported source wait as activity for no longer than this.
+ *
+ * Separate from {@link UPLOAD_STALL_GRACE_MS}, the socket grace, because the two waits
+ * mean different things: a socket that accepted nothing for five seconds has a receiver
+ * that stopped, while a `Blob.stream()` read that has not answered in five seconds has a
+ * slow disk under it.
+ * A minute is past any read a live disk answers, and it is a bound rather than a promise
+ * for the same reason the socket grace is: a source that never answers would otherwise
+ * park the writer, the socket and `requestBodySettled` for the life of the process.
+ */
+export const UPLOAD_SOURCE_STALL_GRACE_MS = 60_000;
+
+/**
  * Set on the AbortError thrown by XHRAdapter's defensive `timeout` event
  * listener. Lets HTTPClient classify the error as a timeout (retryable) rather
  * than an unexpected abort (non-retryable cancel).
  */
 export const XHR_BROWSER_TIMEOUT_FLAG = '_lifecycleion_xhr_browser_timeout';
 
+/**
+ * Every {@link AdapterType}. A client refuses an adapter whose `getType()` answers anything
+ * else: each adapter and runtime check is keyed on the type, so an unknown one would
+ * pass every one of them.
+ */
+export const ADAPTER_TYPES: ReadonlySet<AdapterType> = new Set<AdapterType>([
+  'fetch',
+  'xhr',
+  'node',
+  'mock',
+]);
+
+/**
+ * The standard methods: sent uppercase whatever case they are given in. `TRACE` is sent
+ * by NodeAdapter, MockAdapter and XHRAdapter outside a browser: FetchAdapter refuses it,
+ * and XHRAdapter and `HTTPClient` do in a browser (see the methods section of the
+ * http-client docs).
+ */
 export const HTTP_METHODS: ReadonlyArray<HTTPMethod> = [
   'GET',
   'POST',
@@ -167,6 +381,8 @@ export const HTTP_METHODS: ReadonlyArray<HTTPMethod> = [
   'PATCH',
   'DELETE',
   'HEAD',
+  'OPTIONS',
+  'TRACE',
 ];
 
 /**
@@ -218,11 +434,22 @@ export const BROWSER_METHOD_OVERRIDE_HEADER_NAMES: ReadonlySet<string> =
   new Set(['x-http-method', 'x-http-method-override', 'x-method-override']);
 
 /**
+ * The methods the Fetch Standard forbids (CONNECT, TRACE and TRACK), lowercase: the ones
+ * FetchAdapter, and XHRAdapter in a browser, refuse to send.
+ */
+export const FETCH_FORBIDDEN_METHODS: ReadonlySet<string> = new Set([
+  'connect',
+  'trace',
+  'track',
+]);
+
+/**
  * Methods that browsers do not allow request headers to tunnel via the
- * override headers above.
+ * override headers above: the Fetch Standard's forbidden methods, the same list as
+ * {@link FETCH_FORBIDDEN_METHODS}, in a set of its own.
  */
 export const BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES: ReadonlySet<string> =
-  new Set(['connect', 'trace', 'track']);
+  new Set(FETCH_FORBIDDEN_METHODS);
 
 export const DEFAULT_MAX_REDIRECTS = 5;
 
@@ -244,3 +471,10 @@ export const REDIRECT_STATUS_CODES: ReadonlySet<number> = new Set([
   // 308 Permanent Redirect
   308,
 ]);
+
+/**
+ * The longest lifetime a cookie is given, in seconds: 400 days, RFC 6265bis §5.5's cap on
+ * both `Max-Age` and `Expires`, as browsers apply it. Shared by `CookieJar`, which caps
+ * what it stores, and `MockAdapter`, which caps the `Max-Age` it writes.
+ */
+export const MAX_COOKIE_LIFETIME_SECONDS = 400 * 24 * 60 * 60;

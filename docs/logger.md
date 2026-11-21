@@ -973,6 +973,10 @@ console.log(logger.getSinks().length); // 0
   diagnostic, so logging those reports back through _this_ logger is dropped with no
   console fallback. Use `console.error` or a destination this logger does not own. See
   [Where Failures Go](#where-failures-go)
+- `sinks`, `diagnosticSinks`, `addSink()` and `addDiagnosticSink()` refuse a value that is
+  not a sink - an object or function with a `write()` method, or for a diagnostic sink a
+  `writeDiagnostic()` one - with a `TypeError`, a hole in a list included (named by its
+  index, `Logger sinks[0]`)
 - `addSink()` and `addDiagnosticSink()` throw once `logger.close()` begins, including
   while sink cleanup is pending and after it completes. The logger does not take ownership
   of a refused sink; close it yourself if necessary. Create a new `Logger` for a fresh start

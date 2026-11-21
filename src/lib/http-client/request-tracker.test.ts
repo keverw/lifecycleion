@@ -13,6 +13,23 @@ function makeEntry(overrides?: Partial<TrackedRequest>): TrackedRequest {
 }
 
 describe('RequestTracker', () => {
+  test('list reads each filter field once, not once per entry', () => {
+    const tracker = new RequestTracker();
+    tracker.add(makeEntry({ requestID: 'a' }));
+    tracker.add(makeEntry({ requestID: 'b' }));
+    let reads = 0;
+    // A value on its first read and none after: read again for the comparison, it
+    // would be checked as one and compared as the other, and list nothing.
+    const filter = {
+      get clientID(): string | undefined {
+        return reads++ === 0 ? 'client-1' : undefined;
+      },
+    };
+
+    expect(tracker.list(filter).count).toBe(2);
+    expect(reads).toBe(1);
+  });
+
   describe('add / get / remove', () => {
     test('get returns entry after add', () => {
       const tracker = new RequestTracker();
@@ -246,6 +263,27 @@ describe('RequestTracker', () => {
       const result = tracker.list({ label: 'search' });
       expect(result.count).toBe(1);
       expect(result.requests[0].requestID).toBe('a');
+    });
+
+    test('an empty label or clientID filter matches only that value, as cancelAllWithLabel does', () => {
+      const tracker = new RequestTracker();
+      tracker.add(makeEntry({ requestID: 'a', clientID: '', label: '' }));
+      tracker.add(makeEntry({ requestID: 'b', clientID: 'c1', label: 'nav' }));
+
+      expect(
+        tracker.list({ label: '' }).requests.map((r) => r.requestID),
+      ).toEqual(['a']);
+      expect(
+        tracker.list({ clientID: '' }).requests.map((r) => r.requestID),
+      ).toEqual(['a']);
+    });
+
+    test('a null label or clientID filter is no filter', () => {
+      const tracker = new RequestTracker();
+      tracker.add(makeEntry({ requestID: 'a', clientID: 'c1', label: 'nav' }));
+
+      expect(tracker.list({ label: null } as never).count).toBe(1);
+      expect(tracker.list({ clientID: null } as never).count).toBe(1);
     });
 
     test('filters by both clientID and label', () => {

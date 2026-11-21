@@ -2136,10 +2136,13 @@ describe('errorToString - bounds that hold at the entry point', () => {
 
     error.additionalInfo = new Uint8Array(2_000_000);
 
-    const started = Date.now();
     const rendered = errorToString(error);
 
-    expect(Date.now() - started).toBeLessThan(3_000);
+    // One row holding the whole view: never enumerated, so no index reached a row.
+    expect(rendered).toMatch(
+      /\| AdditionalInfo +\| <binary: Uint8Array, 2000000 bytes> +\|/,
+    );
+    expect(rendered).not.toContain('AdditionalInfo.0');
     expect(rendered).not.toContain('AdditionalInfo.1000');
   });
 
@@ -2151,12 +2154,22 @@ describe('errorToString - bounds that hold at the entry point', () => {
     // couple of hundred characters.
     const error = new Error('boom') as Error & { code?: unknown };
 
-    error.code = Buffer.alloc(8_000_000, 0x41);
+    const code = Buffer.alloc(8_000_000, 0x41);
+    // `JSON.stringify` asks the value's own `toJSON` first, so this counts every time the
+    // JSON form is built.
+    let jsonForms = 0;
 
-    const started = Date.now();
+    Object.defineProperty(code, 'toJSON', {
+      value(this: Buffer) {
+        jsonForms++;
+        return Buffer.prototype.toJSON.call(this);
+      },
+    });
+    error.code = code;
+
     const rendered = errorToString(error);
 
-    expect(Date.now() - started).toBeLessThan(500);
+    expect(jsonForms).toBe(0);
     expect(rendered).toContain('<binary: Buffer, 8000000 bytes>');
     expect(rendered).not.toContain('"type":"Buffer"');
   });

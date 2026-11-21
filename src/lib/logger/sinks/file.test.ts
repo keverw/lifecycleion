@@ -20,6 +20,10 @@ import {
 } from '../../internal/console-test-utils';
 import { reportToConsole } from '../../internal/report-to-console';
 import { setOpenRetryBackoffForTesting } from './internal/reopen-backoff';
+import {
+  CLOSE_REOPEN_GRACE_MS,
+  CLOSE_REOPEN_POLL_MS,
+} from './internal/delivery-engine';
 
 /**
  * Open retries spaced in milliseconds rather than seconds, for tests that hold lines
@@ -4605,6 +4609,11 @@ describe('FileSink - holds lines while its log file cannot be opened', () => {
     message,
   });
 
+  /** How many open attempts `sink` has started, counted by its delivery engine. */
+  const openAttemptsOf = (sink: FileSink): number =>
+    (sink as unknown as { engine: { openAttemptsStarted: number } }).engine
+      .openAttemptsStarted;
+
   /** A sink whose `logDir` sits under a regular file, so every `mkdir` fails. */
   const makeUnopenableSink = async (
     maxRetries = 3,
@@ -4747,11 +4756,17 @@ describe('FileSink - holds lines while its log file cannot be opened', () => {
     sink.write(makeEntry('held one'));
     sink.write(makeEntry('held two'));
 
-    const startedAt = Date.now();
+    const attemptsBefore = openAttemptsOf(sink);
     await sink.close();
 
-    // The 500 ms grace window, not the 30 s close budget.
-    expect(Date.now() - startedAt).toBeLessThan(2000);
+    // Retried, one attempt per poll, across the 500 ms grace window and no longer: the
+    // 30 s close budget would have made hundreds.
+    const closeAttempts = openAttemptsOf(sink) - attemptsBefore;
+
+    expect(closeAttempts).toBeGreaterThan(0);
+    expect(closeAttempts).toBeLessThanOrEqual(
+      CLOSE_REOPEN_GRACE_MS / CLOSE_REOPEN_POLL_MS + 1,
+    );
 
     const closeFailures = failures.filter(
       (failure) => failure.kind === 'close',
@@ -4775,7 +4790,7 @@ describe('FileSink - holds lines while its log file cannot be opened', () => {
 
     sink.write(makeEntry('flushed mid-outage'));
 
-    const startedAt = Date.now();
+    const attemptsBefore = openAttemptsOf(sink);
 
     expect(await sink.flush(5000)).toEqual({
       success: false,
@@ -4784,8 +4799,8 @@ describe('FileSink - holds lines while its log file cannot be opened', () => {
       timedOut: false,
       entriesQueued: 1,
     });
-    // The next attempt, not the deadline.
-    expect(Date.now() - startedAt).toBeLessThan(1000);
+    // The next attempt, not a later one or the deadline.
+    expect(openAttemptsOf(sink) - attemptsBefore).toBe(1);
     expect(sink.getHealth().queueSize).toBe(1);
 
     await sink.close();

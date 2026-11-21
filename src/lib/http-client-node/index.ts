@@ -1,5 +1,8 @@
 export { NodeAdapter } from '../http-client/adapters/node-adapter';
-export type { NodeAdapterConfig } from '../http-client/adapters/node-adapter';
+export type {
+  NodeAdapterConfig,
+  TLSMaterial,
+} from '../http-client/adapters/node-adapter';
 
 /**
  * Adapter contract types, re-exported so code driving an adapter directly —

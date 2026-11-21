@@ -3621,3 +3621,21 @@ test('errorObject on a closed logger does not render the error, but its exitCode
     output.mockRestore();
   }
 });
+
+test('a sink list is read by `in`, not one `Object.hasOwn` per sink', async () => {
+  let ownChecks = 0;
+  const arraySink = new ArraySink();
+  const sinks = new Proxy([arraySink], {
+    getOwnPropertyDescriptor: (target, key) => {
+      ownChecks++;
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+  });
+
+  const logger = new Logger({ callProcessExit: false, sinks });
+  logger.info('hello');
+
+  expect(ownChecks).toBe(0);
+  expect(arraySink.logs).toHaveLength(1);
+  await logger.close();
+});
