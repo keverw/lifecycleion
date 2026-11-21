@@ -1449,6 +1449,79 @@ test('params writes a polyfill buffer as its text and a Proxy in its own key ord
   }
 });
 
+test('a nested params Proxy over an array that lists its indices out of order, and an own constructor getter, are each read once into the query', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  for (const path of ['/x', '/x?k=1']) {
+    let reads = 0;
+    const filter = {
+      get constructor() {
+        return ++reads;
+      },
+    };
+    // Nested, since `.params()` copies a top-level array by index.
+    const list = new Proxy(['a', 'b'], {
+      ownKeys: () => ['1', '0', 'length'],
+    });
+    const response = await client
+      .get(path)
+      .params({ filter, nested: { list } })
+      .send();
+
+    expect(decodeURIComponent(response.requestURL)).toContain(
+      'filter[constructor]=1&nested[list][1]=b&nested[list][0]=a',
+    );
+    expect(reads).toBe(1);
+  }
+});
+
+test("qs runs none of a params value's hooks again: a Date with an isBuffer is written as its ISO text, and a constructor's isBuffer getter is read once", async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  for (const path of ['/x', '/x?k=1']) {
+    let hookCalls = 0;
+    const date = Object.assign(new Date(0), {
+      isBuffer: () => ++hookCalls > 1,
+    });
+    const fn = Object.assign(() => 1, { constructor: date });
+    let isBufferReads = 0;
+    const holder = {
+      constructor: {
+        get isBuffer() {
+          return ++isBufferReads === 1 ? () => false : 'second';
+        },
+      },
+    };
+    let ownReads = 0;
+    const ownConstructor: Record<string, unknown> = {
+      get isBuffer() {
+        return ++ownReads === 1 ? () => false : 'second';
+      },
+    };
+    Object.defineProperty(ownConstructor, 'constructor', {
+      value: ownConstructor,
+    });
+    const response = await client
+      .get(path)
+      .params({ nested: { fn, date, holder, ownConstructor } })
+      .send();
+
+    const query = decodeURIComponent(response.requestURL);
+    expect(query).toContain(
+      'nested[fn][constructor]=1970-01-01T00:00:00.000Z&nested[date]=1970-01-01T00:00:00.000Z',
+    );
+    expect(query).not.toContain('holder');
+    expect(query).not.toContain('ownConstructor');
+    expect(ownReads).toBe(1);
+    expect(hookCalls).toBe(0);
+    expect(isBufferReads).toBe(1);
+  }
+});
+
 test('a getter in an object params reaches twice is read once for each, with or without a query in the path', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({ status: 200 }));

@@ -110,39 +110,75 @@ function isGivenParam(value: unknown): boolean {
 /**
  * A param value with every object `qs` walks into copied, each member read once: the
  * override check and the query both read the copy, so a nested getter cannot answer one
- * of them differently from the other. An array is copied into an array, and any other
- * object `qs` walks by its own enumerable keys - a plain record, a function, a class
- * instance - into a plain record, which `qs` writes as it would the original, its keys
- * in the order the original lists them (a `Proxy`'s `ownKeys` order included). A `Date`,
- * and any value that is not an object, are kept as they are, and a value `qs` writes as
- * a buffer (see {@link qsBufferText}) as the text `qs` would write for it. A cycle, and an entry deeper than `MAX_PARAM_DEPTH`, are refused
- * as `qs` refuses them, with its `RangeError`; a collection `qs` would write nothing for
- * (a `Set` a getter answers, say) as `.params()` refuses one, with a `TypeError` naming
- * its key (see `unreadableCollectionRefusal`). An object reached by more than one path
- * is copied once for each, as `qs` reads it once for each - a getter in it included.
+ * of them differently from the other, and `qs`, which reads only the copy, runs none of
+ * the caller's code. An array is copied into an array, and any other object `qs` walks by
+ * its own enumerable keys - a plain record, a function, a class instance - into a plain
+ * record, which `qs` writes as it would the original, its keys in the order the original
+ * lists them (a `Proxy`'s `ownKeys` order included). A value that is not an object is
+ * kept as it is, and a `Date` and a value `qs` writes as a buffer (see
+ * {@link qsBufferRead}) are written as the text `qs` would write for them. A cycle, and
+ * an entry deeper than `MAX_PARAM_DEPTH`, are refused as `qs` refuses them, with its
+ * `RangeError`; a collection `qs` would write nothing for (a `Set` a getter answers, say)
+ * as `.params()` refuses one, with a `TypeError` naming its key (see
+ * `unreadableCollectionRefusal`). An object reached by more than one path is copied once
+ * for each, as `qs` reads it once for each - a getter in it included.
+ *
+ * `read` holds the members of `value` already read - the `isBuffer` of an object read as
+ * its holder's `constructor` - which are not read again.
  *
  * An array is copied by the keys `qs` serializes it by, as a record is - its own
  * enumerable keys, so a hole is skipped and a key that is not an index (`list.extra`) kept.
  *
  * Kept separate from `.params()`'s check (`assertSerializableParams`), which must run no
  * getter, since this read is the one `qs` serializes, and reads through them.
+ *
+ * What it promises is the query `qs` would write for the values as read here, and that
+ * the override check reads the same values. The hooks `qs` itself consults
+ * (`constructor`, `isBuffer`, `toString`) are read once on the common paths, but a value
+ * whose hooks change the value while they are read (an `isBuffer` that defines an own
+ * `constructor`, say) is outside that promise: matching `qs` there would take
+ * property checks `qs` does not make, which would run a `Proxy`'s traps `qs` never runs.
  */
 function snapshotParamValue(
   value: unknown,
   depth: number,
   walk: ParamSnapshotWalk,
+  read?: ReadonlyMap<string, unknown>,
 ): unknown {
   if (
     (typeof value !== 'object' && typeof value !== 'function') ||
-    value === null ||
-    value instanceof Date
+    value === null
   ) {
     return value;
   }
 
-  const bufferText = qsBufferText(value);
-  if (bufferText !== undefined) {
-    return bufferText;
+  // As `qs` writes a `Date` by default, and throws for an invalid one.
+  if (value instanceof Date) {
+    return Date.prototype.toISOString.call(value);
+  }
+
+  const source = value as Record<string, unknown>;
+  // The `isBuffer` read off `value` itself, when it is its own `constructor`.
+  let ownIsBuffer: unknown = NOT_READ;
+  const member = (key: string): unknown => {
+    if (read?.has(key) === true) {
+      return read.get(key);
+    }
+    return key === 'isBuffer' && ownIsBuffer !== NOT_READ
+      ? ownIsBuffer
+      : source[key];
+  };
+
+  // Read once: told a buffer by, and copied as the entry it is when it is an own one -
+  // its `isBuffer` with it, read once too. `qs` does not ask a function.
+  const constructor: unknown =
+    typeof value === 'object' ? member('constructor') : NOT_READ;
+  const buffer = qsBufferRead(value, constructor);
+  if (buffer.text !== undefined) {
+    return buffer.text;
+  }
+  if (constructor === value) {
+    ownIsBuffer = buffer.isBuffer;
   }
 
   const collectionRefusal = unreadableCollectionRefusal(value, walk);
@@ -154,7 +190,6 @@ function snapshotParamValue(
     throw new RangeError('Cyclic object value');
   }
 
-  const source = value as Record<string, unknown>;
   const keys = Object.keys(source);
   if (exceedsParamDepth(keys.length, depth)) {
     throw new RangeError(PARAM_DEPTH_EXCEEDED_MESSAGE);
@@ -164,15 +199,39 @@ function snapshotParamValue(
   const copy = (Array.isArray(value) ? [] : {}) as Record<string, unknown>;
   for (const key of keys) {
     walk.path.push(key);
-    defineEntry(copy, key, snapshotParamValue(source[key], depth + 1, walk));
+    const isConstructor = key === 'constructor' && constructor !== NOT_READ;
+    const entry = isConstructor ? constructor : member(key);
+    defineEntry(
+      copy,
+      key,
+      snapshotParamValue(
+        entry,
+        depth + 1,
+        walk,
+        isConstructor && buffer.isBuffer !== NOT_READ
+          ? new Map([['isBuffer', buffer.isBuffer]])
+          : undefined,
+      ),
+    );
     walk.path.pop();
   }
 
   walk.ancestors.delete(value);
-  return listsKeysInOrder(copy, keys)
-    ? copy
-    : new Proxy(copy, { ownKeys: () => keys });
+  if (listsKeysInOrder(copy, keys)) {
+    return copy;
+  }
+
+  // An array's `length`, which it holds as its own and cannot let go, must be listed too;
+  // it is not enumerable, so `qs` still writes no entry for it.
+  const ownKeys = Array.isArray(copy) ? [...keys, 'length'] : keys;
+  return new Proxy(copy, { ownKeys: () => ownKeys });
 }
+
+/**
+ * A member not read: a function's `constructor`, which `qs` does not ask whether it is a
+ * buffer, or the `isBuffer` of a falsy `constructor`, which `qs` does not read.
+ */
+const NOT_READ: unique symbol = Symbol('not read');
 
 /**
  * Whether `copy`, an object just filled with `keys` in turn, lists them in that order. It
@@ -185,27 +244,28 @@ function listsKeysInOrder(copy: object, keys: readonly string[]): boolean {
 }
 
 /**
- * The text `qs` writes for `value` when it takes it for a buffer - an object whose
- * `constructor` has an `isBuffer` that answers truthy for it: a `Buffer`, or a polyfill's
- * where there is no global one - as `qs` does, by `String`; `undefined` for any other
- * value. Each hook read once, rather than once by this snapshot and again by `qs`.
+ * Whether `qs` takes `value` for a buffer - an object whose `constructor`, read once by
+ * the caller, has an `isBuffer` that answers truthy for it: a `Buffer`, or a polyfill's
+ * where there is no global one - and if so the text `qs` writes for it, by `String`, as
+ * `qs` does. `isBuffer` is the member read off `constructor` ({@link NOT_READ} when none
+ * was), so a copy of `constructor` does not read it again.
  */
-function qsBufferText(value: object): string | undefined {
-  if (typeof value !== 'object') {
-    return undefined;
-  }
-
-  const constructor: unknown = (value as { constructor?: unknown }).constructor;
-  if (!constructor) {
-    return undefined;
+function qsBufferRead(
+  value: object,
+  constructor: unknown,
+): { text: string | undefined; isBuffer: unknown } {
+  if (constructor === NOT_READ || !constructor) {
+    return { text: undefined, isBuffer: NOT_READ };
   }
 
   const isBuffer: unknown = (constructor as { isBuffer?: unknown }).isBuffer;
-  return typeof isBuffer === 'function' &&
+  const text =
+    typeof isBuffer === 'function' &&
     Reflect.apply(isBuffer, constructor, [value])
-    ? // eslint-disable-next-line @typescript-eslint/no-base-to-string -- a buffer's own `toString`, reached by `String` as `qs` reaches it
-      String(value)
-    : undefined;
+      ? // eslint-disable-next-line @typescript-eslint/no-base-to-string -- a buffer's own `toString`, reached by `String` as `qs` reaches it
+        String(value)
+      : undefined;
+  return { text, isBuffer };
 }
 
 interface ParamSnapshotWalk extends CollectionLookup {
