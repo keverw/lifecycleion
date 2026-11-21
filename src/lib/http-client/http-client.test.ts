@@ -4289,6 +4289,114 @@ describe('HTTPClient — adapter tags are taken off the error once read', () => 
     expect(await stale.requestBodySettled).toBeUndefined();
   });
 
+  test('a stream abort tagged afresh, a value repeated, is read whole', async () => {
+    // An error that refuses every delete, tagged again for each request with the same
+    // status and flag beside new headers: all of them are the new request's.
+    const shared = new Proxy(new Error('cut'), { deleteProperty: () => false });
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (request: AdapterRequest): Promise<AdapterResponse> =>
+          Promise.resolve().then(() => {
+            const host = new URL(request.requestURL).hostname;
+            defineHiddenTags(shared, {
+              [RESPONSE_STREAM_ABORT_FLAG]: true,
+              [STREAM_ABORT_STATUS_KEY]: 200,
+              [STREAM_ABORT_HEADERS_KEY]: {
+                'set-cookie': [`sid=${host}; Path=/`],
+              },
+            });
+            throw shared;
+          }),
+      },
+      cookieJar: jar,
+    });
+
+    for (const host of ['a.test', 'b.test']) {
+      const response = await client.get(`https://${host}/x`).send();
+
+      expect([host, response.status, response.isStreamError]).toEqual([
+        host,
+        200,
+        true,
+      ]);
+      expect(jar.getCookieFor('sid', `https://${host}/`)?.value).toBe(host);
+    }
+  });
+
+  test("an upload tagged afresh does not make an earlier attempt's answer this one's", async () => {
+    // An error that refuses every delete: the first request leaves a stream abort's tags
+    // on it, and the second tags only its own upload, as NodeAdapter tags a caller's
+    // error.
+    const shared = new Proxy(new Error('shared'), {
+      deleteProperty: () => false,
+    });
+    let call = 0;
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (): Promise<AdapterResponse> =>
+          Promise.resolve().then(() => {
+            call++;
+            defineHiddenTags(shared, {
+              [REQUEST_BODY_SETTLED_KEY]: Promise.resolve(
+                new Error(`upload ${call}`),
+              ),
+              ...(call === 1
+                ? {
+                    [RESPONSE_STREAM_ABORT_FLAG]: true,
+                    [STREAM_ABORT_STATUS_KEY]: 200,
+                    [STREAM_ABORT_HEADERS_KEY]: {
+                      'set-cookie': ['sid=a; Path=/'],
+                    },
+                  }
+                : {}),
+            });
+            throw shared;
+          }),
+      },
+      cookieJar: jar,
+    });
+
+    const first = await client.post('https://a.test/x').json({}).send();
+    expect(first.isStreamError).toBe(true);
+
+    const second = await client.post('https://b.test/x').json({}).send();
+    expect(second.isStreamError).toBe(false);
+    expect(second.status).toBe(0);
+    expect((await second.requestBodySettled)?.message).toBe('upload 2');
+    expect(jar.getCookiesFor('https://b.test/')).toEqual([]);
+  });
+
+  test('tags an error inherits are not read as its own', async () => {
+    // A wrapping adapter whose errors share one tagged prototype: the tags are no one
+    // attempt's, and cannot be taken off the error either.
+    const proto = Object.create(Error.prototype) as Error;
+    defineHiddenTags(proto, {
+      [RESPONSE_STREAM_ABORT_FLAG]: true,
+      [STREAM_ABORT_STATUS_KEY]: 200,
+      [STREAM_ABORT_HEADERS_KEY]: { 'set-cookie': ['sid=shared; Path=/'] },
+    });
+    const failure = Object.create(proto) as Error;
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (): Promise<AdapterResponse> => Promise.reject(failure),
+      },
+      cookieJar: jar,
+    });
+
+    for (const host of ['a.test', 'b.test']) {
+      const response = await client.get(`https://${host}/x`).send();
+
+      expect([host, response.isStreamError]).toEqual([host, false]);
+    }
+    expect(jar.getAllCookies()).toEqual([]);
+  });
+
   test("a stream factory's failure handed back for another request is still that failure", async () => {
     const callerError = new Error('sink refused');
     const carrier = new Error('sink refused', { cause: callerError });

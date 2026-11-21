@@ -6396,11 +6396,28 @@ const ATTEMPT_TAG_KEYS: readonly PropertyKey[] = [
 ];
 
 /**
+ * The attempt tags in the groups an adapter writes them in: the upload's outcome alone
+ * (NodeAdapter tags it on an error of a caller's it rejects with), and the answer it had
+ * with the headers it sent, together. Each group is fresh or not as one (see
+ * `attemptTagsLeftOn`).
+ */
+const ATTEMPT_TAG_GROUPS: readonly (readonly PropertyKey[])[] = [
+  [REQUEST_BODY_SETTLED_KEY],
+  [
+    RESPONSE_STREAM_ABORT_FLAG,
+    STREAM_ABORT_STATUS_KEY,
+    STREAM_ABORT_HEADERS_KEY,
+    EFFECTIVE_REQUEST_HEADERS_KEY,
+  ],
+];
+
+/**
  * The attempt tags {@link takeAdapterErrorTags} read off an error but could not take off
  * it - a frozen error's, a `Proxy`'s that refuses - by key, with the value read: they
- * belong to the attempt that read them, so the same value seen again is none for the
- * next. A value set afresh since - an adapter re-tagging the error for another request -
- * is read.
+ * belong to the attempt that read them, so a group of them (see `ATTEMPT_TAG_GROUPS`)
+ * seen again unchanged is none for the next. A group with any value set afresh since -
+ * an adapter tagging the error again for another request, a value repeated beside new
+ * ones - is read whole; a group it did not tag again stays the earlier attempt's.
  */
 const attemptTagsLeftOn = new WeakMap<object, Map<PropertyKey, unknown>>();
 
@@ -6414,27 +6431,57 @@ const attemptTagsLeftOn = new WeakMap<object, Map<PropertyKey, unknown>>();
  * `attemptTagsLeftOn`). `undefined` - the abort's own reason - has no tags.
  */
 function takeAdapterErrorTags(error: unknown): AdapterErrorTags {
-  // The attempt tags, each read once into a record of this client's own, the ones an
-  // earlier attempt read and could not take off left out; the readers below read that.
+  // The attempt tags, each read once into a record of this client's own - without a
+  // group that is just what an earlier attempt read and could not take off; the readers
+  // below read that.
   const attempt: Record<PropertyKey, unknown> = Object.create(null) as Record<
     PropertyKey,
     unknown
   >;
 
   if (isObjectLike(error)) {
-    const readBefore = attemptTagsLeftOn.get(error);
-    const left = new Map<PropertyKey, unknown>();
-
+    // Own tags only: one the error inherits - off a prototype a wrapping adapter shares
+    // between errors - cannot be taken off it, and would be read again for each.
+    const current = new Map<PropertyKey, unknown>();
     for (const key of ATTEMPT_TAG_KEYS) {
-      const value = readUnknownMember(error, key);
-      if (value === undefined) {
-        continue;
+      let isOwn: boolean;
+      try {
+        isOwn = Object.hasOwn(error, key);
+      } catch {
+        // A `Proxy` whose trap throws: read as having none.
+        isOwn = false;
       }
 
-      if (!(readBefore?.has(key) === true && readBefore.get(key) === value)) {
-        attempt[key] = value;
+      const value = isOwn ? readUnknownMember(error, key) : undefined;
+      if (value !== undefined) {
+        current.set(key, value);
       }
+    }
 
+    // Fresh by group: an adapter that tags the error again for another request may repeat
+    // a value (the same status, the stream-abort flag) beside new ones (its headers), and
+    // all of them are that request's; a group every value of which an earlier attempt
+    // read, unchanged, is that attempt's.
+    const readBefore = attemptTagsLeftOn.get(error);
+    for (const group of ATTEMPT_TAG_GROUPS) {
+      const isReadBefore =
+        readBefore !== undefined &&
+        group.every(
+          (key) =>
+            !current.has(key) ||
+            (readBefore.has(key) && readBefore.get(key) === current.get(key)),
+        );
+      if (!isReadBefore) {
+        for (const key of group) {
+          if (current.has(key)) {
+            attempt[key] = current.get(key);
+          }
+        }
+      }
+    }
+
+    const left = new Map<PropertyKey, unknown>();
+    for (const [key, value] of current) {
       let isTakenOff: boolean;
       try {
         isTakenOff = Reflect.deleteProperty(error, key);
@@ -6450,7 +6497,7 @@ function takeAdapterErrorTags(error: unknown): AdapterErrorTags {
 
     if (left.size > 0) {
       attemptTagsLeftOn.set(error, left);
-    } else if (readBefore !== undefined) {
+    } else {
       attemptTagsLeftOn.delete(error);
     }
   }
