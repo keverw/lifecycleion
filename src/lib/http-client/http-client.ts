@@ -6396,10 +6396,11 @@ const ATTEMPT_TAG_KEYS: readonly PropertyKey[] = [
 ];
 
 /**
- * The attempt tags in the groups an adapter writes them in: the upload's outcome alone
- * (NodeAdapter tags it on an error of a caller's it rejects with), and the answer it had
- * with the headers it sent, together. Each group is fresh or not as one (see
- * `attemptTagsLeftOn`).
+ * The attempt tags in groups that are fresh or not as one (see `attemptTagsLeftOn`): the
+ * upload's outcome (NodeAdapter tags it on an error of a caller's it rejects with), the
+ * answer the attempt had - its status, headers and the flag that says it was cut - and
+ * the headers it sent, each on its own, so one tagged afresh makes no other this
+ * attempt's.
  */
 const ATTEMPT_TAG_GROUPS: readonly (readonly PropertyKey[])[] = [
   [REQUEST_BODY_SETTLED_KEY],
@@ -6407,8 +6408,8 @@ const ATTEMPT_TAG_GROUPS: readonly (readonly PropertyKey[])[] = [
     RESPONSE_STREAM_ABORT_FLAG,
     STREAM_ABORT_STATUS_KEY,
     STREAM_ABORT_HEADERS_KEY,
-    EFFECTIVE_REQUEST_HEADERS_KEY,
   ],
+  [EFFECTIVE_REQUEST_HEADERS_KEY],
 ];
 
 /**

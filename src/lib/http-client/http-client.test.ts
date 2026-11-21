@@ -4370,6 +4370,46 @@ describe('HTTPClient — adapter tags are taken off the error once read', () => 
     expect(jar.getCookiesFor('https://b.test/')).toEqual([]);
   });
 
+  test("sent headers tagged afresh do not make an earlier attempt's answer this one's", async () => {
+    const shared = new Proxy(new Error('shared'), {
+      deleteProperty: () => false,
+    });
+    let call = 0;
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (): Promise<AdapterResponse> =>
+          Promise.resolve().then(() => {
+            call++;
+            defineHiddenTags(shared, {
+              [EFFECTIVE_REQUEST_HEADERS_KEY]: { 'x-call': String(call) },
+              ...(call === 1
+                ? {
+                    [RESPONSE_STREAM_ABORT_FLAG]: true,
+                    [STREAM_ABORT_STATUS_KEY]: 200,
+                    [STREAM_ABORT_HEADERS_KEY]: {
+                      'set-cookie': ['sid=a; Path=/'],
+                    },
+                  }
+                : {}),
+            });
+            throw shared;
+          }),
+      },
+      cookieJar: jar,
+    });
+
+    expect((await client.get('https://a.test/x').send()).isStreamError).toBe(
+      true,
+    );
+
+    const second = await client.get('https://b.test/x').send();
+    expect(second.isStreamError).toBe(false);
+    expect(second.status).toBe(0);
+    expect(jar.getCookiesFor('https://b.test/')).toEqual([]);
+  });
+
   test('tags an error inherits are not read as its own', async () => {
     // A wrapping adapter whose errors share one tagged prototype: the tags are no one
     // attempt's, and cannot be taken off the error either.
