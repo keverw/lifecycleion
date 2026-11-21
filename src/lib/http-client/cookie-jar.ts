@@ -294,6 +294,11 @@ type CookieNamePrefix = '__host-http-' | '__host-' | '__http-' | '__secure-';
  * well. `__Host-Http-` is matched before the `__Host-` it starts with.
  */
 function cookieNamePrefix(text: string): CookieNamePrefix | null {
+  // Every prefix starts `__`: a name that does not is answered without a copy.
+  if (text.charCodeAt(0) !== 95 || text.charCodeAt(1) !== 95) {
+    return null;
+  }
+
   const start = asciiLowercase(text.slice(0, '__host-http-'.length));
 
   if (start === '__host-http-') {

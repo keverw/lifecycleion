@@ -449,7 +449,7 @@ export function matchesWildcardDomain(
  * {@link matchesWildcardDomain}, its pattern compiled through the shared cache when
  * `isCached` - false for a pattern from a list longer than the cache, which scanned in
  * order would evict, entry by entry, the one the next scan needs first (see
- * `cachedEntry`).
+ * `MAX_SHARED_CACHE_ENTRIES`).
  */
 function matchesWildcardDomainIn(
   domain: string,
@@ -698,8 +698,10 @@ const compiledWildcardPatterns = new Map<
 
 /**
  * How many entries each shared cache - {@link compiledWildcardPatterns} and
- * {@link normalizedExactEntries} - keeps, and so the longest list cached in them (see
- * `cachedEntry`).
+ * {@link normalizedExactEntries} - keeps, least recently used out first (see
+ * `getOrCompute`), and so the longest list cached in them. A longer list is not cached
+ * there at all: scanned in order, each entry would evict the one the next scan needs
+ * first, missing every time at more cost than computing them.
  */
 const MAX_SHARED_CACHE_ENTRIES = 512;
 
@@ -711,8 +713,8 @@ const normalizedExactEntries = new Map<string, string>();
 
 /**
  * Where a wildcard pattern's compiled form is kept: the shared cache (`true`), nowhere
- * (`false`, for a list longer than it - see `cachedEntry`), or a list's own map (see
- * `compiledOriginList`).
+ * (`false`, for a list longer than it - see `MAX_SHARED_CACHE_ENTRIES`), or a list's
+ * own map (see `compiledOriginList`).
  */
 type PatternCache =
   boolean | Map<string, ReturnType<typeof compileWildcardPattern>>;
@@ -731,27 +733,24 @@ function compiledWildcardPattern(
   }
 
   return cache
-    ? cachedEntry(compiledWildcardPatterns, pattern, compileWildcardPattern)
+    ? getOrCompute(
+        compiledWildcardPatterns,
+        pattern,
+        MAX_SHARED_CACHE_ENTRIES,
+        compileWildcardPattern,
+      )
     : compileWildcardPattern(pattern);
 }
 
 function normalizedExactEntry(entry: string, isCached: boolean): string {
   return isCached
-    ? cachedEntry(normalizedExactEntries, entry, normalizeDomain)
+    ? getOrCompute(
+        normalizedExactEntries,
+        entry,
+        MAX_SHARED_CACHE_ENTRIES,
+        normalizeDomain,
+      )
     : normalizeDomain(entry);
-}
-
-/**
- * `compute(key)`, kept in `cache` (see `getOrCompute`). A list longer than the cache is
- * not cached at all: scanned in order, each entry would evict the one the next scan needs
- * first, missing every time at more cost than computing them.
- */
-function cachedEntry<T>(
-  cache: Map<string, T>,
-  key: string,
-  compute: (key: string) => T,
-): T {
-  return getOrCompute(cache, key, MAX_SHARED_CACHE_ENTRIES, compute);
 }
 
 /** A domain-list entry as {@link matchesDomainList} reads it, compiled once. */
@@ -824,7 +823,8 @@ function compiledDomainList(
     source,
     cleaned,
     entries: [],
-    // A list that fits the shared caches is cached there too; see `cachedEntry`.
+    // A list that fits the shared caches is cached there too; see
+    // `MAX_SHARED_CACHE_ENTRIES`.
     isCached: cleaned.length <= MAX_SHARED_CACHE_ENTRIES,
   };
   compiledDomainLists.set(allowedDomains, list);

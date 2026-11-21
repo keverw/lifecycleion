@@ -6025,25 +6025,66 @@ describe('Leave Secure Cookies Alone reaches the sites on either side of a domai
       });
     }
 
-    expect(internalsOf(jar).buckets.size).toBe(100_000);
+    const { buckets } = internalsOf(jar);
+    expect(buckets.size).toBe(100_000);
 
-    const startedAt = performance.now();
+    // Every way of walking the jar's sites, counted on the map itself: by lookup, the
+    // 2000 checks walk none of them; a scan would walk all 100,000 for each.
+    let walks = 0;
+    let lookups = 0;
+    const counted = buckets as unknown as Record<PropertyKey, unknown>;
+    for (const method of [
+      'keys',
+      'values',
+      'entries',
+      'forEach',
+      Symbol.iterator,
+    ] as const) {
+      const original = Reflect.get(Map.prototype, method) as (
+        ...args: unknown[]
+      ) => unknown;
+      counted[method] = function (this: unknown, ...args: unknown[]): unknown {
+        walks++;
+        return Reflect.apply(original, this, args);
+      };
+    }
+    const get = Reflect.get(Map.prototype, 'get') as (key: unknown) => unknown;
+    counted.get = function (this: unknown, key: unknown): unknown {
+      lookups++;
+      return Reflect.apply(get, this, [key]);
+    };
 
-    for (let plant = 0; plant < 1000; plant++) {
-      jar.parseSetCookieHeader('session=plain', `http://plant${plant}.test/`);
-      jar.parseSetCookieHeader('session=evil', `http://www.site${plant}.test/`);
+    try {
+      for (let plant = 0; plant < 1000; plant++) {
+        jar.parseSetCookieHeader('session=plain', `http://plant${plant}.test/`);
+        jar.parseSetCookieHeader(
+          'session=evil',
+          `http://www.site${plant}.test/`,
+        );
+      }
+    } finally {
+      for (const method of [
+        'keys',
+        'values',
+        'entries',
+        'forEach',
+        Symbol.iterator,
+        'get',
+      ] as const) {
+        Reflect.deleteProperty(counted, method);
+      }
     }
 
-    const elapsedMS = performance.now() - startedAt;
+    expect(walks).toBe(0);
+    // A few lookups a check - its own site, and those above and under its domain - not
+    // one for each of the 100,000 sites.
+    expect(lookups).toBeLessThan(2000 * 20);
 
     // Each plant beside the sites is stored, and each over a site's Secure cookie refused.
-    expect(internalsOf(jar).buckets.size).toBe(101_000);
+    expect(buckets.size).toBe(101_000);
     expect(
       jar.getAllCookies().filter((cookie) => cookie.value === 'evil'),
     ).toEqual([]);
-    // By lookup the 2000 checks take tens of milliseconds; scanning 100,000 buckets for
-    // each, seconds.
-    expect(elapsedMS).toBeLessThan(1000);
   }, 60_000);
 });
 

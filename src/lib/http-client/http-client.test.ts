@@ -3992,6 +3992,111 @@ describe('HTTPClient — adapter marker flags', () => {
   });
 });
 
+describe("HTTPClient — adapter tags on the caller's own abort reason", () => {
+  // An adapter that rejects with its signal's reason, as `fetch` does: the client is
+  // handed the caller's own abort reason, and a tag on it - a tagged error from an
+  // earlier request, passed to `abort()` - is nothing this attempt's adapter said.
+  const reasonRejectingAdapter: HTTPAdapter = {
+    getType: () => 'mock' as const,
+    send: (request: AdapterRequest): Promise<AdapterResponse> =>
+      new Promise((_resolve, reject) => {
+        const signal = request.signal as AbortSignal;
+        signal.addEventListener(
+          'abort',
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          () => reject(signal.reason),
+          { once: true },
+        );
+      }),
+  };
+  const answerOfAnotherRequest = {
+    [STREAM_ABORT_STATUS_KEY]: 200,
+    [STREAM_ABORT_HEADERS_KEY]: { 'set-cookie': ['sid=site-a; Path=/'] },
+    [EFFECTIVE_REQUEST_HEADERS_KEY]: { 'x-site': 'a' },
+  };
+
+  test.each([
+    ['a stream abort', { [RESPONSE_STREAM_ABORT_FLAG]: true }],
+    ['a stream factory failure', { [STREAM_FACTORY_ERROR_FLAG]: true }],
+    ['a stream factory decline', { [STREAM_FACTORY_CANCEL_KEY]: 'declined' }],
+  ])(
+    "an abort mid-flight with a reason tagged as %s stores none of that answer's cookies",
+    async (_label, tag) => {
+      for (const name of ['Error', 'AbortError']) {
+        const reason = Object.assign(new Error('earlier request'), {
+          name,
+          ...tag,
+          ...answerOfAnotherRequest,
+        });
+        const jar = new CookieJar();
+        const client = new HTTPClient({
+          adapter: reasonRejectingAdapter,
+          baseURL: 'https://site-b.test',
+          cookieJar: jar,
+        });
+        const controller = new AbortController();
+        const builder = client.get('/x').signal(controller.signal);
+        const promise = builder.send();
+        await Promise.resolve();
+        controller.abort(reason);
+        const response = await promise;
+
+        expect(response.isCancelled).toBe(true);
+        expect(response.isStreamError).toBe(false);
+        expect(builder.error?.cancelReason).toBeUndefined();
+        expect(builder.error?.code).toBe('cancelled');
+        expect(jar.getAllCookies()).toEqual([]);
+      }
+    },
+  );
+
+  test("an upload outcome tagged on the abort reason is not this attempt's", async () => {
+    const reason = Object.assign(new Error('earlier request'), {
+      [REQUEST_BODY_SETTLED_KEY]: Promise.resolve(new Error('earlier upload')),
+    });
+    const client = new HTTPClient({
+      adapter: reasonRejectingAdapter,
+      baseURL: 'https://site-b.test',
+    });
+    const controller = new AbortController();
+    const promise = client.get('/x').signal(controller.signal).send();
+    await Promise.resolve();
+    controller.abort(reason);
+    const response = await promise;
+
+    expect(response.isCancelled).toBe(true);
+    expect(await response.requestBodySettled).toBeUndefined();
+  });
+
+  test('an attempt given up on, aborted with a tagged reason, stores none of its cookies', async () => {
+    // An adapter that never settles: the attempt ends past the abort grace, throwing the
+    // caller's reason itself.
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (): Promise<AdapterResponse> => new Promise(() => {}),
+      },
+      baseURL: 'https://site-b.test',
+      cookieJar: jar,
+    });
+    const controller = new AbortController();
+    const promise = client.get('/x').signal(controller.signal).send();
+    await Promise.resolve();
+    controller.abort(
+      Object.assign(new Error('earlier request'), {
+        [RESPONSE_STREAM_ABORT_FLAG]: true,
+        ...answerOfAnotherRequest,
+      }),
+    );
+    const response = await promise;
+
+    expect(response.isCancelled).toBe(true);
+    expect(response.isStreamError).toBe(false);
+    expect(jar.getAllCookies()).toEqual([]);
+  });
+});
+
 describe('HTTPClient — interceptor cancel reason', () => {
   test('interceptor returning { cancel: true } sets isCancelled with no cancelReason', async () => {
     const client = makeClient();

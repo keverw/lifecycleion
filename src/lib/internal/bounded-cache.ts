@@ -14,11 +14,12 @@ export function getOrCompute<K, V>(
   compute: (key: K) => V,
   shouldKeep?: (key: K) => boolean,
 ): V {
-  if (cache.has(key)) {
-    const cached = cache.get(key) as V;
+  // One lookup on a hit; `has` only tells a kept `undefined` from a miss.
+  const cached = cache.get(key);
+  if (cached !== undefined || cache.has(key)) {
     cache.delete(key);
-    cache.set(key, cached);
-    return cached;
+    cache.set(key, cached as V);
+    return cached as V;
   }
 
   const value = compute(key);
