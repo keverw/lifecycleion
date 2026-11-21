@@ -1,0 +1,111 @@
+import { expect, test } from 'bun:test';
+import { deferred, Plain, setup } from './test-helpers';
+
+for (const doesOwnCleanup of [false, true]) {
+  test(`restart refuses before stopping anything while a timed-out start is unresolved (ownsLateStartCleanup: ${doesOwnCleanup})`, async () => {
+    const { logger, manager } = setup();
+    const database = new Plain(logger, 'database');
+    const unrelated = new Plain(logger, 'unrelated');
+    const worker = new Plain(logger, 'worker', ['database']);
+    const gate = deferred();
+    let unrelatedStops = 0;
+    let databaseStops = 0;
+    unrelated.stop = () => {
+      unrelatedStops++;
+      return Promise.resolve();
+    };
+    database.stop = () => {
+      databaseStops++;
+      return Promise.resolve();
+    };
+    await manager.registerComponent(database);
+    await manager.registerComponent(unrelated);
+    await manager.registerComponent(worker);
+    await manager.startComponent('database');
+    await manager.startComponent('unrelated');
+    worker.start = () => gate.promise;
+    Object.defineProperty(worker, 'ownsLateStartCleanup', {
+      value: doesOwnCleanup,
+    });
+    Object.defineProperty(worker, 'startupTimeoutMS', { value: 10 });
+    expect((await manager.startComponent('worker')).code).toBe(
+      'component_startup_timeout',
+    );
+
+    try {
+      const result = await manager.restartAllComponents({
+        shutdownTimeoutMS: 500,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.shutdownResult).toMatchObject({
+        success: false,
+        code: 'cleanup_incomplete',
+        stoppedComponents: [],
+        stalledComponents: [],
+        durationMS: 0,
+      });
+      expect(result.shutdownResult.reason).toContain(
+        'Abandoned start still unresolved for: worker',
+      );
+      expect(result.startupResult.code).toBe('partial_state');
+      expect(result.startupResult.reason).toContain('startup skipped');
+      // Nothing was stopped: the application is left as it was, not half down.
+      expect(unrelatedStops).toBe(0);
+      expect(databaseStops).toBe(0);
+      expect(manager.getRunningComponentNames().sort()).toEqual([
+        'database',
+        'unrelated',
+      ]);
+      // No shutdown pass ran.
+      expect(manager.getLastShutdownResult()).toBeNull();
+    } finally {
+      gate.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await manager.stopAllComponents();
+      await logger.close();
+    }
+  });
+}
+
+test('restart refuses before stopping anything while a start a retry replaced is still unresolved', async () => {
+  const { logger, manager } = setup();
+  const database = new Plain(logger, 'database');
+  const worker = new Plain(logger, 'worker', ['database']);
+  const gate = deferred();
+  let starts = 0;
+  let databaseStops = 0;
+  database.stop = () => {
+    databaseStops++;
+    return Promise.resolve();
+  };
+  // The first start hangs past its deadline; the retry comes up.
+  worker.start = () => (++starts === 1 ? gate.promise : Promise.resolve());
+  Object.defineProperty(worker, 'startupTimeoutMS', { value: 10 });
+  await manager.registerComponent(database);
+  await manager.registerComponent(worker);
+  await manager.startComponent('database');
+  expect((await manager.startComponent('worker')).code).toBe(
+    'component_startup_timeout',
+  );
+  expect((await manager.startComponent('worker')).success).toBe(true);
+
+  try {
+    const result = await manager.restartAllComponents({
+      shutdownTimeoutMS: 500,
+    });
+
+    expect(result.shutdownResult.reason).toContain(
+      'Abandoned start still unresolved for: worker',
+    );
+    expect(databaseStops).toBe(0);
+    expect(manager.getRunningComponentNames().sort()).toEqual([
+      'database',
+      'worker',
+    ]);
+  } finally {
+    gate.resolve();
+    await manager.stopAllComponents();
+    await logger.close();
+  }
+});

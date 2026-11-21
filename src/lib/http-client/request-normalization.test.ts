@@ -14514,7 +14514,7 @@ test('an attempt abandoned after its stream factory was called is a stream error
           },
           { signal: new AbortController().signal },
         );
-        return new Promise<AdapterResponse>(() => {});
+        return await new Promise<AdapterResponse>(() => {});
       },
     };
     const sinks: PassThrough[] = [];
@@ -15766,7 +15766,7 @@ test("an abandoned attempt with a body reports its upload's outcome unknown, not
       getType: () => 'node',
       send: () => new Promise<AdapterResponse>(() => {}),
     };
-    return send(
+    return await send(
       new HTTPClient({ adapter, baseURL: 'http://x.test', timeout: 50 }),
     ).send();
   };
