@@ -20,6 +20,8 @@ import {
   MAX_PARAM_DEPTH,
   exceedsParamDepth,
   PARAM_DEPTH_EXCEEDED_MESSAGE,
+  unreadableCollectionRefusal,
+  type CollectionLookup,
 } from './internal/param-check';
 import { readUnknownMember } from '../internal/read-member';
 import { isUint8ArrayValue } from '../internal/binary-view';
@@ -106,32 +108,49 @@ function isGivenParam(value: unknown): boolean {
 }
 
 /**
- * A param value with every array and plain record in it copied, each member read once:
- * the override check and the query both read the copy, so a nested getter cannot answer
- * one of them differently from the other. Any other value is kept as it is - only `qs`
- * reads into it. A cycle, and an entry deeper than `MAX_PARAM_DEPTH`, are refused as `qs`
- * refuses them, with its `RangeError`. An object reached by more than one path is copied
- * once for each, as `qs` reads it once for each - a getter in it included.
+ * A param value with every object `qs` walks into copied, each member read once: the
+ * override check and the query both read the copy, so a nested getter cannot answer one
+ * of them differently from the other. An array is copied into an array, and any other
+ * object `qs` walks by its own enumerable keys - a plain record, a function, a class
+ * instance - into a plain record, which `qs` writes as it would the original, its keys
+ * in the order the original lists them (a `Proxy`'s `ownKeys` order included). A `Date`,
+ * and any value that is not an object, are kept as they are, and a value `qs` writes as
+ * a buffer (see {@link qsBufferText}) as the text `qs` would write for it. A cycle, and an entry deeper than `MAX_PARAM_DEPTH`, are refused
+ * as `qs` refuses them, with its `RangeError`; a collection `qs` would write nothing for
+ * (a `Set` a getter answers, say) as `.params()` refuses one, with a `TypeError` naming
+ * its key (see `unreadableCollectionRefusal`). An object reached by more than one path
+ * is copied once for each, as `qs` reads it once for each - a getter in it included.
  *
  * An array is copied by the keys `qs` serializes it by, as a record is - its own
- * enumerable keys, so a hole is skipped and a key that is not an index (`list.extra`) kept
- * - into an array, which `qs` still writes as one.
+ * enumerable keys, so a hole is skipped and a key that is not an index (`list.extra`) kept.
  *
  * Kept separate from `.params()`'s check (`assertSerializableParams`), which must run no
  * getter, since this read is the one `qs` serializes, and reads through them.
  */
 function snapshotParamValue(
   value: unknown,
-  depth = 0,
-  ancestors: Set<object> = new Set(),
+  depth: number,
+  walk: ParamSnapshotWalk,
 ): unknown {
-  const isArray = Array.isArray(value);
-
-  if (!isArray && !isPlainRecord(value)) {
+  if (
+    (typeof value !== 'object' && typeof value !== 'function') ||
+    value === null ||
+    value instanceof Date
+  ) {
     return value;
   }
 
-  if (ancestors.has(value)) {
+  const bufferText = qsBufferText(value);
+  if (bufferText !== undefined) {
+    return bufferText;
+  }
+
+  const collectionRefusal = unreadableCollectionRefusal(value, walk);
+  if (collectionRefusal !== undefined) {
+    throw collectionRefusal;
+  }
+
+  if (walk.ancestors.has(value)) {
     throw new RangeError('Cyclic object value');
   }
 
@@ -141,18 +160,77 @@ function snapshotParamValue(
     throw new RangeError(PARAM_DEPTH_EXCEEDED_MESSAGE);
   }
 
-  ancestors.add(value);
-  const copy = (isArray ? [] : {}) as Record<string, unknown>;
+  walk.ancestors.add(value);
+  const copy = (Array.isArray(value) ? [] : {}) as Record<string, unknown>;
   for (const key of keys) {
-    defineEntry(
-      copy,
-      key,
-      snapshotParamValue(source[key], depth + 1, ancestors),
-    );
+    walk.path.push(key);
+    defineEntry(copy, key, snapshotParamValue(source[key], depth + 1, walk));
+    walk.path.pop();
   }
 
-  ancestors.delete(value);
-  return copy;
+  walk.ancestors.delete(value);
+  return listsKeysInOrder(copy, keys)
+    ? copy
+    : new Proxy(copy, { ownKeys: () => keys });
+}
+
+/**
+ * Whether `copy`, an object just filled with `keys` in turn, lists them in that order. It
+ * does unless `keys` puts an index after a name - a `Proxy` may list its own that way -
+ * since an ordinary object lists its index keys first.
+ */
+function listsKeysInOrder(copy: object, keys: readonly string[]): boolean {
+  const listed = Object.keys(copy);
+  return listed.every((key, index) => key === keys[index]);
+}
+
+/**
+ * The text `qs` writes for `value` when it takes it for a buffer - an object whose
+ * `constructor` has an `isBuffer` that answers truthy for it: a `Buffer`, or a polyfill's
+ * where there is no global one - as `qs` does, by `String`; `undefined` for any other
+ * value. Each hook read once, rather than once by this snapshot and again by `qs`.
+ */
+function qsBufferText(value: object): string | undefined {
+  if (typeof value !== 'object') {
+    return undefined;
+  }
+
+  const constructor: unknown = (value as { constructor?: unknown }).constructor;
+  if (!constructor) {
+    return undefined;
+  }
+
+  const isBuffer: unknown = (constructor as { isBuffer?: unknown }).isBuffer;
+  return typeof isBuffer === 'function' &&
+    Reflect.apply(isBuffer, constructor, [value])
+    ? // eslint-disable-next-line @typescript-eslint/no-base-to-string -- a buffer's own `toString`, reached by `String` as `qs` reaches it
+      String(value)
+    : undefined;
+}
+
+interface ParamSnapshotWalk extends CollectionLookup {
+  /** The objects the entry being copied is nested inside. */
+  readonly ancestors: Set<object>;
+}
+
+/** `params` with its nested values snapshot (see {@link snapshotParamValue}). */
+function snapshotParams(
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const walk: ParamSnapshotWalk = {
+    path: [],
+    ancestors: new Set(),
+    collectionReads: undefined,
+  };
+  const snapshot: Record<string, unknown> = {};
+
+  for (const key of Object.keys(params)) {
+    walk.path.push(key);
+    defineEntry(snapshot, key, snapshotParamValue(params[key], 0, walk));
+    walk.path.pop();
+  }
+
+  return snapshot;
 }
 
 /**
@@ -230,8 +308,8 @@ function topLevelKeyOf(key: string): string | undefined {
  *
  * `params` is read more than once - the override check and the query - so it is given as
  * `HTTPRequestBuilder.params()` copied it: each top-level value a data property, read once
- * from the caller's object. A nested array or plain record is still the caller's: it is
- * read once, into one snapshot both read.
+ * from the caller's object. A nested object is still the caller's: it is read once, into
+ * one snapshot both read, which refuses a collection `qs` would write nothing for.
  */
 export function buildURL(
   baseURL: string | undefined,
@@ -273,8 +351,12 @@ export function buildURL(
     const fragment = hashIndex === -1 ? '' : url.slice(hashIndex);
     const queryStartIndex = urlWithoutHash.indexOf('?');
 
+    // The query, and the override check, read one snapshot of the nested values (see
+    // `snapshotParamValue`).
+    const snapshot = snapshotParams(params);
+
     if (queryStartIndex === -1) {
-      const queryString = qs.stringify(params, {
+      const queryString = qs.stringify(snapshot, {
         ...QS_STRINGIFY_DEPTH,
         addQueryPrefix: true,
       });
@@ -296,11 +378,6 @@ export function buildURL(
       // A key whose value is `undefined` - or an object of nothing but `undefined` - is
       // not given, so it leaves the path's pairs alone: `.params({ page: options.page })`
       // with no page keeps `?page=2`. An empty array or object is given, and clears them.
-      // Both read one snapshot of the nested values (see `snapshotParamValue`).
-      const snapshot: Record<string, unknown> = {};
-      for (const key of Object.keys(params)) {
-        defineEntry(snapshot, key, snapshotParamValue(params[key]));
-      }
       const overridden = new Set(
         Object.keys(snapshot)
           .filter((key) => isGivenParam(snapshot[key]))

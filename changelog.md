@@ -750,3 +750,6 @@
 - XHRAdapter: an abort stops the transfer even when an XHR outside a browser throws while its answer is read.
 - A URL quoted in a TLS error message with no code no longer reads as a certificate failure from its path or query.
 - FetchAdapter: a polyfilled `fetch`'s response body is released on a bodiless answer (HEAD, 204, 205, 304) rather than left unread.
+- HTTP client: a `Map`, `Set` or other collection a nested `params` getter answers, or one put in a nested `params` object after `.params()`, rejects `send()` with a `TypeError` naming its key, as `.params()` refuses one; it was sent as nothing, and with an existing query in the path that key's pairs were dropped too. A function or class instance in `params` is read once into the query as a plain object is, so one whose entries are all `undefined` is not given, as such a plain object is not, and leaves the path's pairs for its key alone.
+- HTTP client: `.headers()` copies every value before applying any, so a call that throws while copying one leaves the headers set before it unchanged.
+- deepClone: a `Map`, `Set`, `Date`, `RegExp` or boxed primitive from another realm behind a class named after a different built-in (`class Date extends Map` in a `vm` context) clones as the type it holds, not as `{}`.

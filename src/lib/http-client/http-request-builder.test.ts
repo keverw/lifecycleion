@@ -821,6 +821,26 @@ describe('HTTPRequestBuilder', () => {
   });
 });
 
+test('headers() whose value throws while it is copied changes no header', async () => {
+  const { sendFn, requireContext } = makeSendFn();
+  const builder = createRequestBuilder('GET', '/x', sendFn);
+  builder.headers({ 'x-first': 'old' });
+
+  const throwingList: string[] = [];
+  Object.defineProperty(throwingList, 0, {
+    enumerable: true,
+    get() {
+      throw new Error('index getter failed');
+    },
+  });
+  expect(() =>
+    builder.headers({ 'X-First': 'new', 'x-second': throwingList }),
+  ).toThrow('index getter failed');
+
+  await builder.send();
+  expect(requireContext().options.headers).toEqual({ 'x-first': 'old' });
+});
+
 test('headers() refuses a Headers, Map or array instead of dropping its entries', () => {
   for (const value of [
     new Headers({ authorization: 'Bearer t' }),
@@ -1319,6 +1339,113 @@ test('a params value changed after .params() is held to the depth qs is given, w
         );
       }
     }
+  }
+});
+
+test('a collection a nested getter answers, or one put in after .params(), rejects send() naming its key, with or without a query in the path', async () => {
+  const adapter = new MockAdapter();
+  let dispatched = 0;
+  adapter.routes.get('/search', () => {
+    dispatched++;
+    return { status: 200 };
+  });
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  for (const path of ['/search', '/search?filter=recent']) {
+    let reads = 0;
+    const filter = {
+      get ids() {
+        reads++;
+        return new Set([1, 2]);
+      },
+    };
+    const fromGetter = await client
+      .get(path)
+      .params({ filter })
+      .send()
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(fromGetter).toBeInstanceOf(TypeError);
+    expect((fromGetter as Error).message).toBe(
+      'HTTPRequestBuilder params.filter.ids is a Set, whose entries qs does not read, so it cannot be put in a query',
+    );
+    expect(reads).toBe(1);
+
+    // Inside a class instance and a function, which qs walks by their own keys.
+    const holder: Record<string, unknown> = {};
+    const builder = client.get(path).params({ holder });
+    holder.inner = Object.assign(() => 1, { tags: new Map([['a', 1]]) });
+    const changedAfter = await builder.send().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect((changedAfter as Error).message).toBe(
+      'HTTPRequestBuilder params.holder.inner.tags is a Map, whose entries qs does not read, so it cannot be put in a query',
+    );
+  }
+
+  expect(dispatched).toBe(0);
+});
+
+test('a getter in a function or class instance params holds is read once, into the query qs writes for it', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  class Point {
+    public x = 1;
+  }
+
+  for (const path of ['/x', '/x?k=1']) {
+    let reads = 0;
+    const counted = Object.defineProperty(() => 1, 'n', {
+      enumerable: true,
+      get: () => ++reads,
+    });
+    const response = await client
+      .get(path)
+      .params({ fn: counted, point: new Point(), at: new Date(0) })
+      .send();
+
+    expect(decodeURIComponent(response.requestURL)).toContain(
+      'fn[n]=1&point[x]=1&at=1970-01-01T00:00:00.000Z',
+    );
+    expect(reads).toBe(1);
+  }
+});
+
+test('params writes a polyfill buffer as its text and a Proxy in its own key order, as qs does, with or without a query in the path', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  class PolyBuffer extends Uint8Array {
+    public static isBuffer(value: unknown): boolean {
+      return value instanceof PolyBuffer;
+    }
+
+    public override toString(): string {
+      return 'hi';
+    }
+  }
+  const reordered = new Proxy(
+    { b: 'b', 1: 'one', a: 'a' },
+    { ownKeys: () => ['b', '1', 'a'] },
+  );
+
+  for (const path of ['/x', '/x?k=1']) {
+    const response = await client
+      .get(path)
+      .params({ nested: { data: new PolyBuffer([1, 2]) }, reordered })
+      .send();
+
+    expect(decodeURIComponent(response.requestURL)).toContain(
+      'nested[data]=hi&reordered[b]=b&reordered[1]=one&reordered[a]=a',
+    );
   }
 });
 

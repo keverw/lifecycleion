@@ -69,9 +69,15 @@ export function assertSerializableParams(
   }
 }
 
-interface ParamWalk {
+/** A walk over `.params()` values: the entry it is at, and the slot reads it looked up. */
+export interface CollectionLookup {
   /** The keys from the top level down to the entry being checked. */
   readonly path: string[];
+  /** {@link COLLECTION_TYPES}' slot reads, looked up when the first value needs them. */
+  collectionReads: readonly CollectionRead[] | undefined;
+}
+
+interface ParamWalk extends CollectionLookup {
   /** The objects the entry being checked is nested inside. */
   readonly ancestors: Set<object>;
   /**
@@ -79,8 +85,6 @@ interface ParamWalk {
    * levels below it its deepest entry is.
    */
   readonly heights: Map<object, number>;
-  /** {@link COLLECTION_TYPES}' slot reads, looked up when the first value needs them. */
-  collectionReads: readonly CollectionRead[] | undefined;
 }
 
 /**
@@ -125,12 +129,9 @@ function checkParamValue(
   }
 
   // After the lookup: a collection is refused when first met, so it is never recorded.
-  const collection = collectionTypeOf(value, walk);
-  if (collection !== undefined) {
-    throw paramRefusal(
-      walk,
-      `is a ${collection.name}, whose ${collection.held} qs does not read`,
-    );
+  const collectionRefusal = unreadableCollectionRefusal(value, walk);
+  if (collectionRefusal !== undefined) {
+    throw collectionRefusal;
   }
 
   if (walk.ancestors.has(value)) {
@@ -226,7 +227,7 @@ function lookUpCollectionReads(): CollectionRead[] {
  */
 function collectionTypeOf(
   value: object,
-  walk: ParamWalk,
+  walk: CollectionLookup,
 ): CollectionRead | undefined {
   if (Array.isArray(value) || isPlainRecord(value)) {
     return undefined;
@@ -251,6 +252,26 @@ function collectionTypeOf(
   }
 
   return undefined;
+}
+
+/**
+ * The refusal for `value`, the entry at `lookup.path`, when it is one of
+ * {@link COLLECTION_TYPES} (see {@link collectionTypeOf}), whose entries or contents `qs`
+ * would write nothing for; `undefined` for any other value. Shared by `.params()`'s check
+ * and `buildURL`'s snapshot, which meets the values a getter answers and the objects
+ * changed after `.params()`, so a collection is refused wherever it is first read.
+ */
+export function unreadableCollectionRefusal(
+  value: object,
+  lookup: CollectionLookup,
+): TypeError | undefined {
+  const collection = collectionTypeOf(value, lookup);
+  return collection === undefined
+    ? undefined
+    : paramRefusal(
+        lookup,
+        `is a ${collection.name}, whose ${collection.held} qs does not read`,
+      );
 }
 
 /**
@@ -315,7 +336,7 @@ function depthRefusal(walk: ParamWalk): TypeError {
   );
 }
 
-function paramRefusal(walk: ParamWalk, problem: string): TypeError {
+function paramRefusal(walk: CollectionLookup, problem: string): TypeError {
   return new TypeError(
     `HTTPRequestBuilder params.${reportedParamPath(walk.path)} ${problem}, so it cannot be put in a query`,
   );

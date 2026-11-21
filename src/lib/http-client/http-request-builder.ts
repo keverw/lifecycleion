@@ -226,13 +226,17 @@ export class HTTPRequestBuilder<T = unknown> {
     // and within one record a later key replaces an earlier one that differs only by
     // case, as everywhere request headers are merged (see `mergeHeaders`).
     // An array value copied (see `copyArrayValue`), so an item added to the caller's
-    // afterwards is not sent.
-    for (const [key, value] of Object.entries(headers)) {
-      defineEntry(
-        this._headers,
-        lowerCaseHeaderName(key),
-        copyArrayValue(value, HEADER_VALUE_LABEL),
-      );
+    // afterwards is not sent. Every value is copied before any is applied, so a call
+    // whose value throws - an array's index getter, say - changes no header.
+    const staged = Object.entries(headers).map(
+      ([key, value]) =>
+        [
+          lowerCaseHeaderName(key),
+          copyArrayValue(value, HEADER_VALUE_LABEL),
+        ] as const,
+    );
+    for (const [name, value] of staged) {
+      defineEntry(this._headers, name, value);
     }
     return this;
   }

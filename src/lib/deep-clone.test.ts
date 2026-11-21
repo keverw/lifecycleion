@@ -921,6 +921,22 @@ describe('deepClone', () => {
       }
     });
 
+    test("another realm's built-in behind a class that takes another built-in's name clones as the one it has a slot for", () => {
+      const [map, set, date] = vm.runInNewContext(`[
+        new (class Date extends Map {})([[1, 2]]),
+        new (class Map extends Set {})([3]),
+        new (class RegExp extends Date {})(0),
+      ]`) as [Map<number, number>, Set<number>, Date];
+
+      const cloned = deepClone({ map, set, date });
+      expect(cloned.map).toBeInstanceOf(Map);
+      expect([...cloned.map]).toEqual([[1, 2]]);
+      expect(cloned.set).toBeInstanceOf(Set);
+      expect([...cloned.set]).toEqual([3]);
+      expect(cloned.date).toBeInstanceOf(Date);
+      expect(cloned.date.getTime()).toBe(0);
+    });
+
     test('a strict Proxy from another realm clones without its traps being tripped', () => {
       const strict = vm.runInNewContext(
         "new Proxy({ a: 1 }, { get(t, k) { if (!(k in t)) throw new Error('strict'); return t[k]; } })",

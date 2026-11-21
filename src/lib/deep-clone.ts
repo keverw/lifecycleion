@@ -241,13 +241,13 @@ function cloneValue<T>(obj: T, state: CloneState): T {
     return remember(state.seen, obj, copyBuffer(obj, bufferKind));
   }
 
-  const foreignType = foreignBuiltInType(obj);
-  const builtIn = cloneBuiltIn(obj, foreignType, state);
+  const foreignTypes = foreignBuiltInTypes(obj);
+  const builtIn = cloneBuiltIn(obj, foreignTypes, state);
   if (builtIn !== undefined) {
     return builtIn as T;
   }
 
-  if (isError(obj, foreignType)) {
+  if (isError(obj, foreignTypes)) {
     return cloneError(obj, state) as T;
   }
 
@@ -280,37 +280,43 @@ const FOREIGN_BUILT_IN_TYPES: readonly string[] = [
   'DOMException',
 ];
 
+/** No built-in type: this realm's values, and another realm's plain objects. */
+const NO_FOREIGN_TYPES: readonly string[] = [];
+
 /**
  * For a value from another realm - its chain holds no `Object.prototype` of this one -
- * the built-in type whose prototype, in some realm, its chain holds: one of
- * {@link FOREIGN_BUILT_IN_TYPES}, told by each prototype's own `constructor` and name, read
- * by descriptor so no getter runs. `undefined` for this realm's values, and for another
- * realm's plain objects and class instances, which are then never asked about by slot.
+ * the built-in types whose prototypes, in some realm, its chain holds: each of
+ * {@link FOREIGN_BUILT_IN_TYPES} named by a prototype's own `constructor` and name, read
+ * by descriptor so no getter runs. Every one is kept, not just the first, since a class
+ * can take a built-in's name (`class Date extends Map`): each is asked about by slot, and
+ * only the one the value has a slot for answers. None for this realm's values, nor for
+ * another realm's plain objects and class instances, which are then never asked about by
+ * slot.
  */
-function foreignBuiltInType(obj: object): string | undefined {
+function foreignBuiltInTypes(obj: object): readonly string[] {
   if (obj instanceof Object) {
-    return undefined;
+    return NO_FOREIGN_TYPES;
   }
 
+  let types: string[] | undefined;
   let prototype = Reflect.getPrototypeOf(obj);
 
+  // A realm's root - the prototype with none past it - is no built-in type's prototype.
   while (prototype !== null) {
     const next = Reflect.getPrototypeOf(prototype);
-
-    // A realm's root: nothing past it is a built-in type's prototype.
     if (next === null) {
-      return undefined;
+      break;
     }
 
     const name = basePrototypeName(prototype);
     if (name !== undefined && FOREIGN_BUILT_IN_TYPES.includes(name)) {
-      return name;
+      (types ??= []).push(name);
     }
 
     prototype = next;
   }
 
-  return undefined;
+  return types ?? NO_FOREIGN_TYPES;
 }
 
 /**
@@ -401,17 +407,17 @@ function assignEntry(
  */
 function cloneBuiltIn(
   obj: object,
-  foreignType: string | undefined,
+  foreignTypes: readonly string[],
   state: CloneState,
 ): object | undefined {
-  if (obj instanceof Date || foreignType === 'Date') {
+  if (obj instanceof Date || foreignTypes.includes('Date')) {
     const time = callIntrinsic(Date.prototype, 'getTime', obj);
     if (typeof time === 'number') {
       return remember(state.seen, obj, new Date(time));
     }
   }
 
-  if (obj instanceof RegExp || foreignType === 'RegExp') {
+  if (obj instanceof RegExp || foreignTypes.includes('RegExp')) {
     const cloned = cloneRegExp(obj);
     if (cloned !== undefined) {
       return remember(state.seen, obj, cloned);
@@ -419,7 +425,7 @@ function cloneBuiltIn(
   }
 
   if (
-    (obj instanceof Map || foreignType === 'Map') &&
+    (obj instanceof Map || foreignTypes.includes('Map')) &&
     getIntrinsic(Map.prototype, 'size', obj) !== undefined
   ) {
     const cloned = remember<Map<unknown, unknown>>(state.seen, obj, new Map());
@@ -428,7 +434,7 @@ function cloneBuiltIn(
   }
 
   if (
-    (obj instanceof Set || foreignType === 'Set') &&
+    (obj instanceof Set || foreignTypes.includes('Set')) &&
     getIntrinsic(Set.prototype, 'size', obj) !== undefined
   ) {
     const cloned = remember<Set<unknown>>(state.seen, obj, new Set());
@@ -436,7 +442,7 @@ function cloneBuiltIn(
     return cloned;
   }
 
-  return cloneBoxedPrimitive(obj, foreignType, state);
+  return cloneBoxedPrimitive(obj, foreignTypes, state);
 }
 
 /** The intrinsic flag getters of `RegExp.prototype`, each with the flag it reads. */
@@ -485,13 +491,13 @@ function cloneRegExp(obj: object): RegExp | undefined {
  */
 function cloneBoxedPrimitive(
   obj: object,
-  foreignType: string | undefined,
+  foreignTypes: readonly string[],
   state: CloneState,
 ): object | undefined {
   // Told by `instanceof` first, so this realm's plain objects pass five cheap checks and
   // build nothing.
   if (
-    foreignType === undefined &&
+    foreignTypes.length === 0 &&
     !(obj instanceof Number) &&
     !(obj instanceof String) &&
     !(obj instanceof Boolean) &&
@@ -509,7 +515,7 @@ function cloneBoxedPrimitive(
   for (const Wrapper of wrappers) {
     if (
       obj instanceof (Wrapper as unknown as typeof Object) ||
-      foreignType === Wrapper.name
+      foreignTypes.includes(Wrapper.name)
     ) {
       const primitive = callIntrinsic(Wrapper.prototype, 'valueOf', obj);
       if (primitive !== NO_SLOT) {
@@ -829,7 +835,7 @@ class SetFrame implements Frame {
  */
 function isError(
   value: object,
-  foreignType: string | undefined,
+  foreignTypes: readonly string[],
 ): value is Error {
   const isErrorSlot = (Error as { isError?: (value: unknown) => boolean })
     .isError;
@@ -843,7 +849,7 @@ function isError(
   }
 
   return (
-    (value instanceof Error || foreignType === 'DOMException') &&
+    (value instanceof Error || foreignTypes.includes('DOMException')) &&
     isDOMExceptionInstance(value)
   );
 }
