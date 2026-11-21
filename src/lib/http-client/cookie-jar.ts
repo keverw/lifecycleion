@@ -1137,9 +1137,13 @@ export class CookieJar {
       this.storeCookie(cookie, undefined, firstOrder + index + 1);
     }
 
-    // Then stored again least recently used first, the limits applied after each, so each
-    // eviction pass sees the stalest cookies first, as the saved jar's would. Cookies used
-    // at one time keep payload order: the access clock counted them in it.
+    // Then stored again least recently used first, each site held to its own limit as its
+    // cookies are filed, so its eviction passes see its stalest cookies first, as the
+    // saved jar's would; then the jar to its limit once, over every site at once, as the
+    // jar's next store would hold it - a crowded site's own trim is not preempted by the
+    // jar-wide pass, which would take that site's cookies, and others' `Secure` ones,
+    // that the trim leaves no need to. Cookies used at one time keep payload order: the
+    // access clock counted them in it.
     const survivors: Array<{
       site: string;
       key: string;
@@ -1159,8 +1163,9 @@ export class CookieJar {
 
     for (const { site, key, stored } of survivors) {
       this.fileStored(site, key, stored);
-      this.enforceLimits(site);
+      this.enforceSiteLimit(site);
     }
+    this.enforceJarLimit();
 
     // What the jar holds once every entry is stored, not each entry `setCookie` took: an
     // entry of the same identity stored after another replaces it, or deletes it when it
@@ -1783,10 +1788,19 @@ export class CookieJar {
    * Holds `site`, then the jar, to their limits after a store. See {@link CookieJar}.
    */
   private enforceLimits(site: string): void {
+    this.enforceSiteLimit(site);
+    this.enforceJarLimit();
+  }
+
+  /** Holds `site` to its limit. */
+  private enforceSiteLimit(site: string): void {
     if ((this.buckets.get(site)?.size ?? 0) > MAX_COOKIES_PER_SITE) {
       this.evict([site], MAX_COOKIES_PER_SITE, COOKIES_PER_SITE_AFTER_EVICTION);
     }
+  }
 
+  /** Holds the jar to its limit, sparing what was used in the last 30 days. */
+  private enforceJarLimit(): void {
     if (
       this.cookieCount > MAX_COOKIES_IN_JAR &&
       this.earliestAccessTime < Date.now() - SAFE_FROM_JAR_LIMIT_MS

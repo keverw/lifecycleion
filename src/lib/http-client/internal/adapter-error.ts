@@ -44,7 +44,11 @@ export function nonRetryableAdapterErrorFrom(error: unknown): Error {
     carrier.name = name;
   }
 
-  Object.defineProperty(carrier, ADAPTER_ERROR_CARRIER_KEY, { value: true });
+  // Configurable, as every tag is, so `HTTPClient` can take it off once read.
+  Object.defineProperty(carrier, ADAPTER_ERROR_CARRIER_KEY, {
+    value: true,
+    configurable: true,
+  });
   markNonRetryableAdapterError(carrier);
   carriers.add(carrier);
 
@@ -222,8 +226,11 @@ export function nonRetryableRefusal<E extends Error>(
  */
 export function markNonRetryableAdapterError(error: unknown): void {
   try {
+    // Configurable, so `HTTPClient` can take it off once read (see
+    // `takeAdapterErrorTags`).
     Object.defineProperty(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG, {
       value: true,
+      configurable: true,
     });
   } catch {
     // Not an object, or one that refuses the property; it is retried as any untagged

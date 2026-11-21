@@ -3659,7 +3659,9 @@ export class BaseHTTPClient {
                 );
               },
               (error: unknown) => {
-                void getRequestBodySettled(error);
+                // Its tags taken off as an answered attempt's are, so a later replay of
+                // the error is no answer either.
+                void takeAdapterErrorTags(error).uploadOutcome;
               },
             );
           },
@@ -4226,7 +4228,7 @@ export class BaseHTTPClient {
         clearTimeout(timeoutID);
         // The error as the adapter's own, to read its tags off, or `undefined` when it is
         // the abort's own reason - a cancel's or the timer's, which an attempt given up on
-        // throws, and the cancel's, which `fetch` rejects with - carrying nothing this
+        // throws, and either, which `fetch` rejects with - carrying nothing this
         // attempt's adapter said: a tagged error from another request, passed to the
         // caller's `abort()`, would otherwise file that request's `Set-Cookie` under this
         // one's URL. Adapters tag an error of their own, never the reason. What the error
@@ -4234,8 +4236,15 @@ export class BaseHTTPClient {
         const isAbortReason =
           isAbandoned ||
           (cancelSignal.aborted &&
-            error === readUnknownMember(cancelSignal, 'reason'));
-        const adapterError: unknown = isAbortReason ? undefined : error;
+            error === readUnknownMember(cancelSignal, 'reason')) ||
+          (timeoutController.signal.aborted &&
+            error === timeoutController.signal.reason);
+        // Every tag read once, here, and taken off the error: what the caller is handed as
+        // the failure's `cause` carries none of them, so an error handed back as another
+        // request's rejection - replayed by a wrapping adapter - is no answer of that
+        // request's, and an error the adapter tagged but did not create (a caller's own)
+        // keeps no upload of this request alive or reports it for the next.
+        const tags = takeAdapterErrorTags(isAbortReason ? undefined : error);
         /**
          * The upload's own outcome, carried on the throw.
          *
@@ -4255,7 +4264,7 @@ export class BaseHTTPClient {
         const isUploadAbandoned = isAbandoned && isBodySent;
         const uploadOutcome = isUploadAbandoned
           ? Promise.resolve(new Error(ABANDONED_UPLOAD_MESSAGE))
-          : (responseUploadOutcome ?? getRequestBodySettled(adapterError));
+          : (responseUploadOutcome ?? tags.uploadOutcome);
         if (
           uploadOutcome !== undefined &&
           (isBodySent || params.latestUpload.outcome === undefined)
@@ -4270,22 +4279,19 @@ export class BaseHTTPClient {
         // The marker is required, not just the shape — any thrown error could
         // satisfy `getResponseStreamAbortInfo` by coincidence, and this writes to
         // the cookie jar. Same gate the branch below applies.
-        const abortedResponse = isResponseStreamAbortError(adapterError)
-          ? getResponseStreamAbortInfo(adapterError)
+        const abortedResponse = tags.isStreamAbort
+          ? tags.streamAbortInfo
           : undefined;
         // A `streamResponse` factory that failed, declined or was cut off while setting up
         // its sink was called for an answer whose headers had arrived, and the adapter
         // carries that answer on the error: its `Set-Cookie` is stored as a cut stream's
         // is, and a setup failure reports its status. The tag alone is not the gate - the
         // factory's own markers are, as the stream-abort marker is above.
-        const isFactoryCancel =
-          readUnknownMember(adapterError, STREAM_FACTORY_CANCEL_KEY) !==
-          undefined;
+        const isFactoryCancel = tags.factoryCancelValue !== undefined;
         const factoryAnsweredResponse =
           abortedResponse === undefined &&
-          (isFactoryCancel ||
-            hasAdapterMarker(adapterError, STREAM_FACTORY_ERROR_FLAG))
-            ? getResponseStreamAbortInfo(adapterError)
+          (isFactoryCancel || tags.isStreamFactoryError)
+            ? tags.streamAbortInfo
             : undefined;
         // Or, for an adapter that tagged neither, the answer its factory was announced: its
         // headers had arrived, so its `Set-Cookie` is stored as a tagged one's is. Not once
@@ -4304,8 +4310,7 @@ export class BaseHTTPClient {
         // factory's setup among them - to the retry phase's error observers, the final
         // error and a cancel alike, with the status it answered with. Read once, for the
         // sent request reported and a stream error's response alike.
-        const reportedEffectiveHeaders =
-          getEffectiveRequestHeadersFromError(adapterError);
+        const reportedEffectiveHeaders = tags.effectiveRequestHeaders;
         const reportedSentRequest = sentRequestWithObservedHeaders(
           sentRequest,
           reportedEffectiveHeaders,
@@ -4329,7 +4334,7 @@ export class BaseHTTPClient {
             if (
               !isCancelOutcome() &&
               !isTimedOut &&
-              !isXHRBrowserTimeout(adapterError) &&
+              !tags.isXHRBrowserTimeout &&
               !isFactoryCancel
             ) {
               // The jar threw on headers the server did send, so this ends as the
@@ -4455,7 +4460,7 @@ export class BaseHTTPClient {
           return endAsCutStream();
         }
 
-        if (isResponseStreamAbortError(adapterError)) {
+        if (tags.isStreamAbort) {
           // The marker is the gate, not the error's `name`: undici surfaces a timeout
           // during the body read as `TypeError: terminated`, and requiring the name would
           // drop the tagged status and headers, letting a post-header failure reach the
@@ -4465,7 +4470,7 @@ export class BaseHTTPClient {
           }
 
           // A browser-fired XHR timeout over an answer is a timeout, as the client's own is.
-          if (isXHRBrowserTimeout(adapterError)) {
+          if (tags.isXHRBrowserTimeout) {
             isTimedOut = true;
           }
 
@@ -4482,7 +4487,7 @@ export class BaseHTTPClient {
         // opens its sink with - is its failure, `stream_setup_error` below, not a cancel:
         // only a factory's `null` or `{ cancel: true }` carries the cancel tag.
         const isFactoryOwnAbort =
-          hasAdapterMarker(adapterError, STREAM_FACTORY_ERROR_FLAG) &&
+          tags.isStreamFactoryError &&
           !isFactoryCancel &&
           !isCancelOutcome() &&
           !isTimedOut;
@@ -4490,10 +4495,7 @@ export class BaseHTTPClient {
         // An adapter's flagged non-retryable failure is its own, whatever its name: a
         // caller's `throwIfAborted()` error it flagged is not a timeout, nor a cancel the
         // caller did not make. One the caller did make stays a cancel.
-        const isFlaggedAdapterFailure = hasAdapterMarker(
-          adapterError,
-          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
-        );
+        const isFlaggedAdapterFailure = tags.isFlaggedAdapterFailure;
 
         if (
           isAbortError(error) &&
@@ -4518,7 +4520,7 @@ export class BaseHTTPClient {
             // Check for a browser-fired XHR timeout (xhr.timeout = 0 but the browser
             // has its own hard limit). Treat it the same as our own timeout so it gets
             // retried and classified as isTimeout rather than isCancelled.
-            if (isXHRBrowserTimeout(adapterError)) {
+            if (tags.isXHRBrowserTimeout) {
               isTimedOut = true;
               // Fall through to the normal timeout retry path below.
             } else if (!isFactoryCancel && didStartStream()) {
@@ -4528,10 +4530,7 @@ export class BaseHTTPClient {
             } else {
               // AbortError without our timeout flag — treat as non-retryable cancel.
               // This path includes StreamResponseFactory returning null / { cancel: true }.
-              const factoryCancelValue = readUnknownMember(
-                adapterError,
-                STREAM_FACTORY_CANCEL_KEY,
-              );
+              const factoryCancelValue = tags.factoryCancelValue;
               // The decline's own reason, or - for one with none - that of a cancel its
               // cleanup listener made after it.
               const factoryCancelReason =
@@ -4572,10 +4571,8 @@ export class BaseHTTPClient {
         // Otherwise an answer, late or not, decides: one that reads cleanly is delivered,
         // and one that cannot be read is the answered response's non-retryable
         // adapter_error below, so it is not sent again.
-        const isNonRetryableClientCallbackFailure = hasAdapterMarker(
-          adapterError,
-          NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
-        );
+        const isNonRetryableClientCallbackFailure =
+          tags.isClientCallbackFailure;
         // After an answer, the timer's own reason alone (see `isLateTransportFailure`):
         // an `AbortError` a caller's cookie jar or a response getter throws while the late
         // answer is read is that failure, not the timeout.
@@ -4598,10 +4595,7 @@ export class BaseHTTPClient {
             status: factoryAnsweredResponse?.status ?? answeredStatus,
           });
 
-          const isStreamFactoryError = hasAdapterMarker(
-            adapterError,
-            STREAM_FACTORY_ERROR_FLAG,
-          );
+          const isStreamFactoryError = tags.isStreamFactoryError;
 
           return {
             adapterResponse: null,
@@ -4655,9 +4649,7 @@ export class BaseHTTPClient {
             // An adapter's carrier for what may be the caller's own error (see
             // `nonRetryableAdapterErrorFrom`) reports that error too.
             adapterCause: normalizeError(
-              isStreamFactoryError ||
-                readUnknownMember(adapterError, ADAPTER_ERROR_CARRIER_KEY) ===
-                  true
+              isStreamFactoryError || tags.isAdapterErrorCarrier
                 ? (readUnknownMember(error, 'cause') ?? error)
                 : error,
             ),
@@ -6355,6 +6347,87 @@ function getResponseStreamAbortInfo(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Every tag an adapter may set on the error it rejects with, as `takeAdapterErrorTags`
+ * read it.
+ */
+interface AdapterErrorTags {
+  /** The upload's outcome (see {@link REQUEST_BODY_SETTLED_KEY}), adopted. */
+  uploadOutcome: Promise<Error | undefined> | undefined;
+  /** Tagged as a response-stream abort: the gate for {@link streamAbortInfo}. */
+  isStreamAbort: boolean;
+  /** The answer the adapter had received, read whatever the gate says. */
+  streamAbortInfo:
+    { status: number; headers: Record<string, string | string[]> } | undefined;
+  /** A stream factory's decline: its reason, or `true`; `undefined` for none. */
+  factoryCancelValue: unknown;
+  isStreamFactoryError: boolean;
+  isXHRBrowserTimeout: boolean;
+  isFlaggedAdapterFailure: boolean;
+  isClientCallbackFailure: boolean;
+  isAdapterErrorCarrier: boolean;
+  effectiveRequestHeaders: Record<string, string | string[]> | undefined;
+}
+
+/** The keys {@link takeAdapterErrorTags} reads, and takes off the error after. */
+const ADAPTER_ERROR_TAG_KEYS: readonly PropertyKey[] = [
+  REQUEST_BODY_SETTLED_KEY,
+  RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_STATUS_KEY,
+  STREAM_ABORT_HEADERS_KEY,
+  STREAM_FACTORY_CANCEL_KEY,
+  STREAM_FACTORY_ERROR_FLAG,
+  XHR_BROWSER_TIMEOUT_FLAG,
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+  NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  ADAPTER_ERROR_CARRIER_KEY,
+  EFFECTIVE_REQUEST_HEADERS_KEY,
+];
+
+/**
+ * Every tag on the error an attempt's adapter rejected with, each read once through a
+ * guard, then taken off it: the error is the failure's `cause` the caller is handed, and
+ * one tag left on it would be read as an answer again wherever the error comes back as a
+ * rejection - a wrapping adapter that replays the last failure for another request would
+ * file this one's `Set-Cookie` under that one's URL. A tag that cannot be taken off - a
+ * frozen error, a `Proxy` that refuses - stays; the read is what this attempt goes by.
+ * `undefined` - the abort's own reason - has no tags.
+ */
+function takeAdapterErrorTags(error: unknown): AdapterErrorTags {
+  const isStreamAbort = isResponseStreamAbortError(error);
+  const tags: AdapterErrorTags = {
+    uploadOutcome: getRequestBodySettled(error),
+    isStreamAbort,
+    streamAbortInfo: getResponseStreamAbortInfo(error),
+    factoryCancelValue: readUnknownMember(error, STREAM_FACTORY_CANCEL_KEY),
+    isStreamFactoryError: hasAdapterMarker(error, STREAM_FACTORY_ERROR_FLAG),
+    isXHRBrowserTimeout: isXHRBrowserTimeout(error),
+    isFlaggedAdapterFailure: hasAdapterMarker(
+      error,
+      NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+    ),
+    isClientCallbackFailure: hasAdapterMarker(
+      error,
+      NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+    ),
+    isAdapterErrorCarrier:
+      readUnknownMember(error, ADAPTER_ERROR_CARRIER_KEY) === true,
+    effectiveRequestHeaders: getEffectiveRequestHeadersFromError(error),
+  };
+
+  if (isObjectLike(error)) {
+    for (const key of ADAPTER_ERROR_TAG_KEYS) {
+      try {
+        Reflect.deleteProperty(error, key);
+      } catch {
+        // A `Proxy` whose trap throws: its tags stay, as a frozen error's do.
+      }
+    }
+  }
+
+  return tags;
 }
 
 /**

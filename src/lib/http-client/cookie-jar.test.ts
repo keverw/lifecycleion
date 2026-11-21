@@ -5447,6 +5447,39 @@ describe('jar limits', () => {
     expect(names(jar)).not.toContain('c0');
   });
 
+  test("fromJSON trims a crowded site before the jar's own limit can take others' cookies", () => {
+    // 3121 Secure cookies, each on a site of its own, and 181 newer non-Secure ones on
+    // one site, all unused for over 30 days: the crowded site's own trim to 150 leaves
+    // 3271, under the jar's limit, so no Secure cookie goes.
+    const now = Date.now();
+    const secure = Array.from({ length: 3121 }, (_, index) => ({
+      name: 's',
+      value: 'v',
+      domain: `site${index}.test`,
+      path: '/',
+      secure: true,
+      createdAt: now - 90 * DAY_MS,
+      lastAccessedAt: now - 60 * DAY_MS,
+    }));
+    const crowded = Array.from({ length: 181 }, (_, index) => ({
+      name: `c${index}`,
+      value: 'v',
+      domain: 'crowded.test',
+      path: '/',
+      createdAt: now - 90 * DAY_MS,
+      lastAccessedAt: now - 40 * DAY_MS + index,
+    }));
+    const jar = new CookieJar();
+
+    expect(jar.fromJSON({ cookies: [...secure, ...crowded] })).toBe(3271);
+    expect(
+      jar.getAllCookies().filter((cookie) => cookie.secure === true),
+    ).toHaveLength(3121);
+    expect(
+      jar.getAllCookies().filter((cookie) => cookie.domain === 'crowded.test'),
+    ).toHaveLength(150);
+  });
+
   test('reading a URL removes expired cookies of its sites, whatever their names', () => {
     const jar = new CookieJar();
     const start = Date.now();

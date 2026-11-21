@@ -55,19 +55,23 @@ export function calculateExponentialDelays({
     delay = maxTimeoutMS;
   }
 
-  let jittered = delay;
+  const baseDelayMS = boundedDelay(delay, minTimeoutMS, maxTimeoutMS);
 
-  if (dispersion > 0) {
-    const dispersionAmount = delay * dispersion;
-    // Apply dispersion jitter using the documented formula:
-    // randomOffset = (Math.random() * 2 - 1) * (delay * dispersion)
-    // Algebraically equivalent to: Math.random() * (dispersionAmount * 2) - dispersionAmount
-    jittered += randomFn() * (dispersionAmount * 2) - dispersionAmount;
+  // No jitter: the delay is the base, bounded once.
+  if (!(dispersion > 0)) {
+    return { delayMS: baseDelayMS, baseDelayMS };
   }
+
+  const dispersionAmount = delay * dispersion;
+  // Apply dispersion jitter using the documented formula:
+  // randomOffset = (Math.random() * 2 - 1) * (delay * dispersion)
+  // Algebraically equivalent to: Math.random() * (dispersionAmount * 2) - dispersionAmount
+  const jittered =
+    delay + (randomFn() * (dispersionAmount * 2) - dispersionAmount);
 
   return {
     delayMS: boundedDelay(jittered, minTimeoutMS, maxTimeoutMS),
-    baseDelayMS: boundedDelay(delay, minTimeoutMS, maxTimeoutMS),
+    baseDelayMS,
   };
 }
 

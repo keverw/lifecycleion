@@ -689,7 +689,9 @@ export class MockAdapter implements HTTPAdapter {
       routeTransportError !== undefined &&
       routeTransportError !== null &&
       routeTransportError !== false;
-    let serializedBody: { bytes: Uint8Array | null } | { error: unknown } = {
+    let serializedBody:
+      | { bytes: Uint8Array | null | typeof OVERSIZED_BODY }
+      | { error: unknown } = {
       bytes: null,
     };
     if (
@@ -702,7 +704,9 @@ export class MockAdapter implements HTTPAdapter {
       hasResponseBody(method, mockResponse.status)
     ) {
       try {
-        serializedBody = { bytes: serializeResponseBody(mockResponse) };
+        serializedBody = {
+          bytes: serializeResponseBody(mockResponse, maxResponseBytes),
+        };
       } catch (error) {
         serializedBody = { error };
       }
@@ -861,7 +865,9 @@ export class MockAdapter implements HTTPAdapter {
     if ('error' in serializedBody) {
       throw nonRetryableAdapterErrorFrom(serializedBody.error);
     }
-    const intendedBody = serializedBody.bytes;
+    const isBodyOversized = serializedBody.bytes === OVERSIZED_BODY;
+    const intendedBody =
+      serializedBody.bytes === OVERSIZED_BODY ? null : serializedBody.bytes;
 
     // A body past `maxResponseBytes` fails as the real adapters fail it: a stream error
     // that keeps the status and headers, the body dropped. A simulated stream error
@@ -870,10 +876,9 @@ export class MockAdapter implements HTTPAdapter {
     // client cannot disagree on which bodies the limit refuses. Under a simulated stream
     // error the body was never serialized, so `intendedBody` is `null` and within it.
     const intendedByteLength = intendedBody?.byteLength ?? 0;
-    const isResponseTooLarge = isAnsweredBodyOverLimit(
-      intendedBody,
-      maxResponseBytes,
-    );
+    const isResponseTooLarge =
+      isBodyOversized ||
+      isAnsweredBodyOverLimit(intendedBody, maxResponseBytes);
     const streamErrorCode: AdapterResponse['streamErrorCode'] =
       isResponseTooLarge ? 'response_too_large' : simulatedStreamErrorCode;
 
@@ -953,6 +958,7 @@ export class MockAdapter implements HTTPAdapter {
       routeMethod === 'HEAD' || simulatedStreamErrorCode !== undefined;
     const hasRouteBody =
       intendedBody !== null ||
+      isBodyOversized ||
       (isRouteBodyUnserialized &&
         hasResponseBody(
           routeMethod === 'HEAD' ? 'GET' : routeMethod,
@@ -1668,12 +1674,28 @@ function snapshotMockResponse(response: MockResponse): MockResponse {
   return snapshot as unknown as MockResponse;
 }
 
-function serializeResponseBody(response: MockResponse): Uint8Array | null {
+/**
+ * A route's binary body past `maxResponseBytes`, left uncopied (see
+ * `serializeResponseBody`).
+ */
+const OVERSIZED_BODY: unique symbol = Symbol('oversized body');
+
+function serializeResponseBody(
+  response: MockResponse,
+  maxResponseBytes: number,
+): Uint8Array | null | typeof OVERSIZED_BODY {
   const { body } = response;
 
   if (body === undefined || body === null) {
     return null;
   } else if (isRouteBinaryBody(body)) {
+    // Past the limit, it is refused as too large whatever its bytes: measured by its slot
+    // and not copied, so a large fixture under a small limit is not held twice through
+    // the delay.
+    if ((readBinaryByteLength(body) ?? 0) > maxResponseBytes) {
+      return OVERSIZED_BODY;
+    }
+
     // Avoid JSON.stringify indexing the buffer into {"0":…,"1":…}. Delivered as this
     // realm's `Uint8Array` holding a copy of the route's bytes, so a caller that changes
     // the body it was handed does not change the route's fixture for the requests after

@@ -1507,6 +1507,26 @@ describe('deepClone', () => {
       expect(order).toEqual(['indices[0]', 'indices.groups.x']);
     });
 
+    test("a match result's indices.groups is read once when arrayKeys names groups", () => {
+      const matched = /(?<x>a)/d.exec('a') as RegExpExecArray;
+      const indices = matched.indices as RegExpIndicesArray;
+      const groups = indices.groups;
+      let reads = 0;
+      Object.defineProperty(indices, 'groups', {
+        enumerable: true,
+        configurable: true,
+        get: () => {
+          reads++;
+          return reads === 1 ? groups : { x: [9, 9] };
+        },
+      });
+
+      const cloned = deepClone(matched, { arrayKeys: ['groups'] });
+
+      expect(reads).toBe(1);
+      expect(cloned.indices?.groups).toEqual({ x: [0, 1] });
+    });
+
     test("a RegExp's own Symbol.match is not read", () => {
       const pattern = /a/g;
       Object.defineProperty(pattern, Symbol.match, {

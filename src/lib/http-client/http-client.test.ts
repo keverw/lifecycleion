@@ -17,7 +17,10 @@ import {
   restoreConsoleError,
 } from '../internal/console-test-utils';
 import { CookieJar } from './cookie-jar';
-import { markResponseStreamAbort } from './internal/adapter-error';
+import {
+  markNonRetryableAdapterError,
+  markResponseStreamAbort,
+} from './internal/adapter-error';
 import { startTestServer, type TestServer } from './test-helpers/test-server';
 import { derivedRedirectFields, scalarHeader } from './utils';
 import {
@@ -27,6 +30,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_USER_AGENT,
   MAX_TIMER_MS,
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
@@ -4092,6 +4096,127 @@ describe("HTTPClient — adapter tags on the caller's own abort reason", () => {
     const response = await promise;
 
     expect(response.isCancelled).toBe(true);
+    expect(response.isStreamError).toBe(false);
+    expect(jar.getAllCookies()).toEqual([]);
+  });
+});
+
+describe('HTTPClient — adapter tags are taken off the error once read', () => {
+  test("a stream abort's error replayed as another request's rejection is no answer of that request's", async () => {
+    // A wrapping adapter that replays the last failure - a circuit breaker, a dedupe -
+    // hands B the error A failed with, which A's caller sees as `error.cause`.
+    const jar = new CookieJar();
+    let lastFailure: unknown;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock' as const,
+      send: (request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve().then(() => {
+          if (request.requestURL.startsWith('https://a.example/')) {
+            lastFailure = markResponseStreamAbort(new Error('boom'), 200, {
+              'set-cookie': ['sid=from-a; Path=/'],
+            });
+          }
+          throw lastFailure;
+        }),
+    };
+    const client = new HTTPClient({ adapter, cookieJar: jar });
+
+    const builderA = client.get('https://a.example/x');
+    const responseA = await builderA.send();
+    expect(responseA.isStreamError).toBe(true);
+    expect(jar.getCookiesFor('https://a.example/')).toHaveLength(1);
+    expect(
+      Object.hasOwn(
+        builderA.error?.cause as object,
+        RESPONSE_STREAM_ABORT_FLAG,
+      ),
+    ).toBe(false);
+    expect(
+      Object.getOwnPropertySymbols(builderA.error?.cause as object),
+    ).toEqual([]);
+
+    const responseB = await client.get('https://b.example/y').send();
+    expect(responseB.isStreamError).toBe(false);
+    expect(responseB.status).toBe(0);
+    expect(jar.getCookiesFor('https://b.example/')).toEqual([]);
+  });
+
+  test('a non-retryable flag is taken off the error the caller is handed too', async () => {
+    const failure = new Error('bad config');
+    markNonRetryableAdapterError(failure);
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (): Promise<AdapterResponse> => Promise.reject(failure),
+      },
+    });
+
+    const builder = client.get('https://a.test/x');
+    await builder.send();
+
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.cause).toBe(failure);
+    expect(Object.hasOwn(failure, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG)).toBe(
+      false,
+    );
+  });
+
+  test('an upload outcome tagged on a shared error is not reported for the next request', async () => {
+    const shared = new Error('shared');
+    let calls = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock' as const,
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve().then(() => {
+          calls++;
+          if (calls === 1) {
+            Object.defineProperty(shared, REQUEST_BODY_SETTLED_KEY, {
+              value: Promise.resolve(new Error('first upload')),
+              configurable: true,
+            });
+          }
+          throw shared;
+        }),
+    };
+    const client = new HTTPClient({ adapter });
+
+    const first = await client.post('https://a.test/x').json({ a: 1 }).send();
+    expect((await first.requestBodySettled)?.message).toBe('first upload');
+
+    const second = await client.get('https://a.test/y').send();
+    expect(await second.requestBodySettled).toBeUndefined();
+  });
+
+  test("tags on the attempt timer's own reason are not read", async () => {
+    // An adapter that tags the reason its signal aborted with and rejects with it: the
+    // timer's, here, which carries nothing this attempt's adapter said.
+    const jar = new CookieJar();
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock' as const,
+      send: (request: AdapterRequest): Promise<AdapterResponse> =>
+        new Promise((_resolve, reject) => {
+          const signal = request.signal as AbortSignal;
+          signal.addEventListener(
+            'abort',
+            () => {
+              const reason: unknown = signal.reason;
+              Object.assign(reason as object, {
+                [RESPONSE_STREAM_ABORT_FLAG]: true,
+                [STREAM_ABORT_STATUS_KEY]: 200,
+                [STREAM_ABORT_HEADERS_KEY]: { 'set-cookie': ['t=1; Path=/'] },
+              });
+              // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+              reject(reason);
+            },
+            { once: true },
+          );
+        }),
+    };
+    const client = new HTTPClient({ adapter, cookieJar: jar, timeout: 20 });
+
+    const response = await client.get('https://a.test/x').send();
+
+    expect(response.isTimeout).toBe(true);
     expect(response.isStreamError).toBe(false);
     expect(jar.getAllCookies()).toEqual([]);
   });

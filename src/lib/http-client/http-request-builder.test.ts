@@ -281,6 +281,17 @@ describe('HTTPRequestBuilder', () => {
       expect(requireContext().options.headers['x-b']).toBe('2');
     });
 
+    test('two keys of one record that differ only by case are one header, the later winning', async () => {
+      const { builder, requireContext } = makeBuilder();
+      await builder.headers({ 'X-Trace': 'a', 'x-trace': 'b' }).send();
+      const headers = requireContext().options.headers;
+      expect(Object.keys(headers).filter((key) => key === 'x-trace')).toEqual([
+        'x-trace',
+      ]);
+      expect(headers['x-trace']).toBe('b');
+      expect(headers['X-Trace']).toBeUndefined();
+    });
+
     test('.headers() keeps a __proto__ header as an own key', async () => {
       const { builder, requireContext } = makeBuilder();
       const source = JSON.parse('{"__proto__": ["a", "b"]}') as Record<

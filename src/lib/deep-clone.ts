@@ -693,6 +693,13 @@ class ArrayFrame implements Frame {
     if (this.indicesGroups !== undefined) {
       const { value, copy } = this.indicesGroups;
       this.indicesGroups = undefined;
+
+      // Copied already by the indices array's own walk, when `arrayKeys` names `groups`:
+      // read once, as every value is.
+      if (Object.hasOwn(copy, 'groups')) {
+        return true;
+      }
+
       defineEntry(
         copy as unknown as Record<string, unknown>,
         'groups',

@@ -222,7 +222,9 @@ export class HTTPRequestBuilder<T = unknown> {
     }
     // Own keys, not `Object.assign`: a `__proto__` header would set the record's
     // prototype (an array value) or vanish (a string). Lowercased, as the request sends
-    // them, so a later call replaces an earlier one whatever either's capitalization.
+    // them, so a later call replaces an earlier one whatever either's capitalization -
+    // and within one record a later key replaces an earlier one that differs only by
+    // case, as everywhere request headers are merged (see `mergeHeaders`).
     // An array value copied (see `copyArrayValue`), so an item added to the caller's
     // afterwards is not sent.
     for (const [key, value] of Object.entries(headers)) {

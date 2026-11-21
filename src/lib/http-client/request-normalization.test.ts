@@ -16,6 +16,7 @@ import * as http from 'node:http';
 import * as zlib from 'node:zlib';
 import { PassThrough, Writable } from 'node:stream';
 import * as net from 'node:net';
+import qs from 'qs';
 import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
 import type { HTTPSubClient } from './http-client';
@@ -5478,6 +5479,59 @@ test('a leading-bracket key is overridden', () => {
   expect(buildURL(undefined, '/a?[x]=1&y=2', { x: 2 })).toBe('/a?y=2&x=2');
 });
 
+test('a leading-bracket key with brackets nested inside is keyed as qs keys it', () => {
+  // `qs` reads a leading bracket up to the one that closes it, nested ones counted:
+  // `[item[id]old]` and `[item[id]new]` are two keys, not both `item[id`.
+  expect(
+    buildURL('https://x.example', '/p?[item[id]old]=1', { '[item[id]new]': 2 }),
+  ).toBe('https://x.example/p?[item[id]old]=1&%5Bitem%5Bid%5Dnew%5D=2');
+
+  // Every pairing: a path pair goes exactly when `qs` reads it under the top-level key it
+  // reads the `.params()` key's own encoded pair under.
+  const keys = [
+    '[item[id]old]',
+    '[item[id]new]',
+    'item',
+    '[[a]]',
+    '[a]',
+    'a',
+    '[a[b][c]]x',
+    'a[b][c]',
+    '[a]]',
+    '[a]b',
+    '[a][b[c]]',
+    '[a[b]',
+    'x[a[b]]',
+    'x',
+    '[[]]',
+    '[[]a]',
+    '[]a',
+    '[]',
+  ];
+  const topLevelOf = (query: string): string | undefined =>
+    Object.keys(qs.parse(query))[0];
+  // A key opening with `[]` is numbered by `qs` from the pairs around it, so it is never
+  // replaced and replaces nothing.
+  const isNumbered = (key: string): boolean => key.startsWith('[]');
+  for (const pathKey of keys) {
+    for (const paramsKey of keys) {
+      const url = buildURL(undefined, `/a?${pathKey}=1&y=2`, {
+        [paramsKey]: 2,
+      });
+      const isReplaced =
+        !isNumbered(pathKey) &&
+        !isNumbered(paramsKey) &&
+        topLevelOf(`${pathKey}=1`) ===
+          topLevelOf(qs.stringify({ [paramsKey]: 2 }));
+      expect([pathKey, paramsKey, url.startsWith('/a?y=2&')]).toEqual([
+        pathKey,
+        paramsKey,
+        isReplaced,
+      ]);
+    }
+  }
+});
+
 test('a path pair is split at its first ]= as qs splits it, else at its first =', () => {
   // `qs.parse('[a=b]=1')` sets `a=b`, `a[b=c]=1` sets `a`, and `x=[1]=2` sets `x=`.
   expect(buildURL(undefined, '/a?[a=b]=1&y=2', { 'a=b': 2 })).toBe(
@@ -7308,6 +7362,47 @@ describe('maxResponseBytes', () => {
       expect(response.body).toHaveLength(300);
     });
   }
+
+  test('MockAdapter refuses a binary route body past the limit without copying it', async () => {
+    const body = new Uint8Array(64 * 1024);
+    const adapter = new MockAdapter();
+    adapter.routes.get('/fixture', () => ({ status: 200, body }));
+    const OriginalUint8Array = globalThis.Uint8Array;
+    let copies = 0;
+    globalThis.Uint8Array = new Proxy(OriginalUint8Array, {
+      construct(target, args, newTarget) {
+        if (args[0] === body) {
+          copies++;
+        }
+        return Reflect.construct(target, args, newTarget) as object;
+      },
+    });
+    try {
+      const builder = new HTTPClient({
+        adapter,
+        baseURL: 'http://mock.test',
+        maxResponseBytes: 1024,
+      }).get('/fixture');
+      const response = await builder.send();
+
+      expect(builder.error?.code).toBe('response_too_large');
+      expect(response.status).toBe(200);
+      expect(copies).toBe(0);
+    } finally {
+      globalThis.Uint8Array = OriginalUint8Array;
+    }
+
+    // Within the limit, it is still copied, so a fixture changed later is not delivered.
+    const within = await new HTTPClient({
+      adapter,
+      baseURL: 'http://mock.test',
+      maxResponseBytes: body.byteLength,
+    })
+      .get('/fixture')
+      .send();
+    expect(within.isFailed).toBe(false);
+    expect((within.body as Uint8Array).buffer).not.toBe(body.buffer);
+  });
 
   test('NodeAdapter counts a compressed body decoded', async () => {
     const builder = new HTTPClient({

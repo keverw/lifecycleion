@@ -160,7 +160,7 @@ function snapshotParamValue(
  * its first `]=` when it has one, after the `]` - so `[a=b]=1` sets `a=b` - and otherwise
  * at its first `=`.
  */
-function topLevelQueryKey(wirePair: string): string {
+function topLevelQueryKey(wirePair: string): string | undefined {
   // `qs` reads an encoded bracket as a bracket before it splits or decodes a pair.
   const pair = wirePair.replace(/%5B/gi, '[').replace(/%5D/gi, ']');
   const bracketEquals = pair.indexOf(']=');
@@ -178,18 +178,35 @@ function topLevelQueryKey(wirePair: string): string {
 /**
  * The top-level name of a decoded key: `filter[a]` is `filter`, and a key that opens with
  * a bracket (`[x]`) is the name inside it, as `qs` reads both. A `.params()` key goes
- * straight here - it is a name `qs` will encode, not one to decode.
+ * straight here - it is a name `qs` will encode, not one to decode. `undefined` for a
+ * key that opens with `[]`, which has no name of its own (see below).
  */
-function topLevelKeyOf(key: string): string {
-  // A key that opens with a bracket (`[x]=1`) is read by `qs` as the name inside it. A
-  // bare `[]` is left as it is: `qs` numbers it by the pairs around it (`[]=1&[]=2` is
-  // `0` and `1`, `[][a]=1&[]=2` both `0`), so it matches no `.params()` key.
-  if (key.startsWith('[')) {
-    const close = key.indexOf(']');
-    return close > 1 ? key.slice(1, close) : key;
-  }
+function topLevelKeyOf(key: string): string | undefined {
   const bracket = key.indexOf('[');
-  return bracket > 0 ? key.slice(0, bracket) : key;
+  if (bracket !== 0) {
+    return bracket > 0 ? key.slice(0, bracket) : key;
+  }
+
+  // A key that opens with a bracket (`[x]=1`) is read by `qs` as the name inside it, up
+  // to the bracket that closes it, brackets nested inside counted: `[item[id]old]` is
+  // `item[id]old`. One never closed is the whole key, as `qs` keeps it. One that opens
+  // with `[]` has no name: `qs` numbers it by the pairs around it (`[]=1&[]=2` is `0`
+  // and `1`, `[][a]=1&[]=2` both `0`), so it matches no `.params()` key, and no other key
+  // matches it - not even `[[]]`, whose name is `[]`.
+  let level = 0;
+  for (let index = 0; index < key.length; index++) {
+    const char = key[index];
+    if (char === '[') {
+      level++;
+    } else if (char === ']') {
+      level--;
+      if (level === 0) {
+        return index > 1 ? key.slice(1, index) : undefined;
+      }
+    }
+  }
+
+  return key;
 }
 
 /**
@@ -287,12 +304,14 @@ export function buildURL(
       const overridden = new Set(
         Object.keys(snapshot)
           .filter((key) => isGivenParam(snapshot[key]))
-          .map(topLevelKeyOf),
+          .map(topLevelKeyOf)
+          .filter((key) => key !== undefined),
       );
       const pairs = existingQuery.split('&').filter((pair) => pair !== '');
-      const kept = pairs.filter(
-        (pair) => !overridden.has(topLevelQueryKey(pair)),
-      );
+      const kept = pairs.filter((pair) => {
+        const key = topLevelQueryKey(pair);
+        return key === undefined || !overridden.has(key);
+      });
       const added = qs.stringify(snapshot, QS_STRINGIFY_DEPTH);
 
       // Params that add nothing and replace no pair of the path's - each unset, or given
