@@ -4300,13 +4300,15 @@ export class BaseHTTPClient {
           isAbandoned ||
           (cancelSignal.aborted &&
             error === readUnknownMember(cancelSignal, 'reason'));
-        const reportedSentRequest = isCallerAbortReason
-          ? observedSentRequest
-          : sentRequestForObservedAdapterError(
-              sentRequest,
-              error,
-              observedSentRequest,
-            );
+        // Read once, for the sent request reported and a stream error's response alike.
+        const reportedEffectiveHeaders = isCallerAbortReason
+          ? undefined
+          : getEffectiveRequestHeadersFromError(error);
+        const reportedSentRequest = sentRequestForObservedAdapterError(
+          sentRequest,
+          reportedEffectiveHeaders,
+          observedSentRequest,
+        );
 
         if (cookieJar && answeredBeforeFailure) {
           try {
@@ -4421,8 +4423,7 @@ export class BaseHTTPClient {
               isStreamError: true,
               streamErrorCode: 'stream_response_error' as const,
               errorCause: streamCause,
-              effectiveRequestHeaders:
-                getEffectiveRequestHeadersFromError(error),
+              effectiveRequestHeaders: reportedEffectiveHeaders,
             },
             sentRequest: reportedSentRequest,
             attemptCount: attemptNumber,
@@ -6211,15 +6212,14 @@ function isBodyDecodeFailure(response: AdapterResponse): boolean {
 /**
  * When `adapter.send()` rejects before resolving (e.g. stream factory throw),
  * adapters may still attach `effectiveRequestHeaders` on the error so observers
- * see the same merged headers as on a successful `AdapterResponse`.
+ * see the same merged headers as on a successful `AdapterResponse`: `eff` is those
+ * headers, read off the error by `getEffectiveRequestHeadersFromError`.
  */
 function sentRequestForObservedAdapterError(
   sentRequest: HeldAttemptRequest,
-  error: unknown,
+  eff: Record<string, string | string[]> | undefined,
   observedAfterAdapterResolve: HeldAttemptRequest,
 ): HeldAttemptRequest {
-  const eff = getEffectiveRequestHeadersFromError(error);
-
   if (!eff) {
     return observedAfterAdapterResolve;
   }

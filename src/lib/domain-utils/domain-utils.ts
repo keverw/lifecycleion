@@ -1,4 +1,5 @@
 import { getDomain, getSubdomain, getPublicSuffix } from 'tldts';
+import { getOrCompute } from '../internal/bounded-cache';
 import {
   isAllWildcards,
   isHostTooLongToNormalize,
@@ -741,33 +742,16 @@ function normalizedExactEntry(entry: string, isCached: boolean): string {
 }
 
 /**
- * `compute(key)`, kept in `cache`. Least recently used out first: a hit moves to the end,
- * the oldest goes when full. A list longer than the cache is not cached at all: scanned
- * in order, each entry would evict the one the next scan needs first, missing every time
- * at more cost than computing them.
+ * `compute(key)`, kept in `cache` (see `getOrCompute`). A list longer than the cache is
+ * not cached at all: scanned in order, each entry would evict the one the next scan needs
+ * first, missing every time at more cost than computing them.
  */
 function cachedEntry<T>(
   cache: Map<string, T>,
   key: string,
   compute: (key: string) => T,
 ): T {
-  if (cache.has(key)) {
-    const cached = cache.get(key) as T;
-    cache.delete(key);
-    cache.set(key, cached);
-    return cached;
-  }
-
-  const value = compute(key);
-  if (cache.size >= MAX_SHARED_CACHE_ENTRIES) {
-    const oldest = cache.keys().next();
-    if (oldest.done !== true) {
-      cache.delete(oldest.value);
-    }
-  }
-  cache.set(key, value);
-
-  return value;
+  return getOrCompute(cache, key, MAX_SHARED_CACHE_ENTRIES, compute);
 }
 
 /** A domain-list entry as {@link matchesDomainList} reads it, compiled once. */

@@ -42,10 +42,33 @@ describe('concatChunks', () => {
     expect([...result]).toEqual([1, 2, 3]);
   });
 
-  test('a lone plain chunk spanning a plain buffer is the result as it is', () => {
+  test('a lone plain chunk spanning a plain buffer is a view over that buffer, not a copy', () => {
     const chunk = new Uint8Array([1, 2, 3]);
+    const result = concatChunks([chunk], 3);
 
-    expect(concatChunks([chunk], 3)).toBe(chunk);
+    expect(result.buffer).toBe(chunk.buffer);
+    expect([...result]).toEqual([1, 2, 3]);
+  });
+
+  test('a lone chunk with properties of its own is a fresh view that carries none of them', () => {
+    const chunk = new Uint8Array([1, 2, 3]);
+    Object.defineProperties(chunk, {
+      byteLength: { value: 0 },
+      length: { value: 0 },
+      extra: { value: 'kept', enumerable: true },
+    });
+
+    const result = concatChunks([chunk], 3);
+
+    expect(result).not.toBe(chunk);
+    expect(result.buffer).toBe(chunk.buffer);
+    expect(result.byteLength).toBe(3);
+    expect(result.length).toBe(3);
+    expect(
+      Reflect.ownKeys(result).filter(
+        (key) => typeof key !== 'string' || !/^\d+$/.test(key),
+      ),
+    ).toEqual([]);
   });
 
   test('a lone chunk over a buffer with a byteLength of its own is copied', () => {
@@ -73,12 +96,15 @@ describe('concatChunks', () => {
     expect([...result]).toEqual([1, 2, 3]);
   });
 
-  test('a lone empty chunk over a detached buffer is the result as it is', () => {
+  test('a lone empty chunk over a detached buffer is an empty result', () => {
     const buffer = new ArrayBuffer(0);
     const chunk = new Uint8Array(buffer);
     structuredClone(buffer, { transfer: [buffer] });
 
-    expect(concatChunks([chunk], 0)).toBe(chunk);
+    const result = concatChunks([chunk], 0);
+
+    expect(result.byteLength).toBe(0);
+    expect(result.buffer.byteLength).toBe(0);
   });
 
   test.each([

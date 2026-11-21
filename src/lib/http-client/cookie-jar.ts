@@ -1,3 +1,4 @@
+import { getOrCompute } from '../internal/bounded-cache';
 import {
   assertKnownFields,
   assertOptionsObject,
@@ -284,18 +285,30 @@ const COOKIES_IN_JAR_AFTER_EVICTION = 3000;
 // the jar-wide limit, which then lets the jar grow past it.
 const SAFE_FROM_JAR_LIMIT_MS = 30 * 24 * 60 * 60 * 1000;
 
+type CookieNamePrefix = '__host-http-' | '__host-' | '__http-' | '__secure-';
+
 /**
- * The RFC 6265bis §4.1.3 name prefix `text` starts with, matched ASCII
- * case-insensitively as browsers match it, or `null` for none.
+ * The cookie name prefix `text` starts with, matched ASCII case-insensitively as
+ * browsers match it, or `null` for none: RFC 6265bis §4.1.3's `__Secure-` and
+ * `__Host-`, and the `__Http-` and `__Host-Http-` prefixes Chrome and Firefox enforce as
+ * well. `__Host-Http-` is matched before the `__Host-` it starts with.
  */
-function cookieNamePrefix(text: string): '__host-' | '__secure-' | null {
-  const start = asciiLowercase(text.slice(0, '__secure-'.length));
+function cookieNamePrefix(text: string): CookieNamePrefix | null {
+  const start = asciiLowercase(text.slice(0, '__host-http-'.length));
+
+  if (start === '__host-http-') {
+    return '__host-http-';
+  }
 
   if (start.startsWith('__host-')) {
     return '__host-';
   }
 
-  return start === '__secure-' ? '__secure-' : null;
+  if (start.startsWith('__http-')) {
+    return '__http-';
+  }
+
+  return start.startsWith('__secure-') ? '__secure-' : null;
 }
 
 const COOKIE_DATE_DELIMITER =
@@ -407,7 +420,8 @@ const MAX_NORMALIZED_DOMAIN_LENGTH = 512;
  * - Rejects a `Secure` cookie set by a non-secure request, and a non-`Secure` cookie
  *   set by one that would replace or evict a stored `Secure` cookie
  *   (RFC 6265bis "Leave Secure Cookies Alone")
- * - Enforces the `__Secure-` and `__Host-` name prefixes (RFC 6265bis)
+ * - Enforces the `__Secure-` and `__Host-` name prefixes (RFC 6265bis), and the
+ *   `__Http-` and `__Host-Http-` prefixes, as Chrome and Firefox do
  *
  * Growth is bounded as Chromium bounds it: past 180 cookies in a site, or 3300 in the
  * jar, expired cookies go first and then the least recently used, non-`Secure` before
@@ -512,8 +526,9 @@ export class CookieJar {
    * or ending with a space or tab, or a name and value together longer than 4096
    * characters, the limit a `Set-Cookie` is held to. A name may be empty - a nameless
    * cookie, sent as its value alone - when the value is not empty and does not start with
-   * `__Secure-` / `__Host-`. The header is built as `name=value` pairs joined by `; `, so
-   * a value of `x; other=evil` would be sent as two cookies, and a CR LF would be a
+   * a name prefix (`__Secure-`, `__Host-`, `__Http-`, `__Host-Http-`). The header is
+   * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` would be
+   * sent as two cookies, and a CR LF would be a
    * header injection. The Set-Cookie parser cannot produce these - it splits on `;`
    * first - so this covers the programmatic path and a persisted jar that was edited or
    * tampered with.
@@ -1040,24 +1055,28 @@ export class CookieJar {
 
       const rawExpires: unknown = cookie.expires;
 
-      // Absent, so `setCookie` injects `Date.now()`; a tampered value is refused there.
-      if ((cookie.createdAt as unknown) === null) {
-        delete (cookie as Partial<Cookie>).createdAt;
-      }
-
-      if ((cookie.maxAge as unknown) === null) {
-        delete cookie.maxAge;
-      }
-
-      // Absent, so `setCookie` counts the cookie as used at the restore: a payload saved
-      // before the jar wrote it keeps every cookie safe from the jar-wide limit for 30 days.
-      if ((cookie.lastAccessedAt as unknown) === null) {
-        delete cookie.lastAccessedAt;
-      }
-
-      // Absent, so the cookie's own `createdAt` places it in the `Cookie` header.
-      if ((cookie.firstCreatedAt as unknown) === null) {
-        delete cookie.firstCreatedAt;
+      // A `null` field reads as absent, as a `null` expiry does; any other value
+      // `setCookie` cannot store is refused there, and counted out of the total. Absent,
+      // `createdAt` is `Date.now()`, injected by `setCookie` (a cookie with a positive
+      // `maxAge` and no `createdAt` is dropped below, as its expiry cannot be placed);
+      // `lastAccessedAt` counts the cookie as used at the restore, so a payload saved
+      // before the jar wrote it keeps every cookie safe from the jar-wide limit for 30
+      // days; and `firstCreatedAt` lets the cookie's own `createdAt` place it in the
+      // `Cookie` header.
+      for (const field of [
+        'createdAt',
+        'maxAge',
+        'lastAccessedAt',
+        'firstCreatedAt',
+        'path',
+        'secure',
+        'hostOnly',
+        'httpOnly',
+        'sameSite',
+      ] as const) {
+        if ((cookie[field] as unknown) === null) {
+          delete (cookie as Partial<Cookie>)[field];
+        }
       }
 
       // Above zero only: a `maxAge` of zero or less has expired whenever it started, and
@@ -1068,20 +1087,6 @@ export class CookieJar {
         (cookie.createdAt as unknown) === undefined
       ) {
         continue;
-      }
-
-      // A `null` `path`, flag or `sameSite` reads as absent, as a `null` expiry does; any
-      // other value `setCookie` cannot store is refused there, and counted out of the total.
-      for (const field of [
-        'path',
-        'secure',
-        'hostOnly',
-        'httpOnly',
-        'sameSite',
-      ] as const) {
-        if ((cookie[field] as unknown) === null) {
-          delete cookie[field];
-        }
       }
 
       if (rawExpires === undefined || rawExpires === null) {
@@ -1297,6 +1302,7 @@ export class CookieJar {
         name: input.name,
         value: input.value,
         secure: input.secure,
+        httpOnly: input.httpOnly,
         // `Domain` absent means host-only; on this path that is the `hostOnly` flag, or a
         // domain that is stored host-only whatever it says (see below).
         domain: isHostOnly ? undefined : domain,
@@ -1582,31 +1588,15 @@ export class CookieJar {
    * over - its own checks, then `setCookie`'s - and the IDNA mapping is most of its cost.
    */
   private normalizeStoredDomain(domain: string): string {
-    const known = this.normalizedDomains.get(domain);
-    if (known !== undefined) {
-      // Moved to the end, as the most recently used.
-      this.normalizedDomains.delete(domain);
-      this.normalizedDomains.set(domain, known);
-      return known;
-    }
-
-    const normalized = this.normalizeDomainText(domain);
-
     // A longer name than any domain is normalized and not kept, so a caller's long string
     // is let go as soon as it is answered.
-    if (domain.length > MAX_NORMALIZED_DOMAIN_LENGTH) {
-      return normalized;
-    }
-
-    if (this.normalizedDomains.size >= MAX_NORMALIZED_DOMAINS) {
-      for (const leastRecent of this.normalizedDomains.keys()) {
-        this.normalizedDomains.delete(leastRecent);
-        break;
-      }
-    }
-    this.normalizedDomains.set(domain, normalized);
-
-    return normalized;
+    return getOrCompute(
+      this.normalizedDomains,
+      domain,
+      MAX_NORMALIZED_DOMAINS,
+      (name) => this.normalizeDomainText(name),
+      (name) => name.length <= MAX_NORMALIZED_DOMAIN_LENGTH,
+    );
   }
 
   /** {@link normalizeStoredDomain}'s answer, worked out. */
@@ -2245,17 +2235,19 @@ export class CookieJar {
   }
 
   /**
-   * RFC 6265bis §4.1.3 cookie name prefixes, matched case-insensitively as browsers do.
+   * Cookie name prefixes (see `cookieNamePrefix`), matched case-insensitively as browsers
+   * do.
    *
    * `__Secure-` requires the `Secure` attribute. `__Host-` requires `Secure`, no
    * non-empty `Domain` attribute (so the cookie is host-only; an empty `Domain=` reads as
    * absent) - or one naming the IP address the cookie came from, which keeps it host-only
-   * too (`isIPHostOnly`), as Chrome and Firefox take it - and `Path=/`. A cookie that
-   * claims a prefix without meeting its conditions is refused outright rather than stored
-   * with the guarantees the prefix promises to a server reading it back. The
-   * secure-scheme half of both prefixes is enforced by the `Secure` check in
-   * `storeParsed`; the attribute half is checked on `setCookie` as well, since it needs
-   * no URL.
+   * too (`isIPHostOnly`), as Chrome and Firefox take it - and `Path=/`. `__Http-`
+   * requires `Secure` and `HttpOnly`, and `__Host-Http-` the `__Host-` rules and
+   * `HttpOnly`. A cookie that claims a prefix without meeting its conditions is refused
+   * outright rather than stored with the guarantees the prefix promises to a server
+   * reading it back. The secure-scheme half of every prefix is enforced by the `Secure`
+   * check in `storeParsed`; the attribute half is checked on `setCookie` as well, since
+   * it needs no URL.
    */
   private hasValidNamePrefix(
     parsed: ParsedCookie,
@@ -2263,15 +2255,22 @@ export class CookieJar {
   ): boolean {
     const prefix = cookieNamePrefix(parsed.name);
 
-    if (prefix === '__host-') {
-      return (
-        parsed.secure === true &&
-        (!parsed.domain || isIPHostOnly) &&
-        parsed.path === '/'
-      );
+    if (prefix === null) {
+      return true;
     }
 
-    return prefix === null || parsed.secure === true;
+    if (
+      parsed.secure !== true ||
+      ((prefix === '__http-' || prefix === '__host-http-') &&
+        parsed.httpOnly !== true)
+    ) {
+      return false;
+    }
+
+    return (
+      (prefix !== '__host-' && prefix !== '__host-http-') ||
+      ((!parsed.domain || isIPHostOnly) && parsed.path === '/')
+    );
   }
 
   /**
@@ -2444,7 +2443,8 @@ export class CookieJar {
 
     // A name holds no `=` (its own delimiter). It may be empty - a nameless
     // cookie, sent as its value alone (RFC 6265bis) - when the value is not: and then the
-    // value does not pose as a `__Secure-` / `__Host-` cookie, which RFC 6265bis refuses.
+    // value does not pose as a prefixed cookie (see `cookieNamePrefix`), which RFC 6265bis
+    // refuses.
     // It may hold an `=`, though a server reads `=a=b` back as `a=b`, as browsers keep it.
     if (name === '') {
       return (

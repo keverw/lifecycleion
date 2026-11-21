@@ -96,7 +96,8 @@ export class BodyBytes {
 
   /**
    * The bytes appended, as a plain `Uint8Array` spanning an `ArrayBuffer` of its own:
-   * joined by {@link concatChunks}, which hands back a lone part that already is that.
+   * joined by {@link concatChunks}, which hands back a fresh view over a lone part that
+   * already spans such a buffer, without copying it.
    */
   public bytes(): Uint8Array {
     this.endPart();

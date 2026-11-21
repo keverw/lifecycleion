@@ -2515,6 +2515,75 @@ describe('CookieJar', () => {
       ).toBe('1');
     });
 
+    test.each([
+      ['__Http-id=1; Secure; HttpOnly; Path=/app; Domain=example.com', true],
+      ['__http-id=1; Secure; HttpOnly', true],
+      ['__Http-id=1; Secure', false],
+      ['__Http-id=1; HttpOnly', false],
+      ['__Host-Http-id=1; Secure; HttpOnly; Path=/', true],
+      ['__HOST-HTTP-id=1; Secure; HttpOnly; Path=/', true],
+      ['__Host-Http-id=1; Secure; Path=/', false],
+      ['__Host-Http-id=1; HttpOnly; Path=/', false],
+      ['__Host-Http-id=1; Secure; HttpOnly; Path=/; Domain=example.com', false],
+      ['__Host-Http-id=1; Secure; HttpOnly; Path=/app', false],
+      ['__Host-Http-id=1; Secure; HttpOnly', false],
+    ])(
+      'the __Http- and __Host-Http- prefixes, as Chrome and Firefox enforce them: %s is stored: %p',
+      (header, isStored) => {
+        jar.parseSetCookieHeader(header, 'https://example.com/app/page');
+        expect(jar.getAllCookies()).toHaveLength(isStored ? 1 : 0);
+      },
+    );
+
+    test('setCookie() and fromJSON() require httpOnly for __Http- and __Host-Http-', () => {
+      const base = {
+        value: '1',
+        domain: 'example.com',
+        path: '/',
+        secure: true,
+        hostOnly: true,
+      };
+
+      expect(jar.setCookie({ ...base, name: '__Http-id' })).toBe(false);
+      expect(jar.setCookie({ ...base, name: '__Host-Http-id' })).toBe(false);
+      expect(
+        jar.setCookie({
+          ...base,
+          name: '__Host-Http-id',
+          path: '/app',
+          httpOnly: true,
+        }),
+      ).toBe(false);
+      expect(jar.getAllCookies()).toHaveLength(0);
+
+      expect(
+        jar.setCookie({ ...base, name: '__Http-id', httpOnly: true }),
+      ).toBe(true);
+      expect(
+        jar.setCookie({ ...base, name: '__Host-Http-id', httpOnly: true }),
+      ).toBe(true);
+
+      const restored = new CookieJar();
+      const createdAt = Date.now();
+
+      expect(
+        restored.fromJSON({
+          cookies: [
+            { ...base, createdAt, name: '__Http-a' },
+            { ...base, createdAt, name: '__Host-Http-b' },
+            { ...base, createdAt, name: '__Http-ok', httpOnly: true },
+            { ...base, createdAt, name: '__Host-Http-ok', httpOnly: true },
+          ],
+        }),
+      ).toBe(2);
+      expect(
+        restored
+          .getAllCookies()
+          .map((cookie) => cookie.name)
+          .sort(),
+      ).toEqual(['__Host-Http-ok', '__Http-ok']);
+    });
+
     test('prefixes match case-insensitively', () => {
       jar.parseSetCookieHeader('__host-id=1; Path=/', 'https://example.com/');
       jar.parseSetCookieHeader('__SECURE-id=1', 'https://example.com/');
@@ -4437,11 +4506,14 @@ test('a nameless Set-Cookie keeps the = in its value, as browsers do', () => {
   expect(read('===test=2b')).toBe('==test=2b');
   expect(read('=test=11', 'test11')).toBe('test11');
   expect(read('=__Secure-abc=123', '=__HoSt-abc=123')).toBe('');
+  expect(read('=__Http-abc=123', '=__host-http-abc=123')).toBe('');
 
   const jar = new CookieJar();
   const base = { name: '', domain: 'example.com', path: '/' };
   expect(jar.setCookie({ ...base, value: ' __Host-sid=evil' })).toBe(false);
   expect(jar.setCookie({ ...base, value: '\t__Secure-sid=evil' })).toBe(false);
+  expect(jar.setCookie({ ...base, value: '__Http-sid=evil' })).toBe(false);
+  expect(jar.setCookie({ ...base, value: '__Host-Http-sid=evil' })).toBe(false);
 });
 
 test('a value with a space or tab at its edge is refused, as such a name is', () => {

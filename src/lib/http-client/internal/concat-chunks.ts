@@ -22,7 +22,8 @@ const CHANGED_LENGTH_MESSAGE =
  *
  * A lone chunk that already is that - a plain `Uint8Array` spanning the whole of a plain,
  * fixed-length, unshared `ArrayBuffer`, as a web stream's chunk from the runtime's `fetch`
- * is - shares it with nothing there, so it is the result as it is, not copied. A `Buffer`,
+ * is - shares it with nothing there, so its buffer is not copied: the result is a fresh
+ * view over it, so a property set on the chunk itself does not carry over. A `Buffer`,
  * pooled or not, is always copied, as is a chunk over a resizable or shared buffer: the
  * result is a plain `Uint8Array` over a plain `ArrayBuffer` either way.
  */
@@ -30,11 +31,14 @@ export function concatChunks(
   chunks: readonly Uint8Array[],
   byteLength: number,
 ): Uint8Array {
-  if (chunks.length === 1) {
+  // Not for an empty body: no view can be made over a detached buffer, and an empty
+  // result costs nothing to make below.
+  if (chunks.length === 1 && byteLength > 0) {
     const [only] = chunks;
 
     if (isWholeOfPlainBuffer(only, byteLength)) {
-      return only;
+      // A fresh view over the same buffer: nothing set on the chunk itself carries over.
+      return new Uint8Array(readTypedArrayBuffer(only));
     }
   }
 

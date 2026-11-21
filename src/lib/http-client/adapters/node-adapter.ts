@@ -2990,17 +2990,14 @@ export class NodeAdapter implements HTTPAdapter {
                 return;
               }
 
-              activeBufferedResponse = undefined;
-
               // The pieces let go once copied: an early-ack upload still running keeps
               // this closure alive, and would hold the body twice over until it finishes.
               gathered.clear();
 
-              settleResponse({
-                status,
-                headers,
-                body: responseBody,
-              });
+              settleBufferedResponse(
+                { status, headers, body: responseBody },
+                { shouldTearDown: false },
+              );
             });
 
             body.on('error', (err: Error) => {

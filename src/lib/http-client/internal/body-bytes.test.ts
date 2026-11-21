@@ -28,7 +28,7 @@ describe('BodyBytes', () => {
     expect(Object.getPrototypeOf(bytes)).toBe(Uint8Array.prototype);
     // The block itself, not a 16 KiB block joined again into one of 2,048 bytes.
     expect(bytes.buffer.byteLength).toBe(2048);
-    expect(body.bytes()).toBe(bytes);
+    expect(body.bytes().buffer).toBe(bytes.buffer);
   });
 
   test('clear() lets go of every byte kept', () => {
@@ -90,13 +90,13 @@ describe('BodyBytes', () => {
     expect([...body.bytes()]).toEqual([1, 2, 3]);
   });
 
-  test('a lone chunk of 4 KiB or more spanning a plain buffer is the body as it is, not copied', () => {
+  test('a lone chunk of 4 KiB or more spanning a plain buffer is the body over its buffer, not copied', () => {
     for (const length of [4096, 16_000, 20_000]) {
       const chunk = counting(length);
       const body = new BodyBytes(100_000);
       body.append(chunk, chunk.length);
 
-      expect(body.bytes()).toBe(chunk);
+      expect(body.bytes().buffer).toBe(chunk.buffer);
     }
   });
 
