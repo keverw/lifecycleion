@@ -362,12 +362,15 @@ function defineParsedOnRead(
   handed: AttemptRequest,
   parse: () => unknown,
 ): void {
+  // Kept enumerable or not as the field is when it settles, so one an observer made
+  // non-enumerable stays left out of `Object.keys`, a spread and `JSON.stringify`.
   const settle = (value: unknown): boolean =>
     Reflect.defineProperty(handed, 'rawBody', {
       // eslint-disable-next-line @typescript-eslint/naming-convention
       __proto__: null,
       configurable: true,
-      enumerable: true,
+      enumerable:
+        Reflect.getOwnPropertyDescriptor(handed, 'rawBody')?.enumerable ?? true,
       value,
       writable: true,
     } as PropertyDescriptor);
@@ -390,7 +393,30 @@ function defineParsedOnRead(
       settle(value);
       return value;
     },
-    set: (value: unknown) => {
+    set(this: unknown, value: unknown) {
+      // An assignment on an object derived from the copy - `Object.create(request)` -
+      // gives that object its own field, as the copy's data field would, and leaves the
+      // copy, and so the observers after, as they were.
+      if (this !== handed) {
+        if (
+          Object.isFrozen(handed) ||
+          typeof this !== 'object' ||
+          this === null ||
+          !Reflect.defineProperty(this, 'rawBody', {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            __proto__: null,
+            configurable: true,
+            enumerable: true,
+            value,
+            writable: true,
+          } as PropertyDescriptor)
+        ) {
+          throw new TypeError("Cannot assign to read only property 'rawBody'");
+        }
+
+        return;
+      }
+
       if (settle(value)) {
         return;
       }

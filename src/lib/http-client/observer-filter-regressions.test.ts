@@ -438,6 +438,48 @@ test('a JSON rawBody assigned by an observer is the value the observers after it
   });
 });
 
+test('a JSON rawBody an observer made non-enumerable before reading it stays non-enumerable', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter });
+  const seen: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    Object.defineProperty(request, 'rawBody', { enumerable: false });
+    seen.push(request.rawBody);
+    request.rawBody = { redacted: true };
+  });
+  client.addResponseObserver((_response, request) => {
+    seen.push(
+      request.rawBody,
+      Object.keys(request).includes('rawBody'),
+      'rawBody' in JSON.parse(JSON.stringify(request)),
+    );
+  });
+
+  await client.post('https://api.example.com/x').json({ a: 1 }).send();
+
+  expect(seen).toEqual([{ a: 1 }, { redacted: true }, false, false]);
+});
+
+test('a JSON rawBody assigned on an object derived from the request stays on that object', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter });
+  const seen: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    const derived = Object.create(request) as typeof request;
+    derived.rawBody = 'derived';
+    seen.push(derived.rawBody, Object.hasOwn(derived, 'rawBody'));
+  });
+  client.addResponseObserver((_response, request) => {
+    seen.push(request.rawBody);
+  });
+
+  await client.post('https://api.example.com/x').json({ a: 1 }).send();
+
+  expect(seen).toEqual(['derived', true, { a: 1 }]);
+});
+
 test('a JSON rawBody on a request an observer froze before reading it is read, and refuses an assignment', async () => {
   const adapter = new MockAdapter();
   adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
