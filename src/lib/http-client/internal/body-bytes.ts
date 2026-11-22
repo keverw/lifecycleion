@@ -14,6 +14,9 @@ const BLOCK_BYTES = 16 * 1024;
  */
 const KEEP_BYTES = 4 * 1024;
 
+/** The most bytes of a chunk copied by index, where a view over them would cost more. */
+const INDEX_COPY_BYTES = 64;
+
 /**
  * A response body's bytes, kept as each chunk is read and joined once by
  * {@link concatChunks}. A chunk of {@link KEEP_BYTES} or more that spans at least half
@@ -77,17 +80,25 @@ export class BodyBytes {
 
       const block = this.block as Uint8Array;
       const count = Math.min(byteLength - offset, block.length - this.filled);
-      // A part of the chunk, made over its buffer by the intrinsic getters rather than its
-      // own `subarray`, which would build it through the chunk's own constructor.
-      const part =
-        offset === 0 && count === byteLength
-          ? chunk
-          : new Uint8Array(
-              readTypedArrayBuffer(chunk),
-              readTypedArrayByteOffset(chunk) + offset,
-              count,
-            );
-      block.set(part, this.filled);
+      // No more than the bytes measured, as a chunk over a growable `SharedArrayBuffer`
+      // another thread grew since then spans more: a few copied by index, which reads the
+      // chunk's own bytes and runs none of its code, and more through a view made over
+      // its buffer by the intrinsic getters rather than its own `subarray`, which would
+      // build it through the chunk's own constructor.
+      if (count <= INDEX_COPY_BYTES) {
+        for (let index = 0; index < count; index++) {
+          block[this.filled + index] = chunk[offset + index];
+        }
+      } else {
+        block.set(
+          new Uint8Array(
+            readTypedArrayBuffer(chunk),
+            readTypedArrayByteOffset(chunk) + offset,
+            count,
+          ),
+          this.filled,
+        );
+      }
       this.filled += count;
       this.written += count;
       offset += count;

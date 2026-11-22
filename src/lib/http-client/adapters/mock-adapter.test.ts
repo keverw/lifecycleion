@@ -1,5 +1,6 @@
 import { raceSentinel } from '../../internal/race-sentinel-test-utils';
-import { describe, expect, test, beforeEach } from 'bun:test';
+import { describe, expect, test, beforeEach, spyOn } from 'bun:test';
+import * as binaryView from '../../internal/binary-view';
 import vm from 'node:vm';
 import { MockAdapter } from './mock-adapter';
 import {
@@ -3117,6 +3118,61 @@ for (const source of ['handler', 'error handler'] as const) {
     });
   }
 }
+
+describe('MockAdapter - route body bytes', () => {
+  test('a route body past the end of a shrunk resizable buffer fails rather than being delivered empty', async () => {
+    const buffer = new ArrayBuffer(8, { maxByteLength: 16 });
+    const body = new Uint8Array(buffer, 4, 4);
+    buffer.resize(2);
+    const adapter = new MockAdapter();
+    adapter.routes.get('/bytes', () => ({ status: 200, body }));
+
+    const failure = await adapter
+      .send(makeAdapterRequest({ requestURL: '/bytes' }))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(failure).toBeInstanceOf(Error);
+  });
+
+  test('a route body over a growable SharedArrayBuffer that grows after it is measured is copied at the size that passed maxResponseBytes', async () => {
+    // The TypeScript lib in use does not declare growable shared buffers.
+    const GrowableSharedArrayBuffer = SharedArrayBuffer as unknown as new (
+      length: number,
+      options: { maxByteLength: number },
+    ) => SharedArrayBuffer & { grow(length: number): void };
+    const buffer = new GrowableSharedArrayBuffer(4, { maxByteLength: 8 });
+    const body = new Uint8Array(buffer);
+    body.set([1, 2, 3, 4]);
+    const adapter = new MockAdapter();
+    adapter.routes.get('/bytes', () => ({ status: 200, body }));
+    // Grown just after it is measured, as another thread could grow it.
+    const original = binaryView.readBinaryByteLength;
+    const measure = spyOn(binaryView, 'readBinaryByteLength');
+    measure.mockImplementation((value: object) => {
+      const byteLength = original(value);
+      if (value === body && buffer.byteLength === 4) {
+        buffer.grow(8);
+        new Uint8Array(buffer).fill(9, 4);
+      }
+      return byteLength;
+    });
+    let response;
+    try {
+      response = await adapter.send(
+        makeAdapterRequest({ requestURL: '/bytes', maxResponseBytes: 4 }),
+      );
+    } finally {
+      measure.mockRestore();
+    }
+
+    expect(buffer.byteLength).toBe(8);
+    expect(response.isStreamError).toBeUndefined();
+    expect(Array.from(response.body as Uint8Array)).toEqual([1, 2, 3, 4]);
+  });
+});
 
 describe('MockAdapter - route body bytes from another realm', () => {
   test("a route body of bytes from another realm is sent as this realm's Uint8Array", async () => {

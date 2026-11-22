@@ -32,6 +32,7 @@ import {
   hasBufferTagInChain,
   isResizableBuffer,
   typedArrayNameOf,
+  assertTypedArrayInBounds,
 } from './internal/binary-view';
 
 /** Options for {@link deepClone}. */
@@ -1223,6 +1224,13 @@ function cloneView(view: ArrayBufferView): object {
       view,
       [],
     );
+  }
+
+  // A typed array past the end of a shrunk resizable buffer reads as empty through its
+  // getters, so it is checked first and throws a `TypeError`, as a `DataView`'s getters do
+  // for one.
+  if (name !== undefined) {
+    assertTypedArrayInBounds(view);
   }
 
   // Its extent read once, so the copy and the view over it agree even where a worker

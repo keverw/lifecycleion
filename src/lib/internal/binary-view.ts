@@ -213,6 +213,19 @@ export function plainBytesView(view: ArrayBufferView): Uint8Array {
   );
 }
 
+/**
+ * Throws a `TypeError`, as `slice` and the other typed array methods do, for a typed array
+ * over a detached buffer or past the end of a shrunk resizable one - which its getters, and
+ * so {@link plainBytesView}, read as empty. Checked by the intrinsic `keys`, which reads
+ * no element and runs none of the view's own code.
+ */
+export function assertTypedArrayInBounds(view: ArrayBufferView): void {
+  const prototype = Object.getPrototypeOf(Uint8Array.prototype) as {
+    keys: () => unknown;
+  };
+  Reflect.apply(prototype.keys, view, []);
+}
+
 /** Binary template lookup exposes numeric elements and intrinsic length, not expandos. */
 export function readBinaryTemplateMember(value: object, key: string): unknown {
   const length = callByteLengthGetter(TYPED_ARRAY_LENGTH, value);

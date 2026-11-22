@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import vm from 'node:vm';
+import * as binaryView from '../../internal/binary-view';
 import { XHRAdapter } from './xhr-adapter';
 import type { AdapterRequest } from '../types';
 import { materializeRequestHeaders } from '../internal/header-utils';
@@ -1107,6 +1108,47 @@ describe('XHRAdapter', () => {
       response = await promise;
     } finally {
       slice.mockRestore();
+    }
+
+    expect(buffer.byteLength).toBe(8);
+    expect(response.isStreamError).toBeUndefined();
+    expect([...(response.body ?? [])]).toEqual([1, 2, 3, 4]);
+  });
+
+  test('a view over a growable SharedArrayBuffer that grows after it is measured is copied at the size that passed maxResponseBytes', async () => {
+    // The TypeScript lib in use does not declare growable shared buffers.
+    const GrowableSharedArrayBuffer = SharedArrayBuffer as unknown as new (
+      length: number,
+      options: { maxByteLength: number },
+    ) => SharedArrayBuffer & { grow(length: number): void };
+    const buffer = new GrowableSharedArrayBuffer(4, { maxByteLength: 8 });
+    const view = new Uint8Array(buffer);
+    view.set([1, 2, 3, 4]);
+    // Grown just after it is measured, as another thread could grow it.
+    const original = binaryView.readBinaryByteLength;
+    const measure = spyOn(binaryView, 'readBinaryByteLength');
+    measure.mockImplementation((value: object) => {
+      const byteLength = original(value);
+      if (value === view && buffer.byteLength === 4) {
+        buffer.grow(8);
+        new Uint8Array(buffer).fill(9, 4);
+      }
+      return byteLength;
+    });
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/view',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 4,
+    });
+    lastXHR.status = 200;
+    lastXHR.response = view;
+    lastXHR.simulateLoad();
+    let response;
+    try {
+      response = await promise;
+    } finally {
+      measure.mockRestore();
     }
 
     expect(buffer.byteLength).toBe(8);

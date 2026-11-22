@@ -45,6 +45,8 @@ import { defineEntry } from '../../internal/define-entry';
 import { copyArrayValue } from '../../internal/array-copy';
 import {
   arrayBufferKindOf,
+  assertTypedArrayInBounds,
+  plainBytesView,
   readBinaryByteLength,
   typedArrayNameOf,
 } from '../../internal/binary-view';
@@ -1692,20 +1694,27 @@ function serializeResponseBody(
     // Past the limit, it is refused as too large whatever its bytes: measured by its slot
     // and not copied, so a large fixture under a small limit is not held twice through
     // the delay.
-    if ((readBinaryByteLength(body) ?? 0) > maxResponseBytes) {
+    const byteLength = readBinaryByteLength(body) ?? 0;
+    if (byteLength > maxResponseBytes) {
       return OVERSIZED_BODY;
     }
 
     // Avoid JSON.stringify indexing the buffer into {"0":…,"1":…}. Delivered as this
     // realm's `Uint8Array` holding a copy of the route's bytes, so a caller that changes
     // the body it was handed does not change the route's fixture for the requests after
-    // it. Copied through the internal slots, calling none of the body's own methods.
+    // it. Copied through the internal slots, calling none of the body's own methods, and
+    // no more than the bytes measured: a `Uint8Array` over a growable
+    // `SharedArrayBuffer` another thread grew since then spans more.
+    // A `Uint8Array` past the end of a shrunk resizable buffer fails, as copying it whole
+    // does, rather than being delivered as an empty body.
+    let bytes: Uint8Array;
     if (typedArrayNameOf(body) === 'Uint8Array') {
-      return new Uint8Array(body as Uint8Array);
+      assertTypedArrayInBounds(body as Uint8Array);
+      bytes = plainBytesView(body as Uint8Array);
+    } else {
+      bytes = new Uint8Array(body);
     }
-
-    // A view over the buffer, then a copy of what it views.
-    return new Uint8Array(new Uint8Array(body));
+    return bytes.slice(0, byteLength);
   } else if (typeof body === 'string') {
     return new TextEncoder().encode(body);
   } else if (Array.isArray(body) || isPlainRecord(body)) {

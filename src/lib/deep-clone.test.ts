@@ -878,6 +878,19 @@ describe('deepClone', () => {
       expect(() => deepClone(detached)).toThrow(TypeError);
     });
 
+    test('a typed array over a detached buffer, or past the end of a shrunk resizable one, throws rather than cloning empty', () => {
+      const detached = new ArrayBuffer(4);
+      const overDetached = new Uint8Array(detached);
+      structuredClone(detached, { transfer: [detached] });
+      const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+      const pastTheEnd = new Int16Array(resizable, 4, 2);
+      resizable.resize(2);
+
+      expect(() => deepClone(overDetached)).toThrow(TypeError);
+      expect(() => deepClone(pastTheEnd)).toThrow(TypeError);
+      expect(() => deepClone({ nested: [pastTheEnd] })).toThrow(TypeError);
+    });
+
     test('a strict Proxy, a null-prototype dictionary and a class instance clone as plain records', () => {
       const strict = new Proxy(
         { a: 1 },

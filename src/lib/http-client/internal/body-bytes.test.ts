@@ -31,6 +31,28 @@ describe('BodyBytes', () => {
     expect(body.bytes().buffer).toBe(bytes.buffer);
   });
 
+  test('a chunk over a growable SharedArrayBuffer that grew after it was measured keeps only the bytes measured', () => {
+    // The TypeScript lib in use does not declare growable shared buffers.
+    const GrowableSharedArrayBuffer = SharedArrayBuffer as unknown as new (
+      length: number,
+      options: { maxByteLength: number },
+    ) => SharedArrayBuffer & { grow(length: number): void };
+    for (const maxBytes of [4, 64 * 1024 * 1024]) {
+      const buffer = new GrowableSharedArrayBuffer(4, { maxByteLength: 8 });
+      new Uint8Array(buffer).set([1, 2, 3, 4]);
+      const chunk = new Uint8Array(buffer);
+      const measured = chunk.byteLength;
+      // Grown after the caller measured it, as another thread could grow it.
+      buffer.grow(8);
+      new Uint8Array(buffer).fill(9, 4);
+      const body = new BodyBytes(maxBytes);
+      body.append(chunk, measured);
+
+      expect(chunk.byteLength).toBe(8);
+      expect([...body.bytes()]).toEqual([1, 2, 3, 4]);
+    }
+  });
+
   test('clear() lets go of every byte kept', () => {
     const body = new BodyBytes(100_000);
     body.append(counting(10), 10);
