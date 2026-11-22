@@ -871,6 +871,33 @@ describe('deepClone', () => {
       expect(cloned.byteLength).toBe(4);
     });
 
+    test('a JSON.rawJSON value is returned as it is, from any realm, so it still serializes as its text', () => {
+      // The TypeScript lib in use does not declare `JSON.rawJSON`.
+      const { rawJSON } = JSON as unknown as {
+        rawJSON: (text: string) => object;
+      };
+      const raw = rawJSON('9007199254740993');
+      const foreign = vm.runInNewContext(
+        'JSON.rawJSON("9007199254740993")',
+      ) as object;
+      const source = { id: raw, list: [raw, foreign], user: { name: 'a' } };
+      const cloned = deepClone(source);
+
+      expect(deepClone(raw)).toBe(raw);
+      expect(cloned.id).toBe(raw);
+      expect(cloned.list[1]).toBe(foreign);
+      expect(cloned.user).not.toBe(source.user);
+      expect(JSON.stringify(cloned)).toBe(
+        '{"id":9007199254740993,"list":[9007199254740993,9007199254740993],"user":{"name":"a"}}',
+      );
+      // A look-alike with no slot is a plain object, cloned as one.
+      const lookalike = Object.freeze(
+        Object.assign(Object.create(null) as object, { rawJSON: '1' }),
+      );
+      expect(deepClone(lookalike)).not.toBe(lookalike);
+      expect(deepClone(new Proxy(raw, {}))).not.toBe(raw);
+    });
+
     test('a detached buffer throws rather than cloning to {}', () => {
       const detached = new ArrayBuffer(4);
       structuredClone(detached, { transfer: [detached] });

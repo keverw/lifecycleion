@@ -5,7 +5,7 @@
  * common data types including objects, arrays, dates, regexes, errors, Maps, Sets, boxed
  * primitives, buffers and typed arrays.
  *
- * Note: Functions are returned by reference (not cloned). Circular references are
+ * Note: Functions, and `JSON.rawJSON` values, are returned by reference (not cloned). Circular references are
  * detected, and each reaches the one clone of what it pointed at.
  */
 
@@ -229,6 +229,12 @@ function cloneValue<T>(obj: T, state: CloneState): T {
   // of the checks below could tell it as anything else, so it skips them all. An error
   // moved onto either prototype is still one to `Error.isError`, and goes on to them.
   const prototype = Reflect.getPrototypeOf(obj);
+  // A `JSON.rawJSON` value - frozen, with no prototype - is returned as it is, as a
+  // primitive is: copied, it would lose the slot that makes `JSON.stringify` write its
+  // text, and be written as a `{ rawJSON }` object.
+  if (prototype === null && isRawJSONValue(obj)) {
+    return obj;
+  }
   if (
     (prototype === Object.prototype || prototype === null) &&
     !hasErrorSlot(obj)
@@ -253,6 +259,17 @@ function cloneValue<T>(obj: T, state: CloneState): T {
   }
 
   return clonePlainObject(obj, prototype, state) as T;
+}
+
+/**
+ * Whether `value` is a `JSON.rawJSON` value, told by its internal slot - so from any realm,
+ * and a `Proxy` over one is not - where the runtime has them.
+ */
+function isRawJSONValue(value: object): boolean {
+  const { isRawJSON } = JSON as unknown as {
+    isRawJSON?: (candidate: unknown) => boolean;
+  };
+  return typeof isRawJSON === 'function' && isRawJSON(value);
 }
 
 /**
