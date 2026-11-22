@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from 'bun:test';
+import * as exactJSONParseModule from './exact-json-parse';
 import {
   deferredBodyCopy,
   deferredJSONRawBody,
@@ -8,7 +9,7 @@ import type { HeldAttemptRequest } from './observed-bodies';
 import type { AttemptRequest } from '../types';
 
 test('a token is built once, the first time it is asked for, and answers that value after', () => {
-  const parse = spyOn(JSON, 'parse');
+  const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
   try {
     const token = deferredJSONRawBody('{"a":1}');
 

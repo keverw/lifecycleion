@@ -1,4 +1,4 @@
-import { cloneBodyValue } from './request-body-copy';
+import { cloneBodyValue, exactJSONData } from './request-body-copy';
 import { once } from './once';
 import type { AttemptRequest } from '../types';
 
@@ -48,9 +48,12 @@ function deferred(build: () => unknown): PendingBody {
   return token as PendingBody;
 }
 
-/** A token for the value `text` parses to; see `pendingByToken`. */
+/**
+ * A token for the value `text` parses to, with each number its nearest double does not
+ * write back kept exact (see `exactJSONData`), so it is the data sent; see `pendingByToken`.
+ */
 export function deferredJSONRawBody(text: string): PendingBody {
-  return deferred(() => JSON.parse(text) as unknown);
+  return deferred(() => exactJSONData(text));
 }
 
 /**

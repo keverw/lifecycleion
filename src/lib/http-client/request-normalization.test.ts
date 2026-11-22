@@ -8,6 +8,7 @@ import {
   spyOn,
   test,
 } from 'bun:test';
+import * as exactJSONParseModule from './internal/exact-json-parse';
 import vm from 'node:vm';
 import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1817,7 +1818,7 @@ test('with no observer registered no body is parsed back or copied, even where t
     client.post('/x').formData(form),
     client.post('/x').formData(form),
   ];
-  const parse = spyOn(JSON, 'parse');
+  const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
   const entries = spyOn(FormData.prototype, 'entries');
 
   try {
@@ -1854,7 +1855,7 @@ test('a request ended before dispatch builds no observer bodies when no observer
   // body as it is handed over.
   const jsonBuilder = client.post('/x').json({ a: 1 });
   const multipartBuilder = client.post('/x').formData(form);
-  const parse = spyOn(JSON, 'parse');
+  const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
   const stringify = spyOn(JSON, 'stringify');
   const entries = spyOn(FormData.prototype, 'entries');
 

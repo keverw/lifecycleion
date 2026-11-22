@@ -61,6 +61,7 @@ import { adoptPromise } from '../../internal/adopt-promise';
 import {
   readBinaryByteLength,
   isUint8ArrayValue,
+  fixedUnsharedByteLength,
 } from '../../internal/binary-view';
 import { asciiLowercase, asciiUppercase } from '../../internal/ascii-text';
 import {
@@ -528,7 +529,7 @@ async function readResponseBody(
   }
 
   if (maxResponseBytes === Number.POSITIVE_INFINITY) {
-    return await readWholeBody(response, body, signal);
+    return await readWholeBody(response, body, maxResponseBytes, signal);
   }
 
   // Refused before reading when the body says up front it is over the limit - only where
@@ -580,8 +581,7 @@ async function readResponseBody(
       );
     }
 
-    const bytes = await readWholeBody(response, body, signal);
-    return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
+    return await readWholeBody(response, body, maxResponseBytes, signal);
   }
 
   // Read a chunk at a time even when `Content-Length` says the body is within the
@@ -609,7 +609,8 @@ async function readResponseBody(
 }
 
 /**
- * The body through `arrayBuffer()`, with `body` (as already read) let go of on an abort.
+ * The body through `arrayBuffer()`, or {@link RESPONSE_TOO_LARGE} where it holds more than
+ * `maxResponseBytes`, with `body` (as already read) let go of on an abort.
  * That reaches a polyfill's Node `Readable`, which `arrayBuffer()` does not lock. A web
  * stream it has locked refuses the cancel: native `fetch` ends that read through its own
  * signal, and a polyfill that does not heed it reads on.
@@ -617,8 +618,9 @@ async function readResponseBody(
 async function readWholeBody(
   response: Response,
   body: unknown,
+  maxResponseBytes: number,
   signal: AbortSignal | undefined,
-): Promise<Uint8Array> {
+): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
   const stopWatching = letGoOnAbort(signal, () => {
     cancelBodyQuietly(body);
   });
@@ -631,7 +633,21 @@ async function readWholeBody(
       throw makeAbortError();
     }
 
-    return new Uint8Array(buffer);
+    // A polyfill may hand over a buffer that can change size, which a view would track,
+    // or shared memory another thread writes: measured once, refused before anything is
+    // copied where it is over the limit, and otherwise copied to the bytes measured, as
+    // XHRAdapter copies one, so the bytes checked against the limit are the bytes returned.
+    const bytes = new Uint8Array(buffer);
+    const measured = bytes.length;
+    if (measured > maxResponseBytes) {
+      return RESPONSE_TOO_LARGE;
+    }
+
+    // Told by the view's buffer: a view handed over in place of a buffer is copied into one
+    // of its own by the constructor already.
+    return fixedUnsharedByteLength(bytes.buffer) === null
+      ? bytes.slice(0, measured)
+      : bytes;
   } finally {
     stopWatching();
   }

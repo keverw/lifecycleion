@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from 'bun:test';
+import * as exactJSONParseModule from './internal/exact-json-parse';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
 import type { AdapterResponse } from './types';
@@ -355,27 +356,24 @@ test('a JSON rawBody is parsed back only for an attempt an observer runs for, on
     hosts: ['other.test'],
   });
   const text = JSON.stringify({ value: 1 });
-  const parsedTexts: unknown[] = [];
-  const parse = JSON.parse;
-  JSON.parse = ((source: string, reviver?: Parameters<typeof parse>[1]) => {
-    parsedTexts.push(source);
-    return parse(source, reviver) as unknown;
-  }) as typeof JSON.parse;
+  const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
   let response;
+  let parses: number;
   try {
     response = await sub
       .put('https://api.example.com/x')
       .json({ value: 1 })
       .send();
+    parses = parse.mock.calls.filter(([source]) => source === text).length;
   } finally {
-    JSON.parse = parse;
+    parse.mockRestore();
   }
 
   expect(response.status).toBe(200);
   expect(attempts).toBe(3);
   // Once, for the final attempt: the body is sent as the text `.json()` serialized it
   // to, and the two retried attempts had no observer run for them.
-  expect(parsedTexts.filter((source) => source === text)).toHaveLength(1);
+  expect(parses).toBe(1);
   expect(rawBodies).toEqual([{ value: 1 }, { value: 1 }]);
   expect(rawBodies[0]).toBe(rawBodies[1]);
 });
@@ -433,6 +431,26 @@ test('every observer, in every phase, is handed a JSON rawBody as the data sent'
     { phase: 'response redirect', rawBody: { a: 1 } },
     { phase: 'response final', rawBody: { a: 1 } },
   ]);
+});
+
+test('a JSON rawBody keeps a nested number JSON.rawJSON wrote exact', async () => {
+  const { rawJSON } = JSON as unknown as {
+    rawJSON: (source: string) => unknown;
+  };
+  const adapter = new MockAdapter();
+  adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter });
+  const rawBodies: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    rawBodies.push(request.rawBody);
+  });
+
+  await client
+    .post('https://api.example.com/x')
+    .json({ user: { id: { toJSON: () => rawJSON('9007199254740993') } } })
+    .send();
+
+  expect(JSON.stringify(rawBodies[0])).toBe('{"user":{"id":9007199254740993}}');
 });
 
 test('a form body is copied for the observers only for an attempt an observer runs for, once for all of them', async () => {
@@ -680,7 +698,10 @@ test("a JSON rawBody that cannot be parsed back leaves the observers the body's 
     });
   }
   // Nothing else parses the body: no interceptor reads it.
-  const parse = spyOn(JSON, 'parse').mockImplementation(() => {
+  const parse = spyOn(
+    exactJSONParseModule,
+    'parseExactJSON',
+  ).mockImplementation(() => {
     throw new RangeError('engine limit');
   });
   const { reports, release } = captureErrorReports();

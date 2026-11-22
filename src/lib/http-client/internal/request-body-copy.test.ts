@@ -1,7 +1,9 @@
 import { describe, expect, spyOn, test } from 'bun:test';
+import * as exactJSONParseModule from './exact-json-parse';
 import {
   copiedJSONText,
   copyRequestBody,
+  exactJSONData,
   holdsSameBytes,
   isUnreadJSONBodyCopy,
   readJSONBodyData,
@@ -103,7 +105,7 @@ test('a form is told by its own methods, not by inheriting from FormData.prototy
 });
 
 test('a JSON body copy is a frozen empty shape sent as its text, and its data is parsed once, frozen, when first read', () => {
-  const parse = spyOn(JSON, 'parse');
+  const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
   try {
     const source = { a: 1, nested: { b: [2, 3] }, when: new Date(0) };
     const copy = copyRequestBody(source) as Record<string, unknown>;
@@ -162,7 +164,10 @@ test('data read from a copy holds a __proto__ key as a member, in the order pars
 
 test('a read whose parse throws leaves the copy unread with its text, so the next read parses it', () => {
   const copy = copyRequestBody({ a: 1 });
-  const parse = spyOn(JSON, 'parse').mockImplementationOnce(() => {
+  const parse = spyOn(
+    exactJSONParseModule,
+    'parseExactJSON',
+  ).mockImplementationOnce(() => {
     throw new RangeError('Maximum call stack size exceeded');
   });
   try {
@@ -271,4 +276,27 @@ describe('holdsSameBytes', () => {
       globalThis.Buffer = buffer;
     }
   });
+});
+
+test('exactJSONData reads text nested deeper than JSON.stringify can write, without serializing it', () => {
+  const depth = 200_000;
+  const { isRawJSON } = JSON as unknown as {
+    isRawJSON: (value: unknown) => boolean;
+  };
+  const stringify = spyOn(JSON, 'stringify');
+
+  try {
+    let exact = exactJSONData(`${'['.repeat(depth)}1.0${']'.repeat(depth)}`);
+    let plain = exactJSONData(`${'['.repeat(depth)}1${']'.repeat(depth)}`);
+    for (let index = 0; index < depth; index++) {
+      exact = (exact as unknown[])[0];
+      plain = (plain as unknown[])[0];
+    }
+
+    expect(isRawJSON(exact)).toBe(true);
+    expect(plain).toBe(1);
+    expect(stringify).not.toHaveBeenCalled();
+  } finally {
+    stringify.mockRestore();
+  }
 });

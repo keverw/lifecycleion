@@ -1546,6 +1546,94 @@ describe('FetchAdapter', () => {
     expect(isArrayBufferCalled).toBe(false);
   });
 
+  test.each([4, undefined])(
+    'a resizable buffer arrayBuffer() hands over is returned as the bytes it held then (maxResponseBytes %p)',
+    async (maxResponseBytes) => {
+      const buffer = new (
+        ArrayBuffer as unknown as new (
+          length: number,
+          options: { maxByteLength: number },
+        ) => ArrayBuffer & { resize: (length: number) => void }
+      )(4, {
+        maxByteLength: 16,
+      });
+      new Uint8Array(buffer).set([1, 2, 3, 4]);
+
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          headers: new Headers(),
+          arrayBuffer: () => Promise.resolve(buffer),
+        } as unknown as Response);
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/resizable',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes,
+      });
+      buffer.resize(16);
+
+      expect(response.body).toEqual(new Uint8Array([1, 2, 3, 4]));
+      expect(response.body?.length).toBe(4);
+    },
+  );
+
+  test('a SharedArrayBuffer arrayBuffer() hands over is returned as a copy of the bytes it held then', async () => {
+    const buffer = new SharedArrayBuffer(4);
+    const shared = new Uint8Array(buffer);
+    shared.set([1, 2, 3, 4]);
+
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        headers: new Headers(),
+        arrayBuffer: () => Promise.resolve(buffer),
+      } as unknown as Response);
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/shared',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 4,
+    });
+    shared[0] = 9;
+
+    expect(response.body).toEqual(new Uint8Array([1, 2, 3, 4]));
+  });
+
+  test('a resizable buffer over the limit that arrayBuffer() hands over is refused without being copied', async () => {
+    const buffer = new (
+      ArrayBuffer as unknown as new (
+        length: number,
+        options: { maxByteLength: number },
+      ) => ArrayBuffer
+    )(16, { maxByteLength: 32 });
+    const slice = spyOn(Uint8Array.prototype, 'slice');
+
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        headers: new Headers(),
+        arrayBuffer: () => Promise.resolve(buffer),
+      } as unknown as Response);
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/too-large',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 4,
+      });
+
+      expect(response.streamErrorCode).toBe('response_too_large');
+      expect(response.body).toBeNull();
+      expect(slice).not.toHaveBeenCalled();
+    } finally {
+      slice.mockRestore();
+    }
+  });
+
   test('fires progress callbacks', async () => {
     const uploadEvents: Array<{
       loaded: number;

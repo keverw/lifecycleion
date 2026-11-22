@@ -170,9 +170,9 @@ export function isUnreadJSONBodyCopy(body: unknown): body is object {
  * for a copy `copyRequestBody` returned empty, the data its text parses to, deep-frozen -
  * parsed once, the first time it is asked for, and kept with the copy for every later
  * read - and recorded as standing for the same text, so a body handed back as it is sent
- * as that text (see `copiedJSONText`). A number `JSON.rawJSON` wrote past a double's
- * precision is read as that `JSON.rawJSON` value (see `exactJSONData`). Any other body as
- * it is.
+ * as that text (see `copiedJSONText`). A number `JSON.rawJSON` wrote that a double does
+ * not write back is read as that `JSON.rawJSON` value (see `exactJSONData`). Any other body
+ * as it is.
  */
 export function readJSONBodyData(body: unknown): unknown {
   if (!isUnreadJSONBodyCopy(body)) {
@@ -190,30 +190,29 @@ export function readJSONBodyData(body: unknown): unknown {
 }
 
 /**
- * The data `text` - JSON a copy serialized to - parses to: its plain parse, unless that no
- * longer serializes to `text`, as a number `JSON.rawJSON` wrote past a double's precision
- * (`9007199254740993`) parses to the nearest double. Then it is read again keeping each
- * such number as the `JSON.rawJSON` value it was (see `parseExactJSON`), so a body an
- * interceptor builds from the data (`{ ...request.body, token }`), or a top-level
- * number's copy, still sends it as written, at any depth. Only a number can read back as
- * other data: `JSON.stringify` writes every other value as its plain parse writes it.
+ * The data JSON `text` - a body the client serialized - parses to, read by
+ * `parseExactJSON`: each number its nearest double does not write back, as a number
+ * `JSON.rawJSON` wrote past a double's precision (`9007199254740993`), is kept as that
+ * `JSON.rawJSON` value, so a body an interceptor builds from the data
+ * (`{ ...request.body, token }`), a top-level number's copy, or an observer's `rawBody`
+ * still writes it as sent. That read does not recurse, so data at any depth is read whole.
+ * Where `JSON.rawJSON` is missing, no body can hold such a number, and `JSON.parse` reads it.
  */
-function exactJSONData(text: string): unknown {
-  const parsed: unknown = JSON.parse(text);
+export function exactJSONData(text: string): unknown {
   const { rawJSON } = JSON as unknown as {
     rawJSON?: (source: string) => unknown;
   };
-  if (rawJSON === undefined || JSON.stringify(parsed) === text) {
-    return parsed;
-  }
 
-  return parseExactJSON(text, rawJSON);
+  return rawJSON === undefined
+    ? (JSON.parse(text) as unknown)
+    : parseExactJSON(text, rawJSON);
 }
 
 /**
- * `value` - data `JSON.parse` made, so plain objects, arrays and primitives alone - with
- * every object in it frozen, walked with a stack of its own rather than by recursion, so
- * data nested as deep as `JSON.stringify` can write is frozen whole.
+ * `value` - data `exactJSONData` read, so plain objects, arrays, primitives and frozen
+ * `JSON.rawJSON` values alone - with every object in it frozen, walked with a stack of its
+ * own rather than by recursion, so data nested as deep as `JSON.stringify` can write is
+ * frozen whole.
  */
 function deepFreeze<T extends object>(value: T): T {
   const pending: object[] = [value];

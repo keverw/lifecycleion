@@ -1,4 +1,5 @@
 import { describe, test, expect, spyOn } from 'bun:test';
+import * as exactJSONParseModule from './internal/exact-json-parse';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
 import { HTTPClient } from './http-client';
 import { deepClone } from '../deep-clone';
@@ -916,7 +917,7 @@ describe('JSON body copies read by interceptors', () => {
         },
       },
     });
-    const parse = spyOn(JSON, 'parse');
+    const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
     try {
       const response = await client
         .put('https://api.example.com/x')
@@ -959,7 +960,7 @@ describe('JSON body copies read by interceptors', () => {
         },
         { ...rest, bodyContainsKeys: ['a'] },
       );
-      const parse = spyOn(JSON, 'parse');
+      const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
       try {
         const response = await client
           .put('https://api.example.com/x')
@@ -1040,11 +1041,11 @@ describe('JSON body copies read by interceptors', () => {
     return { client, sent };
   }
 
-  /** Calls of `JSON.parse` and `JSON.stringify` while `run` runs. */
+  /** Whole-body parses (`parseExactJSON`) and calls of `JSON.stringify` while `run` runs. */
   async function countJSON(
     run: () => Promise<unknown>,
   ): Promise<{ parses: number; stringifies: number }> {
-    const parse = spyOn(JSON, 'parse');
+    const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
     const stringify = spyOn(JSON, 'stringify');
     try {
       await run();
@@ -1280,7 +1281,7 @@ describe('JSON body copies read by interceptors', () => {
         },
         { phases: ['initial', 'retry'], bodyContainsKeys: [key] },
       );
-      const parse = spyOn(JSON, 'parse');
+      const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
       let parses: number;
       try {
         await client
@@ -1347,7 +1348,7 @@ describe('JSON body copies read by interceptors', () => {
     const text = '{"a":1,"marker":"probe"}';
     const { client } = recordingClient();
     const sender = register(client);
-    const parse = spyOn(JSON, 'parse');
+    const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
     let parses: number;
     try {
       const response = await sender
@@ -1367,7 +1368,10 @@ describe('JSON body copies read by interceptors', () => {
     const { client, sent } = recordingClient();
     const reads: unknown[] = [];
     client.addRequestInterceptor((request) => {
-      const parse = spyOn(JSON, 'parse').mockImplementationOnce(() => {
+      const parse = spyOn(
+        exactJSONParseModule,
+        'parseExactJSON',
+      ).mockImplementationOnce(() => {
         throw new RangeError('Maximum call stack size exceeded');
       });
       try {
@@ -1498,7 +1502,7 @@ describe('JSON body copies read by interceptors', () => {
       },
       { phases: ['retry'], bodyContainsKeys: ['a'] },
     );
-    const parse = spyOn(JSON, 'parse');
+    const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
     let parses: number;
     try {
       const response = await client
@@ -1550,7 +1554,7 @@ describe('JSON body copies read by interceptors', () => {
       },
       { phases: ['redirect'], bodyContainsKeys: ['a'] },
     );
-    const parse = spyOn(JSON, 'parse');
+    const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
     let parses: number;
     try {
       const response = await client

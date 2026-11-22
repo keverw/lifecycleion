@@ -50,18 +50,30 @@ export function parseExactJSON(
     position = WHITESPACE.lastIndex;
   };
 
+  /**
+   * The string opening where the reader stands, ended by the first quote after it with an
+   * even run of backslashes before it, found with `indexOf` rather than a character at a
+   * time, and decoded - and checked - by `JSON.parse`.
+   */
   const readString = (): string => {
     const start = position;
-    position++;
-    while (position < text.length) {
-      const char = text[position];
-      if (char === '"') {
-        position++;
-        return JSON.parse(text.slice(start, position)) as string;
+    let close = position;
+    for (;;) {
+      close = text.indexOf('"', close + 1);
+      if (close === -1) {
+        return fail();
       }
-      position += char === '\\' ? 2 : 1;
+
+      let backslashes = 0;
+      while (text.charCodeAt(close - 1 - backslashes) === 92) {
+        backslashes++;
+      }
+      if (backslashes % 2 === 0) {
+        break;
+      }
     }
-    return fail();
+    position = close + 1;
+    return JSON.parse(text.slice(start, position)) as string;
   };
 
   /** Puts a value read into the container it belongs to, or makes it the result. */
