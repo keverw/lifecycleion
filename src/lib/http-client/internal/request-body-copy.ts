@@ -84,7 +84,7 @@ export function copyRequestBody(body: unknown): unknown {
       return copy;
     }
 
-    const value: unknown = JSON.parse(serialized);
+    const value = exactJSONData(serialized);
     return recordedCopy({ toJSON: () => value }, serialized);
   }
 
@@ -180,7 +180,7 @@ export function readJSONBodyData(body: unknown): unknown {
 
   const record = recordByCopy.get(body) as CopyRecord;
   if (record.data === undefined) {
-    const data = deepFreeze(exactJSONData(record.text as string));
+    const data = deepFreeze(exactJSONData(record.text as string) as object);
     recordByCopy.set(data, record);
     record.data = data;
   }
@@ -193,11 +193,14 @@ export function readJSONBodyData(body: unknown): unknown {
  * longer serializes to `text`, as a number `JSON.rawJSON` wrote past a double's precision
  * (`9007199254740993`) parses to the nearest double. Then each such number is kept as the
  * `JSON.rawJSON` value it was, so a body an interceptor builds from the data
- * (`{ ...request.body, token }`) still sends it as written. Only a number can read back as
- * other data: `JSON.stringify` writes every other value as its plain parse writes it.
+ * (`{ ...request.body, token }`), or a top-level number's copy, still sends it as written.
+ * Only a number can read back as other data: `JSON.stringify` writes every other value as
+ * its plain parse writes it. A reviver walks the data by recursion, so data nested too
+ * deep for it is read as its plain parse: a body handed back unchanged is still sent as
+ * `text`, and only one built from such data sends the nearest double.
  */
-function exactJSONData(text: string): object {
-  const parsed = JSON.parse(text) as object;
+function exactJSONData(text: string): unknown {
+  const parsed: unknown = JSON.parse(text);
   const { rawJSON } = JSON as unknown as {
     rawJSON?: (source: string) => unknown;
   };
@@ -205,15 +208,22 @@ function exactJSONData(text: string): object {
     return parsed;
   }
 
-  return JSON.parse(
-    text,
-    (_key, value: unknown, context?: { source?: string }) =>
-      typeof value === 'number' &&
-      context?.source !== undefined &&
-      context.source !== String(value)
-        ? rawJSON(context.source)
-        : value,
-  ) as object;
+  try {
+    return JSON.parse(
+      text,
+      (_key, value: unknown, context?: { source?: string }) =>
+        typeof value === 'number' &&
+        context?.source !== undefined &&
+        context.source !== String(value)
+          ? rawJSON(context.source)
+          : value,
+    );
+  } catch (error) {
+    if (error instanceof RangeError) {
+      return parsed;
+    }
+    throw error;
+  }
 }
 
 /**

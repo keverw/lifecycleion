@@ -1,6 +1,7 @@
 import { describe, test, expect, spyOn } from 'bun:test';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
 import { HTTPClient } from './http-client';
+import { deepClone } from '../deep-clone';
 import type { HTTPSubClient } from './http-client';
 import type {
   AdapterResponse,
@@ -1176,6 +1177,51 @@ describe('JSON body copies read by interceptors', () => {
     expect(sent).toEqual([
       '{"id":9007199254740993,"nested":{"list":[9007199254740993]},"token":"t"}',
     ]);
+  });
+
+  test('a top-level toJSON that answers a JSON.rawJSON number past double precision is sent exactly, copied by an interceptor too', async () => {
+    for (const isCopied of [false, true]) {
+      const { client, sent } = recordingClient();
+      client.addRequestInterceptor((request) => {
+        if (isCopied) {
+          request.body = deepClone(request.body);
+        }
+        return request;
+      });
+
+      await client
+        .put('https://api.example.com/x')
+        .json({ toJSON: () => rawJSON('9007199254740993') })
+        .send();
+
+      expect([isCopied, sent]).toEqual([isCopied, ['9007199254740993']]);
+    }
+  });
+
+  test('a JSON body nested too deep for a reviver, holding a number JSON.rawJSON wrote, is read and sent as its text', async () => {
+    const { client, sent } = recordingClient();
+    const reads: unknown[] = [];
+    client.addRequestInterceptor((request) => {
+      reads.push(typeof (request.body as Record<string, unknown>).a);
+      return request;
+    });
+    let body: Record<string, unknown> = {
+      id: { toJSON: () => rawJSON('9007199254740993') },
+    };
+    for (let depth = 0; depth < 6000; depth++) {
+      body = { a: body };
+    }
+    const text = JSON.stringify(body);
+
+    const response = await client
+      .put('https://api.example.com/x')
+      .json(body)
+      .send();
+
+    expect(response.isFailed).toBe(false);
+    expect(reads).toEqual(['object']);
+    expect(sent).toEqual([text]);
+    expect(text).toContain('9007199254740993');
   });
 
   test('a JSON body an interceptor replaces is sent as its new data, the rounded value it writes included', async () => {
