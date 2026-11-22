@@ -16136,10 +16136,10 @@ test("an internal throw after a later hop's bodied attempt reports that attempt'
     _composeSignals: (...args: unknown[]) => AbortSignal;
   };
   const composeSignals = internals._composeSignals.bind(client);
-  let composed = 0;
+  let didThrow = false;
   internals._composeSignals = (...args) => {
-    composed++;
-    if (composed === 3) {
+    if (sent.length === 2) {
+      didThrow = true;
       throw new Error('internal');
     }
     return composeSignals(...args);
@@ -16147,7 +16147,7 @@ test("an internal throw after a later hop's bodied attempt reports that attempt'
 
   const response = await client.put('/start').json({ a: 1 }).send();
 
-  expect(composed).toBe(3);
+  expect(didThrow).toBe(true);
   expect(sent).toHaveLength(2);
   expect(sent[1]?.requestURL).toBe('http://x.test/next');
   expect(response.isFailed).toBe(true);
