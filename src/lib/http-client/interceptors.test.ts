@@ -1117,6 +1117,59 @@ describe('JSON body copies read by interceptors', () => {
     expect(sent).toEqual(['{"a":1}']);
   });
 
+  // The TypeScript lib in use does not declare `JSON.rawJSON` or `JSON.isRawJSON`.
+  const { rawJSON, isRawJSON } = JSON as unknown as {
+    rawJSON: (text: string) => unknown;
+    isRawJSON: (value: unknown) => boolean;
+  };
+
+  test('a JSON body an interceptor reads is handed a number past double precision as the JSON.rawJSON value it was written as, and sent exactly', async () => {
+    const { client, sent } = recordingClient();
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      headers: { ...request.headers, authorization: 'Bearer t' },
+    }));
+    let handed: unknown;
+    client.addRequestInterceptor((request) => {
+      handed = (request.body as Record<string, unknown>).id;
+      return request;
+    });
+    const big = { toJSON: () => rawJSON('9007199254740993') };
+
+    await client
+      .put('https://api.example.com/x')
+      .json({ id: big, nested: [big], small: 1 })
+      .send();
+
+    expect(isRawJSON(handed)).toBe(true);
+    expect(sent).toEqual([
+      '{"id":9007199254740993,"nested":[9007199254740993],"small":1}',
+    ]);
+  });
+
+  test('a JSON body an interceptor changes is sent as its new data, the rounded value it writes included', async () => {
+    for (const [label, value, expected] of [
+      ['a number', 2, '{"id":2}'],
+      ['the rounded double', 2 ** 53, '{"id":9007199254740992}'],
+      [
+        'the rounded value as raw JSON',
+        rawJSON('9007199254740992'),
+        '{"id":9007199254740992}',
+      ],
+    ] as const) {
+      const { client, sent } = recordingClient();
+      client.addRequestInterceptor((request) => {
+        (request.body as Record<string, unknown>).id = value;
+        return request;
+      });
+      const big = { toJSON: () => rawJSON('9007199254740993') };
+
+      await client.put('https://api.example.com/x').json({ id: big }).send();
+
+      expect([label, sent]).toEqual([label, [expected]]);
+    }
+  });
+
   test('an interceptor that assigns the body sends the value assigned, never parsing the one it replaced', async () => {
     const { client, sent } = recordingClient();
     client.addRequestInterceptor((request) => {

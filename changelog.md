@@ -754,3 +754,5 @@
 - HTTP client: `.headers()` copies every value before applying any, so a call that throws while copying one leaves the headers set before it unchanged.
 - deepClone: a `Map`, `Set`, `Date`, `RegExp` or boxed primitive from another realm behind a class named after a different built-in (`class Date extends Map` in a `vm` context) clones as the type it holds, not as `{}`.
 - HTTP client: a `params` record, or a top-level `params` array, that lists its keys in an order of its own (a `Proxy` putting `2` after `mode`) is sent in that order, as a nested one is, where `.params()` and `buildURL` copied it with its index keys first.
+- HTTP client: a custom adapter that stops the propagation of its signal's `abort` event and never settles no longer keeps a timeout or cancel from ending the attempt: the client waits on a signal of its own.
+- HTTP client: a JSON body a request interceptor reads holds a number `JSON.rawJSON` wrote past a double's precision as that `JSON.rawJSON` value, so an interceptor that only spreads the request to add a header no longer sends it rounded (`9007199254740992` for `9007199254740993`); one the interceptor writes is sent as written.

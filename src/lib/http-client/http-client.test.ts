@@ -4626,6 +4626,26 @@ describe('HTTPClient — interceptor cancel reason', () => {
 });
 
 describe('HTTPClient — timeout', () => {
+  test('an adapter that stops the abort event from propagating and never settles still ends the attempt as a timeout', async () => {
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock' as const,
+        send: (request): Promise<AdapterResponse> => {
+          request.signal?.addEventListener('abort', (event) => {
+            event.stopImmediatePropagation();
+          });
+          return new Promise(() => {});
+        },
+      },
+      baseURL: 'https://api.test',
+    });
+
+    const response = await client.get('/x').timeout(20).send();
+
+    expect(response.isTimeout).toBe(true);
+    expect(response.status).toBe(0);
+  });
+
   test('isTimeout: true when request exceeds per-request timeout', async () => {
     const client = makeClient();
     const builder = client.get('/api/slow').timeout(100);

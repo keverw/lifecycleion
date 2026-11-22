@@ -206,8 +206,9 @@ export function readRequestBodyContents(
 function fillRequestBody(
   body: object,
   record: Extract<CopyRecord, { isFilled: false }>,
-  parsed: object = JSON.parse(record.text) as object,
+  parsedData: object = JSON.parse(record.text) as object,
 ): void {
+  const parsed = exactJSONData(record.text, parsedData);
   if (Array.isArray(body)) {
     for (const member of parsed as unknown[]) {
       body.push(member);
@@ -221,6 +222,37 @@ function fillRequestBody(
       );
     }
   }
+}
+
+/**
+ * The data `text` - JSON a copy serialized to - parses to, as `parsed`, its plain parse,
+ * holds it, unless that data no longer serializes to `text`: then parsed again keeping
+ * each number its text writes past a double's precision (`9007199254740993`, which
+ * `JSON.rawJSON` wrote) as the `JSON.rawJSON` value it was, so the data serializes to the
+ * same text and is sent as it was handed over, not rounded. Only a number can read back
+ * as other data: `JSON.stringify` writes every other value as its plain parse writes it.
+ */
+function exactJSONData(text: string, parsed: object): object {
+  if (JSON.stringify(parsed) === text) {
+    return parsed;
+  }
+
+  const { rawJSON } = JSON as unknown as {
+    rawJSON?: (source: string) => unknown;
+  };
+  if (rawJSON === undefined) {
+    return parsed;
+  }
+
+  return JSON.parse(
+    text,
+    (_key, value: unknown, context?: { source?: string }) =>
+      typeof value === 'number' &&
+      context?.source !== undefined &&
+      context.source !== String(value)
+        ? rawJSON(context.source)
+        : value,
+  ) as object;
 }
 
 /**

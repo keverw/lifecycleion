@@ -2977,6 +2977,14 @@ export class BaseHTTPClient {
       // an uncaught exception rather than anything this client can catch. Always a
       // fresh signal (see `_composeSignals`), so nothing has listened on it yet.
       guardAbortListeners(attemptSignal, 'HTTPClient attempt abort listener');
+      // The same abort, for the client's own wait on the adapter (see `awaitAdapterSend`):
+      // a signal of its own, never handed out, so an adapter's listener on the one it is
+      // given that stops the event's propagation cannot keep the wait from hearing it.
+      const attemptAbortWatch = this._composeSignals(
+        cancelSignal,
+        timeoutController.signal,
+        signalReleasers,
+      );
 
       // The request an attempt that never reached the adapter reports (see
       // `endBeforeDispatch`). Built apart from ending it, so a failure whose report runs
@@ -3625,7 +3633,7 @@ export class BaseHTTPClient {
         // `awaitAdapterSend`.
         const { value: rawAdapterResponse } = await awaitAdapterSend(
           adapterPromise,
-          attemptSignal,
+          attemptAbortWatch,
           () =>
             cancelSignal.aborted
               ? readUnknownMember(cancelSignal, 'reason')
