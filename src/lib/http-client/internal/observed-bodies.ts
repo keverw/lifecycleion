@@ -5,9 +5,11 @@ import type { AttemptRequest } from '../types';
 /**
  * The parts of an attempt's body its observers are handed but that cost something to
  * build - a JSON body's `rawBody`, parsed back from the text sent; a copy of the bytes or
- * form sent - built the first time an observer is handed the attempt's request (see
- * `handedBodyValue`): an attempt no observer runs for - a retry with only `final`
- * observers registered, an observer whose filter does not match - never builds them.
+ * form sent - built for an attempt an observer runs for, a JSON `rawBody` only once an
+ * observer reads it (see `isDeferredJSONRawBody`), a copy when the first observer is handed
+ * the attempt's request (see `handedBodyValue`): an attempt no observer runs for - a retry
+ * with only `final` observers registered, an observer whose filter does not match - never
+ * builds them.
  *
  * The attempt's request holds a token in place of each value. The token is the client's:
  * a request holding one is never handed to caller code, only the copy `handedBodyValue`
@@ -37,6 +39,9 @@ export type HeldAttemptRequest = Omit<AttemptRequest, 'body' | 'rawBody'> & {
 /** The tokens whose build failure has been reported; see `claimBuildFailureReport`. */
 const claimedFailures = new WeakSet<object>();
 
+/** The tokens for a JSON `rawBody`; see `isDeferredJSONRawBody`. */
+const jsonRawBodyTokens = new WeakSet<object>();
+
 /**
  * A token for `build()`'s value, built once (see `once`): its value kept - and the build,
  * holding the source body, let go - or the error it threw, thrown again rather than built
@@ -53,7 +58,22 @@ function deferred(build: () => unknown): PendingBody {
  * write back kept exact (see `exactJSONData`), so it is the data sent; see `pendingByToken`.
  */
 export function deferredJSONRawBody(text: string): PendingBody {
-  return deferred(() => exactJSONData(text));
+  const token = deferred(() => exactJSONData(text));
+  jsonRawBodyTokens.add(token);
+  return token;
+}
+
+/**
+ * Whether `value` is a token {@link deferredJSONRawBody} made: a JSON `rawBody`, parsed
+ * back only once an observer reads it, so an observer that never does - one that records
+ * only the status - parses nothing. A copy of bytes or a form is taken when the first
+ * observer is handed the request instead, so it is the body sent, whatever later happens to
+ * the bytes the adapter was handed.
+ */
+export function isDeferredJSONRawBody(value: unknown): boolean {
+  return (
+    typeof value === 'object' && value !== null && jsonRawBodyTokens.has(value)
+  );
 }
 
 /**

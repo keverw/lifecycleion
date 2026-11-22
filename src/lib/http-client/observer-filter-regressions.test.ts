@@ -378,6 +378,111 @@ test('a JSON rawBody is parsed back only for an attempt an observer runs for, on
   expect(rawBodies[0]).toBe(rawBodies[1]);
 });
 
+test('a JSON rawBody is parsed only once an observer reads it, and is then a plain field', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter });
+  const text = '{"a":1}';
+  const parse = spyOn(exactJSONParseModule, 'parseExactJSON');
+  const statuses: number[] = [];
+  const seen: unknown[] = [];
+  let untouched: number;
+  let read: number;
+  try {
+    client.addResponseObserver((response) => {
+      statuses.push(response.status);
+    });
+    await client.post('https://api.example.com/x').json({ a: 1 }).send();
+    untouched = parse.mock.calls.filter(([source]) => source === text).length;
+
+    client.addResponseObserver((_response, request) => {
+      const first = request.rawBody;
+      const descriptor = Object.getOwnPropertyDescriptor(request, 'rawBody');
+      seen.push(first, request.rawBody === first, descriptor?.value === first);
+    });
+    client.addResponseObserver((_response, request) => {
+      seen.push(request.rawBody);
+    });
+    await client.post('https://api.example.com/x').json({ a: 1 }).send();
+    read =
+      parse.mock.calls.filter(([source]) => source === text).length - untouched;
+  } finally {
+    parse.mockRestore();
+  }
+
+  expect(statuses).toEqual([200, 200]);
+  expect(untouched).toBe(0);
+  expect(read).toBe(1);
+  expect(seen).toEqual([{ a: 1 }, true, true, { a: 1 }]);
+  expect(seen[3]).toBe(seen[0]);
+});
+
+test('a JSON rawBody assigned by an observer is the value the observers after it are handed', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter });
+  const seen: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    request.rawBody = { redacted: true };
+  });
+  client.addResponseObserver((_response, request) => {
+    seen.push(request.rawBody, { ...request });
+  });
+
+  await client.post('https://api.example.com/x').json({ a: 1 }).send();
+
+  expect(seen[0]).toEqual({ redacted: true });
+  expect(seen[1]).toMatchObject({
+    body: '{"a":1}',
+    rawBody: { redacted: true },
+  });
+});
+
+test('a JSON rawBody on a request an observer froze before reading it is read, and refuses an assignment', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter });
+  const seen: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    Object.freeze(request);
+  });
+  client.addResponseObserver((_response, request) => {
+    seen.push(request.rawBody, request.rawBody);
+    try {
+      request.rawBody = 'replaced';
+      seen.push('assigned');
+    } catch (error) {
+      seen.push(error instanceof TypeError);
+    }
+    seen.push(request.rawBody);
+  });
+
+  await client.post('https://api.example.com/x').json({ a: 1 }).send();
+
+  expect(seen).toEqual([{ a: 1 }, { a: 1 }, true, { a: 1 }]);
+  expect(seen[1]).toBe(seen[0]);
+});
+
+test('a JSON rawBody on a request an observer sealed before reading it takes an assignment', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter });
+  const seen: unknown[] = [];
+  client.addResponseObserver((_response, request) => {
+    Object.seal(request);
+  });
+  client.addResponseObserver((_response, request) => {
+    request.rawBody = { redacted: true };
+  });
+  client.addResponseObserver((_response, request) => {
+    seen.push(request.rawBody, Object.isSealed(request));
+  });
+
+  await client.post('https://api.example.com/x').json({ a: 1 }).send();
+
+  expect(seen).toEqual([{ redacted: true }, true]);
+});
+
 test('every observer, in every phase, is handed a JSON rawBody as the data sent', async () => {
   let calls = 0;
   const client = new HTTPClient({

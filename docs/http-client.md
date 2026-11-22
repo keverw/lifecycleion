@@ -925,7 +925,7 @@ interface AttemptRequest {
 
 **What a change reaches:**
 
-- `body` and `rawBody` are plain fields of the attempt's own, so changing or replacing them reaches neither the adapter, a `307`/`308` replay, nor a later attempt.
+- `body` and `rawBody` are plain fields of the attempt's own, so changing or replacing them reaches neither the adapter, a `307`/`308` replay, nor a later attempt. A JSON body's `rawBody` is the one exception until it is read: an accessor that parses it, so `console.log(request)` shows it as one; read it, spread the request or assign it, and it is a plain field (on a request an observer sealed or froze first, it stays an accessor that answers as the sealed or frozen field would).
 - `request.headers` is the attempt's own as well, its array values included, so redacting or adding to one in place reaches neither the adapter, a retry, the next redirect hop, nor the request another attempt was reported as.
 - Every observer of one response or error - a parent client's and then the sub-client's - is handed the same copy of the request, with the attempt's own `body` and `rawBody`, so an observer that redacts its body in place changes what the observers after it see.
 
@@ -933,7 +933,7 @@ interface AttemptRequest {
 
 - They are set up once for each attempt, from the request's body, as the attempt is dispatched, so an observer registered while the attempt is under way is handed them too.
 - A request that ends before any attempt is dispatched carries them only when a response or error observer is registered on the client or its parent as it ends, since building them reads the value an interceptor returned. An observer registered after that point, while its final observers have yet to run, is handed that request without `body` or `rawBody`.
-- A JSON body's `rawBody`, and the copy of a `Uint8Array` or `FormData` body, are built when an observer of the attempt first runs. An attempt no observer runs for - a retried attempt with only `final` observers registered, or one no observer's filter matches - never parses or copies them. Every observer of the attempt is handed the one value built.
+- A JSON body's `rawBody` is parsed the first time an observer of the attempt reads it, so an observer that only records the status parses nothing. The copy of a `Uint8Array` or `FormData` body is taken when an observer of the attempt first runs. An attempt no observer runs for - a retried attempt with only `final` observers registered, or one no observer's filter matches - never parses or copies them. Every observer of the attempt is handed the one value built.
 
 Use `request.timeout` to inspect what timeout budget was configured for that attempt. Use `response.isTimeout` / `error.isTimeout` to inspect what actually happened.
 

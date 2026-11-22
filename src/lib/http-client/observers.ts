@@ -12,6 +12,7 @@ import { copyHeaderRecord } from './internal/header-utils';
 import {
   claimBuildFailureReport,
   handedBodyValue,
+  isDeferredJSONRawBody,
 } from './internal/observed-bodies';
 import type { HeldAttemptRequest } from './internal/observed-bodies';
 import { once } from './internal/once';
@@ -257,10 +258,10 @@ export function runParentThenOwnErrorObservers(
  * too, so an observer's edit to it in place - redacting `requestURL` or a header - is seen
  * by the observers after it and by nothing the client goes on to read: the method the
  * next redirect hop is judged by, the request a cancelled retry wait is reported with.
- * The body and `rawBody` are the attempt's own (see `AttemptRequest`), built as the copy is
- * taken: a JSON `rawBody` parsed back, bytes or a form copied (see `handedBodyValue`). The
- * copy is taken when the first observer runs, so a phase no observer runs for copies and
- * parses nothing.
+ * The body and `rawBody` are the attempt's own (see `AttemptRequest`): bytes or a form
+ * copied as the copy is taken, a JSON `rawBody` parsed back once an observer reads it (see
+ * `defineParsedOnRead`). The copy is taken when the first observer runs, so a phase no
+ * observer runs for copies and parses nothing.
  *
  * The filters of both chains are matched against `readContext`, read before the first
  * observer of either runs (see `readResponseFilterContext`) from `request` - which no observer
@@ -306,7 +307,8 @@ async function runParentThenOwn<Chain>(
  * reported under `label` once for the attempt, whichever phases hand its request out (see
  * `claimBuildFailureReport`), and handed as a `body` of `null` or a `rawBody` of
  * `undefined`, as a request whose body an interceptor returned could not be built is
- * reported; the other is handed as built, so a JSON body's text survives a `rawBody` that
+ * reported - a JSON `rawBody` when it is first read (see `defineParsedOnRead`); the other
+ * is handed as built, so a JSON body's text survives a `rawBody` that
  * failed, and each observer still hears of the response or error.
  */
 function attemptRequestCopy(
@@ -334,8 +336,70 @@ function attemptRequestCopy(
   }
 
   if ('rawBody' in request) {
-    handed.rawBody = built(rawBody, undefined);
+    if (isDeferredJSONRawBody(rawBody)) {
+      defineParsedOnRead(handed, () => built(rawBody, undefined));
+    } else {
+      handed.rawBody = built(rawBody, undefined);
+    }
   }
 
   return handed;
+}
+
+/**
+ * Defines a JSON `rawBody` on an observers' request copy as parsed the first time it is
+ * read (see `isDeferredJSONRawBody`), so an observer that never reads it - one that only
+ * records the status - parses nothing. The value parsed is kept for the attempt (see
+ * `handedBodyValue`), so every observer handed the copy gets the one value, and a
+ * redaction in place is seen by the observers after it. Read or assigned, it becomes the
+ * plain data field it stands for, so the parse is let go and a logger shows the value. On
+ * a copy an observer sealed or froze before reading it, it stays an accessor: sealed, an
+ * assignment is kept, as a sealed field takes one; frozen, it throws the `TypeError` a
+ * frozen field's does in strict code. A parse that fails is reported when the field is
+ * first read (see `attemptRequestCopy`).
+ */
+function defineParsedOnRead(
+  handed: AttemptRequest,
+  parse: () => unknown,
+): void {
+  const settle = (value: unknown): boolean =>
+    Reflect.defineProperty(handed, 'rawBody', {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    } as PropertyDescriptor);
+
+  // A value assigned on a copy sealed before the field was read, which cannot become a
+  // data field.
+  let assigned: { value: unknown } | undefined;
+
+  Object.defineProperty(handed, 'rawBody', {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get: () => {
+      if (assigned !== undefined) {
+        return assigned.value;
+      }
+
+      const value = parse();
+      settle(value);
+      return value;
+    },
+    set: (value: unknown) => {
+      if (settle(value)) {
+        return;
+      }
+
+      if (Object.isFrozen(handed)) {
+        throw new TypeError("Cannot assign to read only property 'rawBody'");
+      }
+
+      assigned = { value };
+    },
+  } as PropertyDescriptor);
 }
