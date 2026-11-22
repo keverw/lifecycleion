@@ -267,14 +267,16 @@ function snapshotParams(
     collectionReads: undefined,
   };
   const snapshot: Record<string, unknown> = {};
+  const keys = Object.keys(params);
 
-  for (const key of Object.keys(params)) {
+  for (const key of keys) {
     walk.path.push(key);
     defineEntry(snapshot, key, snapshotParamValue(params[key], 0, walk));
     walk.path.pop();
   }
 
-  return snapshot;
+  // In the order the caller's record lists its keys, as a nested record is kept.
+  return inKeyOrder(snapshot, keys);
 }
 
 /**

@@ -8,7 +8,7 @@ import type { BuilderSendContext } from './http-request-builder';
 import type { HTTPRequestOptions, HTTPResponse } from './types';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
-import { UNSUPPORTED_REQUEST_BODY_MESSAGE } from './utils';
+import { UNSUPPORTED_REQUEST_BODY_MESSAGE, buildURL } from './utils';
 import { releaseRequestBody } from './internal/request-body-copy';
 
 // Captures the context passed to sendFn so tests can inspect it.
@@ -1445,6 +1445,47 @@ test('params writes a polyfill buffer as its text and a Proxy in its own key ord
 
     expect(decodeURIComponent(response.requestURL)).toContain(
       'nested[data]=hi&reordered[b]=b&reordered[1]=one&reordered[a]=a',
+    );
+  }
+});
+
+test('a params key a getter deletes or hides while .params() copies the record is not sent, and leaves the path pairs for it alone', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const params: Record<string, unknown> = {
+    get a() {
+      Reflect.deleteProperty(params, 'toString');
+      Object.defineProperty(params, 'b', { enumerable: false });
+      return 1;
+    },
+    toString: 'x',
+    b: 2,
+  };
+
+  const response = await client.get('/x?toString=keep').params(params).send();
+
+  expect(decodeURIComponent(response.requestURL)).toBe(
+    'http://api.test/x?toString=keep&a=1',
+  );
+});
+
+test('a params record that lists a name before its index keys (a Proxy) is sent in its own key order, by .params() and buildURL alike, with or without a query in the path', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const reordered = (): Record<string, string> =>
+    new Proxy(
+      { mode: 'x', 2: 'two', 1: 'one' },
+      { ownKeys: () => ['mode', '2', '1'] },
+    );
+
+  for (const path of ['/x', '/x?k=1']) {
+    const response = await client.get(path).params(reordered()).send();
+
+    expect(response.requestURL).toContain('mode=x&2=two&1=one');
+    expect(buildURL(undefined, path, reordered())).toContain(
+      'mode=x&2=two&1=one',
     );
   }
 });

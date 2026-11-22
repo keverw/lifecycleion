@@ -19,7 +19,7 @@ import {
   assertOptionsObject,
   fieldNames,
 } from '../internal/known-fields';
-import { copyParamArrayValue } from './internal/param-array-copy';
+import { copyParamArrayValue, inKeyOrder } from './internal/param-array-copy';
 import { assertSerializableParams } from './internal/param-check';
 import { copyArrayValue } from '../internal/array-copy';
 import {
@@ -260,13 +260,20 @@ export class HTTPRequestBuilder<T = unknown> {
     // call does not reach the request: each own entry read once, an array value copied
     // one level as `qs` reads it (see `copyParamArrayValue`) and any other value kept as
     // it is - a nested object is still the caller's. Own keys, so a `__proto__` name stays
-    // a query name rather than a prototype.
+    // a query name rather than a prototype. Listed in the order the caller's record lists
+    // them (see `inKeyOrder`), so a `Proxy` that puts `2` after `mode` is sent so.
+    // Read by `Object.entries`, which skips a key an earlier getter has deleted.
+    const entries = Object.entries(params);
     const copied: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(params)) {
+    for (const [key, value] of entries) {
       defineEntry(copied, key, copyParamArrayValue(value));
     }
-    assertSerializableParams(copied);
-    this._params = copied;
+    const ordered = inKeyOrder(
+      copied,
+      entries.map(([key]) => key),
+    );
+    assertSerializableParams(ordered);
+    this._params = ordered;
     return this;
   }
 
