@@ -1,4 +1,3 @@
-import { copyRequestBody } from './internal/request-body-copy';
 import { describe, test, expect, spyOn } from 'bun:test';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
 import { HTTPClient } from './http-client';
@@ -1083,22 +1082,32 @@ describe('JSON body copies read by interceptors', () => {
     ]);
   });
 
-  test('an interceptor that reads the JSON body is handed its data, and an edit in place is sent', async () => {
+  test('an interceptor that reads the JSON body is handed its data frozen, and a body it assigns is sent', async () => {
     const { client, sent } = recordingClient();
     let descriptor: PropertyDescriptor | undefined;
     client.addRequestInterceptor((request) => {
       descriptor = Object.getOwnPropertyDescriptor(request, 'body');
       const body = request.body as Record<string, unknown>;
       expect(request.body).toBe(body);
-      body.a = 2;
+      expect(body).toEqual({ a: 1, nested: { b: 1 } });
+      expect(() => {
+        body.a = 2;
+      }).toThrow(TypeError);
+      expect(() => {
+        (body.nested as Record<string, unknown>).b = 2;
+      }).toThrow(TypeError);
+      request.body = { ...body, a: 2 };
       return request;
     });
 
-    await client.put('https://api.example.com/x').json({ a: 1 }).send();
+    await client
+      .put('https://api.example.com/x')
+      .json({ a: 1, nested: { b: 1 } })
+      .send();
 
     expect(typeof descriptor?.get).toBe('function');
     expect(descriptor?.enumerable).toBe(true);
-    expect(sent).toEqual(['{"a":2}']);
+    expect(sent).toEqual(['{"a":2,"nested":{"b":1}}']);
   });
 
   test('an interceptor that spreads the request is handed the body as its data', async () => {
@@ -1123,7 +1132,7 @@ describe('JSON body copies read by interceptors', () => {
     isRawJSON: (value: unknown) => boolean;
   };
 
-  test('a JSON body an interceptor reads is handed a number past double precision as the JSON.rawJSON value it was written as, and sent exactly', async () => {
+  test('a JSON body an interceptor reads and hands back is sent as its own text, a number JSON.rawJSON wrote past double precision included', async () => {
     const { client, sent } = recordingClient();
     client.addRequestInterceptor((request) => ({
       ...request,
@@ -1141,13 +1150,35 @@ describe('JSON body copies read by interceptors', () => {
       .json({ id: big, nested: [big], small: 1 })
       .send();
 
+    // Read as the `JSON.rawJSON` value it was written as, and sent as written.
     expect(isRawJSON(handed)).toBe(true);
     expect(sent).toEqual([
       '{"id":9007199254740993,"nested":[9007199254740993],"small":1}',
     ]);
   });
 
-  test('a JSON body an interceptor changes is sent as its new data, the rounded value it writes included', async () => {
+  test('a JSON body an interceptor builds from the data it is handed keeps a number JSON.rawJSON wrote past double precision exact', async () => {
+    const { client, sent } = recordingClient();
+    client.addRequestInterceptor((request) => {
+      request.body = {
+        ...(request.body as Record<string, unknown>),
+        token: 't',
+      };
+      return request;
+    });
+    const big = { toJSON: () => rawJSON('9007199254740993') };
+
+    await client
+      .put('https://api.example.com/x')
+      .json({ id: big, nested: { list: [big] } })
+      .send();
+
+    expect(sent).toEqual([
+      '{"id":9007199254740993,"nested":{"list":[9007199254740993]},"token":"t"}',
+    ]);
+  });
+
+  test('a JSON body an interceptor replaces is sent as its new data, the rounded value it writes included', async () => {
     for (const [label, value, expected] of [
       ['a number', 2, '{"id":2}'],
       ['the rounded double', 2 ** 53, '{"id":9007199254740992}'],
@@ -1159,7 +1190,10 @@ describe('JSON body copies read by interceptors', () => {
     ] as const) {
       const { client, sent } = recordingClient();
       client.addRequestInterceptor((request) => {
-        (request.body as Record<string, unknown>).id = value;
+        request.body = {
+          ...(request.body as Record<string, unknown>),
+          id: value,
+        };
         return request;
       });
       const big = { toJSON: () => rawJSON('9007199254740993') };
@@ -1184,7 +1218,7 @@ describe('JSON body copies read by interceptors', () => {
     expect(sent).toEqual(['{"replaced":true}']);
   });
 
-  test('the data a bodyContainsKeys filter parsed is not kept past its phase, whether the filter missed or matched', async () => {
+  test('the data a bodyContainsKeys filter reads is parsed once for the request, across its phases, whether the filter missed or matched', async () => {
     const text = '{"a":1,"marker":"probe"}';
     for (const key of ['missing', 'a']) {
       const { client, sent } = recordingClient([503, 503, 200]);
@@ -1207,8 +1241,8 @@ describe('JSON body copies read by interceptors', () => {
         parse.mockRestore();
       }
 
-      // Once for each of the three phases: nothing a phase parsed is held for the next.
-      expect(parses).toBe(3);
+      // Once for all three phases: the frozen data is kept with the body's copy.
+      expect(parses).toBe(1);
       expect(sent).toEqual([text, text, text]);
     }
   });
@@ -1236,7 +1270,10 @@ describe('JSON body copies read by interceptors', () => {
           bodyContainsKeys: ['a'],
         });
         client.addRequestInterceptor((request) => {
-          (request.body as Record<string, unknown>).seen = true;
+          request.body = {
+            ...(request.body as Record<string, unknown>),
+            seen: true,
+          };
           return request;
         });
         return client;
@@ -1288,7 +1325,7 @@ describe('JSON body copies read by interceptors', () => {
         parse.mockRestore();
       }
       reads.push(structuredClone(request.body));
-      (request.body as Record<string, unknown>).a = 2;
+      request.body = { ...(request.body as Record<string, unknown>), a: 2 };
       return request;
     });
 
@@ -1311,7 +1348,7 @@ describe('JSON body copies read by interceptors', () => {
     expect(sent).toEqual(['{"a":1}']);
   });
 
-  test('an interceptor that reads the body after the chain has moved on reaches nothing sent', async () => {
+  test('an interceptor that reads or assigns the body after the chain has moved on reaches nothing sent', async () => {
     const { client, sent } = recordingClient([503, 200]);
     let kept: InterceptedRequest | undefined;
     client.addRequestInterceptor(
@@ -1321,16 +1358,21 @@ describe('JSON body copies read by interceptors', () => {
       },
       { phases: ['initial'] },
     );
+    let wasFrozen: boolean | undefined;
     client.addResponseObserver(
       () => {
-        (kept?.body as Record<string, unknown>).a = 99;
+        if (kept !== undefined) {
+          wasFrozen = Object.isFrozen(kept.body);
+          kept.body = { a: 99 };
+        }
       },
       { phases: ['retry'] },
     );
 
     await client.put('https://api.example.com/x').json({ a: 1 }).send();
 
-    // The observer reached the body the interceptor kept, which no attempt sends.
+    // The observer reached the request the interceptor kept, which no attempt sends.
+    expect(wasFrozen).toBe(true);
     expect(kept?.body).toEqual({ a: 99 });
     expect(sent).toEqual(['{"a":1}', '{"a":1}']);
   });
@@ -1373,7 +1415,7 @@ describe('JSON body copies read by interceptors', () => {
     expect(sent).toEqual(['{"a":1}', '{"a":1}']);
   });
 
-  test('a retry interceptor whose bodyContainsKeys filter matches parses the body once a phase', async () => {
+  test('a retry interceptor whose bodyContainsKeys filter matches parses the body once for every retry', async () => {
     const statuses = [503, 503, 200];
     const sent: unknown[] = [];
     const client = new HTTPClient({
@@ -1396,7 +1438,10 @@ describe('JSON body copies read by interceptors', () => {
       (request) => {
         handed.push(structuredClone(request.body));
         if (handed.length === 1) {
-          (request.body as Record<string, unknown>).a = 99;
+          request.body = {
+            ...(request.body as Record<string, unknown>),
+            a: 99,
+          };
         }
         return request;
       },
@@ -1416,7 +1461,7 @@ describe('JSON body copies read by interceptors', () => {
       parse.mockRestore();
     }
 
-    expect(parses).toBe(2);
+    expect(parses).toBe(1);
     expect(handed).toEqual([
       { a: 1, marker: 'probe' },
       { a: 1, marker: 'probe' },
@@ -1449,7 +1494,7 @@ describe('JSON body copies read by interceptors', () => {
     client.addRequestInterceptor(
       (request) => {
         handed.push(structuredClone(request.body));
-        (request.body as Record<string, unknown>).a = 99;
+        request.body = { ...(request.body as Record<string, unknown>), a: 99 };
         return request;
       },
       { phases: ['redirect'], bodyContainsKeys: ['a'] },
@@ -1472,33 +1517,4 @@ describe('JSON body copies read by interceptors', () => {
     expect(handed).toEqual([{ a: 1, marker: 'probe' }]);
     expect(sent).toEqual([text, '{"a":99,"marker":"probe"}']);
   });
-});
-
-test("a filter's parsed body is kept for the phase only while the handed request carries it on", async () => {
-  const sizes: number[] = [];
-  for (const isReplaced of [false, true]) {
-    const mgr = new RequestInterceptorManager();
-    mgr.add(
-      (request) =>
-        isReplaced
-          ? {
-              requestURL: request.requestURL,
-              method: request.method,
-              headers: request.headers,
-              body: { replaced: true },
-            }
-          : request,
-      { bodyContainsKeys: ['token'] },
-    );
-    const parsedContents = new Map<unknown, object>();
-    await mgr.snapshot()(
-      { ...makeRequest(), body: copyRequestBody({ token: 'x' }) },
-      { type: 'initial' },
-      makeContext(),
-      { parsedContents },
-    );
-    sizes.push(parsedContents.size);
-  }
-
-  expect(sizes).toEqual([1, 0]);
 });

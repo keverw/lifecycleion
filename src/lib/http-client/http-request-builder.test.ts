@@ -9,7 +9,7 @@ import type { HTTPRequestOptions, HTTPResponse } from './types';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
 import { UNSUPPORTED_REQUEST_BODY_MESSAGE, buildURL } from './utils';
-import { releaseRequestBody } from './internal/request-body-copy';
+import { readJSONBodyData } from './internal/request-body-copy';
 
 // Captures the context passed to sendFn so tests can inspect it.
 function makeSendFn(
@@ -69,12 +69,11 @@ function makeSendFn(
 }
 
 /**
- * The body a send function was handed, a JSON body's copy read back from its text as the
- * client reads it when an interceptor first looks.
+ * The body a send function was handed, a JSON body's copy read as the data its text
+ * parses to, as an interceptor reads it.
  */
 function sentBody(ctx: BuilderSendContext<unknown>): unknown {
-  releaseRequestBody(ctx.options.body);
-  return ctx.options.body;
+  return readJSONBodyData(ctx.options.body);
 }
 
 function makeBuilder<T = unknown>(

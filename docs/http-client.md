@@ -301,16 +301,16 @@ const response = await client
 
 **The body is copied when you hand it over.** `.body()`, `.json()`, `.text()`, `.formData()` and the `body` request option each take a copy the client owns, as `.headers()` and `.params()` do. Changing the object, `Uint8Array` or `FormData` you passed afterwards - before `send()`, or from `onAttemptEnd` between attempts - changes nothing that is sent or reported, on any attempt, retry or `307`/`308` replay. How each type is copied:
 
-- **JSON (a plain object or an array).** Copied as the data it serializes to: run through `JSON.stringify` once and parsed back. Every attempt sends exactly the text `JSON.stringify` gave for your value when you passed it, unless an interceptor changes the body. Request interceptors see plain data: a `Date` as its ISO string, a class instance as a plain object, a `Map` as `{}`, an `undefined` member dropped (`null` in an array), and a number `JSON.rawJSON` wrote past a double's precision (`9007199254740993`) as that `JSON.rawJSON` value, so it is still sent exactly.
-- **A top-level `toJSON`** that answers a string, a number or `null` is kept as a plain object whose own `toJSON` answers that value, so the body still serializes to the same text.
+- **JSON (a plain object or an array).** Copied as the text it serializes to: run through `JSON.stringify` once. Every attempt sends exactly that text, unless an interceptor replaces the body. Request interceptors see it as plain data parsed from that text, frozen at every depth: a `Date` as its ISO string, a class instance as a plain object, a `Map` as `{}`, an `undefined` member dropped (`null` in an array), and a number `JSON.rawJSON` wrote past a double's precision (`9007199254740993`) as that `JSON.rawJSON` value, so it still goes out exactly. Handed back unchanged, the body is sent as the original text.
+- **A top-level `toJSON`** that answers a string, a number or `null` is kept as a frozen plain object whose own `toJSON` answers that value, so the body still serializes to the same text.
 - **Bytes.** A `Buffer` is copied as a `Buffer`, so an interceptor can still call `request.body.toString('base64')`. Any other `Uint8Array` - a subclass, or another realm's `Buffer` - is copied as a plain `Uint8Array`.
 - **`FormData`.** Copied entry by entry, its `Blob` and `File` entries kept as they are. A form is told by `FormData`'s own methods, so an object that only inherits from `FormData.prototype` is not one, while a subclass's instance is; in a browser, a form from another realm (an iframe) is one too.
 - **A string** is kept as it is.
 
-**The JSON copy is parsed back only when it is read.** That is, when an interceptor reads `request.body`, or a `bodyContainsKeys` filter reads it once the rest of that filter has matched (such a filter never matches an array body). A request nothing reads is sent as the text without being parsed. Until it is read, the request an interceptor is handed carries `body` as a getter (with a setter):
+**The JSON copy is parsed only when it is read**, and then once for the whole request: when an interceptor reads `request.body`, or a `bodyContainsKeys` filter reads it once the rest of that filter has matched (such a filter never matches an array body). A request nothing reads is sent as the text without being parsed. The request an interceptor is handed carries `body` as a getter (with a setter):
 
-- An interceptor that only sets a header in place (`request.headers.authorization = token; return request`) costs no parse and no second `JSON.stringify`.
-- One that spreads the request (`{ ...request, headers }`) or assigns `request.body` reads or replaces it as it would a plain field.
+- An interceptor that only sets a header (`request.headers.authorization = token; return request`), or spreads the request (`{ ...request, headers }`), costs no second `JSON.stringify`: the body it hands back is sent as its text.
+- **A JSON body is frozen**, nested objects and arrays included. To change it, assign a new one: `request.body = { ...request.body, token }`, or return `{ ...request, body: newBody }`. A spread copies one level, so to change a nested value build that level anew too (`{ ...body, user: { ...body.user, id } }`), or start from `structuredClone(request.body)`. A new body is copied once the chain ends, as one handed to `.json()` is. Writing to the frozen data throws a `TypeError` in strict-mode code (ES modules and classes) and is ignored elsewhere.
 - Logging the handed request (`console.log(request)`) shows `body` as a getter; log `request.body` to see the data.
 
 **Bun form filenames.** On Bun, a form's entries report a `File` appended under a new filename (`fd.append('f', file, 'renamed.txt')`) by its original name, and one named `''` - or a `Blob` - by none. So the copy sends the original name, and a part with no name as `blob` (as `FormData` names a nameless `Blob`), from either adapter. Wrap the file in a `File` with the name you want before appending it.
@@ -340,12 +340,12 @@ client
 - A returned body of an unsupported type fails it as `interceptor_error`.
 - On a `GET` or `HEAD` that `FetchAdapter`, or `XHRAdapter` in a browser, refuses a body on, a body that cannot be copied cannot serialize to nothing either, so the method is refused as `interceptor_error`, as it is with any other body.
 
-**In-place edits go out only with the request returned.** The first interceptor whose function runs in a phase is handed a copy of the request: its own URL, method and header record in every phase, and its own body in the `retry` and `redirect` phases - and in the `initial` phase for a JSON body, whose copy costs nothing until it is read. An edit made in place to a copied part (`request.headers.authorization = ...` or `request.body.retries = ...`, then `return request`) goes out with the request that interceptor returns, and with nothing else:
+**In-place edits go out only with the request returned.** The first interceptor whose function runs in a phase is handed a copy of the request: its own URL, method and header record in every phase, and its own bytes or form body in the `retry` and `redirect` phases (a JSON body is frozen, so it needs no copy). An edit made in place to a copied part (`request.headers.authorization = ...` or `form.append(...)`, then `return request`), or a body assigned in place of the one handed over, goes out with the request that interceptor returns, and with nothing else:
 
 - A `retry`-phase edit is not made again on top of itself on the next retry.
 - A `redirect`-phase edit never reaches the upload of the hop that answered, which may still be under way.
 - A request that ends in that phase before it is sent - cancelled, or failed by an interceptor that throws - is reported without the edit.
-- **Exception:** an `initial`-phase interceptor is handed a bytes or form body itself, not a copy, since copying every upload again whenever an interceptor runs would cost as much as the first copy. An in-place edit to it still goes out only with the request it returns, but a request that then ends in the initial phase is reported with that edit. A JSON body is copied in that phase too, so its in-place edit is not reported.
+- **Exception:** an `initial`-phase interceptor is handed a bytes or form body itself, not a copy, since copying every upload again whenever an interceptor runs would cost as much as the first copy. An in-place edit to it still goes out only with the request it returns, but a request that then ends in the initial phase is reported with that edit.
 
 **How `NodeAdapter` writes a form.** `NodeAdapter` writes a `FormData` body as `fetch` does (the WHATWG multipart encoding): field names and filenames as UTF-8, with `"`, CR and LF percent-encoded, and no `filename*=`. A server reads the same names whichever adapter sent them, with these differences:
 
@@ -693,7 +693,7 @@ skip a later one in the current snapshot. A sub-client's chain run snapshots its
 parent's registrations and its own together, so a parent callback that registers one
 on the sub-client does not run it in that same chain run.
 
-Interceptors run **before** an adapter attempt and can mutate the outgoing request (headers, URL, body) or cancel it entirely. They are the right place for auth token injection, URL rewriting, or pre-flight validation. They run before each attempt's `timeout` is armed, so a token refresh does not spend it, and the request waits for them with no timeout of its own: one that never settles holds the request until it is cancelled.
+Interceptors run **before** an adapter attempt and can change the outgoing request (its headers and URL in place, a new body in place of a JSON one) or cancel it entirely. They are the right place for auth token injection, URL rewriting, or pre-flight validation. They run before each attempt's `timeout` is armed, so a token refresh does not spend it, and the request waits for them with no timeout of its own: one that never settles holds the request until it is cancelled.
 
 ```typescript
 // Remove a previously added interceptor by calling the returned function
@@ -708,7 +708,7 @@ const removeInterceptor = client.addRequestInterceptor(
 // Later: removeInterceptor()
 ```
 
-Setting the header in place, as above, leaves a JSON body unread, so it is sent as the text it was serialized to when you handed it over. Any read of `request.body` parses it back and serializes it again once the chain ends, and that includes spreading the request (`{ ...request, headers: { ...request.headers, authorization } }`), which reads every field. Both forms send the same request; the in-place one skips that work, which matters for a large JSON body. For the same reason, logging the request an interceptor is handed (`console.log(request)`, `util.inspect(request)`) shows an unread JSON body as `body: [Getter/Setter]`; log `request.body` itself to see the data, which reads it. A `Uint8Array` body handed to a retry- or redirect-phase interceptor is a copy; one handed back holding the same bytes is sent as the client's own bytes it was copied from, so an upload is not copied a second time for that phase.
+Setting the header in place, as above, leaves a JSON body unread, so it is sent as the text it was serialized to when you handed it over, without being parsed. Spreading the request (`{ ...request, headers: { ...request.headers, authorization } }`) reads every field, so it parses the body once, but the body it hands back is still sent as that text. Logging the request an interceptor is handed (`console.log(request)`, `util.inspect(request)`) shows an unread JSON body as `body: [Getter/Setter]`; log `request.body` itself to see the data, which reads it. A `Uint8Array` body handed to a retry- or redirect-phase interceptor is a copy; one handed back holding the same bytes is sent as the client's own bytes it was copied from, so an upload is not copied a second time for that phase.
 
 The `hosts` filter keeps the token to the API's own host. Without it, the interceptor would run for every host, including a redirect target. On a redirect hop to another origin, the client drops a header that a `retry`-phase interceptor adds, unless it is on the cross-origin allow-list. See [Redirect Handling](#redirect-handling).
 
@@ -1479,11 +1479,11 @@ A retry on that hop follows the same rule. The hop's request is the stripped one
 
 **Body:** their changes are discarded. The retry goes out with the hop's own body, so a token added as a field of a `307`/`308` replay's body does not reach that host either.
 
-- The hop's own body goes out with the hop's own `Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Language` and `Content-Location`, whatever they set those to, whether they replaced the body, edited their copy, or left it alone.
+- The hop's own body goes out with the hop's own `Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Language` and `Content-Location`, whatever they set those to, whether they replaced the body, edited a copy of it, or left it alone.
 - A body they remove, or set to an empty string, empty bytes or a form with no entries, is sent that way, as an empty value of the client's own, and without any of those five headers the hop or they set - as a hop rewritten to `GET` drops them with its body. So only the client's own default type for an empty string or bytes goes with it. Bytes count as empty by the length they actually hold, not one a subclass reports.
 - A hop with no body to send goes out as it was, its own headers included.
 - A body they return that could not be copied - a `BigInt` in a JSON body, say - is not copied, since it is not sent, and the hop's own goes out as above.
-- The filters up to and including the first interceptor whose function runs - a parent client's included - read the hop's own request, as on any other hop. That function, and every filter and function after it, read a copy of the hop's body, or whatever an interceptor returned in its place. The functions are handed that copy, as on every retry (see [Body Types](#body-types)), so one that edits it in place (`request.body.token = ...`, `form.append(...)`) does not change what the hop sends.
+- The filters up to and including the first interceptor whose function runs - a parent client's included - read the hop's own request, as on any other hop. That function, and every filter and function after it, read the hop's body - frozen when it is JSON, a copy when it is bytes or a form - or whatever an interceptor returned in its place, as on every retry (see [Body Types](#body-types)). So one that edits a form in place (`form.append(...)`) or assigns a new body does not change what the hop sends.
 
 **Errors:**
 

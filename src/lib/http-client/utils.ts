@@ -2170,7 +2170,7 @@ export function matchesFilter(
   }
 
   // Last, since its keys are read through `readBodyContents` - which parses a request
-  // interceptor's JSON body copy (see `readRequestBodyContents`) - so a filter that cannot
+  // interceptor's JSON body copy (see `readJSONBodyData`) - so a filter that cannot
   // match on the rest never reads them.
   if (
     kind !== 'error' &&

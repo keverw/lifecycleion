@@ -2,28 +2,24 @@ import { isRequestBodyBytes, unsupportedRequestBodyMessage } from '../utils';
 import { isPlainRecord } from './plain-record';
 import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { filePartNameToSend, formEntries, isFormData } from './form-entries';
-import { defineEntry } from '../../internal/define-entry';
 import { plainBytesView } from '../../internal/binary-view';
 
 /**
  * What the client knows of a JSON body copy it made (see `copyRequestBody`): the text it
  * serializes to, its own `toJSON` wrapper's included, or `undefined` for one that
- * serializes to nothing; and whether it has been filled from that text. A copy not yet
- * filled is an empty object or array of the shape its text has (see `releaseRequestBody`),
- * so a copy that is only ever sent - no interceptor reads it (see `handedRequest` in
- * interceptors.ts) and no `bodyContainsKeys` filter reads it - is never parsed back at
- * all.
+ * serializes to nothing; and, once something has read it, the frozen data that text
+ * parses to (see `readJSONBodyData`). A copy no interceptor or `bodyContainsKeys` filter
+ * reads is never parsed at all.
  */
-type CopyRecord =
-  | { readonly text: string; readonly isFilled: false }
-  | { readonly text: string | undefined; readonly isFilled: true };
+interface CopyRecord {
+  readonly text: string | undefined;
+  data?: object;
+}
 
 /**
- * The record of each JSON body copy caller code has not been given. One is forgotten as
- * caller code is given it, which may keep it and change it in place: an interceptor that
- * reads its request's `body` (see `handedRequest` in interceptors.ts, and
- * `releaseRequestBody`). Nothing else gives a request's body to caller code: an attempt's
- * observers are handed their own, parsed back from the text sent.
+ * The record of each JSON body copy, and of the frozen data read from one: both stand for
+ * the same text, and neither can be changed, so a body handed back as either is sent as
+ * that text, never serialized again.
  */
 const recordByCopy = new WeakMap<object, CopyRecord>();
 
@@ -32,17 +28,17 @@ const recordByCopy = new WeakMap<object, CopyRecord>();
  * handed over - to a builder's body setter, or as an interceptor's result - so a change
  * the caller makes afterwards reaches nothing the request sends or reports.
  *
- * - A JSON body (a plain object or an array) is the data it serializes to, read back:
- *   serialized once, by `JSON.stringify` - so every nested `toJSON` is applied and what
- *   JSON reads from prototypes is honored, where a structural copy would lose them - and
- *   parsed back when its contents are first read (see `releaseRequestBody`). Until then it
- *   is an empty object or array, the shape its text has, sent as that text. A `Date` is
- *   its ISO string, a class instance a plain object, an `undefined` member dropped. A
- *   top-level `toJSON` that answers something other than an object or an array - `null`,
- *   a string, a number, nothing - reads back as that value, which is no JSON body: a
- *   string is sent as text, `null` as no body at all, and a number is refused. Such a
- *   copy is wrapped as a plain object whose own `toJSON` answers it, so it is still a
- *   JSON body and serializes to exactly the text the caller's does.
+ * - A JSON body (a plain object or an array) is the text it serializes to: serialized
+ *   once, by `JSON.stringify` - so every nested `toJSON` is applied and what JSON reads
+ *   from prototypes is honored, where a structural copy would lose them. The copy is a
+ *   frozen empty object or array, the shape its text has, sent as that text; read, it is
+ *   the frozen data the text parses to (see `readJSONBodyData`). A `Date` is its ISO
+ *   string, a class instance a plain object, an `undefined` member dropped. A top-level
+ *   `toJSON` that answers something other than an object or an array - `null`, a string,
+ *   a number, nothing - reads back as that value, which is no JSON body: a string is sent
+ *   as text, `null` as no body at all, and a number is refused. Such a copy is a frozen
+ *   plain object whose own `toJSON` answers it, so it is still a JSON body and serializes
+ *   to exactly the text the caller's does. A copy, or data read from one, is its own copy.
  * - Bytes are copied, into this realm; a `Buffer` as a `Buffer` (see `copyBytes`).
  * - Form data - told by `FormData`'s own methods (see `isFormData`) - is a new form with
  *   the same entries; a `Blob` or `File` entry is kept as it is, being
@@ -68,39 +64,44 @@ export function copyRequestBody(body: unknown): unknown {
   }
 
   if (Array.isArray(body) || isPlainRecord(body)) {
-    // A copy of a copy is read back from the text it was read from.
-    const text = jsonTextOf(body);
+    if (recordByCopy.has(body)) {
+      return body;
+    }
+
+    const serialized: unknown = JSON.stringify(body);
 
     // A top-level `toJSON` that answers `undefined` serializes to nothing.
-    if (text === undefined) {
-      const copy = { toJSON: () => undefined };
-      recordByCopy.set(copy, { text: undefined, isFilled: true });
-      return copy;
+    if (typeof serialized !== 'string') {
+      return recordedCopy({ toJSON: () => undefined }, undefined);
     }
 
     // `JSON.stringify` writes no whitespace before a value, so the first character tells
     // an object or an array from every other value.
-    const first = text[0];
+    const first = serialized[0];
     if (first === '{' || first === '[') {
-      const copy = first === '[' ? [] : {};
-      recordByCopy.set(copy, { text, isFilled: false });
+      const copy = recordedCopy(first === '[' ? [] : {}, serialized);
+      unreadCopies.add(copy);
       return copy;
     }
 
-    const value: unknown = JSON.parse(text);
-    const copy = { toJSON: () => value };
-    recordByCopy.set(copy, { text, isFilled: true });
-    return copy;
+    const value: unknown = JSON.parse(serialized);
+    return recordedCopy({ toJSON: () => value }, serialized);
   }
 
   // Refused as `params()` refuses a query it cannot copy: by type, when it is handed over.
   throw new TypeError(unsupportedRequestBodyMessage(body));
 }
 
+/** `copy`, frozen and recorded as the JSON body copy that serializes to `text`. */
+function recordedCopy(copy: object, text: string | undefined): object {
+  recordByCopy.set(Object.freeze(copy), { text });
+  return copy;
+}
+
 /**
- * The JSON text a JSON body copy serializes to, when it is one `copyRequestBody` returned
- * that caller code has not been given (see `recordByCopy`), so it is sent - or copied
- * again - without being serialized a second time; `undefined` for any other value.
+ * The JSON text a JSON body copy serializes to - a copy `copyRequestBody` returned, or the
+ * data read from one (see `readJSONBodyData`) - so it is sent, or copied again, without
+ * being serialized a second time; `undefined` for any other value.
  */
 export function copiedJSONText(body: unknown): string | undefined {
   return typeof body === 'object' && body !== null
@@ -109,10 +110,10 @@ export function copiedJSONText(body: unknown): string | undefined {
 }
 
 /**
- * Whether `body` is a JSON body copy, not yet given to caller code, that serializes to
- * nothing (a top-level `toJSON` that answers `undefined`). Read from the copy's own record
- * (see `recordByCopy`) rather than by serializing, so a value an interceptor returned -
- * whose `toJSON` may answer differently the next time - is never asked.
+ * Whether `body` is a JSON body copy that serializes to nothing (a top-level `toJSON` that
+ * answers `undefined`). Read from the copy's own record (see `recordByCopy`) rather than by
+ * serializing, so a value an interceptor returned - whose `toJSON` may answer differently
+ * the next time - is never asked.
  */
 export function isCopySerializingToNothing(body: unknown): boolean {
   return typeof body === 'object' && body !== null && isRecordedAsNothing(body);
@@ -122,22 +123,6 @@ export function isCopySerializingToNothing(body: unknown): boolean {
 function isRecordedAsNothing(body: object): boolean {
   const record = recordByCopy.get(body);
   return record !== undefined && record.text === undefined;
-}
-
-/**
- * The text a JSON body - a plain object or an array - serializes to, or `undefined` when
- * it serializes to nothing (a top-level `toJSON` that answers `undefined`): a copy's own
- * (see `recordByCopy`), or serialized now for any other value. Throws as
- * `JSON.stringify` throws on it.
- */
-function jsonTextOf(body: object): string | undefined {
-  const record = recordByCopy.get(body);
-  if (record !== undefined) {
-    return record.text;
-  }
-
-  const text: unknown = JSON.stringify(body);
-  return typeof text === 'string' ? text : undefined;
 }
 
 /**
@@ -169,78 +154,54 @@ export function serializesToNothing(body: object): boolean {
 }
 
 /**
- * The data a JSON body - a plain object - holds, as an interceptor's `bodyContainsKeys`
- * filter reads it: for a copy `copyRequestBody` returned empty, its text parsed, the data
- * kept in `parsedByCopy` - one phase's (see `InterceptorChainOptions.parsedContents`) - so
- * a body is parsed once however often the phase reads it, and the data is let go with the
- * phase; any other body as it is.
+ * The JSON body copies `copyRequestBody` returned as an empty object or array, standing
+ * for their text: their data is read only when asked for (see `readJSONBodyData`).
  */
-export function readRequestBodyContents(
-  body: Record<string, unknown>,
-  parsedByCopy: Map<unknown, object>,
-): Record<string, unknown> {
-  const record = recordByCopy.get(body);
-  if (record === undefined || record.isFilled) {
+const unreadCopies = new WeakSet<object>();
+
+/** Whether `body` is a JSON body copy whose data is read only when asked for. */
+export function isUnreadJSONBodyCopy(body: unknown): body is object {
+  return typeof body === 'object' && body !== null && unreadCopies.has(body);
+}
+
+/**
+ * The data a JSON body holds, as an interceptor or a `bodyContainsKeys` filter reads it:
+ * for a copy `copyRequestBody` returned empty, the data its text parses to, deep-frozen -
+ * parsed once, the first time it is asked for, and kept with the copy for every later
+ * read - and recorded as standing for the same text, so a body handed back as it is sent
+ * as that text (see `copiedJSONText`). A number `JSON.rawJSON` wrote past a double's
+ * precision is read as that `JSON.rawJSON` value (see `exactJSONData`). Any other body as
+ * it is.
+ */
+export function readJSONBodyData(body: unknown): unknown {
+  if (!isUnreadJSONBodyCopy(body)) {
     return body;
   }
 
-  const kept = parsedByCopy.get(body);
-  if (kept !== undefined) {
-    return kept as Record<string, unknown>;
+  const record = recordByCopy.get(body) as CopyRecord;
+  if (record.data === undefined) {
+    const data = deepFreeze(exactJSONData(record.text as string));
+    recordByCopy.set(data, record);
+    record.data = data;
   }
 
-  const parsed = JSON.parse(record.text) as Record<string, unknown>;
-  parsedByCopy.set(body, parsed);
-  return parsed;
+  return record.data;
 }
 
 /**
- * Fill a JSON body copy `copyRequestBody` returned empty with the data its text parses
- * to - or `parsed`, the data a filter read it as (see `readRequestBodyContents`) - in
- * place, so it is the same object, the one the builder holds, as it is handed to caller
- * code (see `releaseRequestBody`). Parsed before the copy is touched, so a parse that
- * throws leaves it empty and its record as it was. Each member is defined as the parsed
- * data's own, so a `__proto__` key is a member, as `JSON.parse` makes it, not the copy's
- * prototype.
+ * The data `text` - JSON a copy serialized to - parses to: its plain parse, unless that no
+ * longer serializes to `text`, as a number `JSON.rawJSON` wrote past a double's precision
+ * (`9007199254740993`) parses to the nearest double. Then each such number is kept as the
+ * `JSON.rawJSON` value it was, so a body an interceptor builds from the data
+ * (`{ ...request.body, token }`) still sends it as written. Only a number can read back as
+ * other data: `JSON.stringify` writes every other value as its plain parse writes it.
  */
-function fillRequestBody(
-  body: object,
-  record: Extract<CopyRecord, { isFilled: false }>,
-  parsedData: object = JSON.parse(record.text) as object,
-): void {
-  const parsed = exactJSONData(record.text, parsedData);
-  if (Array.isArray(body)) {
-    for (const member of parsed as unknown[]) {
-      body.push(member);
-    }
-  } else {
-    for (const key of Object.keys(parsed)) {
-      defineEntry(
-        body as Record<string, unknown>,
-        key,
-        (parsed as Record<string, unknown>)[key],
-      );
-    }
-  }
-}
-
-/**
- * The data `text` - JSON a copy serialized to - parses to, as `parsed`, its plain parse,
- * holds it, unless that data no longer serializes to `text`: then parsed again keeping
- * each number its text writes past a double's precision (`9007199254740993`, which
- * `JSON.rawJSON` wrote) as the `JSON.rawJSON` value it was, so the data serializes to the
- * same text and is sent as it was handed over, not rounded. Only a number can read back
- * as other data: `JSON.stringify` writes every other value as its plain parse writes it.
- */
-function exactJSONData(text: string, parsed: object): object {
-  if (JSON.stringify(parsed) === text) {
-    return parsed;
-  }
-
+function exactJSONData(text: string): object {
+  const parsed = JSON.parse(text) as object;
   const { rawJSON } = JSON as unknown as {
     rawJSON?: (source: string) => unknown;
   };
-  if (rawJSON === undefined) {
+  if (rawJSON === undefined || JSON.stringify(parsed) === text) {
     return parsed;
   }
 
@@ -256,41 +217,24 @@ function exactJSONData(text: string, parsed: object): object {
 }
 
 /**
- * Whether `body` is a JSON body copy `copyRequestBody` returned empty that has not been
- * filled: one sent as its text, which nothing has read yet.
+ * `value` - data `JSON.parse` made, so plain objects, arrays and primitives alone - with
+ * every object in it frozen, walked with a stack of its own rather than by recursion, so
+ * data nested as deep as `JSON.stringify` can write is frozen whole.
  */
-export function isUnfilledRequestBody(body: unknown): boolean {
-  return (
-    typeof body === 'object' &&
-    body !== null &&
-    recordByCopy.get(body)?.isFilled === false
-  );
-}
+function deepFreeze<T extends object>(value: T): T {
+  const pending: object[] = [value];
 
-/**
- * Called as a request's body is handed to caller code - an interceptor that reads it -
- * which may keep it and change it in place: a copy still empty is filled (see
- * `fillRequestBody`), and since its text no longer says what it serializes to, its record
- * is forgotten, and the copy is serialized from then on as any other value is. `parsed`,
- * the data a filter read the copy as, fills it in place of a parse: handed over by one
- * copy at most, so no two share nested objects. A fill that throws leaves the record, and
- * the copy still sent as its text. Any other value is left as it is.
- */
-export function releaseRequestBody(body: unknown, parsed?: object): void {
-  if (typeof body !== 'object' || body === null) {
-    return;
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    Object.freeze(next);
+    for (const key of Object.keys(next)) {
+      const member: unknown = (next as Record<string, unknown>)[key];
+      if (typeof member === 'object' && member !== null) {
+        pending.push(member);
+      }
+    }
   }
 
-  const record = recordByCopy.get(body);
-  if (record === undefined) {
-    return;
-  }
-
-  if (!record.isFilled) {
-    fillRequestBody(body, record, parsed);
-  }
-
-  recordByCopy.delete(body);
+  return value;
 }
 
 /**

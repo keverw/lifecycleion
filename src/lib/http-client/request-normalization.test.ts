@@ -3726,7 +3726,10 @@ test('an interceptor that edits the request in place and is then cancelled leave
           async (request, builder) => {
             request.headers.authorization = 'SECRET';
             request.requestURL = 'http://api.test/moved';
-            (request.body as Record<string, unknown>).edited = true;
+            request.body = {
+              ...(request.body as Record<string, unknown>),
+              edited: true,
+            };
             builder.cancel('stop');
             await Promise.resolve();
             return request;
@@ -3741,7 +3744,8 @@ test('an interceptor that edits the request in place and is then cancelled leave
     expect(observed).toHaveLength(1);
     expect(observed[0].requestURL).toBe(reportedURL);
     expect(observed[0].headers).not.toHaveProperty('authorization');
-    // A JSON body is copied for every phase's interceptors.
+    // A JSON body is frozen for every phase's interceptors, and a body assigned in its
+    // place goes nowhere once the request is cancelled.
     expect(observed[0].rawBody).toEqual({ a: 1 });
     // Nor did the edit reach the hop that answered, in the redirect phase.
     expect(sent.map((request) => 'authorization' in request.headers)).toEqual(
@@ -14796,7 +14800,7 @@ test("a transport failure answered after the timer fired stores its Set-Cookie; 
   expect(abandonedJar.getCookieHeaderString('http://x.test/a')).toBe('');
 });
 
-test('a retry interceptor that edits the body in place on a cross-origin hop changes neither what is sent there nor the caller body', async () => {
+test('a retry interceptor that edits a form or bytes body in place on a cross-origin hop changes neither what is sent there nor the caller body, and is handed a JSON body frozen', async () => {
   const json = { a: 1 };
   const form = new FormData();
   form.append('a', '1');
@@ -14813,7 +14817,10 @@ test('a retry interceptor that edits the body in place on a cross-origin hop cha
       send: (client) =>
         client.put('https://api.example/start').json(json).send(),
       edit: (body) => {
-        (body as Record<string, unknown>).token = 'SECRET';
+        expect(Object.isFrozen(body)).toBe(true);
+        expect(() => {
+          (body as Record<string, unknown>).token = 'SECRET';
+        }).toThrow(TypeError);
       },
       read: (sent) => sent,
       expected: JSON.stringify({ a: 1 }),
@@ -14870,7 +14877,7 @@ test('a retry interceptor that edits the body in place on a cross-origin hop cha
   expect([...bytes]).toEqual([1, 2, 3]);
 });
 
-test('a retry interceptor that edits the body in place and names the host itself sends its edit there, not to the caller body', async () => {
+test('a retry interceptor that replaces the body and names the host itself sends its body there, not to the caller body', async () => {
   const sentToFailover: AdapterRequest[] = [];
   const { adapter: replay } = crossOriginReplayAdapter(
     'https://evil.example/next',
@@ -14890,10 +14897,11 @@ test('a retry interceptor that edits the body in place and names the host itself
     retryPolicy: crossOriginRetryPolicy,
   });
   client.addRequestInterceptor(
-    (request) => {
-      (request.body as Record<string, unknown>).token = 'FAILOVER';
-      return { ...request, requestURL: 'https://failover.example/next' };
-    },
+    (request) => ({
+      ...request,
+      body: { ...(request.body as Record<string, unknown>), token: 'FAILOVER' },
+      requestURL: 'https://failover.example/next',
+    }),
     { phases: ['retry'] },
   );
   const json = { a: 1 };
@@ -15234,9 +15242,9 @@ test("a cross-origin hop's own body goes out with its own body headers, whatever
   });
   client.addRequestInterceptor(
     (request) => {
-      (request.body as Record<string, unknown>).token = 'SECRET';
       return {
         ...request,
+        body: { ...(request.body as Record<string, unknown>), token: 'SECRET' },
         headers: {
           ...request.headers,
           'content-type': 'text/plain',
@@ -15324,7 +15332,7 @@ test("a retry interceptor's BigInt body on a cross-origin hop held to its own bo
   ]);
 });
 
-test("a parent client's and a sub-client's retry interceptors share one copy of a cross-origin hop's body", async () => {
+test("a sub-client's retry interceptor is handed the body a parent's replaced, and neither reaches what a cross-origin hop sends", async () => {
   const { adapter, sentToTarget } = crossOriginReplayAdapter(
     'https://evil.example/next',
   );
@@ -15336,7 +15344,7 @@ test("a parent client's and a sub-client's retry interceptors share one copy of 
   const seen: unknown[] = [];
   parent.addRequestInterceptor(
     (request) => {
-      (request.body as Record<string, unknown>).p = 'P';
+      request.body = { ...(request.body as Record<string, unknown>), p: 'P' };
       return request;
     },
     { phases: ['retry'] },
@@ -15345,7 +15353,7 @@ test("a parent client's and a sub-client's retry interceptors share one copy of 
   sub.addRequestInterceptor(
     (request) => {
       seen.push(structuredClone(request.body));
-      (request.body as Record<string, unknown>).s = 'S';
+      request.body = { ...(request.body as Record<string, unknown>), s: 'S' };
       return request;
     },
     { phases: ['retry'] },
@@ -15354,7 +15362,7 @@ test("a parent client's and a sub-client's retry interceptors share one copy of 
 
   await sub.put('https://api.example/start').json(json).send();
 
-  // The sub-client's interceptor saw the parent's edit to the one copy.
+  // The sub-client's interceptor saw the body the parent's assigned.
   expect(seen).toEqual([{ a: 1, p: 'P' }]);
   expect(sentToTarget.map((request) => request.body)).toEqual([
     JSON.stringify({ a: 1 }),
@@ -15615,7 +15623,7 @@ test('an abandoned POST with a body reports non_idempotent_method, the rule that
   expect(builder.error?.isRetriesExhausted).toBe(false);
 });
 
-test("retry interceptors' filters on a cross-origin hop read the hop's body, and the sub-client's first matching interceptor edits a copy of it, not what the hop sends", async () => {
+test("retry interceptors' filters on a cross-origin hop read the hop's body, and a body the sub-client's first matching interceptor assigns is not what the hop sends", async () => {
   class Inner {
     public x = 1;
   }
@@ -15637,11 +15645,14 @@ test("retry interceptors' filters on a cross-origin hop read the hop's body, and
     { phases: ['retry'], bodyContainsKeys: ['missing'] },
   );
   const child = parent.createSubClient();
-  // Matches the hop's own body, and its function is handed the copy.
+  // Matches the hop's own body, and its function is handed its frozen data.
   child.addRequestInterceptor(
     (request) => {
       calls.push('child');
-      (request.body as Record<string, unknown>).token = 'SECRET';
+      request.body = {
+        ...(request.body as Record<string, unknown>),
+        token: 'SECRET',
+      };
       return request;
     },
     { phases: ['retry'], bodyContainsKeys: ['inner.x'] },
@@ -15652,7 +15663,7 @@ test("retry interceptors' filters on a cross-origin hop read the hop's body, and
 
   expect(calls).toEqual(['child']);
   expect(sentToTarget).toHaveLength(2);
-  // The edit went to the copy: the hop sends its own body, and the caller's is untouched.
+  // The hop sends its own body, and the caller's is untouched.
   expect(sentToTarget[1]?.body).toBe(JSON.stringify({ inner: { x: 1 } }));
   expect(body).not.toHaveProperty('token');
 });
@@ -16595,7 +16606,7 @@ test('a 307 replay sends the body as it was handed over, whatever the caller cha
   }
 });
 
-test('a retry interceptor that edits the body in place does not add to it again on each retry', async () => {
+test('a retry interceptor that replaces the body does not add to it again on each retry', async () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([
     { status: 503 },
     { status: 503 },
@@ -16609,7 +16620,7 @@ test('a retry interceptor that edits the body in place does not add to it again 
   client.addRequestInterceptor(
     (request) => {
       const body = request.body as { a: number; retries?: number };
-      body.retries = (body.retries ?? 0) + 1;
+      request.body = { ...body, retries: (body.retries ?? 0) + 1 };
       return request;
     },
     { phases: ['retry'] },
@@ -16768,7 +16779,7 @@ test('a Date in a JSON body reaches interceptors as its ISO string and is sent a
   expect(sent).toEqual([JSON.stringify({ when })]);
 });
 
-test('an interceptor that edits the body it is handed in place sends its edit, in the initial and redirect phases', async () => {
+test('a body an interceptor assigns is sent, in the initial and redirect phases, and the redirect phase is handed the body the hop sent', async () => {
   const { adapter, sent } = roundSeventyTwoBAdapter([
     { status: 307, location: '/next' },
     { status: 200 },
@@ -16780,7 +16791,10 @@ test('an interceptor that edits the body it is handed in place sends its edit, i
   });
   client.addRequestInterceptor(
     (request, phase) => {
-      (request.body as Record<string, unknown>)[phase.type] = true;
+      request.body = {
+        ...(request.body as Record<string, unknown>),
+        [phase.type]: true,
+      };
       return request;
     },
     { phases: ['initial', 'redirect'] },
@@ -16794,9 +16808,9 @@ test('an interceptor that edits the body it is handed in place sends its edit, i
   ]);
 });
 
-test('a request whose JSON body an interceptor edits in place and then ends is reported without its edit, and a result returned with it', async () => {
-  // The initial phase hands its interceptors a copy of a JSON body, so an edit made in
-  // place is not in the request it reports.
+test('a request whose JSON body an interceptor replaces and then ends is reported without the new body, and a result returned with it', async () => {
+  // A body assigned on the request an interceptor is handed is not in the request the
+  // phase reports.
   for (const end of ['throw', 'cancel'] as const) {
     const { adapter, sent } = roundSeventyTwoBAdapter([]);
     const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
@@ -16805,7 +16819,10 @@ test('a request whose JSON body an interceptor edits in place and then ends is r
       reported.push(request.body, request.rawBody);
     });
     client.addRequestInterceptor((request) => {
-      (request.body as Record<string, unknown>).edited = true;
+      request.body = {
+        ...(request.body as Record<string, unknown>),
+        edited: true,
+      };
       if (end === 'throw') {
         throw new Error('interceptor failed');
       }
@@ -16818,8 +16835,7 @@ test('a request whose JSON body an interceptor edits in place and then ends is r
     expect(reported).toEqual(['{"a":1}', { a: 1 }]);
   }
 
-  // Returned and then refused: the result is reported, its text read from the edited
-  // body rather than the text of the copy it was handed.
+  // Returned and then refused: the result is reported, with the body it carries.
   const { adapter, sent } = roundSeventyTwoBAdapter([]);
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
   const reported: unknown[] = [];
@@ -16827,7 +16843,10 @@ test('a request whose JSON body an interceptor edits in place and then ends is r
     reported.push(error.code, request.body, request.rawBody);
   });
   client.addRequestInterceptor((request) => {
-    (request.body as Record<string, unknown>).edited = true;
+    request.body = {
+      ...(request.body as Record<string, unknown>),
+      edited: true,
+    };
     request.method = 'CONNECT';
     return request;
   });

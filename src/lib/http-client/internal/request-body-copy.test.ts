@@ -3,8 +3,8 @@ import {
   copiedJSONText,
   copyRequestBody,
   holdsSameBytes,
-  readRequestBodyContents,
-  releaseRequestBody,
+  isUnreadJSONBodyCopy,
+  readJSONBodyData,
   serializesToNothing,
 } from './request-body-copy';
 import { UNSUPPORTED_REQUEST_BODY_MESSAGE } from '../utils';
@@ -102,7 +102,7 @@ test('a form is told by its own methods, not by inheriting from FormData.prototy
   }
 });
 
-test('a JSON body copy is sent as its text and parsed back only once it is released', () => {
+test('a JSON body copy is a frozen empty shape sent as its text, and its data is parsed once, frozen, when first read', () => {
   const parse = spyOn(JSON, 'parse');
   try {
     const source = { a: 1, nested: { b: [2, 3] }, when: new Date(0) };
@@ -111,118 +111,93 @@ test('a JSON body copy is sent as its text and parsed back only once it is relea
     expect(parse).toHaveBeenCalledTimes(0);
     expect(copiedJSONText(copy)).toBe(JSON.stringify(source));
     expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
+    expect(copy).toEqual({});
+    expect(Object.isFrozen(copy)).toBe(true);
 
-    releaseRequestBody(copy);
-    releaseRequestBody(copy);
+    const data = readJSONBodyData(copy) as Record<string, unknown> & {
+      nested: { b: number[] };
+    };
 
+    expect(readJSONBodyData(copy)).toBe(data);
     expect(parse).toHaveBeenCalledTimes(1);
-    expect(copy).toEqual({
+    expect(data).toEqual({
       a: 1,
       nested: { b: [2, 3] },
       when: '1970-01-01T00:00:00.000Z',
     });
-    // Caller code may change it now, so its text no longer says what it sends.
-    expect(copiedJSONText(copy)).toBeUndefined();
+    expect(Object.isFrozen(data)).toBe(true);
+    expect(Object.isFrozen(data.nested)).toBe(true);
+    expect(Object.isFrozen(data.nested.b)).toBe(true);
+    // The data stands for the same text, and is its own copy.
+    expect(copiedJSONText(data)).toBe(JSON.stringify(source));
+    expect(copyRequestBody(data)).toBe(data);
+    expect(copyRequestBody(copy)).toBe(copy);
   } finally {
     parse.mockRestore();
   }
 });
 
-test('a JSON array body copy is an array, filled in place', () => {
+test('a JSON array body copy is a frozen empty array, read as its frozen data', () => {
   const copy = copyRequestBody([1, { a: 2 }, undefined]) as unknown[];
 
   expect(Array.isArray(copy)).toBe(true);
   expect(copy).toHaveLength(0);
-
-  releaseRequestBody(copy);
-
-  expect(copy).toEqual([1, { a: 2 }, null]);
+  expect(Object.isFrozen(copy)).toBe(true);
+  expect(readJSONBodyData(copy)).toEqual([1, { a: 2 }, null]);
 });
 
-test('a filled copy holds a __proto__ key as a member, in the order parsed', () => {
+test('data read from a copy holds a __proto__ key as a member, in the order parsed', () => {
   const copy = copyRequestBody(
     JSON.parse('{"z":1,"__proto__":{"polluted":true},"a":2}'),
-  ) as Record<string, unknown>;
+  );
+  const data = readJSONBodyData(copy) as Record<string, unknown>;
 
-  releaseRequestBody(copy);
-
-  expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
-  expect(Object.keys(copy)).toEqual(['z', '__proto__', 'a']);
-  expect(Object.getOwnPropertyDescriptor(copy, '__proto__')?.value).toEqual({
+  expect(Object.getPrototypeOf(data)).toBe(Object.prototype);
+  expect(Object.keys(data)).toEqual(['z', '__proto__', 'a']);
+  expect(Object.getOwnPropertyDescriptor(data, '__proto__')?.value).toEqual({
     polluted: true,
   });
-  expect((copy as { polluted?: unknown }).polluted).toBeUndefined();
+  expect((data as { polluted?: unknown }).polluted).toBeUndefined();
 });
 
-test('releasing a copy fills it and forgets its text, and a copy of an unfilled copy reads the same data', () => {
-  const first = copyRequestBody({ a: 1 }) as Record<string, unknown>;
-  const second = copyRequestBody(first) as Record<string, unknown>;
-
-  expect(second).not.toBe(first);
-  expect(copiedJSONText(second)).toBe('{"a":1}');
-
-  releaseRequestBody(first);
-
-  expect(first).toEqual({ a: 1 });
-  expect(copiedJSONText(first)).toBeUndefined();
-
-  releaseRequestBody(second);
-
-  expect(second).toEqual({ a: 1 });
-});
-
-test('a release whose parse throws leaves the copy unfilled with its text, so the next release fills it', () => {
-  const copy = copyRequestBody({ a: 1 }) as Record<string, unknown>;
+test('a read whose parse throws leaves the copy unread with its text, so the next read parses it', () => {
+  const copy = copyRequestBody({ a: 1 });
   const parse = spyOn(JSON, 'parse').mockImplementationOnce(() => {
     throw new RangeError('Maximum call stack size exceeded');
   });
   try {
-    expect(() => releaseRequestBody(copy)).toThrow(RangeError);
+    expect(() => readJSONBodyData(copy)).toThrow(RangeError);
   } finally {
     parse.mockRestore();
   }
 
-  expect(copy).toEqual({});
   expect(copiedJSONText(copy)).toBe('{"a":1}');
-
-  releaseRequestBody(copy);
-
-  expect(copy).toEqual({ a: 1 });
+  expect(readJSONBodyData(copy)).toEqual({ a: 1 });
 });
 
-test('the contents a filter reads are parsed once into the map it is handed, and fill the copy when it is released with them', () => {
-  const parse = spyOn(JSON, 'parse');
-  try {
-    const parsedByCopy = new Map<unknown, object>();
-    const copy = copyRequestBody({ a: 1, nested: { b: 2 } }) as Record<
-      string,
-      unknown
-    >;
-    const contents = readRequestBodyContents(copy, parsedByCopy);
-
-    expect(contents).toEqual({ a: 1, nested: { b: 2 } });
-    expect(readRequestBodyContents(copy, parsedByCopy)).toBe(contents);
-    expect(parsedByCopy.get(copy)).toBe(contents);
-    // The copy itself is left as it was, an empty object sent as its text.
-    expect(copy).toEqual({});
-    expect(copiedJSONText(copy)).toBe('{"a":1,"nested":{"b":2}}');
-
-    releaseRequestBody(copy, contents);
-
-    expect(copy).toEqual({ a: 1, nested: { b: 2 } });
-    expect(copy.nested).toBe(contents.nested);
-    expect(parse).toHaveBeenCalledTimes(1);
-  } finally {
-    parse.mockRestore();
+test('data nested deeper than a recursive walk could go is frozen whole', () => {
+  let text = '0';
+  for (let depth = 0; depth < 5000; depth++) {
+    text = `[${text}]`;
   }
+  const copy = copyRequestBody(JSON.parse(text) as unknown[]);
+  let level = readJSONBodyData(copy);
+  let frozen = 0;
+  while (Array.isArray(level)) {
+    if (Object.isFrozen(level)) {
+      frozen++;
+    }
+    level = level[0] as unknown;
+  }
+
+  expect(frozen).toBe(5000);
 });
 
-test('a body that is no copy is read by a filter as it is, and nothing is kept for it', () => {
-  const parsedByCopy = new Map<unknown, object>();
+test('a body that is no copy is read as it is', () => {
   const body = { a: 1 };
 
-  expect(readRequestBodyContents(body, parsedByCopy)).toBe(body);
-  expect(parsedByCopy.size).toBe(0);
+  expect(readJSONBodyData(body)).toBe(body);
+  expect(isUnreadJSONBodyCopy(body)).toBe(false);
 });
 
 test('a top-level toJSON that answers a value other than an object or array is still a wrapper answering it', () => {

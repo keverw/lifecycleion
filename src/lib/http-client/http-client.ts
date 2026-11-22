@@ -179,7 +179,6 @@ import {
   copyRequestBody,
   holdsSameBytes,
   isCopySerializingToNothing,
-  isUnfilledRequestBody,
   serializesToNothing,
 } from './internal/request-body-copy';
 import { isAdapterStatus, isStatusCode } from './internal/status-code';
@@ -1218,8 +1217,8 @@ export class BaseHTTPClient {
         // no interceptor registered.
         let callerMethodRefusal: Error | undefined;
         // Read from the request the client built, of which the interceptors are handed a
-        // copy - its own fields and header record, the same body unless it is a JSON body
-        // still unread (see `handedRequestPreparer`).
+        // copy - its own fields and header record, and the same body (see
+        // `handedRequestPreparer`).
         const callerMethod = interceptedRequest.method;
         const hasCallerBody = hasRequestBody(interceptedRequest.body);
         try {
@@ -1239,11 +1238,11 @@ export class BaseHTTPClient {
         // Left unset by a failure that a cancel made first turns into that cancel.
         let interceptResult: ResolvedRequest | InterceptorCancel | undefined;
         let initialRequestCandidate: InterceptedRequest = finalRequest;
-        // The interceptors are handed a copy of the request with its own header record and,
-        // but for a JSON body still unread, the same body (see `handedRequestPreparer`), so
-        // a cancel or a failure below reports `finalRequest` with the URL, method and
-        // headers the client built, and a bytes or form body as an interceptor may have
-        // edited it in place.
+        // The interceptors are handed a copy of the request with its own header record and
+        // the same body (see `handedRequestPreparer`), so a cancel or a failure below
+        // reports `finalRequest` with the URL, method and headers the client built, a JSON
+        // body as it was (it is frozen), and a bytes or form body as an interceptor may
+        // have edited it in place.
         const initialBodyCopy: HandedBodyCopy = {
           isTaken: false,
           didFail: false,
@@ -1937,8 +1936,9 @@ export class BaseHTTPClient {
               ResolvedRequest | InterceptorCancel | undefined;
             let failedRedirectRequest: InterceptedRequest = redirectRequest;
             let redirectInterceptURL = redirectURL;
-            // The interceptors are handed copies of the hop's headers and body (see
-            // `handedRequestPreparer`): the hop's own is the request
+            // The interceptors are handed copies of the hop's headers and of a bytes or form
+            // body, and a JSON body as it is, frozen (see `handedRequestPreparer`): the hop's
+            // own is the request
             // the hop that answered was sent with, kept as it was for the reports a cancel
             // or a failure here makes, and a runtime's `fetch` may still hold its bytes.
             const redirectBodyCopy: HandedBodyCopy = {
@@ -3067,10 +3067,10 @@ export class BaseHTTPClient {
         // runs: an interceptor may write into it, which would otherwise make a header it
         // added look like one it was given.
         const retryInputHeaderNames = new Set(Object.keys(retryInputHeaders));
-        // The interceptors are handed a copy of the hop's body (see `copyRequestBody`):
-        // the hop's own is the body every attempt of the hop starts from, and an
-        // interceptor that added a field to it in place -
-        // `request.body.token = ...; return request` - would otherwise add it again on
+        // The interceptors are handed a copy of a bytes or form hop body, and a JSON one
+        // as it is, frozen (see `copyRequestBody`): the hop's own is the body every
+        // attempt of the hop starts from, and an interceptor that added to it in place -
+        // `form.append('token', ...); return request` - would otherwise add it again on
         // every later retry, and on a hop to an origin the caller never chose send that
         // field to the host the server chose, past the check below, which compares
         // identities. Taken only once an interceptor's function is about to be called, so
@@ -5340,16 +5340,12 @@ export class BaseHTTPClient {
     let didParentCallInterceptor = false;
     // Whether either chain called any interceptor's function this phase.
     let isBodyHandedOut = false;
-    // What a filter of either chain parsed a JSON body to, shared so it is parsed once
-    // and let go of with the phase: the body every later attempt sends holds none of it.
-    const parsedContents = new Map<unknown, object>();
 
     if (parentChain) {
       current = await parentChain(request, phase, chainContext, {
         isCancelled,
         cancelSignal,
         onCopyFailure,
-        parsedContents,
         onInterceptorCalled: () => {
           didParentCallInterceptor = true;
           isBodyHandedOut = true;
@@ -5376,7 +5372,6 @@ export class BaseHTTPClient {
         cancelSignal,
         isInterceptorResult: didParentCallInterceptor,
         onCopyFailure,
-        parsedContents,
         onInterceptorCalled: () => {
           isBodyHandedOut = true;
         },
@@ -7176,16 +7171,17 @@ interface HandedBodyCopy extends BodyCopyOutcome {
  * the request the hop that answered was sent with - so an interceptor that edits it in
  * place, `request.headers.authorization = ...`, edits only the request it returns:
  *
- * - The initial phase copies the header record, and a JSON body still unread - a new
- *   empty copy over the same text, which costs no parse or serialization (see
- *   `copyRequestBody`). Any other body is the builder's copy, handed over as it is, since
- *   copying it again for every request an interceptor runs for would cost as much as the
- *   first copy - an upload's bytes held a third time, a form's entries copied again - so a
- *   request that ends in that phase is reported with an interceptor's in-place edit of
- *   such a body.
+ * - The initial phase copies the header record. The body is the builder's copy, handed
+ *   over as it is: a JSON body copy is frozen, and copying bytes or a form again for every
+ *   request an interceptor runs for would cost as much as the first copy - an upload's
+ *   bytes held a third time, a form's entries copied again - so a request that ends in
+ *   that phase is reported with an interceptor's in-place edit of such a body.
  * - The redirect phase copies both.
  * - The retry phase copies the body alone: its header record is built for each retry (see
  *   `_withInternalRequestHeaders`), and nothing else holds it.
+ *
+ * A JSON body copy is its own copy (see `copyRequestBody`): frozen, it is handed over as
+ * it is in every phase.
  *
  * The record is the client's own - built through `mergeHeaders`, or the hop's - so copying
  * it reads no caller code.
@@ -7205,7 +7201,7 @@ function handedRequestPreparer(
         request.headers as Record<string, string | string[]>,
       );
     }
-    if (copies.body || isUnfilledRequestBody(request.body)) {
+    if (copies.body) {
       try {
         prepared.body = copyRequestBody(request.body);
       } catch (error) {
@@ -7380,11 +7376,11 @@ function dropsBodyHeaders(
  * number - which carries nothing to the host and only protects what is sent (see
  * `upgradedHopURL`); a downgrade, or any other change of scheme or port, is not.
  *
- * The body is the hop's own value too, not the copy the interceptors were handed,
- * whatever they did to it - unless they removed it or left it empty, which sends
- * nothing (see `emptyRequestBody`). The hop's own body goes with the hop's own headers
- * that describe it (`BODY_DESCRIBING_HEADERS`), whether the interceptors replaced it,
- * edited their copy, or left it alone: theirs describe a body that is not sent. A body
+ * The body is the hop's own value too, not what the interceptors were handed or
+ * returned, whatever they did to it - unless they removed it or left it empty, which
+ * sends nothing (see `emptyRequestBody`). The hop's own body goes with the hop's own
+ * headers that describe it (`BODY_DESCRIBING_HEADERS`), whether the interceptors
+ * replaced it, edited a copy of it, or left it alone: theirs describe a body that is not sent. A body
  * they dropped goes with none of them, the hop's or the interceptors', as a hop
  * rewritten to `GET` drops them with its body. A hop with no body to send has nothing
  * to drop, so it goes as it was, its own headers included.
