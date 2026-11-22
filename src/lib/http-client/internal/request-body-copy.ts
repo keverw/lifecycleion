@@ -3,6 +3,7 @@ import { isPlainRecord } from './plain-record';
 import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { filePartNameToSend, formEntries, isFormData } from './form-entries';
 import { plainBytesView } from '../../internal/binary-view';
+import { parseExactJSON } from './exact-json-parse';
 
 /**
  * What the client knows of a JSON body copy it made (see `copyRequestBody`): the text it
@@ -191,13 +192,11 @@ export function readJSONBodyData(body: unknown): unknown {
 /**
  * The data `text` - JSON a copy serialized to - parses to: its plain parse, unless that no
  * longer serializes to `text`, as a number `JSON.rawJSON` wrote past a double's precision
- * (`9007199254740993`) parses to the nearest double. Then each such number is kept as the
- * `JSON.rawJSON` value it was, so a body an interceptor builds from the data
- * (`{ ...request.body, token }`), or a top-level number's copy, still sends it as written.
- * Only a number can read back as other data: `JSON.stringify` writes every other value as
- * its plain parse writes it. A reviver walks the data by recursion, so data nested too
- * deep for it is read as its plain parse: a body handed back unchanged is still sent as
- * `text`, and only one built from such data sends the nearest double.
+ * (`9007199254740993`) parses to the nearest double. Then it is read again keeping each
+ * such number as the `JSON.rawJSON` value it was (see `parseExactJSON`), so a body an
+ * interceptor builds from the data (`{ ...request.body, token }`), or a top-level
+ * number's copy, still sends it as written, at any depth. Only a number can read back as
+ * other data: `JSON.stringify` writes every other value as its plain parse writes it.
  */
 function exactJSONData(text: string): unknown {
   const parsed: unknown = JSON.parse(text);
@@ -208,22 +207,7 @@ function exactJSONData(text: string): unknown {
     return parsed;
   }
 
-  try {
-    return JSON.parse(
-      text,
-      (_key, value: unknown, context?: { source?: string }) =>
-        typeof value === 'number' &&
-        context?.source !== undefined &&
-        context.source !== String(value)
-          ? rawJSON(context.source)
-          : value,
-    );
-  } catch (error) {
-    if (error instanceof RangeError) {
-      return parsed;
-    }
-    throw error;
-  }
+  return parseExactJSON(text, rawJSON);
 }
 
 /**

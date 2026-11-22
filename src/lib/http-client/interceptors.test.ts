@@ -1198,30 +1198,35 @@ describe('JSON body copies read by interceptors', () => {
     }
   });
 
-  test('a JSON body nested too deep for a reviver, holding a number JSON.rawJSON wrote, is read and sent as its text', async () => {
-    const { client, sent } = recordingClient();
-    const reads: unknown[] = [];
-    client.addRequestInterceptor((request) => {
-      reads.push(typeof (request.body as Record<string, unknown>).a);
-      return request;
-    });
-    let body: Record<string, unknown> = {
-      id: { toJSON: () => rawJSON('9007199254740993') },
-    };
-    for (let depth = 0; depth < 6000; depth++) {
-      body = { a: body };
+  test('a JSON body nested deeper than a reviver can walk keeps a number JSON.rawJSON wrote exact, read or rebuilt', async () => {
+    for (const isRebuilt of [false, true]) {
+      const { client, sent } = recordingClient();
+      client.addRequestInterceptor((request) => {
+        const body = request.body as Record<string, unknown>;
+        if (isRebuilt) {
+          request.body = { ...body, token: 't' };
+        }
+        return request;
+      });
+      let body: Record<string, unknown> = {
+        id: { toJSON: () => rawJSON('9007199254740993') },
+      };
+      for (let depth = 0; depth < 6000; depth++) {
+        body = { a: body };
+      }
+      const text = JSON.stringify(body);
+
+      const response = await client
+        .put('https://api.example.com/x')
+        .json(body)
+        .send();
+
+      expect(response.isFailed).toBe(false);
+      expect(text).toContain('9007199254740993');
+      expect(sent).toEqual([
+        isRebuilt ? `${text.slice(0, -1)},"token":"t"}` : text,
+      ]);
     }
-    const text = JSON.stringify(body);
-
-    const response = await client
-      .put('https://api.example.com/x')
-      .json(body)
-      .send();
-
-    expect(response.isFailed).toBe(false);
-    expect(reads).toEqual(['object']);
-    expect(sent).toEqual([text]);
-    expect(text).toContain('9007199254740993');
   });
 
   test('a JSON body an interceptor replaces is sent as its new data, the rounded value it writes included', async () => {
