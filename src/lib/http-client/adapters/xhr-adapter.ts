@@ -544,9 +544,9 @@ export class XHRAdapter implements HTTPAdapter {
        * now: an XHR outside a browser may report the URL it ended at only later - by
        * `load`, or partway through the download - after a status and headers read with
        * none. Such an answer is the followed redirect, as one seen at the headers is: the
-       * final page's status and headers are not its own. Asked at `load`, and before a body
-       * is refused as too large, so the redirect is what that refusal reports where the URL
-       * shows it by then.
+       * final page's status and headers are not its own. Asked at `load`, and of a held
+       * answer read with no URL each time the state and progress listeners read it again
+       * (see `withRedirectShownSinceRead`).
        */
       const withRedirectSeenLater = (
         answer: AnsweredHeaders | undefined,
@@ -909,18 +909,7 @@ export class XHRAdapter implements HTTPAdapter {
        * Fail a body past `maxResponseBytes` as a stream error with the real status and
        * headers of `answer`, and stop the download.
        */
-      const refuseTooLargeBody = (answered: AnsweredHeaders): void => {
-        // A redirect the URL shows only now ends the send as that redirect (see
-        // `endDownloadAt`), not as a body too large. Asked only of an answer read with no
-        // URL, as one read with its URL is judged by it; a read that throws leaves it.
-        let answer = answered;
-        if (answered.responseURL === '') {
-          try {
-            answer = withRedirectSeenLater(answered) ?? answered;
-          } catch {
-            // The URL cannot be read: the answer stands as it was read.
-          }
-        }
+      const refuseTooLargeBody = (answer: AnsweredHeaders): void => {
         endDownloadAt(answer, () => {
           resolve(
             tooLargeAnswer(
@@ -999,13 +988,45 @@ export class XHRAdapter implements HTTPAdapter {
       };
 
       /**
+       * `answer`, read with no URL, as the redirect the browser followed where the XHR
+       * shows one now - partway through the download, say (see `withRedirectSeenLater`) -
+       * kept as the answer and the send ended as that redirect (see `endUploadWithAnswer`),
+       * before anything else is made of the download. An answer read with its URL is
+       * judged by it; a read that throws leaves the answer as it was read. Asked by the
+       * state and progress listeners (see `readAndActOnAnswer`) and at `load`, not where a
+       * cancel, a timeout or a failure ends the send: a browser shows the URL with the
+       * headers, and clears it on those.
+       */
+      const withRedirectShownSinceRead = (
+        answer: AnsweredHeaders,
+      ): AnsweredHeaders => {
+        if (answer.responseURL !== '' || answer.redirectURL !== undefined) {
+          return answer;
+        }
+
+        let seen: AnsweredHeaders;
+        try {
+          seen = withRedirectSeenLater(answer) ?? answer;
+        } catch {
+          return answer;
+        }
+
+        if (seen.redirectURL !== undefined) {
+          answeredAtHeaders = seen;
+          endUploadWithAnswer(seen);
+        }
+
+        return seen;
+      };
+
+      /**
        * The answer, read the first time there is one and acted on as it is (see
        * `onAnswered`), by every listener that reads it on its way in. A read that throws
        * captures nothing: the request ends as it would have.
        */
       const readAndActOnAnswer = (): AnsweredHeaders | undefined => {
         if (answeredAtHeaders !== undefined) {
-          return answeredAtHeaders;
+          return withRedirectShownSinceRead(answeredAtHeaders);
         }
 
         let answered: AnsweredHeaders | undefined;

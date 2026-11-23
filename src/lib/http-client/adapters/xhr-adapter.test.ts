@@ -6840,6 +6840,35 @@ test.each([
   },
 );
 
+test.each([
+  ['a 205 past the limit', 205, 50, false],
+  ['a 200 whose transfer then fails', 200, 5, true],
+])(
+  'a redirect an XHR outside a browser shows partway through the download is the redirect: %s',
+  async (_kind, status, loaded, doesFailAfter) => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+    const xhr = lastXHR;
+
+    xhr.simulateHeadersReceived(status);
+    xhr.responseURL = 'https://api.test/y';
+    xhr.simulateDownloadProgress(loaded, 0);
+    if (doesFailAfter) {
+      xhr.simulateError();
+    }
+
+    const response = await promise;
+
+    expect(response.status).toBe(0);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://api.test/y');
+  },
+);
+
 test('headers an XHR outside a browser shows only at load, after a status with none, are the answer', async () => {
   const promise = new XHRAdapter().send({
     requestURL: 'https://api.test/x',
