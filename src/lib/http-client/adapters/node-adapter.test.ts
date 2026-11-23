@@ -13371,18 +13371,33 @@ test.each([
   'a gzip body followed by zero-byte padding that %s ends with the response, not with the gzip stream',
   async (_kind, missing, isStreamError) => {
     // Gunzip reads a zero byte after its stream as padding and ends there, before the
-    // response has: the body is whole only once the response is.
+    // response has: the body is whole only once the response is. The server holds the
+    // connection open until the client's gunzip has ended, then closes it - short of the
+    // Content-Length, or not.
     const padded = Buffer.concat([
       zlib.gzipSync(Buffer.from('ok')),
       Buffer.alloc(16, 0),
     ]);
+    let markGunzipEnded = (): void => {};
+    const gunzipEnded = new Promise<void>((resolve) => {
+      markGunzipEnded = resolve;
+    });
+    const realCreateGunzip = zlib.createGunzip;
+    const createGunzip = spyOn(zlib, 'createGunzip').mockImplementation(
+      (options) => {
+        const gunzip = realCreateGunzip(options);
+        gunzip.once('end', markGunzipEnded);
+        return gunzip;
+      },
+    );
     const server = net.createServer((socket) => {
       socket.on('error', () => {});
       socket.once('data', () => {
         socket.write(
           `HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: ${String(padded.length + missing)}\r\nConnection: close\r\n\r\n`,
         );
-        socket.end(padded);
+        socket.write(padded);
+        void gunzipEnded.then(() => socket.end());
       });
     });
     await new Promise<void>((resolve) =>
@@ -13396,12 +13411,14 @@ test.each([
         headers: {},
       });
 
+      expect(createGunzip).toHaveBeenCalledTimes(1);
       expect(response.status).toBe(200);
       expect(response.isStreamError === true).toBe(isStreamError);
       if (!isStreamError) {
         expect(Buffer.from(response.body ?? []).toString()).toBe('ok');
       }
     } finally {
+      createGunzip.mockRestore();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   },
