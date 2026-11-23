@@ -148,8 +148,8 @@ export function createResponseBodySource(
  *   before its trailer, which a CDN can serve whole from a truncated cache entry - is a
  *   stream error, not a success that silently lost the rest. `Z_SYNC_FLUSH` only makes
  *   what is decoded arrive promptly.
- * - `data` / `end` come from the last decoder - `end` once the response has ended too, as
- *   gunzip ends early on zero-byte padding - and only start flowing once a `data`
+ * - `data` / `end` come from the last decoder - `end` once the response and every decoder
+ *   have ended too, as gunzip ends early on zero-byte padding - and only start flowing once a `data`
  *   listener is added (or `resume()` drains it), as a paused `IncomingMessage` waits for
  *   its reader. The raw response is read ahead into the decoders from its first byte -
  *   it is what builds them - but only as far as their buffers hold, then backpressure
@@ -174,7 +174,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private didFailDecoding = false;
   private hasDestroyedUnfinishedResponse = false;
   private didLastDecoderClose = false;
-  private didLastDecoderEnd = false;
+  private endedDecoderCount = 0;
   private didEmitClose = false;
   private isPaused = false;
   /**
@@ -472,10 +472,13 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     last.once('close', () => {
       this.didLastDecoderClose = true;
     });
-    last.on('end', () => {
-      this.didLastDecoderEnd = true;
-      this.endIfWhole();
-    });
+    // After each stage's own checks above, so a stage they fail never counts as ended.
+    for (const decoder of this.decoders) {
+      decoder.once('end', () => {
+        this.endedDecoderCount++;
+        this.endIfWhole();
+      });
+    }
 
     const head = this.decoders[0];
     // The first chunk's backpressure is `pipe`'s too: it pauses the response at once when
@@ -495,17 +498,18 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   }
 
   /**
-   * The body's `'end'`, once both the decoding and the raw response have ended: gunzip
+   * The body's `'end'`, once every decoding stage and the raw response have ended: gunzip
    * ends on zero bytes after its stream, which it reads as padding, before the response
-   * has - one then cut short of its `Content-Length` is a stream error, the response's
-   * own, not a body delivered whole.
+   * has, and before an outer stage feeding it has - one then cut short of its
+   * `Content-Length` is a stream error, the response's own, and an outer stage cut short
+   * is that stage's decoding failure, not a body delivered whole.
    */
   private endIfWhole(): void {
     if (
       this.didFailDecoding ||
       this.didDecodeEnd ||
       !this.didRawEnd ||
-      !this.didLastDecoderEnd
+      this.endedDecoderCount < this.decoders.length
     ) {
       return;
     }

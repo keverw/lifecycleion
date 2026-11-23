@@ -9,6 +9,7 @@ import {
 } from 'bun:test';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
+import vm from 'node:vm';
 import { FetchAdapter } from './fetch-adapter';
 import { materializeRequestHeaders } from '../internal/header-utils';
 import { serializeError } from '../../serialize-error';
@@ -1600,6 +1601,128 @@ describe('FetchAdapter', () => {
     shared[0] = 9;
 
     expect(response.body).toEqual(new Uint8Array([1, 2, 3, 4]));
+  });
+
+  test.each([
+    [4, [1, 2, 3, 4]],
+    [2, null],
+  ])(
+    'a wider typed array arrayBuffer() hands over is read by its bytes (maxResponseBytes %p)',
+    async (maxResponseBytes, expected) => {
+      const view = new Uint16Array(new Uint8Array([1, 2, 3, 4]).buffer);
+
+      (globalThis as any).fetch = () =>
+        Promise.resolve({
+          status: 200,
+          headers: new Headers(),
+          arrayBuffer: () => Promise.resolve(view),
+        } as unknown as Response);
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/view',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes,
+      });
+
+      if (expected === null) {
+        expect(response.streamErrorCode).toBe('response_too_large');
+        expect(response.body).toBeNull();
+      } else {
+        expect(response.body).toEqual(new Uint8Array(expected));
+      }
+    },
+  );
+
+  test('a view over part of a buffer that arrayBuffer() hands over is returned as a copy of its own bytes', async () => {
+    const pool = new Uint8Array([9, 1, 2, 9]);
+    const view = pool.subarray(1, 3);
+
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        headers: new Headers(),
+        arrayBuffer: () => Promise.resolve(view),
+      } as unknown as Response);
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/pooled',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 2,
+    });
+    pool[1] = 7;
+
+    expect(response.body).toEqual(new Uint8Array([1, 2]));
+    expect(response.body?.buffer.byteLength).toBe(2);
+  });
+
+  test('a typed array past the end of a resizable buffer that shrank is a stream error, not an empty body', async () => {
+    const buffer = new (
+      ArrayBuffer as unknown as new (
+        length: number,
+        options: { maxByteLength: number },
+      ) => ArrayBuffer & { resize: (length: number) => void }
+    )(8, { maxByteLength: 8 });
+    const view = new Uint8Array(buffer, 4, 4);
+    buffer.resize(2);
+
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        headers: new Headers(),
+        arrayBuffer: () => Promise.resolve(view),
+      } as unknown as Response);
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/shrunk',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+    expect(response.body).toBeNull();
+  });
+
+  test('a DataView from another realm that arrayBuffer() hands over is read by its bytes', async () => {
+    const view = vm.runInNewContext(
+      'new DataView(new Uint8Array([9, 1, 2, 9]).buffer, 1, 2)',
+    ) as DataView;
+
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        headers: new Headers(),
+        arrayBuffer: () => Promise.resolve(view),
+      } as unknown as Response);
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/realm',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.body).toEqual(new Uint8Array([1, 2]));
+  });
+
+  test('an arrayBuffer() that resolves to neither a buffer nor a view is a stream error', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        headers: new Headers(),
+        arrayBuffer: () => Promise.resolve(1_000_000),
+      } as unknown as Response);
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/odd',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+    expect(response.body).toBeNull();
   });
 
   test('a resizable buffer over the limit that arrayBuffer() hands over is refused without being copied', async () => {

@@ -6785,6 +6785,25 @@ test('a redirect an XHR outside a browser reports only at load is the followed r
   expect(response.body).toBeNull();
 });
 
+test('headers an XHR outside a browser shows only at load, after a status with none, are the answer', async () => {
+  const promise = new XHRAdapter().send({
+    requestURL: 'https://api.test/x',
+    method: 'GET',
+    headers: {},
+  });
+  const xhr = lastXHR;
+
+  xhr.simulateHeadersReceived(200);
+  xhr.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+  xhr.readyState = 4;
+  xhr.response = new TextEncoder().encode('hi').buffer;
+  xhr.simulateLoad();
+  const response = await promise;
+
+  expect(response.status).toBe(200);
+  expect(response.headers['content-type']).toBe('text/plain');
+});
+
 test('a stop asked for inside send(), where abort() does nothing, is made once send() returns', async () => {
   // An XHR outside a browser that reports a malformed status inside send(), while the
   // response is still loading, and whose abort() does nothing until send() has returned.

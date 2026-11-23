@@ -62,6 +62,10 @@ import {
   readBinaryByteLength,
   isUint8ArrayValue,
   fixedUnsharedByteLength,
+  isArrayBufferLike,
+  plainBytesView,
+  assertTypedArrayInBounds,
+  typedArrayNameOf,
 } from '../../internal/binary-view';
 import { asciiLowercase, asciiUppercase } from '../../internal/ascii-text';
 import {
@@ -626,7 +630,7 @@ async function readWholeBody(
   });
 
   try {
-    const buffer = await response.arrayBuffer();
+    const buffer: unknown = await response.arrayBuffer();
 
     // A cancel can end the read as if finished; what it read is not the whole body.
     if (isSignalAbortedQuietly(signal)) {
@@ -637,15 +641,35 @@ async function readWholeBody(
     // or shared memory another thread writes: measured once, refused before anything is
     // copied where it is over the limit, and otherwise copied to the bytes measured, as
     // XHRAdapter copies one, so the bytes checked against the limit are the bytes returned.
-    const bytes = new Uint8Array(buffer);
+    // A view in place of a buffer - a Node `Buffer`, say - is read by its bytes, whatever
+    // its element size, and always copied: its buffer may be a pool others' bytes share.
+    const isView = ArrayBuffer.isView(buffer);
+    if (
+      !isView &&
+      (typeof buffer !== 'object' ||
+        buffer === null ||
+        !isArrayBufferLike(buffer))
+    ) {
+      throw new TypeError(
+        'Response arrayBuffer() resolved to neither an ArrayBuffer nor a view of one',
+      );
+    }
+
+    // A typed array past the end of a resizable buffer that shrank would read as empty: it
+    // throws instead, as a `DataView`'s own getters do for one.
+    if (isView && typedArrayNameOf(buffer) !== undefined) {
+      assertTypedArrayInBounds(buffer);
+    }
+
+    const bytes = isView
+      ? plainBytesView(buffer)
+      : new Uint8Array(buffer as ArrayBufferLike);
     const measured = bytes.length;
     if (measured > maxResponseBytes) {
       return RESPONSE_TOO_LARGE;
     }
 
-    // Told by the view's buffer: a view handed over in place of a buffer is copied into one
-    // of its own by the constructor already.
-    return fixedUnsharedByteLength(bytes.buffer) === null
+    return isView || fixedUnsharedByteLength(bytes.buffer) === null
       ? bytes.slice(0, measured)
       : bytes;
   } finally {

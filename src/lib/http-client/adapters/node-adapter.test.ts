@@ -13425,6 +13425,56 @@ test.each([
   30_000,
 );
 
+test('a stacked body whose inner gzip ends on zero-byte padding is a stream error when its outer deflate stage is cut short', async () => {
+  // `gzip, deflate`: deflate is undone first, then gzip. The inner gzip ends on its
+  // padding, then the response ends with the outer deflate stream's checksum cut short:
+  // the body is whole only once every stage has ended.
+  const deflated = zlib.deflateSync(
+    Buffer.concat([zlib.gzipSync(Buffer.from('ok')), Buffer.alloc(16, 0)]),
+  );
+  const truncated = deflated.subarray(0, deflated.length - 2);
+  let markGunzipEnded = (): void => {};
+  const gunzipEnded = new Promise<void>((resolve) => {
+    markGunzipEnded = resolve;
+  });
+  const realCreateGunzip = zlib.createGunzip;
+  const createGunzip = spyOn(zlib, 'createGunzip').mockImplementation(
+    (options) => {
+      const gunzip = realCreateGunzip(options);
+      gunzip.once('end', markGunzipEnded);
+      return gunzip;
+    },
+  );
+  // The last byte, part of the checksum, is held back until the client's gunzip has
+  // ended, so the response ends after it.
+  const server = net.createServer((socket) => {
+    socket.on('error', () => {});
+    socket.once('data', () => {
+      socket.write(
+        `HTTP/1.1 200 OK\r\nContent-Encoding: gzip, deflate\r\nContent-Length: ${String(truncated.length)}\r\nConnection: close\r\n\r\n`,
+      );
+      socket.write(truncated.subarray(0, -1));
+      void gunzipEnded.then(() => socket.end(truncated.subarray(-1)));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${String(port)}/stacked`,
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(createGunzip).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+  } finally {
+    createGunzip.mockRestore();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}, 30_000);
+
 test('an upload a Connection: close answer that fails to decode ends is not settled as the close', async () => {
   // The answer is still arriving - its Content-Length is past what is sent - when the
   // decoder fails and tears the connection down, so the upload is ended by this adapter,

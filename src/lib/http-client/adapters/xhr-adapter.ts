@@ -573,6 +573,33 @@ export class XHRAdapter implements HTTPAdapter {
         };
       };
 
+      /**
+       * `answer`, with the headers the XHR shows now where it showed none when the answer
+       * was read: an XHR outside a browser may report a status as its headers arrive but
+       * its headers only by `load`. A read that throws keeps `answer` as it was.
+       */
+      const withHeadersShownAtLoad = (
+        answer: AnsweredHeaders,
+      ): AnsweredHeaders => {
+        if (
+          answer.redirectURL !== undefined ||
+          Object.keys(answer.headers).length > 0
+        ) {
+          return answer;
+        }
+
+        let headers: AnsweredHeaders['headers'];
+        try {
+          headers = parseXHRResponseHeaders(xhr.getAllResponseHeaders());
+        } catch {
+          return answer;
+        }
+
+        return Object.keys(headers).length === 0
+          ? answer
+          : { ...answer, headers };
+      };
+
       // --- Abort signal ---
       //
       // Check for pre-aborted signal before calling xhr.send — if we called
@@ -1110,12 +1137,14 @@ export class XHRAdapter implements HTTPAdapter {
           // Read before any progress callback, as everything this listener reports is: the
           // answer, captured once (see `answeredAtHeaders`).
           // Read here for the first time by an XHR that showed no state before `load`.
-          const answer = withRedirectSeenAtLoad(answerToActOn(captureAnswer()));
+          const seen = withRedirectSeenAtLoad(answerToActOn(captureAnswer()));
 
           // Ended by the answer: a malformed status.
-          if (answer === undefined) {
+          if (seen === undefined) {
             return;
           }
+
+          const answer = withHeadersShownAtLoad(seen);
 
           // A redirect is seen here only by an XHR that reported none of it before. The
           // final upload event fires before the body is read, so a refused body sees it
