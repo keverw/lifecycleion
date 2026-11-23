@@ -366,8 +366,35 @@ function handedRequest(request: InterceptedRequest): InterceptedRequest {
     // eslint-disable-next-line @typescript-eslint/naming-convention
     __proto__: null,
     get: lazy.get,
-    set: (value: unknown) => {
-      lazy.body = value;
+    set(this: unknown, value: unknown) {
+      // Refused on a request the interceptor froze, as its frozen data field would be,
+      // and through an object derived from it.
+      if (Object.isFrozen(handed)) {
+        throw new TypeError("Cannot assign to read only property 'body'");
+      }
+
+      if (this === handed) {
+        lazy.body = value;
+        return;
+      }
+
+      // An assignment on an object derived from the request - `Object.create(request)` -
+      // gives that object its own field, as the request's data field would, and leaves
+      // the request, and so what it sends, as it was.
+      if (
+        typeof this !== 'object' ||
+        this === null ||
+        !Reflect.defineProperty(this, 'body', {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          __proto__: null,
+          configurable: true,
+          enumerable: true,
+          value,
+          writable: true,
+        } as PropertyDescriptor)
+      ) {
+        throw new TypeError("Cannot assign to read only property 'body'");
+      }
     },
     enumerable: true,
     configurable: true,

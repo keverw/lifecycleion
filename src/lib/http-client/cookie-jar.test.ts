@@ -4516,6 +4516,40 @@ test('a nameless Set-Cookie keeps the = in its value, as browsers do', () => {
   expect(jar.setCookie({ ...base, value: '__Host-Http-sid=evil' })).toBe(false);
 });
 
+test('a nameless cookie from http cannot shadow a Secure cookie by the name its value spells', () => {
+  const sent = (line: string): string => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('sid=secret; Secure', 'https://example.com/');
+    jar.parseSetCookieHeader(line, 'http://example.com/');
+    return jar.getCookieHeaderString('https://example.com/');
+  };
+
+  for (const line of ['=sid=evil', '= sid =evil', 'sid', '=sid']) {
+    expect(sent(line)).toBe('sid=secret');
+  }
+
+  expect(sent('=other=fine')).toBe('sid=secret; other=fine');
+
+  // The other way round: a named cookie beside a Secure nameless one spelling its name.
+  for (const secure of ['=sid=good; Secure', 'sid; Secure']) {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader(secure, 'https://example.com/');
+    jar.parseSetCookieHeader('sid=evil', 'http://example.com/');
+    expect(jar.getCookieHeaderString('https://example.com/')).not.toContain(
+      'evil',
+    );
+  }
+});
+
+test('a nameless cookie set before a Secure cookie of the name it spells can still be deleted from http', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader('=sid=old', 'http://example.com/');
+  jar.parseSetCookieHeader('sid=good; Secure', 'https://example.com/');
+  jar.parseSetCookieHeader('=sid; Max-Age=0', 'http://example.com/');
+
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('sid=good');
+});
+
 test('a value with a space or tab at its edge is refused, as such a name is', () => {
   const jar = new CookieJar();
   const base = { name: 'a', domain: 'example.com', path: '/' };
@@ -5516,6 +5550,7 @@ describe('Leave Secure Cookies Alone reaches the sites on either side of a domai
     bucketKeysUnder: Map<string, Set<string>>;
     wouldShadowSecureCookie: (
       name: string,
+      wireName: string | undefined,
       domain: string,
       path: string,
     ) => boolean;
@@ -5906,8 +5941,8 @@ describe('Leave Secure Cookies Alone reaches the sites on either side of a domai
         const internals = internalsOf(watched);
         const check = internals.wouldShadowSecureCookie.bind(watched);
 
-        internals.wouldShadowSecureCookie = (name, domain, path) => {
-          const isRefused = check(name, domain, path);
+        internals.wouldShadowSecureCookie = (name, wireName, domain, path) => {
+          const isRefused = check(name, wireName, domain, path);
           const site = shadowingSite(watched, name, domain, path);
 
           if (isRefused !== (site !== null)) {
@@ -6027,7 +6062,7 @@ describe('Leave Secure Cookies Alone reaches the sites on either side of a domai
         for (const name of NAMES) {
           for (const domain of HOSTS) {
             for (const path of PATHS) {
-              internals.wouldShadowSecureCookie(name, domain, path);
+              internals.wouldShadowSecureCookie(name, name, domain, path);
             }
           }
         }

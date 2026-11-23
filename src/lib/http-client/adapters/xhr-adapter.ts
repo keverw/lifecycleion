@@ -559,9 +559,16 @@ export class XHRAdapter implements HTTPAdapter {
           return answer;
         }
 
-        if (
-          compareResponseURL(responseURL, dispatchedURL).kind !== 'redirected'
-        ) {
+        const comparison = compareResponseURL(responseURL, dispatchedURL);
+
+        // An upgrade the browser made itself, shown only now: the `https:` form is what
+        // answered, so a `Location` resolves against it, as one seen at the headers does.
+        if (comparison.kind === 'upgraded') {
+          answeringURL = comparison.upgradedURL;
+          return answer;
+        }
+
+        if (comparison.kind !== 'redirected') {
           return answer;
         }
 

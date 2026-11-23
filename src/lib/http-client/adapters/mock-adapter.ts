@@ -1716,7 +1716,7 @@ function serializeResponseBody(
     }
     return bytes.slice(0, byteLength);
   } else if (typeof body === 'string') {
-    return new TextEncoder().encode(body);
+    return encodedWithin(body, maxResponseBytes);
   } else if (Array.isArray(body) || isPlainRecord(body)) {
     // `JSON.stringify` answers `undefined` for a top-level `toJSON` that does: nothing is
     // sent, so nothing is typed as JSON either, as the client sends such a request body.
@@ -1724,12 +1724,26 @@ function serializeResponseBody(
 
     return serialized === undefined
       ? null
-      : new TextEncoder().encode(serialized);
+      : encodedWithin(serialized, maxResponseBytes);
   }
 
   throw new Error(
     'Unsupported mock response body type. Supported types: string, Uint8Array, ArrayBuffer, plain object, array, null, and undefined.',
   );
+}
+
+/**
+ * `text` as UTF-8, or {@link OVERSIZED_BODY} where that is past `maxResponseBytes`: told
+ * from the text before it is encoded (see `isAnsweredBodyOverLimit`), so a large fixture
+ * under a small limit is not encoded and held through the delay only to be refused.
+ */
+function encodedWithin(
+  text: string,
+  maxResponseBytes: number,
+): Uint8Array | typeof OVERSIZED_BODY {
+  return isAnsweredBodyOverLimit(text, maxResponseBytes)
+    ? OVERSIZED_BODY
+    : new TextEncoder().encode(text);
 }
 
 /**

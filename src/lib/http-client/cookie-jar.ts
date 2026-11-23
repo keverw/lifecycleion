@@ -288,6 +288,20 @@ const SAFE_FROM_JAR_LIMIT_MS = 30 * 24 * 60 * 60 * 1000;
 type CookieNamePrefix = '__host-http-' | '__host-' | '__http-' | '__secure-';
 
 /**
+ * The name a server reads a cookie by in the `Cookie` header: its own, or for a nameless
+ * cookie, sent as its value alone, what comes before the value's first `=` - or the whole
+ * value where it has none - trimmed as a name is.
+ */
+function cookieWireName(name: string, value: string): string {
+  if (name !== '') {
+    return name;
+  }
+
+  const eqIndex = value.indexOf('=');
+  return trimSpacesAndTabs(eqIndex === -1 ? value : value.slice(0, eqIndex));
+}
+
+/**
  * The cookie name prefix `text` starts with, matched ASCII case-insensitively as
  * browsers match it, or `null` for none: RFC 6265bis §4.1.3's `__Secure-` and
  * `__Host-`, and the `__Http-` and `__Host-Http-` prefixes Chrome and Firefox enforce as
@@ -2156,9 +2170,25 @@ export class CookieJar {
     // expiry-driven deletions below on purpose - `Max-Age=0` over `http:` is otherwise a
     // one-line eviction of the `https:` session, and a fresh one planted beside it would
     // then be the only `session` cookie left to send.
+    //
+    // Matched by the name a server reads in the `Cookie` header as well as the name
+    // stored: a nameless cookie is sent as its value alone, so `=sid=evil` arrives as
+    // `sid=evil` beside a Secure `sid`, and `sid=evil` beside a Secure nameless
+    // `=sid=good`. A deletion is matched by the name stored alone: it removes only the
+    // cookie of that name, which shadows nothing once gone.
+    const isDeletion =
+      (parsed.maxAge !== undefined && parsed.maxAge <= 0) ||
+      (parsed.expires !== undefined &&
+        parsed.expires.getTime() <= Date.now() &&
+        parsed.maxAge === undefined);
     if (
       !isSecureRequest &&
-      this.wouldShadowSecureCookie(parsed.name, domain, path)
+      this.wouldShadowSecureCookie(
+        parsed.name,
+        isDeletion ? undefined : cookieWireName(parsed.name, parsed.value),
+        domain,
+        path,
+      )
     ) {
       return;
     }
@@ -2293,8 +2323,10 @@ export class CookieJar {
   }
 
   /**
-   * Whether the jar already holds a Secure cookie named `name` whose scope covers a new
-   * cookie stored for `domain` / `path` - RFC 6265bis §5.7 step 21, as browsers apply it:
+   * Whether the jar already holds a Secure cookie named `name` - or, where `wireName` is
+   * given, read by a server as that name (see `cookieWireName`), a check past browsers'
+   * own - whose scope covers a new cookie stored for `domain` / `path` - RFC 6265bis §5.7
+   * step 21, as browsers apply it:
    * the stored cookie's domain domain-matches the new cookie's domain *or vice versa*, and
    * the new cookie's path path-matches the stored one's. A wider path is stored: a `/`
    * cookie beside a Secure `/admin` one is sent after it. The domains match either way,
@@ -2304,6 +2336,7 @@ export class CookieJar {
    */
   private wouldShadowSecureCookie(
     name: string,
+    wireName: string | undefined,
     domain: string,
     path: string,
   ): boolean {
@@ -2324,6 +2357,7 @@ export class CookieJar {
       this.holdsSecureCookieOver(
         normalizedDomain,
         name,
+        wireName,
         preparedDomain,
         path,
         now,
@@ -2338,13 +2372,31 @@ export class CookieJar {
     }
 
     for (const site of namesAbove(normalizedDomain)) {
-      if (this.holdsSecureCookieOver(site, name, preparedDomain, path, now)) {
+      if (
+        this.holdsSecureCookieOver(
+          site,
+          name,
+          wireName,
+          preparedDomain,
+          path,
+          now,
+        )
+      ) {
         return true;
       }
     }
 
     for (const site of this.bucketKeysUnder.get(normalizedDomain) ?? []) {
-      if (this.holdsSecureCookieOver(site, name, preparedDomain, path, now)) {
+      if (
+        this.holdsSecureCookieOver(
+          site,
+          name,
+          wireName,
+          preparedDomain,
+          path,
+          now,
+        )
+      ) {
         return true;
       }
     }
@@ -2353,13 +2405,15 @@ export class CookieJar {
   }
 
   /**
-   * Whether `site`'s bucket holds a live Secure cookie named `name` whose domain matches
+   * Whether `site`'s bucket holds a live Secure cookie named `name`, or read as `wireName`,
+   * whose domain matches
    * `preparedDomain` in either direction and whose path `path` path-matches. See
    * {@link wouldShadowSecureCookie}.
    */
   private holdsSecureCookieOver(
     site: string,
     name: string,
+    wireName: string | undefined,
     preparedDomain: PreparedHost,
     path: string,
     now: number,
@@ -2369,7 +2423,9 @@ export class CookieJar {
 
       if (
         cookie.secure !== true ||
-        cookie.name !== name ||
+        (cookie.name !== name &&
+          (wireName === undefined ||
+            cookieWireName(cookie.name, cookie.value) !== wireName)) ||
         this.isExpired(stored, now)
       ) {
         continue;

@@ -3174,6 +3174,33 @@ describe('MockAdapter - route body bytes', () => {
   });
 });
 
+test.each([
+  ['a string', 'x'.repeat(1000)],
+  ['a JSON value', { text: 'x'.repeat(1000) }],
+])(
+  'a route body of %s past maxResponseBytes is refused without being encoded',
+  async (_kind, body) => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/big', () => ({ status: 200, body }));
+    const encode = spyOn(TextEncoder.prototype, 'encode');
+    let response;
+    let encoded: number;
+    try {
+      response = await adapter.send(
+        makeAdapterRequest({ requestURL: '/big', maxResponseBytes: 10 }),
+      );
+      encoded = encode.mock.calls.filter(
+        ([text]) => typeof text === 'string' && text.length >= 1000,
+      ).length;
+    } finally {
+      encode.mockRestore();
+    }
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(encoded).toBe(0);
+  },
+);
+
 describe('MockAdapter - route body bytes from another realm', () => {
   test("a route body of bytes from another realm is sent as this realm's Uint8Array", async () => {
     const adapter = new MockAdapter();

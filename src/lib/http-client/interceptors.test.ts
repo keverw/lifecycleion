@@ -1270,6 +1270,44 @@ describe('JSON body copies read by interceptors', () => {
     expect(sent).toEqual(['{"replaced":true}']);
   });
 
+  test('a body assigned on an object derived from the request stays on that object, and the request sends its own', async () => {
+    const { client, sent } = recordingClient();
+    client.addRequestInterceptor((request) => {
+      const draft = Object.create(request) as typeof request;
+      draft.body = { draft: true };
+      return request;
+    });
+
+    await client.put('https://api.example.com/x').json({ a: 1 }).send();
+
+    expect(sent).toEqual(['{"a":1}']);
+  });
+
+  test('a body assigned on a request the interceptor froze is refused, as a frozen field is', async () => {
+    const { client, sent } = recordingClient();
+    const refused: unknown[] = [];
+    client.addRequestInterceptor((request) => {
+      Object.freeze(request);
+      for (const target of [
+        request,
+        Object.create(request) as typeof request,
+      ]) {
+        try {
+          target.body = { replaced: true };
+        } catch (error) {
+          refused.push(error instanceof TypeError);
+        }
+      }
+
+      return request;
+    });
+
+    await client.put('https://api.example.com/x').json({ a: 1 }).send();
+
+    expect(refused).toEqual([true, true]);
+    expect(sent).toEqual(['{"a":1}']);
+  });
+
   test('the data a bodyContainsKeys filter reads is parsed once for the request, across its phases, whether the filter missed or matched', async () => {
     const text = '{"a":1,"marker":"probe"}';
     for (const key of ['missing', 'a']) {

@@ -3155,6 +3155,28 @@ describe('XHRAdapter', () => {
     expect(response.detectedRedirectURL).toBe('https://api.test/b');
   });
 
+  test('a 3xx whose upgrade the XHR shows only at load resolves its Location against the https: URL that answered', async () => {
+    const response = await withPageOrigin('https://app.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'http://api.test/a',
+        method: 'GET',
+        headers: {},
+      });
+
+      // The status and headers arrive with no URL; the upgraded one shows at `load`.
+      lastXHR.simulateHeadersReceived(308, 'location: /b\r\n');
+      lastXHR.response = textBody('');
+      lastXHR.responseURL = 'https://api.test/a';
+      lastXHR.simulateLoad();
+
+      return await promise;
+    });
+
+    expect(response.status).toBe(308);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://api.test/b');
+  });
+
   test('an upgraded same-host request past maxResponseBytes is refused mid-download, as a same-origin one is', async () => {
     const result = await withPageOrigin(
       'https://app.test',
