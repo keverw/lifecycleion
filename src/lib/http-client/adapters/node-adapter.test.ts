@@ -13364,6 +13364,50 @@ test('a whole compressed answer with Connection: close that arrives mid-upload k
   }
 }, 30_000);
 
+test.each([
+  ['arrives whole', 0, false],
+  ['is cut short of its Content-Length', 100, true],
+])(
+  'a gzip body followed by zero-byte padding that %s ends with the response, not with the gzip stream',
+  async (_kind, missing, isStreamError) => {
+    // Gunzip reads a zero byte after its stream as padding and ends there, before the
+    // response has: the body is whole only once the response is.
+    const padded = Buffer.concat([
+      zlib.gzipSync(Buffer.from('ok')),
+      Buffer.alloc(16, 0),
+    ]);
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+      socket.once('data', () => {
+        socket.write(
+          `HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: ${String(padded.length + missing)}\r\nConnection: close\r\n\r\n`,
+        );
+        socket.end(padded);
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${String(port)}/padded`,
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError === true).toBe(isStreamError);
+      if (!isStreamError) {
+        expect(Buffer.from(response.body ?? []).toString()).toBe('ok');
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  },
+  30_000,
+);
+
 test('an upload a Connection: close answer that fails to decode ends is not settled as the close', async () => {
   // The answer is still arriving - its Content-Length is past what is sent - when the
   // decoder fails and tears the connection down, so the upload is ended by this adapter,

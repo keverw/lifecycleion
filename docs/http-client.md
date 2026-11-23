@@ -1800,7 +1800,7 @@ Compressed responses are handled as `fetch` handles them: NodeAdapter asks for c
 
 **Decoding is strict.** A body that ends before its compressed stream does (a gzip body cut before its trailer), or carries bytes after it, is a stream error.
 
-- gzip follows gunzip's own rule, as Node and browsers do: bytes after a gzip stream fail unless they start with a zero byte, which reads as padding, and what follows that zero byte is ignored.
+- gzip follows gunzip's own rule, as Node and browsers do: bytes after a gzip stream fail unless they start with a zero byte, which reads as padding, and what follows that zero byte is ignored; the body still ends only when the response does, so one cut short of its `Content-Length` after that padding is a stream error.
 - Under stacked codings, a gzip stage that ends on such padding ends the body, so what an outer stage still holds after that point - a cut, corrupt or junk-trailed end - can go unread and unreported (behind a large run of zero padding, say). With a gzip outer stage, that is how Node's `fetch` reads such a body.
 
 **FetchAdapter decodes by its runtime's `fetch` rules**, which are more lenient in places:
