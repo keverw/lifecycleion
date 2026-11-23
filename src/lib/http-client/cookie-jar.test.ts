@@ -2535,6 +2535,21 @@ describe('CookieJar', () => {
       },
     );
 
+    test.each([
+      ['HttpOnly with a 1024-octet value', true, 'Secure', 'HttpOnly', 1024],
+      ['HttpOnly with a 1025-octet value', false, 'Secure', 'HttpOnly', 1025],
+      ['Secure with a 1025-octet value', false, 'HttpOnly', 'Secure', 1025],
+    ] as const)(
+      'a flag whose value is over 1024 octets is ignored, as any attribute is (RFC 6265bis §5.6): __Http-id with %s is stored: %p',
+      (_label, isStored, otherFlag, sizedFlag, valueLength) => {
+        jar.parseSetCookieHeader(
+          `__Http-id=1; ${otherFlag}; ${sizedFlag}=${'x'.repeat(valueLength)}`,
+          'https://example.com/app/page',
+        );
+        expect(jar.getAllCookies()).toHaveLength(isStored ? 1 : 0);
+      },
+    );
+
     test('setCookie() and fromJSON() require httpOnly for __Http- and __Host-Http-', () => {
       const base = {
         value: '1',

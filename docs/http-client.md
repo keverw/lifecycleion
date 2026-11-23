@@ -1801,12 +1801,12 @@ Compressed responses are handled as `fetch` handles them: NodeAdapter asks for c
 **Decoding is strict.** A body that ends before its compressed stream does (a gzip body cut before its trailer), or carries bytes after it, is a stream error.
 
 - gzip follows gunzip's own rule, as Node and browsers do: bytes after a gzip stream fail unless they start with a zero byte, which reads as padding, and what follows that zero byte is ignored; the body still ends only when the response does, so one cut short of its `Content-Length` after that padding is a stream error.
-- Under stacked codings, a gzip stage that ends on such padding ends the body, so what an outer stage still holds after that point - a cut, corrupt or junk-trailed end - can go unread and unreported (behind a large run of zero padding, say). With a gzip outer stage, that is how Node's `fetch` reads such a body.
+- Under stacked codings, the body ends only once every stage has: an inner gzip stage that ends on such padding still leaves the outer stage to be read to its end, so an outer stage that is cut short, corrupt or followed by junk is a stream error.
 
 **FetchAdapter decodes by its runtime's `fetch` rules**, which are more lenient in places:
 
 - Bun's `fetch` ignores bytes after a compressed stream.
-- Node's `fetch` returns what decoded from a body cut short, with a matching `Content-Length`, as a complete response: through FetchAdapter on Node a truncated gzip body is a success holding part of the text, where NodeAdapter, and FetchAdapter on Bun, fail it as a stream error. Use NodeAdapter where a cut-short compressed body must fail (one coding, or a stack whose inner stage carries no padding).
+- Node's `fetch` returns what decoded from a body cut short, with a matching `Content-Length`, as a complete response: through FetchAdapter on Node a truncated gzip body is a success holding part of the text, where NodeAdapter, and FetchAdapter on Bun, fail it as a stream error. Use NodeAdapter where a cut-short compressed body must fail.
 - They can differ on a well-formed body with more than one coding too: Bun's `fetch` hands a stacked body (`br, gzip`) over undecoded, and Node's `fetch` one that lists `identity` beside a coding (`identity, gzip`). NodeAdapter decodes both.
 
 **A body that cannot be decoded** fails as a stream error with the response's status. Where what failed is the decoding rather than the transfer, the status still counts, as browsers treat it:

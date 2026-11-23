@@ -1272,6 +1272,39 @@ describe('FetchAdapter', () => {
     expect(downloadEvents).toEqual([{ loaded: 0, total: 0, progress: 1 }]);
   });
 
+  test('the final upload event reports the body as fetch took it, though its buffer is transferred in flight', async () => {
+    const body = new Uint8Array(8);
+    const uploadEvents: Array<{
+      loaded: number;
+      total: number;
+      progress: number;
+    }> = [];
+
+    (globalThis as any).fetch = () => {
+      // The caller hands the buffer on while the request is in flight, leaving the view
+      // with no bytes.
+      structuredClone(body.buffer, { transfer: [body.buffer] });
+      return Promise.resolve(
+        new Response(null, { status: 204, headers: new Headers() }),
+      );
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/upload',
+      method: 'POST',
+      headers: {},
+      body,
+      onUploadProgress: (e) => uploadEvents.push(e),
+    });
+
+    expect(response.status).toBe(204);
+    expect(body.byteLength).toBe(0);
+    expect(uploadEvents).toEqual([
+      { loaded: 0, total: 0, progress: 0 },
+      { loaded: 8, total: 8, progress: 1 },
+    ]);
+  });
+
   test.each([
     ['an opaque redirect', 0, 'opaqueredirect', 'GET', 'resolved'],
     ['a bodiless answer', 204, 'basic', 'GET', 'rejected AbortError'],

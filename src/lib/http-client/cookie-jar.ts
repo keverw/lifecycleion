@@ -1710,26 +1710,27 @@ export class CookieJar {
         trimSpacesAndTabs(eqIdx === -1 ? part : part.slice(0, eqIdx)),
       );
 
-      // Flag attributes are matched by name; RFC 6265bis ignores any value.
+      // A bare attribute (`; Path`) has an empty value, as RFC 6265bis §5.6 reads it -
+      // the same as `; Path=`. Skipped, it would leave an earlier `Path=/` in force,
+      // which would let `__Host-id=1; Secure; Path=/; Path` past the prefix rule.
+      const attrValue =
+        eqIdx === -1 ? '' : trimSpacesAndTabs(part.slice(eqIdx + 1));
+
+      // An attribute whose value is over 1024 octets is ignored, as RFC 6265bis §5.6
+      // ignores it before reading its name - a flag's too, so `HttpOnly=<1025 octets>`
+      // sets no `HttpOnly`. Counted in characters: the header arrives read as latin1,
+      // one character per octet on the wire, and encoding it as UTF-8 would count each
+      // byte above 0x7F twice.
+      if (attrValue.length > 1024) {
+        continue;
+      }
+
+      // Flag attributes are matched by name; RFC 6265bis ignores any other value.
       if (attrName === 'secure') {
         cookie.secure = true;
       } else if (attrName === 'httponly') {
         cookie.httpOnly = true;
       } else {
-        // A bare attribute (`; Path`) has an empty value, as RFC 6265bis §5.6 reads it -
-        // the same as `; Path=`. Skipped, it would leave an earlier `Path=/` in force,
-        // which would let `__Host-id=1; Secure; Path=/; Path` past the prefix rule.
-        const attrValue =
-          eqIdx === -1 ? '' : trimSpacesAndTabs(part.slice(eqIdx + 1));
-
-        // An attribute value over 1024 octets is ignored, as RFC 6265bis ignores it.
-        // Counted in characters: the header arrives read as latin1, one character per
-        // octet on the wire, and encoding it as UTF-8 would count each byte above 0x7F
-        // twice.
-        if (attrValue.length > 1024) {
-          continue;
-        }
-
         switch (attrName) {
           case 'domain': {
             // The last one wins, an empty one included: `Domain=example.com; Domain=` is

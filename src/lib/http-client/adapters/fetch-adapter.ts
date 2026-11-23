@@ -259,6 +259,14 @@ export class FetchAdapter implements HTTPAdapter {
       throw abortReasonOf(signal);
     }
 
+    // The body's size as it is handed to `fetch`, for the upload's 100% below: read now,
+    // as `fetch` takes the bytes, since a buffer the caller transfers or resizes while the
+    // request is in flight would report its later size. Only when upload progress was
+    // asked for: nothing else reads it.
+    const uploadByteLength = guardedUploadProgress
+      ? knownBodyByteLength(body)
+      : undefined;
+
     let response: Response;
 
     try {
@@ -328,7 +336,7 @@ export class FetchAdapter implements HTTPAdapter {
     // The server answered, so the upload ended: reported as 100% on every answered path,
     // fetch having no real per-chunk progress.
     const reportUploadEnded = (): void => {
-      guardedUploadProgress?.(completeProgressEvent(knownBodyByteLength(body)));
+      guardedUploadProgress?.(completeProgressEvent(uploadByteLength));
     };
     // A body that will not be read is let go of: a polyfill's Node `Readable` would
     // otherwise hold its socket until the server closed it.
