@@ -2030,6 +2030,8 @@ A browser hides `Set-Cookie` from XHR. An XHR outside a browser that shows it ma
 
 Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, as the response headers arrive, the adapter compares `xhr.responseURL` to the absolute URL it opened (for an XHR outside a browser that reports no change of state, at its first progress event or at `load`). If a redirect is detected the request ends there - the page it led to is not read further - and the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`. Its download progress ends at `0` bytes, as no body is handed over - unless the request was cancelled or timed out first, which reports no completion, as for any download.
 
+An XHR outside a browser may fill in `responseURL` only later, partway through the download or at `load`. The adapter checks it again before refusing a body past `maxResponseBytes`, so a redirect it shows by then is still reported as the redirect. One it shows only at `load` is reported as `response_too_large`: the body is refused as soon as it passes the limit, rather than downloaded in full to learn the URL.
+
 **It is detected only once the page the redirect led to answers**, since the browser follows it first. FetchAdapter in a browser reports each of these as `redirect_disabled` at once:
 
 - A redirect to a page that fails CORS reads as a `network_error`, retried as one.

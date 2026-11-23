@@ -541,11 +541,14 @@ export class XHRAdapter implements HTTPAdapter {
 
       /**
        * `answer`, or the redirect the browser followed where `responseURL` shows it only
-       * now: an XHR outside a browser may report the URL it ended at only by `load`, after
-       * a status and headers read with none. Such an answer is the followed redirect, as
-       * one seen at the headers is: the final page's status and headers are not its own.
+       * now: an XHR outside a browser may report the URL it ended at only later - by
+       * `load`, or partway through the download - after a status and headers read with
+       * none. Such an answer is the followed redirect, as one seen at the headers is: the
+       * final page's status and headers are not its own. Asked at `load`, and before a body
+       * is refused as too large, so the redirect is what that refusal reports where the URL
+       * shows it by then.
        */
-      const withRedirectSeenAtLoad = (
+      const withRedirectSeenLater = (
         answer: AnsweredHeaders | undefined,
       ): AnsweredHeaders | undefined => {
         if (answer === undefined || answer.redirectURL !== undefined) {
@@ -906,7 +909,18 @@ export class XHRAdapter implements HTTPAdapter {
        * Fail a body past `maxResponseBytes` as a stream error with the real status and
        * headers of `answer`, and stop the download.
        */
-      const refuseTooLargeBody = (answer: AnsweredHeaders): void => {
+      const refuseTooLargeBody = (answered: AnsweredHeaders): void => {
+        // A redirect the URL shows only now ends the send as that redirect (see
+        // `endDownloadAt`), not as a body too large. Asked only of an answer read with no
+        // URL, as one read with its URL is judged by it; a read that throws leaves it.
+        let answer = answered;
+        if (answered.responseURL === '') {
+          try {
+            answer = withRedirectSeenLater(answered) ?? answered;
+          } catch {
+            // The URL cannot be read: the answer stands as it was read.
+          }
+        }
         endDownloadAt(answer, () => {
           resolve(
             tooLargeAnswer(
@@ -1144,7 +1158,7 @@ export class XHRAdapter implements HTTPAdapter {
           // Read before any progress callback, as everything this listener reports is: the
           // answer, captured once (see `answeredAtHeaders`).
           // Read here for the first time by an XHR that showed no state before `load`.
-          const seen = withRedirectSeenAtLoad(answerToActOn(captureAnswer()));
+          const seen = withRedirectSeenLater(answerToActOn(captureAnswer()));
 
           // Ended by the answer: a malformed status.
           if (seen === undefined) {

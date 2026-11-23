@@ -6807,6 +6807,39 @@ test('a redirect an XHR outside a browser reports only at load is the followed r
   expect(response.body).toBeNull();
 });
 
+test.each([
+  ['shows its URL before the body passes the limit', true],
+  ['shows its URL only at load', false],
+])(
+  'a redirect whose body passes the limit, from an XHR outside a browser that %s',
+  async (_kind, isURLShownFirst) => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+    const xhr = lastXHR;
+
+    xhr.simulateHeadersReceived(200, 'content-encoding: identity\r\n');
+    if (isURLShownFirst) {
+      xhr.responseURL = 'https://api.test/y';
+    }
+
+    xhr.simulateDownloadProgress(50, 0);
+    const response = await promise;
+
+    // Refused at once either way; reported as the redirect where the URL showed it.
+    if (isURLShownFirst) {
+      expect(response.status).toBe(0);
+      expect(response.wasRedirectDetected).toBe(true);
+      expect(response.detectedRedirectURL).toBe('https://api.test/y');
+    } else {
+      expect(response.streamErrorCode).toBe('response_too_large');
+    }
+  },
+);
+
 test('headers an XHR outside a browser shows only at load, after a status with none, are the answer', async () => {
   const promise = new XHRAdapter().send({
     requestURL: 'https://api.test/x',
