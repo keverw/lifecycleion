@@ -5582,7 +5582,9 @@ export class BaseHTTPClient {
     // Jar cookies and the attempt header (x-local-client-request-attempt) are not added
     // here - they are applied at dispatch time, and no attempt went out. A redirect hop's
     // request already carries the jar's `Cookie` for its target, set as the hop was
-    // built, and keeps it. The request ID
+    // built, and keeps it. Nor is a caller's `Content-Length` dropped, as an attempt
+    // drops it for FetchAdapter and XHRAdapter and from a bodiless request: the headers
+    // are the ones requested, not the ones an attempt would have sent. The request ID
     // header and the client's user-agent are already on it: they are set before the
     // interceptors run. A request that already carries them (a redirect
     // hop's, built from the previous hop's sent headers, or a retry interceptor's input)

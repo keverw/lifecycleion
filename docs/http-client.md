@@ -375,7 +375,7 @@ client
 
 ### Query Parameters
 
-Parameters passed via `.params()` are merged into the URL query string using the `qs` library, which supports nested objects and arrays.
+Parameters passed via `.params()` are merged into the URL query string using the `qs` library, which supports nested objects and arrays. A lone surrogate in a key or value - text cut mid-emoji with `slice()`, say - is sent as U+FFFD (`%EF%BF%BD`), as `URLSearchParams` sends it.
 
 ```typescript
 client
@@ -993,7 +993,7 @@ type ErrorObserver = (
 
 The `request` argument is the same `AttemptRequest` snapshot described above, including the configured `timeout` for that attempt.
 
-When a request fails before any adapter attempt is dispatched (for example request setup errors, pre-dispatch interceptor failures, or pre-send cancellation), the snapshot is best-effort: it carries the headers set before interceptors run - the request ID header (with `includeRequestID`) and the `user-agent`, if there is one - but not the per-attempt attempt header or cookie-jar cookies, which are applied at dispatch, because no real outbound attempt occurred. A redirect hop's request is the exception for cookies: it carries the `Cookie` the jar gave its target as the hop was set up, so a snapshot of one that failed or was cancelled before dispatch - and the request its retry-phase interceptors are handed - shows that header, though a `Set-Cookie` from the hop's own earlier attempt is not in it. What is sent is rebuilt from the jar at dispatch either way.
+When a request fails before any adapter attempt is dispatched (for example request setup errors, pre-dispatch interceptor failures, or pre-send cancellation), the snapshot is best-effort: it carries the headers set before interceptors run - the request ID header (with `includeRequestID`) and the `user-agent`, if there is one - but not the per-attempt attempt header or cookie-jar cookies, which are applied at dispatch, because no real outbound attempt occurred. A redirect hop's request is the exception for cookies: it carries the `Cookie` the jar gave its target as the hop was set up, so a snapshot of one that failed or was cancelled before dispatch - and the request its retry-phase interceptors are handed - shows that header, though a `Set-Cookie` from the hop's own earlier attempt is not in it. What is sent is rebuilt from the jar at dispatch either way. Its other headers are the ones the request was given, as set: a caller's `Content-Length` included, which an attempt drops where `FetchAdapter` or `XHRAdapter` sends it and, on any adapter, from a request with no body.
 
 ### Filter Options
 

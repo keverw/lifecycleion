@@ -300,9 +300,21 @@ function topLevelQueryKey(wirePair: string): string | undefined {
 }
 
 /**
+ * A `.params()` key as `qs` sends it: each lone surrogate as U+FFFD, so it is compared
+ * with the path's keys as they decode.
+ */
+function wellFormedParamKey(key: string): string {
+  return key.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    '\uFFFD',
+  );
+}
+
+/**
  * The top-level name of a decoded key: `filter[a]` is `filter`, and a key that opens with
  * a bracket (`[x]`) is the name inside it, as `qs` reads both. A `.params()` key goes
- * straight here - it is a name `qs` will encode, not one to decode. `undefined` for a
+ * here, through {@link wellFormedParamKey} - it is a name `qs` will encode, not one to
+ * decode. `undefined` for a
  * key that opens with `[]`, which has no name of its own (see below).
  */
 function topLevelKeyOf(key: string): string | undefined {
@@ -427,7 +439,7 @@ export function buildURL(
       const overridden = new Set(
         Object.keys(snapshot)
           .filter((key) => isGivenParam(snapshot[key]))
-          .map(topLevelKeyOf)
+          .map((key) => topLevelKeyOf(wellFormedParamKey(key)))
           .filter((key) => key !== undefined),
       );
       const pairs = existingQuery.split('&').filter((pair) => pair !== '');

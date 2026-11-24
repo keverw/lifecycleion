@@ -1218,6 +1218,67 @@ describe('serializeMultipartFormData', () => {
     expect(fileBytesWritten).toBe(REQUEST_BODY_CHUNK_SIZE);
   });
 
+  test('a chunk that is already a view past the end of its shrunk buffer fails the upload rather than reading as empty', async () => {
+    const resizable = new ArrayBuffer(16, { maxByteLength: 16 });
+    const outOfBounds = new Uint8Array(resizable, 8, 8);
+    resizable.resize(4);
+    const chunks = [outOfBounds, new Uint8Array(8).fill(7)];
+    let fileBytesWritten = 0;
+
+    const fd = scriptFormEntries(new FormData(), function* () {
+      yield [
+        'upload',
+        {
+          name: 'data.bin',
+          type: 'application/octet-stream',
+          size: 8,
+          stream() {
+            return new ReadableStream<Uint8Array>({
+              pull(controller) {
+                const chunk = chunks.shift();
+                if (chunk === undefined) {
+                  controller.close();
+                } else {
+                  controller.enqueue(chunk);
+                }
+              },
+            });
+          },
+        },
+      ];
+    });
+
+    const req: RequestBodyWritable = {
+      destroyed: false,
+      setHeader() {},
+      write(data, callback) {
+        if (data instanceof Uint8Array && !Buffer.isBuffer(data)) {
+          fileBytesWritten += data.byteLength;
+        }
+        callback?.(null);
+        return true;
+      },
+      once() {
+        return this;
+      },
+      off() {
+        return this;
+      },
+    };
+
+    let caught: Error | undefined;
+    try {
+      await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).toBe('Request body source could not be read');
+    expect(caught?.cause).toBeInstanceOf(TypeError);
+    // The next chunk, which fits the part, is not sent in the unread one's place.
+    expect(fileBytesWritten).toBe(0);
+  });
+
   test('cancels reader when req.destroyed flips between reader.read() result and write()', async () => {
     let readCount = 0;
     let cancelCount = 0;

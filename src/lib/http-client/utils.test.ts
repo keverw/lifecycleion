@@ -99,6 +99,42 @@ describe('buildURL', () => {
     },
   );
 
+  test.each([
+    [{ q: 'a\ud83dxyz' }, '?q=a%EF%BF%BDxyz'],
+    [{ q: 'hi \ud83d' }, '?q=hi%20%EF%BF%BD'],
+    [{ q: 'a\ude00b' }, '?q=a%EF%BF%BDb'],
+    [{ 'k\ud83d': 'v' }, '?k%EF%BF%BD=v'],
+    [{ a: { b: ['x\ud83dy'] } }, '?a%5Bb%5D%5B0%5D=x%EF%BF%BDy'],
+  ])(
+    'sends a lone surrogate as U+FFFD and keeps the character after it: %j',
+    (params, query) => {
+      expect(buildURL('https://a.test', '/s', params)).toBe(
+        `https://a.test/s${query}`,
+      );
+    },
+  );
+
+  test.each([
+    ['/s?k%EF%BF%BD=1', { 'k\ud83d': 'v' }, '/s?k%EF%BF%BD=v'],
+    [
+      '/s?k%EF%BF%BD%5Ba%5D=1',
+      { 'k\ud83d': { b: 1 } },
+      '/s?k%EF%BF%BD%5Bb%5D=1',
+    ],
+    [
+      '/s?k%F0%9F%90%80=1',
+      { 'k\ud83d': 'v' },
+      '/s?k%F0%9F%90%80=1&k%EF%BF%BD=v',
+    ],
+  ])(
+    'a params key with a lone surrogate replaces the path pairs sent under the same key: %s',
+    (path, params, expected) => {
+      expect(buildURL('https://a.test', path, params)).toBe(
+        `https://a.test${expected}`,
+      );
+    },
+  );
+
   test('with a base, only a scheme followed by // leaves it', () => {
     for (const path of [
       'http:evil.test/x',
