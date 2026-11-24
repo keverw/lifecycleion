@@ -16126,6 +16126,59 @@ describe('NodeAdapter - headers observers see', () => {
     },
   );
 
+  test('an abort settles, with the headers it was handed, when an instrumented request cannot report its headers', async () => {
+    // Headers the adapter set on the request: a bodiless GET frames none.
+    const setHeaders: string[] = [];
+    const spy = spyOn(http, 'request').mockImplementation(() => {
+      // A request that never answers, whose `getHeaders` throws, and which has no
+      // `method` of its own: the framing is decided by the adapter's request.
+      const req = new EventEmitter();
+      const stub = req as unknown as Record<string, unknown>;
+      stub.setHeader = (name: string) => {
+        setHeaders.push(name);
+      };
+      stub.getHeaders = () => {
+        throw new Error('instrumentation failed');
+      };
+      stub.destroy = () => {};
+      stub.end = () => {};
+
+      return req as unknown as http.ClientRequest;
+    });
+    const controller = new AbortController();
+
+    try {
+      const sending = new NodeAdapter().send({
+        requestURL: 'http://example.test/x',
+        method: 'GET',
+        headers: { 'x-tag': 'a' },
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 10);
+      let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+      const outcome = (await Promise.race([
+        sending.then(
+          () => 'resolved',
+          (error: unknown) => error,
+        ),
+        new Promise((resolve) => {
+          pendingTimer = setTimeout(() => resolve('pending'), 2000);
+        }),
+      ])) as Error;
+      clearTimeout(pendingTimer);
+
+      expect(outcome.name).toBe('AbortError');
+      expect(
+        (outcome as unknown as Record<symbol, unknown>)[
+          EFFECTIVE_REQUEST_HEADERS_KEY
+        ],
+      ).toEqual({ 'x-tag': 'a' });
+      expect(setHeaders).not.toContain('Content-Length');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test("a bodiless request shows its response observer the Content-Length Node's http sends", async () => {
     const received: Array<string | undefined> = [];
     const server = http.createServer((req, res) => {

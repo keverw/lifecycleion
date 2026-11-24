@@ -3427,7 +3427,7 @@ export class NodeAdapter implements HTTPAdapter {
           // Node's `http` frames it with `Content-Length: 0` itself for most methods; set
           // here, the same header, so the effective headers reported show it - before the
           // 100% callback, so a cancel from it reports the header too.
-          if (isBodilessContentLengthSent(req.method)) {
+          if (isBodilessContentLengthSent(asciiUppercase(request.method))) {
             req.setHeader('Content-Length', '0');
           }
           reportUploadProgress(completeProgressEvent(0));
@@ -4996,12 +4996,19 @@ function makeSentRequestAbortError(
   req: http.ClientRequest,
   fallbackHeaders: Record<string, string | string[]>,
 ): Error {
+  // Read guarded: this runs from the abort listener, where a throw from an instrumented
+  // request's `getHeaders` would escape rather than settle the request, so such a
+  // request is reported with the headers it was handed.
+  let sentHeaders: Record<string, string | string[]>;
+  try {
+    sentHeaders = snapshotEffectiveRequestHeaders(req, fallbackHeaders);
+  } catch {
+    sentHeaders = mergeObservedHeaders(fallbackHeaders);
+  }
+
   const error = makeAbortError();
   defineHiddenTags(error, {
-    [EFFECTIVE_REQUEST_HEADERS_KEY]: snapshotEffectiveRequestHeaders(
-      req,
-      fallbackHeaders,
-    ),
+    [EFFECTIVE_REQUEST_HEADERS_KEY]: sentHeaders,
   });
   return error;
 }

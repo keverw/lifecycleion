@@ -773,3 +773,4 @@
 - HTTP NodeAdapter: a bodiless `POST`, `PATCH` or other method Node's `http` frames with `Content-Length: 0` shows that header to observers, set by the adapter as the same header Node's `http` sends on its own.
 - HTTP: a `Cookie` given as several values, or under several spellings, is handed to the adapter and shown to observers as the one field every adapter sends, joined with `; `, with any value that holds no cookie left out.
 - HTTP: a caller's `Content-Length` is not handed to FetchAdapter or XHRAdapter, nor shown to observers as sent, since both send the body's real length themselves; a custom adapter is still handed it as set.
+- HTTP NodeAdapter: a cancel or timeout before any response settles even when an instrumented request's `getHeaders()` throws: the headers reported as sent fall back to the ones the adapter was handed.
