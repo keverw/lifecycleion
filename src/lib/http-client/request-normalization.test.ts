@@ -18975,6 +18975,101 @@ test.each([
 );
 
 test.each([
+  ['a detached buffer', () => detached((buffer) => buffer), false],
+  [
+    'a view over a detached buffer',
+    () => detached((buffer) => new Uint8Array(buffer)),
+    false,
+  ],
+  [
+    'a DataView over a detached buffer',
+    () => detached((buffer) => new DataView(buffer)),
+    false,
+  ],
+  [
+    'a view past the end of a shrunk resizable buffer',
+    () => {
+      const buffer = new ArrayBuffer(4, { maxByteLength: 8 });
+      const view = new Uint8Array(buffer, 0, 4);
+      buffer.resize(2);
+      return view;
+    },
+    false,
+  ],
+  ['an empty buffer', () => new ArrayBuffer(0), true],
+  [
+    'a length-tracking view over a resizable buffer shrunk to nothing',
+    () => {
+      const buffer = new ArrayBuffer(4, { maxByteLength: 8 });
+      const view = new Uint8Array(buffer);
+      buffer.resize(0);
+      return view;
+    },
+    true,
+  ],
+] as const)(
+  "a custom adapter's body that is %s is a stream_response_error only when it cannot be read",
+  async (_label, makeBody, isReadable) => {
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+            body: makeBody() as Uint8Array,
+          }),
+      },
+      baseURL: 'http://example.test',
+    });
+
+    const builder = client.get('/x');
+    const response = await builder.send();
+
+    expect(response.status).toBe(200);
+    expect(response.body).toBeNull();
+    expect(response.isFailed).toBe(!isReadable);
+    expect(builder.error?.code).toBe(
+      isReadable ? undefined : 'stream_response_error',
+    );
+  },
+);
+
+test('a followed redirect whose custom adapter body is a detached buffer is followed as a bodiless 3xx', async () => {
+  let sends = 0;
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve<AdapterResponse>(
+          sends++ === 0
+            ? {
+                status: 302,
+                headers: { location: '/landed' },
+                body: detached((buffer) => new Uint8Array(buffer)),
+              }
+            : { status: 200, headers: {}, body: null },
+        ),
+    },
+    baseURL: 'http://example.test',
+    followRedirects: true,
+  });
+
+  const response = await client.get('/x').send();
+
+  expect(response.status).toBe(200);
+  expect(response.redirectHistory).toHaveLength(1);
+});
+
+/** `wrap`'s answer over an 8-byte buffer, the buffer detached once it is made. */
+function detached<T>(wrap: (buffer: ArrayBuffer) => T): T {
+  const buffer = new ArrayBuffer(8);
+  const body = wrap(buffer);
+  structuredClone(buffer, { transfer: [buffer] });
+  return body;
+}
+
+test.each([
   ['a length-tracking view', (buffer: ArrayBuffer) => new Uint8Array(buffer)],
   ['the buffer itself', (buffer: ArrayBuffer) => buffer],
 ] as const)(

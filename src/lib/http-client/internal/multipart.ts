@@ -42,7 +42,10 @@
  */
 
 import { types } from 'node:util';
-import { plainBytesView } from '../../internal/binary-view';
+import {
+  assertTypedArrayInBounds,
+  plainBytesView,
+} from '../../internal/binary-view';
 import { callQuietly } from '../../internal/call-quietly';
 import { readUnknownMember } from '../../internal/read-member';
 import { markNonRetryableAdapterError } from './adapter-error';
@@ -129,11 +132,15 @@ export async function serializeMultipartFormData(
   // Every write: the boundary lines and part heads are those counted, and a file part's
   // bytes are held to its measured size before they are written (see below), so the
   // body comes to `totalSize` exactly.
-  const write = (data: string | Buffer | Uint8Array): Promise<void> =>
+  const write = (data: string | Buffer | Uint8Array): Promise<void> => {
+    // Measured before it is handed over: a custom `stream()`'s producer may transfer the
+    // chunk's buffer while the write is in flight, after which its length reads as 0.
+    const byteLength = Buffer.byteLength(data);
+
     // Bytes counted, and progress reported, only once the writable has accepted them: a
     // write the stream closed or errored under is rejected uncounted.
-    writeChunkWithBackpressure(req, data, () => {
-      uploadedBytes += Buffer.byteLength(data);
+    return writeChunkWithBackpressure(req, data, () => {
+      uploadedBytes += byteLength;
 
       onProgress?.({
         loaded: uploadedBytes,
@@ -141,6 +148,7 @@ export async function serializeMultipartFormData(
         progress: uploadedBytes / totalSize,
       });
     });
+  };
 
   // A part's head - a string field's whole part, or a file part's headers - written in
   // the slices a file's bytes are (see below): a large text field written at once would
@@ -158,23 +166,43 @@ export async function serializeMultipartFormData(
 
   // Bytes written slice by slice, each awaited; the slices are views, not copies. A stream
   // destroyed between slices fails the write, as it fails the whole body below, rather
-  // than leaving a part cut short to read as written.
+  // than leaving a part cut short to read as written. The chunk's length is read once,
+  // before its first slice, and the upload fails if any of those bytes can no longer be
+  // read: a custom `stream()` whose producer transfers or shrinks a chunk's buffer while
+  // its slices are written leaves the rest reading as empty, which would end the loop
+  // early with the part's count short of the bytes already sent.
   const writeInSlices = async (
     bytes: Uint8Array,
     writeSlice: (slice: Uint8Array) => Promise<void>,
   ): Promise<void> => {
+    const byteLength = bytes.byteLength;
+
     for (
       let offset = 0;
-      offset < bytes.byteLength;
+      offset < byteLength;
       offset += REQUEST_BODY_CHUNK_SIZE
     ) {
       if (req.destroyed) {
         throw closedBeforeWritten();
       }
 
-      await writeSlice(
-        bytes.subarray(offset, offset + REQUEST_BODY_CHUNK_SIZE),
-      );
+      const end = Math.min(offset + REQUEST_BODY_CHUNK_SIZE, byteLength);
+      let slice: Uint8Array;
+
+      try {
+        assertTypedArrayInBounds(bytes);
+        slice = bytes.subarray(offset, end);
+      } catch (error) {
+        throw sourceReadFailure(error);
+      }
+
+      if (slice.byteLength !== end - offset) {
+        throw sourceReadFailure(
+          new TypeError('The chunk shrank while it was being written'),
+        );
+      }
+
+      await writeSlice(slice);
     }
   };
 
@@ -287,7 +315,11 @@ export async function serializeMultipartFormData(
           // Yielding to the event loop leaves such a source reading until a timeout or
           // cancel ends it. Still a wait on the source while yielded: a stall watchdog's
           // timer lands here, and must not read it as a wait on the socket.
-          if (bytes.byteLength === 0) {
+          // Read once: the chunk's buffer may be transferred while it is written, after
+          // which its length reads as 0.
+          const chunkLength = bytes.byteLength;
+
+          if (chunkLength === 0) {
             onSourceWait?.(true);
             await new Promise<void>((resolve) => {
               setImmediate(resolve);
@@ -303,14 +335,14 @@ export async function serializeMultipartFormData(
           // size, so the message names the part that outgrew it. The part's shortfall
           // check, after the loop, has no equivalent problem - bytes that were never
           // written need no undoing.
-          if (partBytes + bytes.byteLength > partSize) {
+          if (partBytes + chunkLength > partSize) {
             callQuietly(readUnknownMember(reader, 'cancel'), reader);
 
             // What actually went on the wire, and the chunk that was refused, kept
             // apart: counting the refused chunk into the written total would name up to
             // a whole chunk that never left this process.
             throw sourceMismatch(
-              `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, produced more - ${String(partBytes)} written and a further ${String(bytes.byteLength)} refused`,
+              `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, produced more - ${String(partBytes)} written and a further ${String(chunkLength)} refused`,
             );
           }
 
@@ -321,7 +353,7 @@ export async function serializeMultipartFormData(
           // the stall watchdog, which reads that progress, would destroy an upload the
           // server had acked early and was still reading.
           await writeInSlices(bytes, write);
-          partBytes += bytes.byteLength;
+          partBytes += chunkLength;
         }
       } finally {
         // Unconditionally, not only when the stream was destroyed. `await write(chunk)`

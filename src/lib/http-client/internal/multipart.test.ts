@@ -14,6 +14,7 @@ import {
   sanitizeContentType,
 } from './multipart-format';
 import type { RequestBodyWritable } from './request-body-writable';
+import type { AdapterProgressEvent } from '../types';
 import { REQUEST_BODY_CHUNK_SIZE } from './request-body-writer';
 import { filePartNameToSend, formEntries } from './form-entries';
 import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
@@ -1073,6 +1074,141 @@ describe('serializeMultipartFormData', () => {
     // and therefore nothing is left armed.
     expect(attached).toEqual([]);
     expect(attached.filter((event) => !removed.includes(event))).toEqual([]);
+  });
+
+  test('a chunk whose buffer is transferred while its last slice is written is counted whole in the progress reported', async () => {
+    const partSize = REQUEST_BODY_CHUNK_SIZE * 2;
+    const chunk = new Uint8Array(partSize);
+    let isSent = false;
+    let fileSlices = 0;
+
+    const fd = scriptFormEntries(new FormData(), function* () {
+      yield [
+        'upload',
+        {
+          name: 'data.bin',
+          type: 'application/octet-stream',
+          size: partSize,
+          stream() {
+            return new ReadableStream<Uint8Array>({
+              pull(controller) {
+                if (isSent) {
+                  controller.close();
+                } else {
+                  isSent = true;
+                  controller.enqueue(chunk);
+                }
+              },
+            });
+          },
+        },
+      ];
+    });
+
+    const req: RequestBodyWritable = {
+      destroyed: false,
+      setHeader() {},
+      write(data, callback) {
+        // The producer takes the buffer back while the chunk's last slice is in flight.
+        if (
+          data instanceof Uint8Array &&
+          !Buffer.isBuffer(data) &&
+          ++fileSlices === 2
+        ) {
+          structuredClone(chunk.buffer, { transfer: [chunk.buffer] });
+        }
+        callback?.(null);
+        return true;
+      },
+      once() {
+        return this;
+      },
+      off() {
+        return this;
+      },
+    };
+
+    const events: AdapterProgressEvent[] = [];
+    await serializeMultipartFormData(
+      fd,
+      req,
+      generateMultipartBoundary(),
+      (event) => {
+        events.push(event);
+      },
+    );
+
+    const last = events.at(-1);
+    expect(chunk.byteLength).toBe(0);
+    expect(last?.loaded).toBe(last?.total);
+    expect(last?.progress).toBe(1);
+  });
+
+  test("a chunk whose buffer is transferred between its slices fails the upload, and no later chunk is written past the part's size", async () => {
+    const partSize = REQUEST_BODY_CHUNK_SIZE * 2;
+    const chunks = [new Uint8Array(partSize), new Uint8Array(partSize)];
+    let fileBytesWritten = 0;
+    let isTransferred = false;
+
+    const fd = scriptFormEntries(new FormData(), function* () {
+      yield [
+        'upload',
+        {
+          name: 'data.bin',
+          type: 'application/octet-stream',
+          size: partSize,
+          stream() {
+            return new ReadableStream<Uint8Array>({
+              pull(controller) {
+                const chunk = chunks.shift();
+                if (chunk === undefined) {
+                  controller.close();
+                } else {
+                  controller.enqueue(chunk);
+                }
+              },
+            });
+          },
+        },
+      ];
+    });
+
+    const first = chunks[0];
+    const req: RequestBodyWritable = {
+      destroyed: false,
+      setHeader() {},
+      write(data, callback) {
+        if (data instanceof Uint8Array && !Buffer.isBuffer(data)) {
+          fileBytesWritten += data.byteLength;
+          // The producer takes the first chunk's buffer back once its first slice is
+          // accepted, as a transferable chunk lets it.
+          if (!isTransferred) {
+            isTransferred = true;
+            structuredClone(first.buffer, { transfer: [first.buffer] });
+          }
+        }
+        callback?.(null);
+        return true;
+      },
+      once() {
+        return this;
+      },
+      off() {
+        return this;
+      },
+    };
+
+    let caught: Error | undefined;
+    try {
+      await serializeMultipartFormData(fd, req, generateMultipartBoundary());
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(first.byteLength).toBe(0);
+    expect(caught?.message).toBe('Request body source could not be read');
+    expect(caught?.cause).toBeInstanceOf(TypeError);
+    expect(fileBytesWritten).toBe(REQUEST_BODY_CHUNK_SIZE);
   });
 
   test('cancels reader when req.destroyed flips between reader.read() result and write()', async () => {

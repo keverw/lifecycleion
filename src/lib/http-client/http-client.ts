@@ -162,8 +162,10 @@ import {
 } from './internal/response-limit';
 import {
   arrayBufferKindOf,
+  assertTypedArrayInBounds,
   fixedUnsharedByteLength,
   plainBytesView,
+  typedArrayNameOf,
   readBinaryByteLength,
   readViewBuffer,
   isPlainArrayBuffer,
@@ -3916,10 +3918,27 @@ export class BaseHTTPClient {
                 false,
               );
             } else if (typeof answeredBodySize === 'number') {
-              adapterResponse.body = fixedAnsweredBody(
-                answeredBody,
-                answeredBodySize,
-              ) as Uint8Array;
+              try {
+                adapterResponse.body = fixedAnsweredBody(
+                  answeredBody,
+                  answeredBodySize,
+                ) as Uint8Array;
+              } catch (error) {
+                // Bytes that cannot be read - a detached buffer - are no body, rather than
+                // an empty one delivered as a success: a stream error with the real status,
+                // as the built-in adapters report a body they could not read. A redirect's
+                // is dropped instead, read as the bodiless 3xx it is followed or refused as.
+                adapterResponse.body = null;
+
+                if (!isRedirectAnswer) {
+                  adapterResponse.isStreamError = true;
+                  adapterResponse.streamErrorCode = 'stream_response_error';
+                  adapterResponse.errorCause = new TypeError(
+                    'HTTPClient adapter answered with a body that could not be read',
+                    { cause: error },
+                  );
+                }
+              }
             }
           }
         }
@@ -6175,9 +6194,23 @@ function answeredBodySizeOf(body: unknown): number | 'string' | null {
 function fixedAnsweredBody(body: object, size: number): unknown {
   const isBuffer = arrayBufferKindOf(body) !== undefined;
 
-  // Nothing to copy, nor to read off a buffer detached since: an empty body is a fixed
-  // empty one, as the memory under it could grow after it was measured.
+  // Nothing to copy: an empty body is a fixed empty one, as the memory under it could grow
+  // after it was measured. Checked readable first, as the getters read a detached buffer,
+  // a view over one, or a typed array past the end of a shrunk resizable buffer as empty
+  // too: those throw a `TypeError` rather than pass as an empty body.
   if (size === 0) {
+    if (isBuffer) {
+      // The constructor refuses a detached buffer, as it is the one `ArrayBuffer` state a
+      // length of 0 hides; a `SharedArrayBuffer` cannot be detached.
+      new Uint8Array(body as ArrayBuffer);
+    } else {
+      if (typedArrayNameOf(body) !== undefined) {
+        assertTypedArrayInBounds(body as ArrayBufferView);
+      }
+
+      plainBytesView(body as ArrayBufferView);
+    }
+
     return isBuffer ? new ArrayBuffer(0) : new Uint8Array(0);
   }
 
