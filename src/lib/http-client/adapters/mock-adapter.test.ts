@@ -3601,7 +3601,65 @@ describe('MockAdapter - request body bytes are taken once', () => {
   });
 });
 
+describe("MockAdapter - a route's Location is text", () => {
+  test('a Location naming non-ASCII characters is followed to the path it names, not read as UTF-8 bytes', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/start', () => ({
+      status: 302,
+      headers: { location: '/names/\u00c3\u00a9' },
+    }));
+    adapter.routes.get('/names/\u00c3\u00a9', () => ({
+      status: 200,
+      body: 'found',
+    }));
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      followRedirects: true,
+    });
+
+    const response = await client.get('/start').send();
+
+    expect(response.status).toBe(200);
+    expect(response.redirectHistory).toEqual([
+      'http://api.test/names/%C3%83%C2%A9',
+    ]);
+  });
+});
+
 describe('MockAdapter - headers observers see', () => {
+  test('effectiveRequestHeaders reports the headers exactly as the route received them', async () => {
+    const adapter = new MockAdapter();
+    let routeHeaders: Record<string, string | string[]> = {};
+    adapter.routes.get('/x', (request) => {
+      routeHeaders = { ...request.headers };
+      return { status: 204 };
+    });
+
+    const response = await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/x',
+        headers: {
+          'X-Tag': 'first',
+          'x-tag': 'second',
+          cookie: ['a=1', 'b=2'],
+          accept: ['text/plain', 'application/json'],
+        },
+      }),
+    );
+
+    expect(routeHeaders['x-tag']).toBe('first, second');
+    expect(routeHeaders.cookie).toBe('a=1; b=2');
+    expect(response.effectiveRequestHeaders).toEqual(routeHeaders);
+
+    // A whitespace-only cookie the route never receives is not reported either.
+    const blank = await adapter.send(
+      makeAdapterRequest({ requestURL: '/x', headers: { cookie: '  ' } }),
+    );
+    expect(routeHeaders.cookie).toBeUndefined();
+    expect(blank.effectiveRequestHeaders?.cookie).toBeUndefined();
+  });
+
   test("a response observer sees the content-length the route received, not the caller's", async () => {
     const adapter = new MockAdapter();
     let routeLength: unknown;

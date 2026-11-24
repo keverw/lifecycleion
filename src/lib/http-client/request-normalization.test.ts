@@ -16353,12 +16353,21 @@ test('a retry interceptor that pushes onto an array header does not accumulate a
 });
 
 test('the request an earlier attempt was reported as keeps its array headers after a later attempt changes its own', async () => {
-  const adapter = new MockAdapter();
+  const inner = new MockAdapter();
   let attempts = 0;
-  adapter.routes.get('/x', () => {
+  inner.routes.get('/x', () => {
     attempts++;
     return { status: attempts === 1 ? 503 : 200, body: 'ok' };
   });
+  // Reports no headers of its own, so observers are handed the client's record.
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: async (request) => {
+      const { effectiveRequestHeaders: _sent, ...answer } =
+        await inner.send(request);
+      return answer;
+    },
+  };
   const client = new HTTPClient({
     adapter,
     baseURL: 'http://api.test',
@@ -16389,7 +16398,7 @@ test('the request an earlier attempt was reported as keeps its array headers aft
   expect(kept[1].headers['x-multi']).toEqual(['a', 'b', 'r']);
 });
 
-test('a custom adapter that pushes onto an array header does not carry it into the retry, and observers see it as the adapter reports it sent', async () => {
+test('a custom adapter that pushes onto an array header reaches neither the observers nor the retry', async () => {
   const inner = new MockAdapter();
   const seen: unknown[] = [];
   inner.routes.get('/x', (request) => {
@@ -16398,12 +16407,15 @@ test('a custom adapter that pushes onto an array header does not carry it into t
   });
   const adapter: HTTPAdapter = {
     getType: () => 'mock',
-    send: (request) => {
+    send: async (request) => {
       const accept = request.headers.accept;
       if (Array.isArray(accept)) {
         accept.push('application/x-adapter');
       }
-      return inner.send(request);
+      // Reports no headers of its own, so observers are handed the client's record.
+      const { effectiveRequestHeaders: _sent, ...answer } =
+        await inner.send(request);
+      return answer;
     },
   };
   const client = new HTTPClient({
@@ -16428,11 +16440,9 @@ test('a custom adapter that pushes onto an array header does not carry it into t
     'text/plain, application/json, application/x-adapter',
     'text/plain, application/json, application/x-adapter',
   ]);
-  // The inner MockAdapter reports the headers it was handed, the push among them, as
-  // NodeAdapter reports what it wrote: once per attempt, never carried into the next.
   expect(observed).toEqual([
-    ['text/plain', 'application/json', 'application/x-adapter'],
-    ['text/plain', 'application/json', 'application/x-adapter'],
+    ['text/plain', 'application/json'],
+    ['text/plain', 'application/json'],
   ]);
 });
 
@@ -18292,7 +18302,7 @@ test('repeated Content-Length values agree by their digits, not as numbers', () 
   );
 });
 
-test('a Location sent as raw UTF-8 bytes is followed to the URL it names, on NodeAdapter and FetchAdapter', async () => {
+test('a Location sent as raw UTF-8 bytes is followed to the URL it names, on NodeAdapter, FetchAdapter and a custom adapter wrapping one', async () => {
   // Header bytes reach the client a character per byte; read so and percent-encoded, the
   // server's `/café` was followed as `/caf%C3%83%C2%A9`, where `fetch` and browsers go
   // to `/caf%C3%A9`.
@@ -18303,10 +18313,10 @@ test('a Location sent as raw UTF-8 bytes is followed to the URL it names, on Nod
       const path = data.toString('latin1').split(' ')[1] ?? '';
       paths.push(path);
       socket.end(
-        path === '/start'
+        path === '/start' || path === '/twice'
           ? Buffer.concat([
               Buffer.from('HTTP/1.1 302 Found\r\nLocation: '),
-              Buffer.from('/café?q=é', 'utf8'),
+              Buffer.from(path === '/start' ? '/café?q=é' : '/cafÃ©', 'utf8'),
               Buffer.from('\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'),
             ])
           : 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok',
@@ -18317,7 +18327,14 @@ test('a Location sent as raw UTF-8 bytes is followed to the URL it names, on Nod
   const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   try {
-    for (const adapter of [new NodeAdapter(), new FetchAdapter()]) {
+    const node = new NodeAdapter();
+    // A wrapper hands on the headers the built-in adapter read, `Location` already text.
+    const wrapper: HTTPAdapter = {
+      getType: () => 'node',
+      send: (request) => node.send(request),
+    };
+
+    for (const adapter of [new NodeAdapter(), new FetchAdapter(), wrapper]) {
       paths.length = 0;
       const client = new HTTPClient({
         adapter,
@@ -18331,6 +18348,30 @@ test('a Location sent as raw UTF-8 bytes is followed to the URL it names, on Nod
       expect(response.redirectHistory).toEqual([
         `${baseURL}/caf%C3%A9?q=%C3%A9`,
       ]);
+    }
+
+    // The adapter's answer holds the text it names, as a wrapper hands it on.
+    for (const adapter of [node, new FetchAdapter()]) {
+      const answer = await adapter.send({
+        requestURL: `${baseURL}/start`,
+        method: 'GET',
+        headers: {},
+      });
+      expect(answer.headers['location']).toBe('/café?q=é');
+      expect(answer.detectedRedirectURL).toBe(`${baseURL}/caf%C3%A9?q=%C3%A9`);
+    }
+
+    // Read as UTF-8 once only: the bytes of a path that really holds `Ã©` name that path,
+    // where a second reading would name `/caf%C3%A9`, another URL.
+    for (const adapter of [new NodeAdapter(), new FetchAdapter(), wrapper]) {
+      paths.length = 0;
+      const client = new HTTPClient({
+        adapter,
+        baseURL,
+        followRedirects: true,
+      });
+      await client.get('/twice').send();
+      expect(paths).toEqual(['/twice', '/caf%C3%83%C2%A9']);
     }
   } finally {
     server.close();

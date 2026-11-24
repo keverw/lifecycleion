@@ -6852,15 +6852,15 @@ describe('HTTPClient — redirect', () => {
     ]);
   });
 
-  test('a redirect not followed reports the URL that would have been followed, its Location read as UTF-8 once', async () => {
-    // The raw UTF-8 bytes of a path that really holds `Ã©`, a character per byte. Read as
-    // UTF-8 twice, the report would name `/caf%C3%A9`, another URL.
+  test("a redirect not followed reports the URL that would have been followed, a custom adapter's Location read as the text it is", async () => {
+    // A custom adapter hands over text: `Ã©` here names those two characters, not the
+    // UTF-8 of `é`, which would be `/caf%C3%A9`, another URL.
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
       send: (): Promise<AdapterResponse> =>
         Promise.resolve({
           status: 302,
-          headers: { location: '/caf\u00c3\u0083\u00c2\u00a9' },
+          headers: { location: '/caf\u00c3\u00a9' },
           body: null,
         }),
     };

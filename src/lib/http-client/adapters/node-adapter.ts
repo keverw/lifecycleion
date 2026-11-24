@@ -113,6 +113,7 @@ import {
   materializeRequestHeaders,
 } from '../internal/header-utils';
 import {
+  decodeWireLocation,
   derivedRedirectFields,
   isCrossOrigin,
   firstNonEmptyValue,
@@ -2134,6 +2135,8 @@ export class NodeAdapter implements HTTPAdapter {
             const status = res.statusCode ?? 0;
             const headers = normalizeResponseHeaders(res.headers);
             keepFirstNonEmptyLocation(headers, res.rawHeaders);
+            // Its bytes read as UTF-8, as `fetch` follows it (see `locationText`).
+            decodeWireLocation(headers);
             // The answer when taking delivery of the body fails: a stream error with the
             // real status and headers, since the server answered.
             const streamErrorResponse = (

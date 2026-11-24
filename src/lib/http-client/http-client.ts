@@ -80,7 +80,6 @@ import {
   detectedRedirectTarget,
   resolveRedirectLocation,
   locationHeader,
-  locationText,
   type AdapterRedirectFields,
   scalarHeader,
   serializeBody,
@@ -1615,10 +1614,11 @@ export class BaseHTTPClient {
             // counted: a 3xx with nothing to follow is the final response, not a redirect
             // over the limit.
             // Relative paths (e.g. "/new-path") resolve against the current request URL.
-            // Its bytes read as UTF-8, as browsers read them (see `locationText`).
-            const rawLocation = locationHeader(adapterResponse.headers);
+            // A built-in network adapter has already read its bytes as UTF-8 (see
+            // `locationText`); a mock route's or custom adapter's is text, as written.
+            const location = locationHeader(adapterResponse.headers);
 
-            if (!rawLocation) {
+            if (!location) {
               // Redirect status but no Location header — treat as final response
               const built = this._buildAnsweredResponse<T>({
                 adapterResponse,
@@ -1638,8 +1638,6 @@ export class BaseHTTPClient {
 
               break;
             }
-
-            const location = locationText(rawLocation);
 
             hopCount++;
 
@@ -1696,9 +1694,8 @@ export class BaseHTTPClient {
             // adapter's own, or one resolved by this same rule where the adapter gave none
             // (`unfollowedRedirectAnswer`). None for a `Location` that does not resolve.
             // Nothing is sent to it.
-            // Handed the header as it came: this reads it as `locationText` does, once.
             const detectedTargetURL = detectedRedirectTarget(
-              rawLocation,
+              location,
               attemptResult.sentRequest.requestURL,
             );
             lastDetectedTargetURL = detectedTargetURL;

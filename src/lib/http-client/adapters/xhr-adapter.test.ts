@@ -1987,6 +1987,25 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('a 3xx handed over unfollowed reads its raw UTF-8 Location as the text it names', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    // The XHR hands header bytes over a character per byte, as a browser's does.
+    lastXHR.status = 302;
+    lastXHR.responseURL = 'https://api.test/start';
+    lastXHR.getAllResponseHeadersResult = 'location: /caf\u00c3\u00a9\r\n';
+    lastXHR.response = textBody('');
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.headers['location']).toBe('/caf\u00e9');
+    expect(response.detectedRedirectURL).toBe('https://api.test/caf%C3%A9');
+  });
+
   test('a path-relative request URL is not taken for a followed redirect', async () => {
     const originalDocument = (globalThis as Record<string, unknown>).document;
     (globalThis as Record<string, unknown>).document = {

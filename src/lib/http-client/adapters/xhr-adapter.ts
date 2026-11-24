@@ -72,6 +72,7 @@ import {
   isAmbiguousSetCookieLine,
   isCrossOrigin,
   firstJoinedLocation,
+  locationText,
   firstNonEmptyValue,
   resolveBrowserDispatchURL,
   stripURLCredentials,
@@ -1818,10 +1819,12 @@ function parseXHRResponseHeaders(
   // report. Of lines of their own, the first that is not empty is kept whole, as
   // browsers follow it, or the first when all are.
   if (firstLocationLine !== undefined) {
-    result['location'] =
+    // Its bytes read as UTF-8, as the browser follows it (see `locationText`).
+    result['location'] = locationText(
       locations.length === 1
         ? trimHTTPWhitespace(firstJoinedLocation(firstLocationLine))
-        : (firstNonEmptyValue(locations) ?? locations[0]);
+        : (firstNonEmptyValue(locations) ?? locations[0]),
+    );
   }
 
   return result;

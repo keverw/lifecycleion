@@ -1500,7 +1500,7 @@ With `NodeAdapter`, URL-based Basic auth follows the resolved redirect URL: from
 `detectedRedirectURL` follows the same rule. It reports the target, and nothing is sent to it. It is set:
 
 - on the response for a hop this client did **not** follow (`followRedirects: false`, or a redirect that ends the request)
-- on the response handed to `redirect`-phase observers for one it did, whose raw `Location` header still carries whatever the server wrote
+- on the response handed to `redirect`-phase observers for one it did, whose `Location` header still carries whatever the server wrote, userinfo included
 
 **Userinfo in the reported URL:**
 
@@ -2619,6 +2619,8 @@ type RequestState =
 ## Headers
 
 **Internal representation:** All header keys are lowercased. `set-cookie` is always `string[]`. Other multi-value headers that arrive as comma-joined strings remain as `string`. A response header an adapter reports more than once - as an array, or under keys that differ only by case - is read as Node reads a repeated header: joined with `', '`, except one that holds a single value (`location`, `content-type`, `content-length`, ...), which keeps its first (a `location` its first that is not empty, as browsers follow it). `fetch` and XHR hand a repeated header over already joined with `, ` (`XHRAdapter` joins one an XHR outside a browser gives on lines of its own the same way), and `FetchAdapter` and `XHRAdapter` keep it joined, single-value headers included: a joined `Content-Type` is read by its first media type, and a joined `Content-Length` only when its values agree. For `Location`, both take the first value that is not empty, so a single `Location` whose path holds an unencoded `, /` or `, , ` is cut or narrowed there; one whose query or fragment holds either is followed whole.
+
+**`Location`:** a header value arrives off the wire a character per byte, so `NodeAdapter`, `FetchAdapter` and `XHRAdapter` read a `Location` sent as raw UTF-8 bytes as the text it is, as browsers follow it: their answer's `headers.location` for a server's `/café` is `/café`, followed as `/caf%C3%A9`. One whose bytes are not valid UTF-8 is kept as it came. A `MockAdapter` route's `Location` is taken as the text it is, and so is a custom adapter's: one built on a raw transport (`node:http` on its own) hands over text, decoding a raw `Location` itself, while one that wraps a built-in adapter hands its headers on as they are.
 
 **Merging:** When multiple sources set the same header (default headers, request headers, interceptors), later values win wholesale. A `string[]` value replaces a `string` value entirely rather than being appended. A single-element `string[]` is normalized to a plain `string` when merging outgoing request headers. Observer-facing `AttemptRequest.headers` may still contain `string[]` values when an adapter reports repeated effective request headers, but array preservation is not guaranteed. Do not rely on `Array.isArray()` checks on header values in any context.
 

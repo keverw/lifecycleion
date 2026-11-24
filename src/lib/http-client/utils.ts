@@ -1446,7 +1446,8 @@ export function extractFetchHeaders(
   const location = result['location'];
 
   if (typeof location === 'string') {
-    result['location'] = firstJoinedLocation(location);
+    // Its bytes read as UTF-8, as the browser follows it (see `locationText`).
+    result['location'] = locationText(firstJoinedLocation(location));
   }
 
   // Use getSetCookie() when available (Bun, Node 18.14+, modern browsers)
@@ -1644,6 +1645,11 @@ export function locationHeader(
  * `/caf%C3%A9` it means. A value holding a character past one byte is already text, and
  * one whose bytes are not valid UTF-8 is kept as it came.
  *
+ * Read by the built-in network adapters as they take the headers off the wire (see
+ * {@link decodeWireLocation}), not by the client: a MockAdapter route's or a custom
+ * adapter's `Location` is text, and `/names/Ã©` there names those two characters - while
+ * a custom adapter wrapping a built-in one hands on headers already read.
+ *
  * The decoder refuses invalid bytes and keeps a BOM: a `Location` of nothing but one must
  * not read as empty, which resolves to the request's own URL. Made here rather than as the
  * module loads, and kept as it came on a runtime that has none or refuses these options
@@ -1666,6 +1672,20 @@ export function locationText(value: string): string {
     );
   } catch {
     return value;
+  }
+}
+
+/**
+ * Reads `headers`' `Location` as {@link locationText} does, in place: for headers a
+ * built-in network adapter took off the wire, a character per byte.
+ */
+export function decodeWireLocation(
+  headers: Record<string, string | string[]>,
+): void {
+  const location = headers['location'];
+
+  if (typeof location === 'string') {
+    headers['location'] = locationText(location);
   }
 }
 
@@ -1725,7 +1745,7 @@ export function detectedRedirectTarget(
 
   let target: string;
   try {
-    target = resolveRedirectLocation(locationText(location), base).href;
+    target = resolveRedirectLocation(location, base).href;
   } catch {
     return undefined;
   }

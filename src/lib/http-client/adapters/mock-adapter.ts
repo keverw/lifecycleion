@@ -458,19 +458,12 @@ export class MockAdapter implements HTTPAdapter {
       defineEntry(materializedHeaders, 'content-length', String(bodyLength));
     }
 
-    // The headers sent, as observers are to see them: the caller's, arrays kept as
-    // NodeAdapter reports them, with the mock's own `host`, form `content-type` and
-    // `content-length` in place of the caller's - the ones the route receives. Taken
-    // before the route runs, so one that changes `req.headers` changes what it was
-    // handed, not what was sent.
-    const effectiveRequestHeaders = mergeObservedHeaders(headers);
-    delete effectiveRequestHeaders['content-length'];
-    for (const name of ['host', 'content-type', 'content-length'] as const) {
-      const value = materializedHeaders[name];
-      if (value !== undefined) {
-        defineEntry(effectiveRequestHeaders, name, value);
-      }
-    }
+    // The headers sent, as observers are to see them: exactly what the route receives -
+    // repeated values joined as a server receives them, `Cookie` with `; `, an empty one
+    // left out, and the mock's own `host`, form `content-type` and `content-length` in
+    // place of the caller's. A copy, taken before the route runs, so one that changes
+    // `req.headers` changes what it was handed, not what was sent.
+    const effectiveRequestHeaders = mergeObservedHeaders(materializedHeaders);
 
     // Signal 0% upload — upload is instant for mock, but we fire the event so
     // progress listeners see the same shape they would from FetchAdapter.
