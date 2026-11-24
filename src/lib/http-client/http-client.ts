@@ -28,6 +28,7 @@ import {
   HEADER_VALUE_LABEL,
   assertNoBrowserRestrictedHeaders,
   copyHeaderRecord,
+  joinCookieHeader,
   lowerCaseHeaderName,
   presentHeaderValue,
 } from './internal/header-utils';
@@ -5476,6 +5477,16 @@ export class BaseHTTPClient {
         headers.cookie = cookieStr;
       } else {
         delete headers.cookie;
+      }
+    }
+
+    // A `Cookie` that holds no cookie - empty, or only whitespace - is sent by no adapter
+    // (see `joinCookieHeader`), so it is not reported to observers as sent either.
+    if (joinCookieHeader(Object.entries(headers)) === undefined) {
+      for (const key of Object.keys(headers)) {
+        if (lowerCaseHeaderName(key) === 'cookie') {
+          delete headers[key];
+        }
       }
     }
 

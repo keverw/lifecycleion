@@ -3628,6 +3628,29 @@ describe("MockAdapter - a route's Location is text", () => {
 });
 
 describe('MockAdapter - headers observers see', () => {
+  test.each([['  '], [['', ' ']]])(
+    'a Cookie that holds no cookie (%p) reaches neither the route nor the response observer',
+    async (cookie) => {
+      const adapter = new MockAdapter();
+      let routeCookie: unknown = 'unset';
+      adapter.routes.get('/x', (request) => {
+        routeCookie = request.headers.cookie;
+        return { status: 204 };
+      });
+      const client = new HTTPClient({ adapter, baseURL: 'https://api.test' });
+      const observed: Array<Record<string, string | string[]>> = [];
+      client.addResponseObserver((_response, request) => {
+        observed.push(request.headers);
+      });
+
+      await client.get('/x').headers({ cookie }).send();
+
+      expect(routeCookie).toBeUndefined();
+      expect(observed).toHaveLength(1);
+      expect(Object.hasOwn(observed[0], 'cookie')).toBe(false);
+    },
+  );
+
   test('effectiveRequestHeaders reports the headers exactly as the route received them', async () => {
     const adapter = new MockAdapter();
     let routeHeaders: Record<string, string | string[]> = {};
