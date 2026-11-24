@@ -3132,28 +3132,36 @@ describe('XHRAdapter', () => {
     expect(response.status).toBe(200);
   });
 
-  test('a 3xx handed over unfollowed after an upgrade resolves its Location against the https: URL that answered', async () => {
-    const response = await withPageOrigin('https://app.test', async () => {
-      const promise = new XHRAdapter().send({
-        requestURL: 'http://api.test/a',
-        method: 'GET',
-        headers: {},
+  test.each([
+    ['http://api.test/a', 'https://api.test/b'],
+    // A Location with no fragment inherits the request's, an empty one included.
+    ['http://api.test/a#', 'https://api.test/b#'],
+    ['http://api.test/a#top', 'https://api.test/b#top'],
+  ])(
+    'a 3xx handed over unfollowed after an upgrade resolves its Location against the https: URL that answered: %s',
+    async (requestURL, expected) => {
+      const response = await withPageOrigin('https://app.test', async () => {
+        const promise = new XHRAdapter().send({
+          requestURL,
+          method: 'GET',
+          headers: {},
+        });
+
+        // An XHR that does not follow it, as one outside a browser hands a 3xx over.
+        lastXHR.status = 308;
+        lastXHR.getAllResponseHeadersResult = 'location: /b\r\n';
+        lastXHR.response = textBody('');
+        lastXHR.responseURL = 'https://api.test/a';
+        lastXHR.simulateLoad();
+
+        return await promise;
       });
 
-      // An XHR that does not follow it, as one outside a browser hands a 3xx over.
-      lastXHR.status = 308;
-      lastXHR.getAllResponseHeadersResult = 'location: /b\r\n';
-      lastXHR.response = textBody('');
-      lastXHR.responseURL = 'https://api.test/a';
-      lastXHR.simulateLoad();
-
-      return await promise;
-    });
-
-    expect(response.status).toBe(308);
-    expect(response.wasRedirectDetected).toBe(true);
-    expect(response.detectedRedirectURL).toBe('https://api.test/b');
-  });
+      expect(response.status).toBe(308);
+      expect(response.wasRedirectDetected).toBe(true);
+      expect(response.detectedRedirectURL).toBe(expected);
+    },
+  );
 
   test('a 3xx whose upgrade the XHR shows only at load resolves its Location against the https: URL that answered', async () => {
     const response = await withPageOrigin('https://app.test', async () => {

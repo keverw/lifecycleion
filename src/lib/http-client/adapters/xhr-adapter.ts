@@ -1836,7 +1836,11 @@ function compareResponseURL(
   const responseHref = stripURLCredentials(normalizedResponse.href);
 
   const request = new URL(dispatchedURL);
-  const hash = request.hash;
+  // Taken from the serialized URL, not `hash`, which reads `''` for an empty fragment
+  // (`/a#`) as for none: a `Location` inherits an empty one too, as Fetch has it.
+  const fragmentIndex = request.href.indexOf('#');
+  const fragment =
+    fragmentIndex === -1 ? '' : request.href.slice(fragmentIndex);
   request.hash = '';
 
   if (responseHref === stripURLCredentials(request.href)) {
@@ -1857,9 +1861,7 @@ function compareResponseURL(
     return { kind: 'redirected' };
   }
 
-  request.hash = hash;
-
-  return { kind: 'upgraded', upgradedURL: request.href };
+  return { kind: 'upgraded', upgradedURL: `${request.href}${fragment}` };
 }
 
 /**
