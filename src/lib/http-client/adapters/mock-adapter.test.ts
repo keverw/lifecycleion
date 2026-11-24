@@ -3601,6 +3601,36 @@ describe('MockAdapter - request body bytes are taken once', () => {
   });
 });
 
+describe('MockAdapter - headers observers see', () => {
+  test("a response observer sees the content-length the route received, not the caller's", async () => {
+    const adapter = new MockAdapter();
+    let routeLength: unknown;
+    adapter.routes.post('/upload', (request) => {
+      routeLength = request.headers['content-length'];
+      // A route changing what it was handed changes nothing that was sent.
+      request.headers['x-route'] = 'changed';
+      return { status: 204 };
+    });
+    const client = new HTTPClient({ adapter, baseURL: 'https://api.test' });
+    const observed: Array<Record<string, string | string[]>> = [];
+    client.addResponseObserver((_response, request) => {
+      observed.push(request.headers);
+    });
+
+    const response = await client
+      .post('/upload')
+      .headers({ 'content-length': '200', 'content-type': 'text/plain' })
+      .text('abc')
+      .send();
+
+    expect(response.status).toBe(204);
+    expect(routeLength).toBe('3');
+    expect(observed).toHaveLength(1);
+    expect(observed[0]['content-length']).toBe('3');
+    expect(observed[0]['x-route']).toBeUndefined();
+  });
+});
+
 describe('MockAdapter - request body over a detached buffer', () => {
   test.each([['text/plain'], ['application/octet-stream']])(
     'a %s body whose buffer was transferred is sent as no bytes, as NodeAdapter and fetch send it',

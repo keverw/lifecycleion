@@ -41,9 +41,11 @@ import {
 } from '../internal/response-limit';
 import {
   arrayBufferKindOf,
+  assertTypedArrayInBounds,
   fixedUnsharedByteLength,
   plainBytesView,
   readBinaryByteLength,
+  typedArrayNameOf,
 } from '../../internal/binary-view';
 import { safeParseURL } from '../../domain-utils/domain-utils';
 import {
@@ -144,6 +146,17 @@ export class XHRAdapter implements HTTPAdapter {
       throw nonRetryableRefusal(
         TypeError,
         blockedPortMessage('XHRAdapter', blockedPort),
+      );
+    }
+
+    // Port 0 on every runtime, as NodeAdapter refuses it: no server listens there, and a
+    // non-browser XHR's native networking may read it as no port and dial the scheme's
+    // default instead, with the request's credentials and cookies, while the client
+    // takes `host:0` as the origin that answered.
+    if (safeParseURL(dispatchedURL)?.port === '0') {
+      throw nonRetryableRefusal(
+        TypeError,
+        'XHRAdapter cannot send a request to port 0',
       );
     }
 
@@ -1220,7 +1233,7 @@ export class XHRAdapter implements HTTPAdapter {
                 responseHeaders,
                 'stream_response_error',
                 new TypeError(
-                  'XHRAdapter response body was neither bytes nor text',
+                  'XHRAdapter response body could not be read as bytes or text',
                 ),
               ),
             );
@@ -1649,22 +1662,35 @@ function readResponseBody(
     }
     const measured = byteLength ?? undefined;
 
-    // Wrapped as it is when it is a fixed `ArrayBuffer`, which the XHR hands over and no
-    // one else writes; copied when it is shared or resizable, as the other adapters copy
-    // a chunk over one, so no other code can change or resize the body once it is read.
-    if (bufferKind !== undefined) {
-      const bytes = new Uint8Array(response as ArrayBuffer);
-      return fixedUnsharedByteLength(response) !== null
-        ? bytes
-        : bytes.slice(0, measured);
-    }
+    // Bytes over a detached buffer, or a view past the end of a shrunk resizable one,
+    // cannot be read: unreadable, as FetchAdapter fails such a body, rather than an empty
+    // body delivered as a success - the getters read either as empty.
+    try {
+      // Wrapped as it is when it is a fixed `ArrayBuffer`, which the XHR hands over and
+      // no one else writes; copied when it is shared or resizable, as the other adapters
+      // copy a chunk over one, so no other code can change or resize the body once it is
+      // read.
+      if (bufferKind !== undefined) {
+        const bytes = new Uint8Array(response as ArrayBuffer);
+        return fixedUnsharedByteLength(response) !== null
+          ? bytes
+          : bytes.slice(0, measured);
+      }
 
-    // A view rather than the buffer itself - happy-dom answers `responseType =
-    // 'arraybuffer'` with a `Uint8Array`, and a shim may hand over a Node `Buffer` -
-    // from any realm (`ArrayBuffer.isView` reads the internal slot). Copied: a `Buffer`
-    // may be a slice of a pooled slab, whose other bytes are not this body's.
-    if (isView) {
-      return plainBytesView(response).slice(0, measured);
+      // A view rather than the buffer itself - happy-dom answers `responseType =
+      // 'arraybuffer'` with a `Uint8Array`, and a shim may hand over a Node `Buffer` -
+      // from any realm (`ArrayBuffer.isView` reads the internal slot). Copied: a `Buffer`
+      // may be a slice of a pooled slab, whose other bytes are not this body's. A typed
+      // array is checked in bounds first, as a `DataView`'s getters check themselves.
+      if (isView) {
+        if (typedArrayNameOf(response) !== undefined) {
+          assertTypedArrayInBounds(response);
+        }
+
+        return plainBytesView(response).slice(0, measured);
+      }
+    } catch {
+      return RESPONSE_UNREADABLE;
     }
   }
 

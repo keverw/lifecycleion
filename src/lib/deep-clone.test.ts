@@ -586,6 +586,16 @@ describe('deepClone', () => {
       expect(cloned.lastIndex).toBe(5);
     });
 
+    test('should preserve a lastIndex that is not a number, as matching coerces it', () => {
+      const original = /a/y;
+      (original as unknown as { lastIndex: unknown }).lastIndex = '1';
+      const cloned = deepClone(original);
+
+      expect(cloned.lastIndex as unknown).toBe('1');
+      // A sticky match from index 1, as on the original.
+      expect(cloned.test('ba')).toBe(true);
+    });
+
     test('should clone RegExp in nested structures', () => {
       const original = {
         pattern: /test/i,

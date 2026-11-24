@@ -478,7 +478,7 @@ const REGEXP_FLAGS: ReadonlyArray<readonly [string, string]> = [
 /**
  * A `RegExp`'s clone, from the source and flags its internal slots hold - read through
  * the intrinsic getters, so neither an own `source` or `flags` it shadows them with nor a
- * `Symbol.match` of its own is read - with its numeric `lastIndex`; `undefined` for a
+ * `Symbol.match` of its own is read - with its `lastIndex` as it holds it; `undefined` for a
  * value without the slot.
  */
 function cloneRegExp(obj: object): RegExp | undefined {
@@ -495,10 +495,9 @@ function cloneRegExp(obj: object): RegExp | undefined {
   }
 
   const cloned = new RegExp(source, flags);
-  const lastIndex: unknown = Reflect.get(obj, 'lastIndex');
-  if (typeof lastIndex === 'number') {
-    cloned.lastIndex = lastIndex;
-  }
+  // Copied as it is held, not only when it is a number: matching coerces it, so a `'1'`
+  // starts a sticky or global match at index 1, as it does on the original.
+  cloned.lastIndex = Reflect.get(obj, 'lastIndex') as number;
 
   return cloned;
 }

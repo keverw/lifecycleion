@@ -16389,7 +16389,7 @@ test('the request an earlier attempt was reported as keeps its array headers aft
   expect(kept[1].headers['x-multi']).toEqual(['a', 'b', 'r']);
 });
 
-test('a custom adapter that pushes onto an array header reaches neither the observers nor the retry', async () => {
+test('a custom adapter that pushes onto an array header does not carry it into the retry, and observers see it as the adapter reports it sent', async () => {
   const inner = new MockAdapter();
   const seen: unknown[] = [];
   inner.routes.get('/x', (request) => {
@@ -16428,9 +16428,11 @@ test('a custom adapter that pushes onto an array header reaches neither the obse
     'text/plain, application/json, application/x-adapter',
     'text/plain, application/json, application/x-adapter',
   ]);
+  // The inner MockAdapter reports the headers it was handed, the push among them, as
+  // NodeAdapter reports what it wrote: once per attempt, never carried into the next.
   expect(observed).toEqual([
-    ['text/plain', 'application/json'],
-    ['text/plain', 'application/json'],
+    ['text/plain', 'application/json', 'application/x-adapter'],
+    ['text/plain', 'application/json', 'application/x-adapter'],
   ]);
 });
 

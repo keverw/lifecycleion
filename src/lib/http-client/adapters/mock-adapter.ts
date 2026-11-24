@@ -81,6 +81,7 @@ import {
   derivedRedirectFields,
   isAdapterHeaderValue,
   isRequestBodyBytes,
+  mergeObservedHeaders,
   normalizeAdapterResponseHeaders,
   parseContentType,
 } from '../utils';
@@ -455,6 +456,20 @@ export class MockAdapter implements HTTPAdapter {
     const bodyLength = requestBodyLength(sentBody, routeMethod, formParts);
     if (bodyLength !== undefined) {
       defineEntry(materializedHeaders, 'content-length', String(bodyLength));
+    }
+
+    // The headers sent, as observers are to see them: the caller's, arrays kept as
+    // NodeAdapter reports them, with the mock's own `host`, form `content-type` and
+    // `content-length` in place of the caller's - the ones the route receives. Taken
+    // before the route runs, so one that changes `req.headers` changes what it was
+    // handed, not what was sent.
+    const effectiveRequestHeaders = mergeObservedHeaders(headers);
+    delete effectiveRequestHeaders['content-length'];
+    for (const name of ['host', 'content-type', 'content-length'] as const) {
+      const value = materializedHeaders[name];
+      if (value !== undefined) {
+        defineEntry(effectiveRequestHeaders, name, value);
+      }
     }
 
     // Signal 0% upload — upload is instant for mock, but we fire the event so
@@ -840,6 +855,7 @@ export class MockAdapter implements HTTPAdapter {
       return {
         status: status ?? 0,
         isTransportError: true,
+        effectiveRequestHeaders,
         ...(isRetryable !== undefined ? { isRetryable } : {}),
         ...(wasDefinitelyNotSent !== undefined ? { wasDefinitelyNotSent } : {}),
         headers: {},
@@ -1037,6 +1053,7 @@ export class MockAdapter implements HTTPAdapter {
       ),
       headers: normalizedResponseHeaders,
       body: responseBody,
+      effectiveRequestHeaders,
       ...(streamErrorCode !== undefined
         ? {
             isStreamError: true,

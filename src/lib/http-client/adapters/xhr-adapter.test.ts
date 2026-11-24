@@ -1072,6 +1072,65 @@ describe('XHRAdapter', () => {
     },
   );
 
+  test.each([
+    [
+      'a typed array past the end of its shrunk buffer',
+      () => {
+        const buffer = new ArrayBuffer(8, { maxByteLength: 8 });
+        const view = new Uint8Array(buffer, 0, 4);
+        (buffer as ArrayBuffer & { resize(length: number): void }).resize(2);
+        return view;
+      },
+    ],
+    [
+      'a typed array over a detached buffer',
+      () => {
+        const view = new Uint8Array(4);
+        structuredClone(view.buffer, { transfer: [view.buffer] });
+        return view;
+      },
+    ],
+    [
+      'a detached ArrayBuffer',
+      () => {
+        const buffer = new ArrayBuffer(4);
+        structuredClone(buffer, { transfer: [buffer] });
+        return buffer;
+      },
+    ],
+  ])(
+    'a response handed over as %s is a stream error, not an empty body',
+    async (_label, makeResponse) => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/buffer',
+        method: 'GET',
+        headers: {},
+      });
+      lastXHR.status = 200;
+      lastXHR.response = makeResponse();
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.status).toBe(200);
+      expect(response.streamErrorCode).toBe('stream_response_error');
+    },
+  );
+
+  test('a response handed over as an empty ArrayBuffer is an empty body', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/buffer',
+      method: 'GET',
+      headers: {},
+    });
+    lastXHR.status = 200;
+    lastXHR.response = new ArrayBuffer(0);
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.streamErrorCode).toBeUndefined();
+    expect(response.body?.length).toBe(0);
+  });
+
   test('a growable SharedArrayBuffer that grows after it is measured is copied at the size that passed maxResponseBytes', async () => {
     // The TypeScript lib in use does not declare growable shared buffers.
     const GrowableSharedArrayBuffer = SharedArrayBuffer as unknown as new (
@@ -2125,6 +2184,33 @@ describe('XHRAdapter', () => {
     lastXHR.status = 200;
     lastXHR.simulateLoad();
     expect((await sending).status).toBe(200);
+  });
+
+  test('outside a browser a request to port 0 is refused before the XHR is opened, while another blocked port is sent', async () => {
+    lastXHR = undefined as unknown as typeof lastXHR;
+    const outcome = await new XHRAdapter()
+      .send({ requestURL: 'https://api.test:0/x', method: 'GET', headers: {} })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(String(outcome?.message)).toContain('port 0');
+    expect(lastXHR).toBeUndefined();
+
+    // A port only the Fetch Standard blocks, which a non-browser XHR may reach.
+    const sending = new XHRAdapter().send({
+      requestURL: 'https://api.test:6000/x',
+      method: 'GET',
+      headers: {},
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lastXHR.openArgs?.url).toBe('https://api.test:6000/x');
+    lastXHR.status = 204;
+    lastXHR.responseURL = 'https://api.test:6000/x';
+    lastXHR.simulateLoad();
+    expect((await sending).status).toBe(204);
   });
 
   test('outside a browser an XHR GET with a body is sent', async () => {
