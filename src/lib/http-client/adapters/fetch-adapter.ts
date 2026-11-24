@@ -545,15 +545,30 @@ async function readResponseBody(
     return await readWholeBody(response, body, maxResponseBytes, signal);
   }
 
+  // Read through a reader only where the body is a web stream. A polyfilled `fetch`
+  // (node-fetch, cross-fetch) hands over a Node `Readable`, which has no `getReader`, and
+  // a test double may hand over anything: those that are not async-iterable either are
+  // read whole and checked after. Each member read once, here, and used below.
+  const getReader = readUnknownMember(body, 'getReader');
+  const iterate =
+    typeof getReader === 'function'
+      ? undefined
+      : readUnknownMember(body, Symbol.asyncIterator);
+  const isStreamed =
+    typeof getReader === 'function' || typeof iterate === 'function';
+
   // Refused before reading when the body says up front it is over the limit - only where
   // its `Content-Length` counts what `fetch` hands over, which is the decoded body: so
   // not when a coding is applied, nor when one may be hidden. A browser exposes
   // `Content-Encoding` on a cross-origin (`cors`) response only when the server lists it
-  // in `Access-Control-Expose-Headers`, so its absence there proves nothing.
+  // in `Access-Control-Expose-Headers`, so its absence there proves nothing. Nor does it
+  // from an XHR-based polyfill (whatwg-fetch), which reads its headers through XHR -
+  // hidden the same way - while reporting `type` as `default`, and which hands over no
+  // stream: a body that is not streamed is measured once read.
   const contentEncoding = answered.headers['content-encoding'];
   const isIdentityEncoded =
     contentEncoding === undefined
-      ? answered.type !== 'cors'
+      ? isStreamed && answered.type !== 'cors'
       : isIdentityContentEncoding(contentEncoding);
   const declaredLength = isIdentityEncoded
     ? declaredContentLength(answered.headers)
@@ -564,18 +579,10 @@ async function readResponseBody(
     return RESPONSE_TOO_LARGE;
   }
 
-  // Read through a reader only where the body is a web stream. A polyfilled `fetch`
-  // (node-fetch, cross-fetch) hands over a Node `Readable`, which has no `getReader`, and
-  // a test double may hand over anything: those that are not async-iterable either are
-  // read whole and checked after.
-  const getReader = readUnknownMember(body, 'getReader');
-
   if (typeof getReader !== 'function') {
     // A Node `Readable` is async-iterable: read it a chunk at a time as well, so a body
     // over the limit is neither read whole first nor left holding its socket. Iterated
-    // through the method read here, not read again by `for await`.
-    const iterate = readUnknownMember(body, Symbol.asyncIterator);
-
+    // through the method read above, not read again by `for await`.
     if (typeof iterate === 'function') {
       const iterable: AsyncIterable<unknown> = {
         [Symbol.asyncIterator]: () =>

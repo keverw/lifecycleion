@@ -3064,6 +3064,46 @@ test('contentTypeHeaders */* matches any type, and an entry with no slash is ref
   }
 });
 
+test('contentTypeHeaders takes a comma in a quoted parameter as part of the one media type, and refuses a comma list', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/csv', () => ({
+    status: 200,
+    headers: { 'content-type': 'text/csv; header=present' },
+    body: 'a,b',
+  }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://a.test' });
+  let calls = 0;
+  for (const pattern of [
+    'text/csv; delimiter=","',
+    'text/csv; delimiter="\\",\\""; header=present',
+  ]) {
+    client.addResponseObserver(
+      () => {
+        calls++;
+      },
+      { contentTypeHeaders: [pattern] },
+    );
+  }
+
+  await client.get('/csv').send();
+
+  expect(calls).toBe(2);
+  for (const pattern of [
+    'text/csv, text/plain',
+    'text/csv; delimiter=",", text/plain',
+    'text/csv,',
+    // An unclosed quote, which would swallow `text/plain`, and a quote in the type.
+    'text/csv; a="x, text/plain',
+    'text/csv; a="x\\", text/plain',
+    'text/"a,b"',
+    '"text/csv,x"',
+  ]) {
+    expect(() =>
+      client.addResponseObserver(() => {}, { contentTypeHeaders: [pattern] }),
+    ).toThrow(TypeError);
+  }
+});
+
 test('a host filter entry with a scheme, port or nothing is refused', () => {
   const client = new HTTPClient();
   for (const pattern of [

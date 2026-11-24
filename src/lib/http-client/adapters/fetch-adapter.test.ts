@@ -4404,6 +4404,99 @@ describe('FetchAdapter - body chunk types and sizes', () => {
   );
 });
 
+describe('FetchAdapter - a declared length over the limit', () => {
+  const gzipped = Bun.gzipSync(new TextEncoder().encode('OK'));
+
+  /** A `fetch` answering like an XHR-based polyfill: headers as XHR exposes them, no `body`. */
+  function polyfillFetch(type: string | undefined, headers: HeadersInit) {
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        ...(type === undefined ? {} : { type }),
+        headers: new Headers(headers),
+        // XHR hands over the body already decoded.
+        arrayBuffer: () =>
+          Promise.resolve(new TextEncoder().encode('OK').buffer),
+      });
+  }
+
+  test.each([['default'], [undefined]])(
+    'without a streamed body, a missing Content-Encoding is not taken as identity (type %p): the decoded body is measured',
+    async (type) => {
+      // A cross-origin server that exposes Content-Length but not Content-Encoding.
+      polyfillFetch(type, { 'content-length': String(gzipped.byteLength) });
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://other-origin.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 10,
+      });
+
+      expect(gzipped.byteLength).toBeGreaterThan(10);
+      expect(response.streamErrorCode).toBeUndefined();
+      expect(new TextDecoder().decode(response.body as Uint8Array)).toBe('OK');
+    },
+  );
+
+  test('without a streamed body, a visible identity Content-Encoding still refuses it unread', async () => {
+    let reads = 0;
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'default',
+        headers: new Headers({
+          'content-length': '1000',
+          'content-encoding': 'identity',
+        }),
+        arrayBuffer: () => {
+          reads++;
+          return Promise.resolve(new ArrayBuffer(1000));
+        },
+      });
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(reads).toBe(0);
+  });
+
+  test('a streamed body with no Content-Encoding is refused unread by its declared length', async () => {
+    let reads = 0;
+    (globalThis as any).fetch = () => {
+      const response = new Response('x'.repeat(1000), {
+        status: 200,
+        headers: { 'content-length': '1000' },
+      });
+      Object.defineProperty(response, 'body', {
+        value: {
+          getReader() {
+            reads++;
+            throw new Error('not read');
+          },
+          cancel() {},
+        },
+      });
+      return Promise.resolve(response);
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/data',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(reads).toBe(0);
+  });
+});
+
 describe('FetchAdapter - request body copy', () => {
   test("the bytes it is handed are copied by the runtime's fetch before send() returns, so a change made after it reaches nothing sent", async () => {
     const received: number[][] = [];

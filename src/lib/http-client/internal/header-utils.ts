@@ -158,7 +158,7 @@ export function dropTransportFramedHeaders(
  * ends `Headers` has already trimmed of all four, and a line break anywhere else makes
  * the value one a browser refuses outright.
  */
-function splitHeaderValues(input: string): string[] {
+export function splitHeaderValues(input: string): string[] {
   const values: string[] = [];
   let position = 0;
   let temporaryValue = '';
@@ -218,6 +218,23 @@ function skipQuotedString(input: string, position: number): number {
   }
 
   return position;
+}
+
+/**
+ * Whether `input` opens a quoted string it never closes, read as
+ * {@link skipQuotedString} reads one: a `\` takes the character after it.
+ */
+export function hasUnclosedQuotedString(input: string): boolean {
+  let isQuoted = false;
+  for (let position = 0; position < input.length; position++) {
+    const char = input[position];
+    if (isQuoted && char === '\\') {
+      position++;
+    } else if (char === '"') {
+      isQuoted = !isQuoted;
+    }
+  }
+  return isQuoted;
 }
 
 export function isBrowserRestrictedHeader(

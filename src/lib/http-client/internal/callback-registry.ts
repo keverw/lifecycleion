@@ -9,6 +9,7 @@ import { readCopiedIndex } from '../../internal/array-indices';
 import { isRealmRootPrototype } from './plain-record';
 import { isAdapterStatus } from './status-code';
 import { trimHTTPWhitespace } from '../../internal/ascii-text';
+import { hasUnclosedQuotedString, splitHeaderValues } from './header-utils';
 import { normalizeFilterMethods } from '../utils';
 import { readHostPattern } from '../../domain-utils/host-filter';
 import { validateHostFilterEntry } from '../../domain-utils/domain-utils';
@@ -66,7 +67,13 @@ function describeUnmatchableMediaTypePattern(
   const type = mediaType.slice(0, slash);
   const subtype = mediaType.slice(slash + 1);
   if (
-    entry.includes(',') ||
+    // A comma list, split as a header's is: a comma in a quoted parameter value
+    // (`text/csv; delimiter=","`) is part of the one media type.
+    splitHeaderValues(entry).length > 1 ||
+    // An unclosed quote would swallow a list's later entries into the first.
+    hasUnclosedQuotedString(entry) ||
+    // A quote belongs only in a parameter value, never the type or subtype.
+    mediaType.includes('"') ||
     /\s/.test(mediaType) ||
     slash <= 0 ||
     subtype === '' ||
