@@ -1126,6 +1126,19 @@ export class NodeAdapter implements HTTPAdapter {
         let answerAbort: (() => void) | undefined;
 
         /**
+         * Set once the 0% upload callback has returned without a cancel, as the request
+         * starts to go out. An abort before then sent nothing, so it carries no sent
+         * headers and observers are shown the client's.
+         */
+        let hasStartedSending = false;
+
+        /** The `AbortError` for an abort before any response, tagged once it was sent. */
+        const makeRequestAbortError = (): Error =>
+          hasStartedSending
+            ? makeSentRequestAbortError(req, request.headers)
+            : makeAbortError();
+
+        /**
          * Whether the server has already answered.
          *
          * A body write that fails after this is not the failure worth reporting. A server is
@@ -1686,20 +1699,14 @@ export class NodeAdapter implements HTTPAdapter {
          * otherwise fail the request with a bare `AbortError` and leave that answer held.
          * The listener is on before anything can fail, so the fallback is for completeness.
          */
-        const answerAbortRead = (isSent = true): void => {
+        const answerAbortRead = (): void => {
           if (answerAbort !== undefined) {
             answerAbort();
 
             return;
           }
 
-          // Tagged with the headers sent only once the request has gone out: one ended
-          // from the 0% upload callback sent nothing, and reports the client's.
-          failRequest(
-            isSent
-              ? makeSentRequestAbortError(req, request.headers)
-              : makeAbortError(),
-          );
+          failRequest(makeRequestAbortError());
           destroyRequestQuietly(req);
         };
 
@@ -3257,7 +3264,7 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             destroyRequestQuietly(req);
-            failRequest(makeSentRequestAbortError(req, request.headers));
+            failRequest(makeRequestAbortError());
             releaseResponseBody?.();
           };
 
@@ -3283,10 +3290,12 @@ export class NodeAdapter implements HTTPAdapter {
         reportUploadProgress({ loaded: 0, total: 0, progress: 0 });
 
         if (readIsAborted()) {
-          answerAbortRead(false);
+          answerAbortRead();
 
           return;
         }
+
+        hasStartedSending = true;
 
         if (req.destroyed) {
           return;
@@ -3415,12 +3424,13 @@ export class NodeAdapter implements HTTPAdapter {
           // No body (any other was refused above) — fire 100% upload immediately and end
           // the request. (A caller's `Content-Length` has been taken off the request; see
           // `dropBodilessContentLength`.)
-          reportUploadProgress(completeProgressEvent(0));
           // Node's `http` frames it with `Content-Length: 0` itself for most methods; set
-          // here, the same header, so the effective headers reported show it.
+          // here, the same header, so the effective headers reported show it - before the
+          // 100% callback, so a cancel from it reports the header too.
           if (isBodilessContentLengthSent(req.method)) {
             req.setHeader('Content-Length', '0');
           }
+          reportUploadProgress(completeProgressEvent(0));
           req.end();
         }
       } catch (error) {

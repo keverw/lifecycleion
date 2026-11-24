@@ -16043,6 +16043,89 @@ describe('NodeAdapter - headers observers see', () => {
     },
   );
 
+  test('a request cancelled from the 0% upload callback, before anything is sent, shows the client headers', async () => {
+    let requests = 0;
+    const server = http.createServer((req, res) => {
+      requests++;
+      req.resume();
+      res.end();
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${String(port)}`,
+      });
+      const observed: Array<Record<string, string | string[]>> = [];
+      client.addErrorObserver((_error, request) => {
+        observed.push(request.headers);
+      });
+
+      const builder = client.post('/x').text('abc');
+      builder.onUploadProgress(() => {
+        builder.cancel('stop');
+      });
+      const response = await builder.send();
+
+      expect(response.isCancelled).toBe(true);
+      expect(observed).toHaveLength(1);
+      expect(Object.hasOwn(observed[0], 'host')).toBe(false);
+      expect(Object.hasOwn(observed[0], 'content-length')).toBe(false);
+      expect(requests).toBe(0);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  test.each([
+    ['a text body', 'text'],
+    ['no body', 'none'],
+  ])(
+    'a POST with %s, cancelled from its first upload progress past 0%, shows the headers it was framed with',
+    async (_label, body) => {
+      const server = http.createServer((req) => {
+        req.resume();
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      const { port } = server.address() as AddressInfo;
+
+      try {
+        const client = new HTTPClient({
+          adapter: new NodeAdapter(),
+          baseURL: `http://127.0.0.1:${String(port)}`,
+        });
+        const observed: Array<Record<string, string | string[]>> = [];
+        client.addErrorObserver((_error, request) => {
+          observed.push(request.headers);
+        });
+
+        const builder =
+          body === 'text' ? client.post('/x').text('abc') : client.post('/x');
+        builder.onUploadProgress((event) => {
+          if (event.progress > 0) {
+            builder.cancel('stop');
+          }
+        });
+        const response = await builder.send();
+
+        expect(response.isCancelled).toBe(true);
+        expect(observed).toHaveLength(1);
+        expect(observed[0].host).toBe(`127.0.0.1:${String(port)}`);
+        expect(observed[0]['content-length']).toBe(body === 'text' ? '3' : '0');
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
   test("a bodiless request shows its response observer the Content-Length Node's http sends", async () => {
     const received: Array<string | undefined> = [];
     const server = http.createServer((req, res) => {

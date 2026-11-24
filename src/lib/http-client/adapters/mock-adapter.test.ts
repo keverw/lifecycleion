@@ -3666,6 +3666,32 @@ describe('MockAdapter - headers observers see', () => {
     },
   );
 
+  test('a request cancelled from the 0% upload callback, before the route runs, shows the client headers', async () => {
+    const adapter = new MockAdapter();
+    let routeCalls = 0;
+    adapter.routes.post('/x', () => {
+      routeCalls++;
+      return { status: 204 };
+    });
+    const client = new HTTPClient({ adapter, baseURL: 'https://api.test' });
+    const observed: Array<Record<string, string | string[]>> = [];
+    client.addErrorObserver((_error, request) => {
+      observed.push(request.headers);
+    });
+
+    const builder = client.post('/x').text('abc');
+    builder.onUploadProgress(() => {
+      builder.cancel('stop');
+    });
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(observed).toHaveLength(1);
+    expect(Object.hasOwn(observed[0], 'host')).toBe(false);
+    expect(Object.hasOwn(observed[0], 'content-length')).toBe(false);
+    expect(routeCalls).toBe(0);
+  });
+
   test.each([['  '], [['', ' ']]])(
     'a Cookie that holds no cookie (%p) reaches neither the route nor the response observer',
     async (cookie) => {
