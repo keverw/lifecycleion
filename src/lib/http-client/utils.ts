@@ -652,8 +652,10 @@ export function stripCrossOriginURLCredentials(
   }
 
   try {
-    // Read on its own first, as `fetch` reads it: `https:u:p@b.com/x` is a relative path
-    // under an `https:` base but an absolute URL to `b.com`, credentials and all.
+    // Read on its own first, as `fetch` reads it with no page (Node, Bun):
+    // `https:u:p@b.com/x` is a relative path under an `https:` base but an absolute URL to
+    // `b.com`, credentials and all. A browser adapter hands this the URL already resolved
+    // against the page (see `resolveBrowserRequestURL`).
     let target: URL;
     try {
       target = new URL(requestURL);
@@ -709,28 +711,29 @@ export function resolveAbsoluteURLForRuntime(
 }
 
 /**
- * `url` resolved for a browser request: itself when it parses on its own as an absolute
- * URL, else against {@link getBrowserResolutionBase} - the document's base URL in a
- * window, the `location` in a worker; `undefined` when it is relative and there is no
- * base, or does not resolve against it. Tested with `new URL` in a `try`: `URL.canParse`
- * is missing from older browsers and early Node 18, and a check that throws there must
- * not fail every request.
+ * `url` resolved for a browser request, as `fetch` and XHR resolve it: against
+ * {@link getBrowserResolutionBase} - the document's base URL in a window, the `location`
+ * in a worker - where there is one, else on its own as an absolute URL; `undefined` when
+ * it is relative and there is no base, or does not parse. The base comes first even for a
+ * URL that parses on its own: `https:next` is `https://next/` alone, but on
+ * `https://app.test/dir/page` the browser reads it as `https://app.test/dir/next`, its
+ * scheme being the page's. Tested with `new URL` in a `try`: `URL.canParse` is missing
+ * from older browsers and early Node 18, and a check that throws there must not fail
+ * every request.
  */
 export function resolveBrowserRequestURL(url: string): string | undefined {
-  try {
-    return new URL(url).href;
-  } catch {
-    // Relative: resolved below, where there is a base.
-  }
-
   const base = getBrowserResolutionBase();
 
-  if (base === undefined) {
-    return undefined;
+  if (base !== undefined) {
+    try {
+      return new URL(url, base).href;
+    } catch {
+      // A base that is no URL itself: the URL is read on its own below.
+    }
   }
 
   try {
-    return new URL(url, base).href;
+    return new URL(url).href;
   } catch {
     return undefined;
   }
@@ -738,48 +741,61 @@ export function resolveBrowserRequestURL(url: string): string | undefined {
 
 /**
  * A browser adapter's `initialURL`, for {@link stripCrossOriginURLCredentials} to compare
- * the request with. Absent stays absent; an absolute one is taken as it parses.
+ * the request with: absent stays absent, and `null` is one that names no origin, so the
+ * request's credentials are withheld. An absolute one is taken as it parses - where the
+ * page reads it the same way, as the request URL is read (see
+ * {@link resolveBrowserRequestURL}): `https:start` on an `https:` page is a path under it.
  *
- * Only one whose first character is `/` - root-relative (`/start`) or protocol-relative
- * (`//api.test/start`) - is resolved against the page, as its request URL is (see
- * {@link resolveBrowserRequestURL}): it names an origin of its own - the page's, or the one
- * written - so same-origin credentials are not withheld for want of a parse. Every other
- * relative one is handed back as written and the comparison fails closed: `''`, `#top`,
- * `?q`, `.` and `start` name no origin, only the page itself, and resolved they would
- * take the page for the request's origin and keep the userinfo of a request to it with
- * nothing to show it belongs there. Other spellings a browser also reads as root- or
- * protocol-relative - `\\app.test/x`, a leading space or tab - fail closed too, withholding
- * same-origin credentials rather than guessing. So does a `/` one with no page to resolve
- * it against.
+ * Only a relative one whose first character is `/` - root-relative (`/start`) or
+ * protocol-relative (`//api.test/start`) - is resolved against the page, as its request
+ * URL is: it names an origin of its own - the page's, or the one written - so same-origin
+ * credentials are not withheld for want of a parse. Every other relative one names no
+ * origin: `''`, `#top`, `?q`, `.`, `start` and `https:start` name only the page itself,
+ * and resolved they would take the page for the request's origin and keep the userinfo
+ * of a request to it with nothing to show it belongs there. Other spellings a browser
+ * also reads as root- or protocol-relative - `\\app.test/x`, a leading space or tab -
+ * name none too, withholding same-origin credentials rather than guessing. So does a `/`
+ * one with no page to resolve it against.
  */
 export function resolveBrowserInitialURL(
   initialURL: string | undefined,
-): string | undefined {
+): string | null | undefined {
   if (initialURL === undefined) {
     return undefined;
   }
 
+  const base = getBrowserResolutionBase();
+
   try {
-    return new URL(initialURL).href;
+    const alone = new URL(initialURL).href;
+
+    if (base === undefined || isReadAloneAgainst(initialURL, base, alone)) {
+      return alone;
+    }
   } catch {
     // Relative: resolved below only when it names an origin.
   }
 
-  if (!initialURL.startsWith('/')) {
-    return initialURL;
-  }
-
-  // Not absolute - it failed to parse above - so only the page can resolve it.
-  const base = getBrowserResolutionBase();
-
-  if (base === undefined) {
-    return initialURL;
+  if (!initialURL.startsWith('/') || base === undefined) {
+    return null;
   }
 
   try {
     return new URL(initialURL, base).href;
   } catch {
-    return initialURL;
+    return null;
+  }
+}
+
+/**
+ * Whether `url`, read on its own as `alone`, resolves to the same URL against `base` - a
+ * base that does not parse leaves it as read on its own.
+ */
+function isReadAloneAgainst(url: string, base: string, alone: string): boolean {
+  try {
+    return new URL(url, base).href === alone;
+  } catch {
+    return true;
   }
 }
 
@@ -814,10 +830,11 @@ export function resolveBrowserDispatchURL(
     );
   }
 
-  const dispatchedURL = stripCrossOriginURLCredentials(
-    resolvedURL,
-    resolveBrowserInitialURL(initialURL),
-  );
+  const initial = resolveBrowserInitialURL(initialURL);
+  const dispatchedURL =
+    initial === null
+      ? stripURLCredentials(resolvedURL)
+      : stripCrossOriginURLCredentials(resolvedURL, initial);
 
   if (!isAbsoluteWebURL(dispatchedURL)) {
     return nonRetryableAdapterErrorFrom(

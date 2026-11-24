@@ -3683,6 +3683,45 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('a same-scheme URL with no slashes is read as a path under the page, as the request and as the initial URL', async () => {
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+    const openedURL = async (
+      requestURL: string,
+      initialURL?: string,
+    ): Promise<string | undefined> => {
+      const promise = new XHRAdapter().send({
+        requestURL,
+        initialURL,
+        method: 'GET',
+        headers: {},
+      });
+      lastXHR.status = 204;
+      lastXHR.responseURL = lastXHR.openArgs?.url ?? '';
+      lastXHR.simulateLoad();
+      await promise;
+      return lastXHR.openArgs?.url;
+    };
+
+    try {
+      (globalThis as Record<string, unknown>).document = {
+        baseURI: 'https://app.test/dir/page',
+      };
+      // As the browser's XHR resolves it, not `https://next/`.
+      expect(await openedURL('https:next')).toBe('https://app.test/dir/next');
+      // `https:evil.test` is a path under the page, naming no origin: credentials for
+      // `evil.test` are withheld.
+      expect(
+        await openedURL('https://u:p@evil.test/x', 'https:evil.test'),
+      ).toBe('https://evil.test/x');
+    } finally {
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
+  });
+
   test('an initial URL that names no origin fails closed rather than naming the page', async () => {
     // Resolved against the page, `''`, `#top`, `?q` or `start` is the page itself: the
     // request URL's userinfo was kept with nothing to show it belonged to that origin. A
@@ -6167,6 +6206,13 @@ describe('XHRAdapter - a cancel at a followed redirect, and a body declared past
     ['a HEAD answer', 'HEAD', 200, 'content-length: 10\r\n'],
     ['a 304', 'GET', 304, 'content-length: 10\r\n'],
     ['a body within the limit', 'GET', 200, 'content-length: 4\r\n'],
+    // The chunks frame the body, not the length (RFC 9112 §6.3).
+    [
+      'a chunked body',
+      'GET',
+      200,
+      'transfer-encoding: chunked\r\ncontent-length: 10\r\n',
+    ],
   ] as const)(
     '%s is not refused on its Content-Length',
     async (_label, method, status, headers) => {

@@ -176,6 +176,21 @@ export function parseContentLength(
 }
 
 /**
+ * The body length a response's headers declare, by its `Content-Length` (see
+ * {@link parseContentLength}) - or `undefined` when it carries a `Transfer-Encoding`,
+ * which frames the body instead and overrides any `Content-Length` (RFC 9112 §6.3). A
+ * runtime that accepts both (Bun's `fetch` hands such a response over with both shown)
+ * reads the body by its chunks, so the length states nothing about it.
+ */
+export function declaredContentLength(
+  headers: Readonly<Record<string, string | string[] | undefined>>,
+): number | undefined {
+  return headers['transfer-encoding'] === undefined
+    ? parseContentLength(headers['content-length'])
+    : undefined;
+}
+
+/**
  * Whether a body handed over - a string from a custom adapter, MockAdapter's serialized
  * bytes, an XHR's buffer or view - is past `maxResponseBytes`: bytes as their internal
  * slot measures them - a view or buffer of any kind, from any realm, not the size the

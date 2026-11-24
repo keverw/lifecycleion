@@ -3565,6 +3565,78 @@ describe('MockAdapter - request body bytes from another realm', () => {
   });
 });
 
+describe('MockAdapter - request body bytes are taken once', () => {
+  test('a body resized from the upload callback reaches the route as its content-length counts it', async () => {
+    const buffer = new ArrayBuffer(2, { maxByteLength: 8 });
+    // Length-tracking: it grows with its buffer.
+    const body = new Uint8Array(buffer);
+    body.set([1, 2]);
+    const adapter = new MockAdapter();
+    let routeBody: unknown;
+    let contentLength: unknown;
+    adapter.routes.post('/upload', (request) => {
+      routeBody = request.body;
+      contentLength = request.headers['content-length'];
+      return { status: 204 };
+    });
+    const uploads: number[] = [];
+
+    await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/upload',
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream' },
+        body,
+        onUploadProgress: ({ loaded }) => {
+          uploads.push(loaded);
+          buffer.resize(5);
+        },
+      }),
+    );
+
+    expect(body.length).toBe(5);
+    expect(contentLength).toBe('2');
+    expect(Array.from(routeBody as Uint8Array)).toEqual([1, 2]);
+    expect(uploads).toEqual([0, 2]);
+  });
+});
+
+describe('MockAdapter - request body over a detached buffer', () => {
+  test.each([['text/plain'], ['application/octet-stream']])(
+    'a %s body whose buffer was transferred is sent as no bytes, as NodeAdapter and fetch send it',
+    async (contentType) => {
+      const buffer = new ArrayBuffer(4);
+      const body = new Uint8Array(buffer);
+      structuredClone(buffer, { transfer: [buffer] });
+      const adapter = new MockAdapter();
+      let contentLength: unknown;
+      let routeBody: unknown;
+      adapter.routes.post('/upload', (request) => {
+        contentLength = request.headers['content-length'];
+        routeBody = request.body;
+        return { status: 204 };
+      });
+
+      const response = await adapter.send(
+        makeAdapterRequest({
+          requestURL: '/upload',
+          method: 'POST',
+          headers: { 'content-type': contentType },
+          body,
+        }),
+      );
+
+      expect(response.status).toBe(204);
+      expect(contentLength).toBe('0');
+      expect(
+        contentType === 'text/plain'
+          ? routeBody
+          : Array.from(routeBody as Uint8Array),
+      ).toEqual(contentType === 'text/plain' ? '' : []);
+    },
+  );
+});
+
 describe('MockAdapter - route body bytes are copied', () => {
   test('a route body of bytes is delivered as a copy, so changing it leaves the fixture as it was', async () => {
     const bytes = new Uint8Array([1, 2, 3]);

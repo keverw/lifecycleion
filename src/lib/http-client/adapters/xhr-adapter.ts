@@ -36,7 +36,7 @@ import {
   hasResponseBody,
   isAnsweredBodyOverLimit,
   isIdentityContentEncoding,
-  parseContentLength,
+  declaredContentLength,
   streamErrorAnswer,
 } from '../internal/response-limit';
 import {
@@ -968,9 +968,7 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        const declaredLength = parseContentLength(
-          answer.headers['content-length'],
-        );
+        const declaredLength = declaredContentLength(answer.headers);
 
         if (
           declaredLength === undefined ||

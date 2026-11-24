@@ -37,10 +37,11 @@ import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   RESPONSE_TOO_LARGE,
   hasResponseBody,
+  isAnsweredBodyOverLimit,
   isIdentityContentEncoding,
   tooLargeAnswer,
   streamErrorAnswer,
-  parseContentLength,
+  declaredContentLength,
 } from '../internal/response-limit';
 import type {
   HTTPAdapter,
@@ -555,7 +556,7 @@ async function readResponseBody(
       ? answered.type !== 'cors'
       : isIdentityContentEncoding(contentEncoding);
   const declaredLength = isIdentityEncoded
-    ? parseContentLength(answered.headers['content-length'])
+    ? declaredContentLength(answered.headers)
     : undefined;
 
   if (declaredLength !== undefined && declaredLength > maxResponseBytes) {
@@ -931,6 +932,14 @@ async function readBodyWithin(
           if (text === '' && value !== '') {
             continue;
           }
+        }
+
+        // Measured as UTF-8 before it is encoded, as the units alone cannot tell: up to
+        // three bytes each, so text that fits by its units may still be past the limit,
+        // and is not encoded only to be refused.
+        if (isAnsweredBodyOverLimit(text, maxResponseBytes - loadedBytes)) {
+          letGo();
+          return RESPONSE_TOO_LARGE;
         }
 
         value = encodeText(text);

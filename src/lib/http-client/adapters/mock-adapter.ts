@@ -439,8 +439,20 @@ export class MockAdapter implements HTTPAdapter {
     // to go ahead - so a part's getters are not read for one refused or cancelled - and
     // both the `content-length` and what the route is handed are made from that read.
     const formParts = isFormBody ? [...formEntries(body)] : undefined;
+    // Bytes copied once, here, the same way: the `content-length` and what the route is
+    // handed are both this copy, so a buffer the caller resizes or changes afterwards -
+    // from the upload callback below, say - changes neither, as bytes on the wire would
+    // not change. Copied through the internal slots, so another realm's `Uint8Array` is
+    // copied as well, and a route that changes the bytes it is handed changes only its own.
+    // One over a detached buffer, or past the end of a shrunk resizable one, is sent as
+    // no bytes, as NodeAdapter and `fetch` send it, rather than refused by the copy.
+    const sentBody = isRequestBodyBytes(body)
+      ? readBinaryByteLength(body) === 0
+        ? new Uint8Array(0)
+        : new Uint8Array(body)
+      : body;
     delete materializedHeaders['content-length'];
-    const bodyLength = requestBodyLength(body, routeMethod, formParts);
+    const bodyLength = requestBodyLength(sentBody, routeMethod, formParts);
     if (bodyLength !== undefined) {
       defineEntry(materializedHeaders, 'content-length', String(bodyLength));
     }
@@ -541,7 +553,7 @@ export class MockAdapter implements HTTPAdapter {
         body: formParts
           ? extractFormData(formParts)
           : parseRequestBody(
-              body as Exclude<typeof body, FormData>,
+              sentBody as Exclude<typeof sentBody, FormData>,
               materializedHeaders['content-type'],
             ),
       };
@@ -991,7 +1003,7 @@ export class MockAdapter implements HTTPAdapter {
     // NodeAdapter reports the bytes it wrote - then report download size based on
     // serialised body.
     guardedUploadProgress?.(
-      completeProgressEvent(bodyLength ?? knownBodyByteLength(body)),
+      completeProgressEvent(bodyLength ?? knownBodyByteLength(sentBody)),
     );
 
     // A cancel from that callback ends the request as a cancel over the answer, its status
@@ -1592,11 +1604,8 @@ function parseRequestBody(
     // Keep opaque bytes intact so mock handlers can inspect binary payloads
     // like uploads or octet-stream requests without lossy text decoding.
     if (parsedContentType === 'binary') {
-      // A copy, as a server receives its own off the wire: driven directly, the adapter
-      // is handed the caller's buffer, which a route that changed the bytes it was handed
-      // would otherwise change too. Copied through the internal slots, so another realm's
-      // `Uint8Array` is copied as well.
-      return new Uint8Array(body);
+      // The send's own copy (see `sentBody`), as a server receives its own off the wire.
+      return body;
     } else if (parsedContentType === 'json') {
       // JSON requests arrive as bytes from the adapter layer, so decode first
       // and then match the client response path by attempting JSON.parse().

@@ -18,6 +18,7 @@ import {
   parseContentType,
   resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
+  resolveBrowserRequestURL,
   scalarHeader,
   reportedRedirectTarget,
   serializeBody,
@@ -306,6 +307,31 @@ describe('resolveAbsoluteURLForRuntime', () => {
     expect(
       resolveAbsoluteURLForRuntime('users', 'https://x.test/api', true),
     ).toBe('https://x.test/api/users');
+  });
+
+  test('a page base that is no URL leaves an absolute URL read on its own', () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).document = { baseURI: 'not a url' };
+
+    expect(
+      resolveAbsoluteURLForRuntime('https://api.test/x', undefined, true),
+    ).toBe('https://api.test/x');
+    expect(resolveBrowserRequestURL('https://api.test/x')).toBe(
+      'https://api.test/x',
+    );
+    expect(resolveBrowserRequestURL('/x')).toBeUndefined();
+  });
+
+  test("a worker's location resolves a same-scheme URL with no slashes", () => {
+    delete (globalThis as Record<string, unknown>).window;
+    delete (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).self = {
+      location: { href: 'https://worker.test/js/worker.js' },
+    };
+
+    expect(resolveBrowserRequestURL('https:next')).toBe(
+      'https://worker.test/js/next',
+    );
   });
 
   test('leaves relative paths unresolved on non-browser runtimes', () => {

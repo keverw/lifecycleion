@@ -415,6 +415,36 @@ describe('FetchAdapter', () => {
     expect(response.detectedRedirectURL).toBe('https://app.test/dir/api/next');
   });
 
+  test.each([
+    ['https:next', 'https://app.test/dir/page', 'https://app.test/dir/next'],
+    ['http:next', 'https://app.test/dir/page', 'http://next/'],
+    ['https:next', undefined, 'https://next/'],
+  ] as const)(
+    '%s is sent where fetch resolves it against the page base (%s): %s',
+    async (requestURL, baseURI, expected) => {
+      let capturedURL = '';
+
+      if (baseURI !== undefined) {
+        (globalThis as any).document = { baseURI };
+      }
+
+      (globalThis as any).fetch = (url: string) => {
+        capturedURL = url;
+        return Promise.resolve(new Response(null, { status: 204 }));
+      };
+
+      await new FetchAdapter().send({ requestURL, method: 'GET', headers: {} });
+
+      // The same as the URL parser resolves it against that base, as `fetch` does.
+      expect(capturedURL).toBe(
+        baseURI === undefined
+          ? new URL(requestURL).href
+          : new URL(requestURL, baseURI).href,
+      );
+      expect(capturedURL).toBe(expected);
+    },
+  );
+
   test('keeps URL userinfo when the initial and request origins match', async () => {
     let capturedURL = '';
 
@@ -3995,6 +4025,38 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     }
   });
 
+  test('a text chunk within the limit by its UTF-16 units but past it as UTF-8 is refused before it is encoded', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve({
+        status: 200,
+        type: 'basic',
+        headers: new Headers(),
+        body: {
+          *[Symbol.asyncIterator]() {
+            yield 'a'.repeat(600);
+            // 300 units, within the 400 bytes left; 900 bytes as UTF-8.
+            yield '\u20ac'.repeat(300);
+          },
+        },
+        arrayBuffer: () => Promise.reject(new Error('not read whole')),
+      });
+    const encode = spyOn(TextEncoder.prototype, 'encode');
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://local.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+      });
+
+      expect(response.streamErrorCode).toBe('response_too_large');
+      expect(encode.mock.calls.map(([text]) => text?.length)).toEqual([600]);
+    } finally {
+      encode.mockRestore();
+    }
+  });
+
   test('a text chunk that is only a held high surrogate is not counted as an empty chunk', async () => {
     const pairs = 128;
     (globalThis as any).fetch = () =>
@@ -4747,6 +4809,27 @@ test('an abort ends a stalled body read whose Content-Length is within the limit
   );
 
   expect(outcome).toBe('AbortError');
+});
+
+test('a chunked body under the limit is read whole though the Content-Length beside it is past the limit', async () => {
+  // The chunks frame the body and override the length (RFC 9112 §6.3); Bun's fetch hands
+  // such a response over with both headers shown.
+  (globalThis as any).fetch = () =>
+    Promise.resolve(
+      new Response('ok', {
+        headers: { 'transfer-encoding': 'chunked', 'content-length': '100' },
+      }),
+    );
+
+  const response = await new FetchAdapter().send({
+    requestURL: 'https://local.test/data',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 10,
+  });
+
+  expect(response.streamErrorCode).toBeUndefined();
+  expect(new TextDecoder().decode(response.body as Uint8Array)).toBe('ok');
 });
 
 test('a body with a Transfer-Encoding beside its Content-Length is read a chunk at a time, held to the limit', async () => {
