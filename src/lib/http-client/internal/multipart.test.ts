@@ -1076,11 +1076,13 @@ describe('serializeMultipartFormData', () => {
     expect(attached.filter((event) => !removed.includes(event))).toEqual([]);
   });
 
-  test('a chunk whose buffer is transferred while its last slice is written is counted whole in the progress reported', async () => {
+  test('a chunk whose buffer is transferred while its last slice is queued is still written whole, as the progress reported counts it', async () => {
     const partSize = REQUEST_BODY_CHUNK_SIZE * 2;
-    const chunk = new Uint8Array(partSize);
+    const chunk = new Uint8Array(partSize).map((_, index) => index % 251);
+    const expected = [...chunk];
     let isSent = false;
     let fileSlices = 0;
+    const queued: Uint8Array[] = [];
 
     const fd = scriptFormEntries(new FormData(), function* () {
       yield [
@@ -1109,13 +1111,13 @@ describe('serializeMultipartFormData', () => {
       destroyed: false,
       setHeader() {},
       write(data, callback) {
-        // The producer takes the buffer back while the chunk's last slice is in flight.
-        if (
-          data instanceof Uint8Array &&
-          !Buffer.isBuffer(data) &&
-          ++fileSlices === 2
-        ) {
-          structuredClone(chunk.buffer, { transfer: [chunk.buffer] });
+        if (data instanceof Uint8Array && !Buffer.isBuffer(data)) {
+          // Held, as a corked writable holds what it is given, and consumed only later.
+          queued.push(data);
+          // The producer takes the buffer back while the chunk's last slice is queued.
+          if (++fileSlices === 2) {
+            structuredClone(chunk.buffer, { transfer: [chunk.buffer] });
+          }
         }
         callback?.(null);
         return true;
@@ -1140,6 +1142,11 @@ describe('serializeMultipartFormData', () => {
 
     const last = events.at(-1);
     expect(chunk.byteLength).toBe(0);
+    // What the writable consumes once the buffer is gone: every byte counted.
+    expect(queued.reduce((sum, slice) => sum + slice.byteLength, 0)).toBe(
+      partSize,
+    );
+    expect(queued.flatMap((slice) => [...slice])).toEqual(expected);
     expect(last?.loaded).toBe(last?.total);
     expect(last?.progress).toBe(1);
   });

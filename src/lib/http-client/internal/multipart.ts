@@ -42,10 +42,7 @@
  */
 
 import { types } from 'node:util';
-import {
-  assertTypedArrayInBounds,
-  plainBytesView,
-} from '../../internal/binary-view';
+import { plainBytesView } from '../../internal/binary-view';
 import { callQuietly } from '../../internal/call-quietly';
 import { readUnknownMember } from '../../internal/read-member';
 import { markNonRetryableAdapterError } from './adapter-error';
@@ -133,8 +130,7 @@ export async function serializeMultipartFormData(
   // bytes are held to its measured size before they are written (see below), so the
   // body comes to `totalSize` exactly.
   const write = (data: string | Buffer | Uint8Array): Promise<void> => {
-    // Measured before it is handed over: a custom `stream()`'s producer may transfer the
-    // chunk's buffer while the write is in flight, after which its length reads as 0.
+    // Measured before it is handed over, so the count is of what was handed over.
     const byteLength = Buffer.byteLength(data);
 
     // Bytes counted, and progress reported, only once the writable has accepted them: a
@@ -164,13 +160,18 @@ export async function serializeMultipartFormData(
       : writeInSlices(bytes, write);
   };
 
-  // Bytes written slice by slice, each awaited; the slices are views, not copies. A stream
-  // destroyed between slices fails the write, as it fails the whole body below, rather
-  // than leaving a part cut short to read as written. The chunk's length is read once,
-  // before its first slice, and the upload fails if any of those bytes can no longer be
-  // read: a custom `stream()` whose producer transfers or shrinks a chunk's buffer while
-  // its slices are written leaves the rest reading as empty, which would end the loop
-  // early with the part's count short of the bytes already sent.
+  // Bytes written slice by slice, each awaited. A file chunk's slices are copies the
+  // writable owns, each made as its write is due: a custom `stream()`'s producer can
+  // transfer, shrink or refill a chunk's buffer while a write is queued, and a writable
+  // holding a view over it would then send fewer bytes, or other ones, than were counted -
+  // a body short of its `Content-Length` reported as complete. A producer that refills the
+  // buffer between slices sends the bytes each slice was copied from, so what is sent is
+  // what is counted. The chunk's length is read once, before its first slice, and a slice
+  // that can no longer be read - its buffer transferred or shrunk away - fails the upload
+  // rather than ending the chunk early. A part head is a `Buffer` the writer made, whose
+  // `slice` is a view, which nothing else can change. A stream destroyed between slices
+  // fails the write, as it fails the whole body below, rather than leaving a part cut
+  // short to read as written.
   const writeInSlices = async (
     bytes: Uint8Array,
     writeSlice: (slice: Uint8Array) => Promise<void>,
@@ -189,17 +190,11 @@ export async function serializeMultipartFormData(
       const end = Math.min(offset + REQUEST_BODY_CHUNK_SIZE, byteLength);
       let slice: Uint8Array;
 
+      // `slice` throws for a view over a detached buffer or past the end of a shrunk one.
       try {
-        assertTypedArrayInBounds(bytes);
-        slice = bytes.subarray(offset, end);
+        slice = bytes.slice(offset, end);
       } catch (error) {
         throw sourceReadFailure(error);
-      }
-
-      if (slice.byteLength !== end - offset) {
-        throw sourceReadFailure(
-          new TypeError('The chunk shrank while it was being written'),
-        );
       }
 
       await writeSlice(slice);
