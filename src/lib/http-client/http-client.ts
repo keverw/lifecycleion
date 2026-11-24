@@ -3481,6 +3481,16 @@ export class BaseHTTPClient {
         // Told once, for the stream factory's timeout and the body the adapter is handed.
         const isBuiltInSend = isBuiltInNetworkSend(adapter, send);
         isBuiltInNodeSend = this._adapterType === 'node' && isBuiltInSend;
+        // The built-in FetchAdapter and XHRAdapter send a body's real length whatever a
+        // caller set (`fetch` and XHR frame it themselves), so a caller's `Content-Length`
+        // is neither handed to them nor shown to observers as sent. A custom adapter is
+        // handed it as the caller set it.
+        if (
+          isBuiltInSend &&
+          (this._adapterType === 'fetch' || this._adapterType === 'xhr')
+        ) {
+          delete sentRequest.headers['content-length'];
+        }
         const adapterRequest: AdapterRequest = {
           requestURL: sentRequest.requestURL,
           method: sentRequest.method,
@@ -5502,14 +5512,18 @@ export class BaseHTTPClient {
       }
     }
 
-    // A `Cookie` that holds no cookie - empty, or only whitespace - is sent by no adapter
-    // (see `joinCookieHeader`), so it is not reported to observers as sent either.
-    if (joinCookieHeader(Object.entries(headers)) === undefined) {
-      for (const key of Object.keys(headers)) {
-        if (lowerCaseHeaderName(key) === 'cookie') {
-          delete headers[key];
-        }
+    // `Cookie` as the one field every adapter sends (see `joinCookieHeader`): items joined
+    // with `; `, any that holds no cookie - empty, or only whitespace - left out, and none
+    // at all when none holds one, so observers are shown what went out.
+    // Set in place under its first spelling, so its position among the headers is kept.
+    const cookie = joinCookieHeader(Object.entries(headers));
+    for (const key of Object.keys(headers)) {
+      if (lowerCaseHeaderName(key) === 'cookie' && key !== cookie?.name) {
+        delete headers[key];
       }
+    }
+    if (cookie !== undefined) {
+      headers[cookie.name] = cookie.value;
     }
 
     return {

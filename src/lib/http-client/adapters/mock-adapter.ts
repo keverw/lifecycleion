@@ -29,6 +29,7 @@ import {
 } from '../../internal/describe-value';
 import {
   connectRefusal,
+  defineHiddenTags,
   makeAbortError,
   markNonRetryableAdapterError,
   markResponseStreamAbort,
@@ -58,6 +59,7 @@ import {
   completeProgressEvent,
 } from '../internal/progress';
 import {
+  isBodilessContentLengthSent,
   lowerCaseHeaderName,
   materializeRequestHeaders,
   presentHeaderValue,
@@ -74,6 +76,7 @@ import {
   type PromiseResultBox,
 } from '../../internal/adopt-promise';
 import {
+  EFFECTIVE_REQUEST_HEADERS_KEY,
   MAX_COOKIE_LIFETIME_SECONDS,
   MOCK_ADAPTER_DEFAULT_BASE_URL,
 } from '../consts';
@@ -470,7 +473,8 @@ export class MockAdapter implements HTTPAdapter {
     guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
     // Again, as the real adapters do: a cancel from that callback ends the request before
-    // the route handler runs, as it would before a real request was sent.
+    // the route handler runs, as it would before a real request was sent, so it carries
+    // no sent headers.
     if (isSignalAborted(signal)) {
       throwAbortError();
     }
@@ -574,7 +578,7 @@ export class MockAdapter implements HTTPAdapter {
         ).value;
       } catch (handlerError) {
         if (isInternalAbortError(handlerError)) {
-          throwAbortError();
+          throwAbortError(effectiveRequestHeaders);
         }
 
         // The wait's own refusal - a signal whose `aborted` throws, read while the route
@@ -620,7 +624,7 @@ export class MockAdapter implements HTTPAdapter {
             ).value;
           } catch (error) {
             if (isInternalAbortError(error)) {
-              throwAbortError();
+              throwAbortError(effectiveRequestHeaders);
             }
 
             if (waitRefusals.has(error as object)) {
@@ -816,7 +820,7 @@ export class MockAdapter implements HTTPAdapter {
           // The sleep's own abort, rejected as every other abort here is rather than as
           // the internal error class.
           if (isInternalAbortError(error)) {
-            throwAbortError();
+            throwAbortError(effectiveRequestHeaders);
           }
 
           throw error;
@@ -829,7 +833,7 @@ export class MockAdapter implements HTTPAdapter {
     // --- 6. Post-delay abort check ---
     // Catches cancellation when there was no delay (or delay was 0).
     if (isSignalAborted(signal)) {
-      throwAbortError();
+      throwAbortError(effectiveRequestHeaders);
     }
 
     // A `streamError` the mock does not know (see above), refused whatever else the route
@@ -1020,11 +1024,15 @@ export class MockAdapter implements HTTPAdapter {
     // with no download. Read quietly, as once an answer is in hand they read it: a signal
     // that throws now does not replace the answer with a refusal.
     if (isSignalAbortedQuietly(signal)) {
-      throw markResponseStreamAbort(
+      const abortError = markResponseStreamAbort(
         makeAbortError(MOCK_ABORT_MESSAGE),
         mockResponse.status,
         normalizedResponseHeaders,
       );
+      defineHiddenTags(abortError, {
+        [EFFECTIVE_REQUEST_HEADERS_KEY]: effectiveRequestHeaders,
+      });
+      throw abortError;
     }
 
     // A simulated stream error reports no terminal download progress: real
@@ -1571,18 +1579,8 @@ function requestBodyLength(
     return readBinaryByteLength(body) ?? undefined;
   }
 
-  return NO_DEFAULT_BODY_METHODS.has(upperMethod) ? undefined : 0;
+  return isBodilessContentLengthSent(upperMethod) ? 0 : undefined;
 }
-
-/** The methods Node's `http` sends no `content-length` for when they carry no body. */
-const NO_DEFAULT_BODY_METHODS: ReadonlySet<string> = new Set([
-  'GET',
-  'HEAD',
-  'DELETE',
-  'OPTIONS',
-  'TRACE',
-  'CONNECT',
-]);
 
 /**
  * Add `value` to the list under `key`, made once per key and defined as `defineEntry`
@@ -1862,8 +1860,21 @@ function isInternalAbortError(error: unknown): error is InternalMockAbortError {
   }
 }
 
-function throwAbortError(): never {
-  throw makeAbortError(MOCK_ABORT_MESSAGE);
+/**
+ * The mock's `AbortError`, carrying the headers the request was sent with once they are
+ * known, as NodeAdapter's aborts do, so observers of a cancel or timeout see them.
+ * Hidden, as every such tag is: the headers carry the request's credentials.
+ */
+function throwAbortError(
+  effectiveRequestHeaders?: Record<string, string | string[]>,
+): never {
+  const error = makeAbortError(MOCK_ABORT_MESSAGE);
+  if (effectiveRequestHeaders !== undefined) {
+    defineHiddenTags(error, {
+      [EFFECTIVE_REQUEST_HEADERS_KEY]: effectiveRequestHeaders,
+    });
+  }
+  throw error;
 }
 
 /**

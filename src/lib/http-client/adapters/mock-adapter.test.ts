@@ -3628,6 +3628,44 @@ describe("MockAdapter - a route's Location is text", () => {
 });
 
 describe('MockAdapter - headers observers see', () => {
+  test.each([
+    ['times out while the route runs', 'route'],
+    ['is cancelled during the response delay', 'delay'],
+  ])(
+    'a request that %s shows its error observer the headers the route received',
+    async (_label, phase) => {
+      const adapter = new MockAdapter();
+      adapter.routes.post('/x', () =>
+        phase === 'route'
+          ? new Promise<never>(() => {})
+          : { status: 204, delay: 5000 },
+      );
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'https://api.test',
+        timeout: phase === 'route' ? 50 : 0,
+      });
+      const observed: Array<Record<string, string | string[]>> = [];
+      client.addErrorObserver((_error, request) => {
+        observed.push(request.headers);
+      });
+
+      const builder = client.post('/x').text('abc');
+      if (phase === 'delay') {
+        setTimeout(() => builder.cancel('stop'), 20);
+      }
+      const response = await builder.send();
+
+      expect(
+        phase === 'route' ? response.isTimeout : response.isCancelled,
+      ).toBe(true);
+      expect(observed).toHaveLength(1);
+      // The mock's own framing, which the client's record does not hold.
+      expect(observed[0]['content-length']).toBe('3');
+      expect(observed[0].host).toBe('api.test');
+    },
+  );
+
   test.each([['  '], [['', ' ']]])(
     'a Cookie that holds no cookie (%p) reaches neither the route nor the response observer',
     async (cookie) => {

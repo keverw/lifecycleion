@@ -12912,3 +12912,40 @@ test("dot segments in a path resolve past baseURL's path, which is a prefix, not
     'https://api.test/tenant-a/users/..%2F..%2Fadmin',
   );
 });
+
+describe('HTTPClient - request headers observers see', () => {
+  test.each(['fetch', 'xhr'] as const)(
+    "a custom '%s' adapter is handed, and observers shown, the one Cookie sent and the caller's Content-Length",
+    async (type) => {
+      // Restored after each test.
+      (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+      const handed: Array<Record<string, string | string[]>> = [];
+      const adapter: HTTPAdapter = {
+        getType: () => type,
+        send: (request: AdapterRequest): Promise<AdapterResponse> => {
+          handed.push(request.headers);
+          return Promise.resolve({ status: 204, headers: {}, body: null });
+        },
+      };
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+      });
+      const observed: Array<Record<string, string | string[]>> = [];
+      client.addResponseObserver((_response, request) => {
+        observed.push(request.headers);
+      });
+
+      await client
+        .post('/x')
+        .headers({ cookie: ['', 'a=1', ' ', 'b=2'], 'content-length': '999' })
+        .text('abc')
+        .send();
+
+      for (const headers of [handed[0], observed[0]]) {
+        expect(headers.cookie).toBe('a=1; b=2');
+        expect(headers['content-length']).toBe('999');
+      }
+    },
+  );
+});

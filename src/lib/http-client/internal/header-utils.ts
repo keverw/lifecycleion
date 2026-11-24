@@ -108,6 +108,25 @@ export function deleteHeader(
   }
 }
 
+/** The methods Node's `http` sends no `Content-Length` for when they carry no body. */
+const NO_DEFAULT_BODY_METHODS: ReadonlySet<string> = new Set([
+  'GET',
+  'HEAD',
+  'DELETE',
+  'OPTIONS',
+  'TRACE',
+  'CONNECT',
+]);
+
+/**
+ * Whether Node's `http` frames a bodiless request of `upperMethod` (uppercase) with
+ * `Content-Length: 0`, as it does every method but `GET`, `HEAD`, `DELETE`, `OPTIONS`,
+ * `TRACE` and `CONNECT`.
+ */
+export function isBodilessContentLengthSent(upperMethod: string): boolean {
+  return !NO_DEFAULT_BODY_METHODS.has(upperMethod);
+}
+
 /**
  * Remove, in place, the headers a browser adapter's transport frames itself from its own
  * copy of a request's headers.

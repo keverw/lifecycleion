@@ -4908,3 +4908,27 @@ test('a body with a Transfer-Encoding beside its Content-Length is read a chunk 
     server.close();
   }
 });
+
+describe('FetchAdapter - headers observers see', () => {
+  test("a caller's Content-Length is not shown to observers as sent", async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve(new Response(null, { status: 204 }));
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'https://api.test',
+    });
+    const observed: Array<Record<string, string | string[]>> = [];
+    client.addResponseObserver((_response, request) => {
+      observed.push(request.headers);
+    });
+
+    await client
+      .post('/x')
+      .headers({ 'content-length': '999' })
+      .text('abc')
+      .send();
+
+    expect(observed).toHaveLength(1);
+    expect(Object.hasOwn(observed[0], 'content-length')).toBe(false);
+  });
+});

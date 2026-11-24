@@ -15995,3 +15995,88 @@ describe("a client's byte body through NodeAdapter", () => {
     }
   });
 });
+
+describe('NodeAdapter - headers observers see', () => {
+  test.each([
+    ['times out', 'timeout'],
+    ['is cancelled', 'cancel'],
+  ])(
+    'a request that %s before any response shows its error observer the headers it sent',
+    async (_label, ending) => {
+      // Reads the request and never answers.
+      const server = http.createServer((req) => {
+        req.resume();
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      const { port } = server.address() as AddressInfo;
+
+      try {
+        const client = new HTTPClient({
+          adapter: new NodeAdapter(),
+          baseURL: `http://127.0.0.1:${String(port)}`,
+          timeout: ending === 'timeout' ? 100 : 0,
+        });
+        const observed: Array<Record<string, string | string[]>> = [];
+        client.addErrorObserver((_error, request) => {
+          observed.push(request.headers);
+        });
+
+        const builder = client.post('/x').text('abc');
+        if (ending === 'cancel') {
+          setTimeout(() => builder.cancel('stop'), 50);
+        }
+        const response = await builder.send();
+
+        expect(
+          ending === 'timeout' ? response.isTimeout : response.isCancelled,
+        ).toBe(true);
+        expect(observed).toHaveLength(1);
+        // NodeAdapter's own framing, which the client's record does not hold.
+        expect(observed[0]['content-length']).toBe('3');
+        expect(observed[0].host).toBe(`127.0.0.1:${String(port)}`);
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
+  test("a bodiless request shows its response observer the Content-Length Node's http sends", async () => {
+    const received: Array<string | undefined> = [];
+    const server = http.createServer((req, res) => {
+      received.push(req.headers['content-length']);
+      req.resume();
+      res.end();
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${String(port)}`,
+      });
+      const observed: Array<Record<string, string | string[]>> = [];
+      client.addResponseObserver((_response, request) => {
+        observed.push(request.headers);
+      });
+
+      await client.post('/x').send();
+      await client.patch('/x').send();
+      await client.request('PURGE', '/x').send();
+      await client.get('/x').send();
+      await client.delete('/x').send();
+
+      expect(received).toEqual(['0', '0', '0', undefined, undefined]);
+      expect(
+        observed.map((headers) => headers['content-length'] as unknown),
+      ).toEqual(received);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

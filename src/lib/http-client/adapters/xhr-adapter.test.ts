@@ -2232,6 +2232,30 @@ describe('XHRAdapter', () => {
     expect((await sending).status).toBe(204);
   });
 
+  test("a caller's Content-Length is neither sent nor shown to observers", async () => {
+    const client = new HTTPClient({
+      adapter: new XHRAdapter(),
+      baseURL: 'https://api.test',
+    });
+    const observed: Array<Record<string, string | string[]>> = [];
+    client.addResponseObserver((_response, request) => {
+      observed.push(request.headers);
+    });
+    const sending = client
+      .post('/x')
+      .headers({ 'content-length': '999' })
+      .text('abc')
+      .send();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    lastXHR.status = 204;
+    lastXHR.simulateLoad();
+    await sending;
+
+    expect(lastXHR.requestHeaders['content-length']).toBeUndefined();
+    expect(observed).toHaveLength(1);
+    expect(Object.hasOwn(observed[0], 'content-length')).toBe(false);
+  });
+
   test('outside a browser an XHR GET with a body is sent', async () => {
     const client = new HTTPClient({
       adapter: new XHRAdapter(),

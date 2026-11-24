@@ -109,6 +109,7 @@ import {
   deleteHeader,
   describeRefusedHeader,
   headerListTokens,
+  isBodilessContentLengthSent,
   lowerCaseHeaderName,
   materializeRequestHeaders,
 } from '../internal/header-utils';
@@ -1685,14 +1686,20 @@ export class NodeAdapter implements HTTPAdapter {
          * otherwise fail the request with a bare `AbortError` and leave that answer held.
          * The listener is on before anything can fail, so the fallback is for completeness.
          */
-        const answerAbortRead = (): void => {
+        const answerAbortRead = (isSent = true): void => {
           if (answerAbort !== undefined) {
             answerAbort();
 
             return;
           }
 
-          failRequest(makeAbortError());
+          // Tagged with the headers sent only once the request has gone out: one ended
+          // from the 0% upload callback sent nothing, and reports the client's.
+          failRequest(
+            isSent
+              ? makeSentRequestAbortError(req, request.headers)
+              : makeAbortError(),
+          );
           destroyRequestQuietly(req);
         };
 
@@ -3250,8 +3257,7 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             destroyRequestQuietly(req);
-            const abortErr = makeAbortError();
-            failRequest(abortErr);
+            failRequest(makeSentRequestAbortError(req, request.headers));
             releaseResponseBody?.();
           };
 
@@ -3277,7 +3283,7 @@ export class NodeAdapter implements HTTPAdapter {
         reportUploadProgress({ loaded: 0, total: 0, progress: 0 });
 
         if (readIsAborted()) {
-          answerAbortRead();
+          answerAbortRead(false);
 
           return;
         }
@@ -3410,6 +3416,11 @@ export class NodeAdapter implements HTTPAdapter {
           // the request. (A caller's `Content-Length` has been taken off the request; see
           // `dropBodilessContentLength`.)
           reportUploadProgress(completeProgressEvent(0));
+          // Node's `http` frames it with `Content-Length: 0` itself for most methods; set
+          // here, the same header, so the effective headers reported show it.
+          if (isBodilessContentLengthSent(req.method)) {
+            req.setHeader('Content-Length', '0');
+          }
           req.end();
         }
       } catch (error) {
@@ -4964,6 +4975,25 @@ function snapshotEffectiveRequestHeaders(
   // Start with the client-level attempt headers, then overlay any adapter-side
   // mutations (for example multipart Content-Type/Content-Length).
   return mergeObservedHeaders(fallbackHeaders, req.getHeaders());
+}
+
+/**
+ * The `AbortError` for a caller abort or timeout that lands once the request is made, before
+ * any response: tagged with the headers it was made with, so observers of the cancel or
+ * timeout see what was sent. Hidden, as the other tags are.
+ */
+function makeSentRequestAbortError(
+  req: http.ClientRequest,
+  fallbackHeaders: Record<string, string | string[]>,
+): Error {
+  const error = makeAbortError();
+  defineHiddenTags(error, {
+    [EFFECTIVE_REQUEST_HEADERS_KEY]: snapshotEffectiveRequestHeaders(
+      req,
+      fallbackHeaders,
+    ),
+  });
+  return error;
 }
 
 function resolveAdapterResponse(
