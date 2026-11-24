@@ -794,6 +794,10 @@ async function readBodyWithin(
     // read is work as parsing it would be. A wait on every so many of a real download's
     // would hold it on a timer a hidden tab throttles to a second or more.
     if (byteLength === 0) {
+      // A chunk over a detached buffer, or past the end of a shrunk resizable one, also
+      // reads as empty: it throws instead, as the unlimited path's `arrayBuffer()` does,
+      // rather than leave the body short and delivered as a success.
+      assertTypedArrayInBounds(chunk as Uint8Array);
       emptyChunks += 1;
 
       return emptyChunks % EMPTY_CHUNKS_PER_YIELD === 0 ? YIELD_DUE : undefined;

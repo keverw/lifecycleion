@@ -3535,6 +3535,36 @@ describe('FetchAdapter - body chunk types and sizes', () => {
     }
   });
 
+  test('a chunk over a detached or shrunk-away buffer fails the body read, not reads it short', async () => {
+    const detached = new Uint8Array(new ArrayBuffer(4));
+    structuredClone(detached.buffer, { transfer: [detached.buffer] });
+    const resizable = new (ArrayBuffer as any)(8, { maxByteLength: 8 });
+    const shrunkAway = new Uint8Array(resizable, 4, 4);
+    resizable.resize(2);
+
+    for (const chunk of [detached, shrunkAway]) {
+      const { response, isCancelled } = await sendStreamed(
+        [new Uint8Array([9]), chunk, new Uint8Array([9])],
+        100,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body).toBeNull();
+      expect(response.isStreamError).toBe(true);
+      expect(response.streamErrorCode).toBe('stream_response_error');
+      expect(response.errorCause).toBeInstanceOf(TypeError);
+      expect(isCancelled).toBe(true);
+    }
+
+    // An empty chunk that is in bounds is still no bytes, not an error.
+    const { response } = await sendStreamed(
+      [new Uint8Array([9]), new Uint8Array(0), new Uint8Array([8])],
+      100,
+    );
+    expect(response.isStreamError).toBeFalsy();
+    expect(Array.from(response.body as Uint8Array)).toEqual([9, 8]);
+  });
+
   test('a chunk is counted by the bytes it holds, not the byteLength it reports', async () => {
     class Understated extends Uint8Array {
       public override get byteLength(): number {

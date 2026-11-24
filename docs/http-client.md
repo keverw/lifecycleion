@@ -512,7 +512,10 @@ read since the upload last reported progress - a read that returns no bytes does
 that allowance over. Within it, the inactivity clock restarts when a read answers; past it
 the reads are inactivity. Upload progress always counts.
 On expiry, the client returns a timeout, aborts the attempt, and reports the stalled
-settlement through the global `'error'` channel. `timeout: 0`, negative values, and
+settlement through the global `'error'` channel. Whenever the client tears an upload down - a redirect
+followed without waiting, a cancel during this wait, or its expiry - if the adapter does
+not settle the outcome within a second of the abort, it resolves with the Error saying the
+upload's outcome is unknown, as an attempt given up on does. `timeout: 0`, negative values, and
 `Infinity` disable this client wait bound. A custom adapter that supplies the promise
 must settle it and honor cancellation.
 A `null` or omitted request timeout inherits the client timeout. Explicit `NaN` or another non-number

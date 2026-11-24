@@ -2215,15 +2215,19 @@ export class BaseHTTPClient {
                 attemptResult.abortAttempt?.();
                 // The abort the teardown leaves names it, so the final response's
                 // `requestBodySettled` is told from a cancel. Any other failure - a reset
-                // that came first - is the upload's own and is left as it is.
+                // that came first - is the upload's own and is left as it is. An adapter
+                // that ignores the abort gets the grace any aborted attempt gets, and
+                // past it the upload's fate is unknown, so the final response's outcome
+                // still settles.
                 if (latestUpload.outcome === hopUpload) {
-                  latestUpload.outcome = hopUpload.then((failure) =>
-                    failure !== undefined && isAbortError(failure)
-                      ? new Error(
-                          'Request body upload ended: a redirect was followed',
-                          { cause: failure },
-                        )
-                      : failure,
+                  latestUpload.outcome = settleWithinAbortGrace(hopUpload).then(
+                    (failure) =>
+                      failure !== undefined && isAbortError(failure)
+                        ? new Error(
+                            'Request body upload ended: a redirect was followed',
+                            { cause: failure },
+                          )
+                        : failure,
                   );
                 }
               }
@@ -2259,6 +2263,15 @@ export class BaseHTTPClient {
                   // The hop whose upload was given up on is torn down with the request,
                   // as a per-attempt timeout tears one down. See `abortAttempt`.
                   attemptResult.abortAttempt?.();
+                }
+
+                // Aborted either way - a cancel reaches the hop through its signal - so
+                // an adapter that ignores the abort gets the grace any aborted attempt
+                // gets, and the final response's outcome still settles.
+                if (latestUpload.outcome !== undefined) {
+                  latestUpload.outcome = settleWithinAbortGrace(
+                    latestUpload.outcome,
+                  );
                 }
 
                 observerRequest = this._bestEffortAttemptRequestFromPending(
@@ -2949,6 +2962,15 @@ export class BaseHTTPClient {
         if (wait === 'deadline') {
           reportUploadSettleDeadline(this._adapterType, timeout, 'retry');
           abortAttempt();
+        }
+
+        // Aborted either way - a cancel reaches the attempt through its signal - so an
+        // adapter that ignores the abort gets the grace any aborted attempt gets, and the
+        // response's outcome still settles.
+        if (params.latestUpload.outcome !== undefined) {
+          params.latestUpload.outcome = settleWithinAbortGrace(
+            params.latestUpload.outcome,
+          );
         }
 
         return {
@@ -6911,6 +6933,27 @@ function lastUploadActivityAt(activity: UploadActivity): number {
  * the adapter's `send()` to settle before ending without it. See {@link awaitAdapterSend}.
  */
 const ADAPTER_ABORT_GRACE_MS = 1000;
+
+/**
+ * An aborted upload's outcome, or, when the adapter has not settled it within
+ * {@link ADAPTER_ABORT_GRACE_MS}, an `Error` saying its fate is unknown (see
+ * `ABANDONED_UPLOAD_MESSAGE`), as an attempt given up on reports. Never rejects: the
+ * outcome passed in is already adopted.
+ */
+function settleWithinAbortGrace(
+  outcome: Promise<Error | undefined>,
+): Promise<Error | undefined> {
+  return new Promise((resolve) => {
+    const graceID = setTimeout(() => {
+      resolve(new Error(ABANDONED_UPLOAD_MESSAGE));
+    }, ADAPTER_ABORT_GRACE_MS);
+
+    void outcome.then((failure) => {
+      clearTimeout(graceID);
+      resolve(failure);
+    });
+  });
+}
 
 /**
  * The adapter's `send()`, ended by the attempt's abort if the adapter does not end it.

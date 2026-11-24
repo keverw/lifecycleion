@@ -1134,6 +1134,124 @@ describe('HTTPClient — basic HTTP methods', () => {
     },
   );
 
+  test('an upload a redirect tears down whose adapter ignores the abort reports its fate unknown', async () => {
+    // The first hop's outcome never settles, abort or not: the final response's outcome
+    // still settles, after the abort grace, rather than waiting for good.
+    let hop = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> => {
+        hop++;
+        const answer: AdapterResponse =
+          hop === 1
+            ? {
+                status: 303,
+                headers: { location: '/next' },
+                body: null,
+                requestBodySettled: new Promise<Error | undefined>(() => {}),
+              }
+            : { status: 200, headers: {}, body: null };
+
+        return Promise.resolve(answer);
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      timeout: 0,
+    })
+      .post('/upload')
+      .json({ a: 1 })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(hop).toBe(2);
+    const outcome = await Promise.race([
+      response.requestBodySettled,
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 3000)),
+    ]);
+    expect((outcome as Error).message).toBe(
+      "The request body's upload outcome is unknown: the adapter did not settle after the attempt was aborted, and the client gave up on it",
+    );
+  });
+
+  describe('an upload a cancel gives up on whose adapter ignores the abort reports its fate unknown', () => {
+    const UNKNOWN =
+      "The request body's upload outcome is unknown: the adapter did not settle after the attempt was aborted, and the client gave up on it";
+    // The first answer's outcome never settles, abort or not.
+    const ignoringAdapter = (firstStatus: number) => {
+      const signals: AbortSignal[] = [];
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (request: AdapterRequest): Promise<AdapterResponse> => {
+          signals.push(request.signal as AbortSignal);
+          const answer: AdapterResponse =
+            signals.length === 1
+              ? {
+                  status: firstStatus,
+                  headers: { location: '/next' },
+                  body: null,
+                  requestBodySettled: new Promise<Error | undefined>(() => {}),
+                }
+              : { status: 200, headers: {}, body: null };
+
+          return Promise.resolve(answer);
+        },
+      };
+
+      return { adapter, signals };
+    };
+    const outcomeWithin = (outcome: Promise<Error | undefined> | undefined) =>
+      Promise.race([
+        outcome,
+        new Promise((resolve) => setTimeout(() => resolve('pending'), 3000)),
+      ]);
+
+    test('cancelled during the wait before a 307 hop', async () => {
+      const { adapter, signals } = ignoringAdapter(307);
+      const builder = new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        followRedirects: true,
+        timeout: 0,
+      })
+        .post('/upload')
+        .json({ a: 1 });
+      setTimeout(() => builder.cancel('stop'), 20);
+      const response = await builder.send();
+
+      expect(response.isCancelled).toBe(true);
+      expect(signals).toHaveLength(1);
+      expect(signals[0].aborted).toBe(true);
+      expect(
+        ((await outcomeWithin(response.requestBodySettled)) as Error).message,
+      ).toBe(UNKNOWN);
+    });
+
+    test('cancelled during the wait before a retry', async () => {
+      const { adapter, signals } = ignoringAdapter(503);
+      const builder = new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+        timeout: 0,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+      })
+        .put('/upload')
+        .json({ a: 1 });
+      setTimeout(() => builder.cancel('stop'), 20);
+      const response = await builder.send();
+
+      expect(response.isCancelled).toBe(true);
+      expect(signals).toHaveLength(1);
+      expect(signals[0].aborted).toBe(true);
+      expect(
+        ((await outcomeWithin(response.requestBodySettled)) as Error).message,
+      ).toBe(UNKNOWN);
+    });
+  });
+
   test('an upload a redirect tears down that ends in a failure of its own keeps it', async () => {
     // The upload ends in a reset rather than the teardown's abort - a reset that won the
     // race with it - so the failure is the upload's own and is reported as it is.
@@ -1405,8 +1523,11 @@ describe('HTTPClient — basic HTTP methods', () => {
       expect(hop).toBe(1);
       expect(response.isTimeout).toBe(true);
       expect(response.isCancelled).toBe(false);
-      // Still carried, so the caller can await the adapter's word if it ever comes.
-      expect(response.requestBodySettled).toBeDefined();
+      // Still carried, and it settles: the adapter ignored the abort past its grace, so
+      // the upload's fate is unknown.
+      expect((await response.requestBodySettled)?.message).toBe(
+        "The request body's upload outcome is unknown: the adapter did not settle after the attempt was aborted, and the client gave up on it",
+      );
       // And the hop given up on is torn down, as a per-attempt timeout tears one down:
       // the request has been reported as timed out, so its upload must not go on
       // putting bytes on the wire. `NodeAdapter` answers this signal by destroying the
@@ -1471,7 +1592,9 @@ describe('HTTPClient — basic HTTP methods', () => {
 
       expect(attempts).toBe(1);
       expect(response.isTimeout).toBe(true);
-      expect(response.requestBodySettled).toBeDefined();
+      expect((await response.requestBodySettled)?.message).toBe(
+        "The request body's upload outcome is unknown: the adapter did not settle after the attempt was aborted, and the client gave up on it",
+      );
       expect(reports).toHaveLength(1);
       expect((reports[0]?.error as Error).message).toContain('retry');
       // The attempt given up on is torn down with the request; see the redirect test.
