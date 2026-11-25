@@ -510,24 +510,38 @@ export class BaseHTTPClient {
 
     this._clientID = generateID('ulid');
     const adapterCandidate: unknown = snapshot.adapter;
+    // A sub-client sharing its parent's adapter takes the type the parent checked, and
+    // reads nothing off the adapter again.
+    const inherited =
+      internal.inheritedAdapter !== undefined &&
+      internal.inheritedAdapter.adapter === adapterCandidate
+        ? internal.inheritedAdapter
+        : undefined;
     // An adapter by its two methods, said as the other options are, rather than as the
     // engine's `getType is not a function` from the call below or `send` on the first
-    // request. A function carrying both is an adapter too.
-    if (
-      !isNullish(adapterCandidate) &&
-      (!isObjectLike(adapterCandidate) ||
-        typeof readUnknownMember(adapterCandidate, 'getType') !== 'function' ||
-        typeof readUnknownMember(adapterCandidate, 'send') !== 'function')
-    ) {
-      throw new TypeError(
-        `HTTPClient adapter must be an object with getType() and send() methods (got ${describeValue(adapterCandidate)})`,
-      );
+    // request. A function carrying both is an adapter too. `getType` is read once: the
+    // method checked is the one called, with the adapter as its receiver.
+    let getType: unknown;
+    if (!isNullish(adapterCandidate) && inherited === undefined) {
+      getType = readUnknownMember(adapterCandidate, 'getType');
+
+      if (
+        !isObjectLike(adapterCandidate) ||
+        typeof getType !== 'function' ||
+        typeof readUnknownMember(adapterCandidate, 'send') !== 'function'
+      ) {
+        throw new TypeError(
+          `HTTPClient adapter must be an object with getType() and send() methods (got ${describeValue(adapterCandidate)})`,
+        );
+      }
     }
     this._adapter = snapshot.adapter ?? new FetchAdapter();
     const adapterType: unknown =
-      internal.inheritedAdapter?.adapter === this._adapter
-        ? internal.inheritedAdapter.type
-        : this._adapter.getType();
+      inherited !== undefined
+        ? inherited.type
+        : typeof getType === 'function'
+          ? Reflect.apply(getType, this._adapter, [])
+          : this._adapter.getType();
     // One of the four, as the type has it: every adapter and runtime check below and per
     // request is keyed on it, so a custom adapter answering anything else - `'custom'`,
     // `undefined` - would otherwise be checked as none of them. Named by its type only:

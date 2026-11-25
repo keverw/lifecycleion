@@ -1530,6 +1530,40 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.status).toBe(200);
   });
 
+  test('the getType of an adapter is read once and called on the adapter, and a sub-client sharing it reads it not at all', async () => {
+    let getTypeReads = 0;
+    const receivers: unknown[] = [];
+    const adapter = {
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({ status: 200, headers: {}, body: null }),
+    } as unknown as HTTPAdapter;
+    Object.defineProperty(adapter, 'getType', {
+      get() {
+        if (++getTypeReads > 1) {
+          throw new Error('getType read again');
+        }
+
+        return function (this: unknown) {
+          receivers.push(this);
+          return 'fetch';
+        };
+      },
+    });
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    });
+    const subClient = client.createSubClient();
+
+    expect((await client.get('/').send()).status).toBe(200);
+    expect((await subClient.get('/').send()).status).toBe(200);
+    expect(subClient.adapterType).toBe('fetch');
+    expect(getTypeReads).toBe(1);
+    expect(receivers).toHaveLength(1);
+    expect(receivers[0]).toBe(adapter);
+  });
+
   test('an adapter whose requestBodySettled never settles fails the redirect as a timeout at the request timeout', async () => {
     // `NodeAdapter` bounds its own promise through the upload stall watchdog. A custom
     // adapter is a public extension point, and one that set the field and never settled
