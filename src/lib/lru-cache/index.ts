@@ -26,6 +26,13 @@ const MAX_SIZED_ARRAY_DEPTH = 1000;
  */
 const UNSIZED_VALUE_BYTES = 1000;
 
+/**
+ * What the default size estimate returns once it stops walking a value already past its
+ * byte budget (see `calculateSize`). No finished estimate is ever `Infinity`, and no
+ * `sizeCalculator` result can be one, so it tells a cut-short walk apart.
+ */
+const STOPPED_EARLY = Infinity;
+
 /** The arrays one default size estimate has met (see `calculateSize`). */
 interface ArraySizing {
   /** Arrays being sized now, so one met inside itself is a cycle. */
@@ -80,6 +87,11 @@ export type LRUCacheChangeEvent<K, V> =
       newValue: V;
       currentValue?: V;
       cause: 'maxSize';
+      /**
+       * Present when the built-in estimator stopped walking the value once its estimate
+       * passed `maxSize`, so there is no final size estimate for it.
+       */
+      sizeEstimateStoppedEarly?: true;
     };
 
 // Extract the reason string union from the event type so it stays in sync.
@@ -361,8 +373,9 @@ export class LRUCache<K, V> {
       );
     }
 
-    // Calculate size first so failed sizeCalculator calls do not mutate cache state.
-    const size = this.calculateSize(value);
+    // Calculate size first so failed sizeCalculator calls do not mutate cache state. The
+    // built-in estimate stops once it passes `maxSize`, as the write is then skipped.
+    const size = this.calculateSize(value, this.maxSize ?? Infinity);
     const changeEvents = this.createLocalChangeQueue();
 
     // Reclaim expired entries before deciding whether this write is a fresh insert,
@@ -373,22 +386,26 @@ export class LRUCache<K, V> {
 
     // Oversized writes are skipped before mutating live entries so they remain a true no-op.
     if (this.maxSize !== undefined && size > this.maxSize) {
-      changeEvents.push(
-        existingEntry
-          ? {
-              reason: 'skip',
-              key,
-              currentValue: existingEntry.value,
-              newValue: value,
-              cause: 'maxSize',
-            }
-          : {
-              reason: 'skip',
-              key,
-              newValue: value,
-              cause: 'maxSize',
-            },
-      );
+      const skip: LRUCacheChangeEvent<K, V> = existingEntry
+        ? {
+            reason: 'skip',
+            key,
+            currentValue: existingEntry.value,
+            newValue: value,
+            cause: 'maxSize',
+          }
+        : {
+            reason: 'skip',
+            key,
+            newValue: value,
+            cause: 'maxSize',
+          };
+
+      if (size === STOPPED_EARLY) {
+        skip.sizeEstimateStoppedEarly = true;
+      }
+
+      changeEvents.push(skip);
 
       this.flushLocalChangeQueue(changeEvents);
       return;
@@ -581,10 +598,17 @@ export class LRUCache<K, V> {
   /**
    * Calculate the size of a value in bytes
    * Uses the provided sizeCalculator if available, otherwise makes a best guess
+   *
+   * The best guess walks an array an entry at a time, and stops once its estimate passes
+   * `budget`, with indices still to walk (holes included), returning {@link STOPPED_EARLY}: a nested array
+   * is given what is left of its parent's budget, so it stops too. An estimate that ends
+   * at or under `budget` is always walked in full. What is sized in one step - a string,
+   * a buffer, an object by `JSON.stringify` - is sized in full whatever the budget.
    */
 
   private calculateSize(
     value: unknown,
+    budget: number,
     sizing?: ArraySizing,
     depth = 0,
   ): number {
@@ -690,6 +714,10 @@ export class LRUCache<K, V> {
         // `has` and `ownKeys` disagree can be read either way past a long run of holes
         // (see `walksOnByIndex`).
         for (let index = 0; index < length; index++) {
+          if (estimatedSize > budget) {
+            return STOPPED_EARLY;
+          }
+
           let isOwn: boolean;
 
           try {
@@ -741,7 +769,13 @@ export class LRUCache<K, V> {
 
           // Counted as held whether or not its read throws, as `deepClone` counts one.
           entries++;
-          estimatedSize += this.entrySize(items, index, sizing, depth);
+          estimatedSize += this.entrySize(
+            items,
+            index,
+            budget - estimatedSize,
+            sizing,
+            depth,
+          );
         }
 
         if (sparseFrom === undefined) {
@@ -758,6 +792,10 @@ export class LRUCache<K, V> {
         }
 
         for (const index of tail) {
+          if (estimatedSize > budget) {
+            return STOPPED_EARLY;
+          }
+
           let isOwn: boolean;
 
           // Checked again, as `deepClone` checks its tail: an entry read before it can
@@ -772,7 +810,13 @@ export class LRUCache<K, V> {
             continue;
           }
 
-          estimatedSize += this.entrySize(items, index, sizing, depth);
+          estimatedSize += this.entrySize(
+            items,
+            index,
+            budget - estimatedSize,
+            sizing,
+            depth,
+          );
         }
 
         return estimatedSize;
@@ -795,12 +839,14 @@ export class LRUCache<K, V> {
   }
 
   /**
-   * The default size estimate of `items[index]`, an entry of an array sized at `depth`:
-   * {@link UNSIZED_VALUE_BYTES} when its read throws.
+   * The default size estimate of `items[index]`, an entry of an array sized at `depth`,
+   * within `budget` (see `calculateSize`): {@link UNSIZED_VALUE_BYTES} when its read
+   * throws.
    */
   private entrySize(
     items: unknown[],
     index: number,
+    budget: number,
     sizing: ArraySizing,
     depth: number,
   ): number {
@@ -812,7 +858,10 @@ export class LRUCache<K, V> {
       return UNSIZED_VALUE_BYTES;
     }
 
-    return primitiveSize(entry) ?? this.calculateSize(entry, sizing, depth + 1);
+    return (
+      primitiveSize(entry) ??
+      this.calculateSize(entry, budget, sizing, depth + 1)
+    );
   }
 
   /**

@@ -1185,6 +1185,173 @@ describe('LRUCache', () => {
     });
   });
 
+  describe('Default size estimate within maxSize', () => {
+    /** `entries` with a getter appended that counts its reads and returns `value`. */
+    function withCountingGetter(
+      entries: unknown[],
+      value: unknown,
+    ): { items: unknown[]; reads: () => number } {
+      let reads = 0;
+      const items = [...entries];
+      Object.defineProperty(items, entries.length, {
+        get: () => {
+          reads++;
+          return value;
+        },
+        enumerable: true,
+        configurable: true,
+      });
+      return { items, reads: () => reads };
+    }
+
+    test('stops walking an oversized nested array before reading a later getter, and keeps the current value', () => {
+      const events: LRUCacheChangeEvent<string, unknown>[] = [];
+      const cache = new LRUCache<string, unknown>(10, {
+        maxSize: 200,
+        onChange: (event) => {
+          events.push(event);
+        },
+      });
+      cache.set('k', ['ok']); // 40 + 4
+      events.length = 0;
+
+      // The inner array is 40 + 200 bytes before its getter: past the 160 its parent
+      // leaves it.
+      const inner = withCountingGetter(['x'.repeat(100)], 'late');
+      const outer = withCountingGetter([inner.items], 'later');
+
+      cache.set('k', outer.items);
+
+      expect(inner.reads()).toBe(0);
+      expect(outer.reads()).toBe(0);
+      expect(cache.get('k')).toEqual(['ok']);
+      expect(cache.byteSize).toBe(44);
+      expect(events).toEqual([
+        {
+          reason: 'skip',
+          key: 'k',
+          currentValue: ['ok'],
+          newValue: outer.items,
+          cause: 'maxSize',
+          sizeEstimateStoppedEarly: true,
+        },
+      ]);
+    });
+
+    test('gives a nested array only what its parent leaves of maxSize', () => {
+      const cache = new LRUCache<string, unknown>(10, { maxSize: 200 });
+      // 40 + 100 alone fits 200, but not the 120 left after its parent's 40 + 80.
+      const inner = withCountingGetter(['a'.repeat(50)], 'late');
+
+      cache.set('k', ['b'.repeat(40), inner.items]);
+
+      expect(inner.reads()).toBe(0);
+      expect(cache.has('k')).toBe(false);
+    });
+
+    test('accepts a nested array that ends exactly at what its parent leaves of maxSize', () => {
+      const cache = new LRUCache<string, unknown>(10, { maxSize: 220 });
+      // 40 + 80 + (40 + 60 + 0): the inner array reaches the 100 left to it before its
+      // last entry, which must still be read.
+      const inner = withCountingGetter(['a'.repeat(30)], undefined);
+      const value = ['b'.repeat(40), inner.items];
+
+      cache.set('k', value);
+
+      expect(inner.reads()).toBe(1);
+      expect(cache.get('k')).toBe(value);
+      expect(cache.byteSize).toBe(220);
+    });
+
+    test('stops in the tail of a sparse array before reading a later getter', () => {
+      const events: LRUCacheChangeEvent<string, unknown>[] = [];
+      const cache = new LRUCache<string, unknown>(10, {
+        maxSize: 200,
+        onChange: (event) => {
+          events.push(event);
+        },
+      });
+      const items: unknown[] = [];
+      items[200_000] = 'x'.repeat(200);
+      let reads = 0;
+      Object.defineProperty(items, 300_000, {
+        get: () => {
+          reads++;
+          return 'late';
+        },
+        enumerable: true,
+        configurable: true,
+      });
+
+      cache.set('k', items);
+
+      expect(reads).toBe(0);
+      expect(events).toEqual([
+        {
+          reason: 'skip',
+          key: 'k',
+          newValue: items,
+          cause: 'maxSize',
+          sizeEstimateStoppedEarly: true,
+        },
+      ]);
+    });
+
+    test('accepts a value whose estimate is exactly maxSize, walked in full', () => {
+      const events: LRUCacheChangeEvent<string, unknown>[] = [];
+      const cache = new LRUCache<string, unknown>(10, {
+        maxSize: 240,
+        onChange: (event) => {
+          events.push(event);
+        },
+      });
+      // 40 + (40 + 100) + 60
+      const value = withCountingGetter([['a'.repeat(50)]], 'b'.repeat(30));
+
+      cache.set('k', value.items);
+
+      expect(value.reads()).toBe(1);
+      expect(cache.get('k')).toBe(value.items);
+      expect(cache.byteSize).toBe(240);
+      expect(events).toEqual([
+        { reason: 'set', key: 'k', newValue: value.items },
+      ]);
+    });
+
+    test('an oversized estimate that was walked to its end, or one from sizeCalculator, carries no flag', () => {
+      const events: LRUCacheChangeEvent<string, unknown>[] = [];
+      const estimated = new LRUCache<string, unknown>(10, {
+        maxSize: 239,
+        onChange: (event) => {
+          events.push(event);
+        },
+      });
+      // 240 bytes, past maxSize only once its last entry is read.
+      const value = withCountingGetter([['a'.repeat(50)]], 'b'.repeat(30));
+
+      estimated.set('k', value.items);
+
+      expect(value.reads()).toBe(1);
+      expect(estimated.get('k')).toBeUndefined();
+
+      const calculated = new LRUCache<string, unknown>(10, {
+        maxSize: 10,
+        sizeCalculator: () => 11,
+        onChange: (event) => {
+          events.push(event);
+        },
+      });
+
+      calculated.set('k', [1, 2, 3]);
+
+      expect(events).toHaveLength(2);
+      for (const event of events) {
+        expect(event.reason).toBe('skip');
+        expect('sizeEstimateStoppedEarly' in event).toBe(false);
+      }
+    });
+  });
+
   describe('Custom size calculator', () => {
     test('should use custom size calculator when provided', () => {
       const sizeCalculator = (value: any) => {

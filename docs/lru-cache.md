@@ -81,6 +81,7 @@ type LRUCacheChangeEvent<K, V> =
       newValue: V;
       currentValue?: V;
       cause: 'maxSize';
+      sizeEstimateStoppedEarly?: true;
     };
 ```
 
@@ -93,7 +94,7 @@ When `onChangeReasons` is provided, only events whose `reason` appears in that l
 - `reason: 'delete'`: An entry was removed by an explicit `delete(key)` call.
 - `reason: 'clear'`: An entry was removed by `clear()`. `clear()` emits one event per removed entry.
 - `reason: 'set'`: `set(key, value)` completed successfully. This event always includes `newValue`, and includes `oldValue` only when an existing entry for the same key was overwritten.
-- `reason: 'skip'`: `set(key, value)` was intentionally skipped without changing cache state. This currently happens when a single value is larger than `maxSize`. The event includes `newValue` and `cause`, and includes `currentValue` only when the skipped write left an existing entry in place.
+- `reason: 'skip'`: `set(key, value)` was intentionally skipped without changing cache state. This currently happens when a single value is larger than `maxSize`. The event includes `newValue` and `cause`, and includes `currentValue` only when the skipped write left an existing entry in place. It includes `sizeEstimateStoppedEarly: true` when the built-in estimator stopped walking the value once its estimate passed `maxSize`, so there is no final size estimate for it.
 
 `byteSize` is tracked whether or not `maxSize` is configured. Likewise, `sizeCalculator` affects byte accounting even when size-based eviction is disabled. `maxSize` only enables eviction based on total stored size. Custom `sizeCalculator` results are treated as byte counts or byte estimates and must be returned as non-negative integers.
 
@@ -104,6 +105,8 @@ The built-in estimator is runtime-aware. If a Node/Bun-style global `Buffer` imp
 If neither `defaultTtl` nor `customTtl` is provided, entries do not expire.
 
 If a single value is larger than `maxSize`, `set()` skips that write entirely and leaves the cache unchanged. If `onChange` is configured, the cache emits `reason: 'skip'` with `cause: 'maxSize'`.
+
+With `maxSize` set, the built-in estimator stops walking an array, nested arrays included, as soon as its running estimate passes `maxSize` with indices still to walk (holes included), and the write is skipped with `sizeEstimateStoppedEarly: true`; entries after that point, getters included, are not read. A value whose estimate is exactly `maxSize` is accepted, and every accepted value is counted at its full estimate for `byteSize` and eviction. The stop applies between array entries only: a single step such as sizing an object through `JSON.stringify()` still runs in full. A `sizeCalculator` is always called as before.
 
 If a value can fit individually but adding it would push the total cache size over `maxSize`, the cache accepts the write and then evicts least-recently-used entries until it is back within limits.
 
