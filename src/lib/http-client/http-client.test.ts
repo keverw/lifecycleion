@@ -1058,6 +1058,50 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(secondHopStartedAt).toBeGreaterThanOrEqual(settledAt);
   });
 
+  test("a 307 that resends an empty form waits for the hop's upload to settle first", async () => {
+    // An empty form still goes out as a body: its closing boundary.
+    let isSettled = false;
+    let isSettledAtSecondHop: boolean | undefined;
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> => {
+        hop++;
+
+        if (hop === 1) {
+          return Promise.resolve({
+            status: 307,
+            headers: { location: '/again' },
+            body: null,
+            requestBodySettled: new Promise((resolve) => {
+              setTimeout(() => {
+                isSettled = true;
+                resolve(undefined);
+              }, 20);
+            }),
+          });
+        }
+
+        isSettledAtSecondHop = isSettled;
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    })
+      .post('/upload')
+      .formData(new FormData())
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(hop).toBe(2);
+    expect(isSettledAtSecondHop).toBe(true);
+  });
+
   test.each([303, 302, 301])(
     "a %d that drops a POST's body follows without waiting for the hop's upload",
     async (status) => {

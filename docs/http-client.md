@@ -488,7 +488,8 @@ attempt's outcome. If that latest bodied attempt was given up on after its adapt
 ignored the abort, the outcome resolves with an `Error` saying the upload's fate is
 unknown; if it reported none - a custom adapter's failure that carried none - the response
 reports none either. Neither reports an earlier attempt's or hop's. A body that sends
-nothing - an empty string, no bytes, a form with no entries - is no body here.
+nothing - an empty string or no bytes - is no body here. A form with no entries is one:
+it still goes out as its closing boundary.
 Redirect-phase observers see that hop's outcome.
 
 Before following a redirect or retrying, the client waits for a reported upload outcome.
@@ -1638,7 +1639,7 @@ A timeout given up on this way is retried or not as follows:
 
 - **Not retried** if the adapter's `streamResponse` factory had started a stream (returned a writable or a promise not yet answered); see [Streaming Responses](#streaming-responses).
 - **Not retried** if the attempt had a body to send: the adapter may still be sending it, and a retry would send it a second time beside it. The request ends as that timeout, with `isRetriesExhausted: false` whatever the retry budget, and its `onAttemptEnd` reports `retrySuppressedReason: 'upload_unsettled'` when a retry was otherwise available.
-- **Retried** as any timeout is when the attempt was bodiless, or its body sends nothing - an empty string, no bytes, or a form with no entries.
+- **Retried** as any timeout is when the attempt was bodiless, or its body sends nothing - an empty string or no bytes. A form with no entries still sends its closing boundary, so it is not retried.
 
 ### Abort Listeners That Throw
 

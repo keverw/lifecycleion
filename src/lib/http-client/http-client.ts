@@ -2210,14 +2210,14 @@ export class BaseHTTPClient {
             // is not held for it. Only the adapter's word is waited on: a hop that threw
             // has no socket left to wait for.
             //
-            // Only for a hop that sends a body: one a `303`, or a `301`/`302` that
-            // rewrote a `POST`, left behind - or that the interceptors dropped - sends
-            // none beside the upload, so it follows at once, and the upload, a body the
-            // server has answered and moved on from, is torn down as the redirect is
-            // followed, as a browser's redirect ends it. Its outcome is carried onto the
+            // Only for a hop with an upload of its own (see `uploadsRequestBody`): one a
+            // `303`, or a `301`/`302` that rewrote a `POST`, left behind - or that the
+            // interceptors dropped - sends none beside the upload, so it follows at once,
+            // and the upload, a body the server has answered and moved on from, is torn
+            // down as the redirect is followed, as a browser's redirect ends it. Its outcome is carried onto the
             // final response.
             const hopUpload = adapterResponse.requestBodySettled;
-            const isBodyResent = sendsRequestBody(
+            const isBodyResent = uploadsRequestBody(
               sanitizedRedirectRequest.body,
             );
             if (hopUpload !== undefined && !isBodyResent) {
@@ -3344,7 +3344,7 @@ export class BaseHTTPClient {
       // What the snapshot of a failed setup may reuse: the bodies once built, or
       // `unbuildable` while building them is what is under way.
       let knownBodies: AttemptBodies | 'unbuildable' | undefined;
-      // Whether this attempt has a body to send, read once; see `sendsRequestBody`.
+      // Whether this attempt has a body to send, read once; see `uploadsRequestBody`.
       let isBodySent: boolean;
       try {
         // Only a host change explicitly selects a new credential destination.
@@ -3375,7 +3375,7 @@ export class BaseHTTPClient {
         );
         knownBodies = attemptBodies;
         sentBody = attemptBodies.sentBody;
-        isBodySent = sendsRequestBody(sentBody);
+        isBodySent = uploadsRequestBody(sentBody);
         params.sentBody.value = attemptRequest.body;
         sentRequest = this._buildAttemptRequest(attemptRequest, attemptBodies, {
           requestID,
@@ -4738,8 +4738,9 @@ export class BaseHTTPClient {
         // retried: the adapter that ignored its abort may still be writing that body, and
         // nothing tells the client when it stops - the settle wait has no outcome of the
         // adapter's to wait on - so a retry would send the body a second time beside it. A
-        // bodiless one, an empty body included, has nothing left going out and is retried
-        // as any timeout is.
+        // bodiless one, an empty string or no bytes included, has nothing left going out
+        // and is retried as any timeout is; an empty form still sends its closing boundary
+        // (see `uploadsRequestBody`).
 
         // Network / adapter / per-attempt timeout — retry if policy allows. A throw
         // carries no adapter response, so delivery is unproven - and a timed-out answer
@@ -7439,14 +7440,24 @@ function hasRequestBody(body: unknown): boolean {
 /**
  * Whether a body sends anything: by the rule `emptyRequestBody` reads a body by - none, an
  * empty string, no bytes, a form with no entries, or a JSON body that serializes to
- * nothing sends nothing. It is asked about an attempt's body as the client serialized it
- * (see `buildAttemptBodies`), and on a cross-origin hop (see
+ * nothing sends nothing. It is asked about an attempt's body as the client serialized it,
+ * through `uploadsRequestBody`, and about a redirect hop's body by the header rules (see
+ * `dropsBodyHeaders`) and on a cross-origin hop (see
  * `withoutAddedCrossOriginCredentials`) about the hop's own body and the body the retry
  * interceptors returned, which on a hop held to its own is read uncopied, once; a caller
  * that is handed a throw fails the request as `request_setup_error`.
  */
 function sendsRequestBody(body: unknown): boolean {
   return emptyRequestBody(body) === undefined;
+}
+
+/**
+ * Whether an attempt with this body has an upload to wait on: one that sends a body (see
+ * `sendsRequestBody`), or a form with no entries, which carries no data but still goes
+ * out as a body - its closing boundary - so an adapter may still be writing it.
+ */
+function uploadsRequestBody(body: unknown): boolean {
+  return sendsRequestBody(body) || isFormData(body);
 }
 
 /**

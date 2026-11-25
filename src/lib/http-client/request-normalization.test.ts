@@ -15630,6 +15630,15 @@ test('an abandoned attempt that had a body is not retried; a bodiless one is', a
   ]);
   expect(bodied.response.isTimeout).toBe(true);
 
+  // An empty form still sends its closing boundary.
+  const emptyForm = await run((client) =>
+    client.put('/a').formData(new FormData()),
+  );
+  expect(emptyForm.sends).toBe(1);
+  expect(emptyForm.ends).toEqual([
+    { willRetry: false, reason: 'upload_unsettled' },
+  ]);
+
   const bodiless = await run((client) => client.get('/a'));
   expect(bodiless.sends).toBe(2);
   expect(bodiless.ends[0]).toEqual({ willRetry: true, reason: undefined });
@@ -16000,7 +16009,9 @@ test("a cross-origin retry the client refuses reports the hop's request, not wha
 });
 
 test('an abandoned attempt whose body sends nothing is retried, and reports no upload outcome', async () => {
-  for (const body of ['', new Uint8Array(0), new FormData()]) {
+  // Not an empty form, which still sends its closing boundary and is not retried (see
+  // 'an abandoned attempt that had a body is not retried; a bodiless one is').
+  for (const body of ['', new Uint8Array(0)]) {
     let sends = 0;
     // Ignores its abort and never settles.
     const adapter: HTTPAdapter = {
@@ -16035,7 +16046,8 @@ test('an abandoned attempt whose body sends nothing is retried, and reports no u
 }, 30_000);
 
 test('a retry interceptor that empties the body leaves the upload outcome of the attempt that had one', async () => {
-  for (const emptyBody of ['', new Uint8Array(0), new FormData()]) {
+  // Not an empty form, which still sends its closing boundary, and so reports its own.
+  for (const emptyBody of ['', new Uint8Array(0)]) {
     const sent: AdapterRequest[] = [];
     const cut = new Error('cut');
     const adapter: HTTPAdapter = {
