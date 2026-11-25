@@ -1119,25 +1119,42 @@ export class BaseHTTPClient {
     // for with no timeout, and one that never settles must not keep a finished request
     // listed or its listeners on a caller's long-lived signal. An upload still going out
     // keeps the listeners until it settles, so a caller's abort - from a `final` observer,
-    // or after `send()` answers - still stops it, as a natively composed signal does - or
-    // until it has made no progress for the longer of the request's timeout and twice the
+    // or after `send()` answers - still stops it, as a natively composed signal does.
+    //
+    // Or until it has been quiet for the longer of the request's timeout and twice the
     // upload stall grace, past `NodeAdapter`'s own watchdog on a live upload's pauses: a
     // custom adapter whose `requestBodySettled` never settles would otherwise leave one
-    // listener per request on a signal reused across them. That wait's timer does not keep
-    // the process alive, and none is armed when there is nothing to release. The `finally`
-    // below runs this for a request that ends by throwing.
+    // listener per request on a signal reused across them. Quiet is counted from the later
+    // of the upload's last progress and the last call here, so a slow answer does not use
+    // the wait up before the caller has the response, nor do `final` observers that finish
+    // within it. One still running when it runs out does not hold the listeners. That
+    // wait's timer does not keep the process alive, and none is armed when there is
+    // nothing to release.
+    //
+    // Called as the request settles, and again by the `finally` below once its `final`
+    // observers are done - or, for a request that ends by throwing, only there. A second
+    // call restarts the quiet clock of the wait already armed rather than arming another.
+    let releaseQuietFrom = 0;
+    let isReleaseWaitArmed = false;
     const releaseRequest = (): void => {
       this._tracker.remove(requestID);
+      releaseQuietFrom = performance.now();
 
       const upload = latestUpload.outcome;
+      if (isReleaseWaitArmed) {
+        return;
+      }
+
       if (upload === undefined || signalReleasers.length === 0) {
         releaseSignals();
       } else {
+        isReleaseWaitArmed = true;
         void settleUploadBeforeNextDispatch(
           upload,
           cancelSignal,
           Math.max(timeout, 2 * UPLOAD_STALL_GRACE_MS),
-          () => lastUploadActivityAt(uploadActivity),
+          () =>
+            Math.max(releaseQuietFrom, lastUploadActivityAt(uploadActivity)),
           { isBackground: true },
         ).then(releaseSignals, releaseSignals);
       }

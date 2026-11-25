@@ -58,6 +58,10 @@ import { hostileRejections } from '../internal/hostile-promise-test-utils';
 
 let server: TestServer;
 const originalFetch = globalThis.fetch;
+const originalAbortSignalAny = Object.getOwnPropertyDescriptor(
+  AbortSignal,
+  'any',
+);
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalDocument = (globalThis as Record<string, unknown>).document;
 const originalSelf = (globalThis as Record<string, unknown>).self;
@@ -75,6 +79,11 @@ afterAll(async () => {
 });
 
 afterEach(() => {
+  // A fake-timer test that timed out never reached its own `finally`.
+  jest.useRealTimers();
+  if (originalAbortSignalAny !== undefined) {
+    Object.defineProperty(AbortSignal, 'any', originalAbortSignalAny);
+  }
   globalThis.fetch = originalFetch;
 
   if (originalWindow === undefined) {
@@ -3311,6 +3320,157 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
         Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
       }
     }
+  });
+
+  test('a caller abort reaches an upload still going out after an answer slower than the release wait, when AbortSignal.any is unavailable', async () => {
+    // Answered past the ten seconds the listeners are kept for, with no timeout and no
+    // upload progress: the wait counts from the answer, not the dispatch.
+    let adapterSignal: AbortSignal | undefined;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        adapterSignal = request.signal;
+
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({
+              status: 200,
+              headers: {},
+              body: null,
+              requestBodySettled: new Promise(() => {}),
+            });
+          }, 10_100);
+        });
+      },
+    };
+    const client = new HTTPClient({ adapter, timeout: 0 });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+    const flushMicrotasks = async (): Promise<void> => {
+      for (let i = 0; i < 20; i += 1) {
+        await Promise.resolve();
+      }
+    };
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+    jest.useFakeTimers();
+
+    try {
+      const pending = client
+        .post('https://example.com/upload', { body: 'x' })
+        .signal(controller.signal)
+        .send();
+      await flushMicrotasks();
+      jest.advanceTimersByTime(10_100);
+      const res = await pending;
+
+      expect(res.status).toBe(200);
+
+      jest.advanceTimersByTime(100);
+      await flushMicrotasks();
+      controller.abort();
+
+      expect(adapterSignal?.aborted).toBe(true);
+    } finally {
+      jest.useRealTimers();
+
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
+  test('a caller abort reaches an upload still going out after slow final observers, the release wait counting again from when send() answers, when AbortSignal.any is unavailable', async () => {
+    let adapterSignal: AbortSignal | undefined;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        adapterSignal = request.signal;
+
+        return Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        });
+      },
+    };
+    const client = new HTTPClient({ adapter, timeout: 0 });
+    // Five seconds into the ten the listeners are kept for.
+    client.addResponseObserver(
+      () => new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+      { phases: ['final'] },
+    );
+    const controller = new AbortController();
+    const flushMicrotasks = async (): Promise<void> => {
+      for (let i = 0; i < 20; i += 1) {
+        await Promise.resolve();
+      }
+    };
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+    jest.useFakeTimers();
+
+    try {
+      const pending = client
+        .post('https://example.com/upload', { body: 'x' })
+        .signal(controller.signal)
+        .send();
+      await flushMicrotasks();
+      jest.advanceTimersByTime(5_000);
+      const res = await pending;
+
+      expect(res.status).toBe(200);
+
+      // Twelve seconds after the request settled, seven after send() answered.
+      jest.advanceTimersByTime(7_000);
+      await flushMicrotasks();
+      controller.abort();
+
+      expect(adapterSignal?.aborted).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a process whose last request left an upload unsettled exits without waiting to release its listeners, when AbortSignal.any is unavailable', async () => {
+    const script = `
+    Object.defineProperty(AbortSignal, 'any', { value: undefined, configurable: true });
+    const { HTTPClient } = await import(${JSON.stringify(`${import.meta.dir}/http-client.ts`)});
+    const adapter = {
+      getType: () => 'mock',
+      send: () => Promise.resolve({
+        status: 200, headers: {}, body: null,
+        requestBodySettled: new Promise(() => {}),
+      }),
+    };
+    await new HTTPClient({ adapter, timeout: 0 })
+      .post('https://example.com/upload', { body: 'x' })
+      .signal(new AbortController().signal)
+      .send();
+  `;
+    const child = Bun.spawn([process.execPath, '--eval', script], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    // Well short of the ten seconds the listeners are kept for.
+    const killer = setTimeout(() => child.kill(), 3000);
+    const [stderr, code] = await Promise.all([
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    clearTimeout(killer);
+
+    expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
   });
 
   test('a retry chain leaves no abort listener on any signal when AbortSignal.any is unavailable', async () => {
