@@ -1610,20 +1610,10 @@ describe('LRUCache', () => {
       expect(ownKeysCalls).toBe(0);
     });
 
-    test('takes the fallback, not a failing set(), for an array whose prototype stops reading once its prototypes are listed', () => {
-      let wasListed = false;
-      const prototype = new Proxy(Object.create(Array.prototype) as object, {
-        ownKeys: (target) => {
-          wasListed = true;
-          return Reflect.ownKeys(target);
-        },
-      });
+    test('takes the fallback, not a failing set(), for an array whose prototype cannot be read', () => {
       const value = new Proxy([1, 2, 3], {
         getPrototypeOf: () => {
-          if (wasListed) {
-            throw new Error('prototype trap');
-          }
-          return prototype;
+          throw new Error('prototype trap');
         },
       });
       const cache = new LRUCache<string, unknown>(5, { maxSize: 10_000_000 });
@@ -1633,7 +1623,7 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(40 + 1000);
     });
 
-    test("catches a Proxy prototype that answers for holes only past the first checked indices, reading at most a gap's worth", () => {
+    test("never reads the holes a Proxy prototype answers for past an Array subclass's entries, nor walks its length", () => {
       let inheritedReads = 0;
       const value: unknown[] = new (class List extends Array<unknown> {})();
       for (let index = 0; index < 5000; index++) {
@@ -1658,12 +1648,12 @@ describe('LRUCache', () => {
 
       cache.set('a', value);
 
-      // 40 for the array and 8 for each of its own numbers: sized again once caught.
+      // 40 for the array and 8 for each of its own numbers.
       expect(cache.byteSize).toBe(40 + 5000 * 8);
-      expect(inheritedReads).toBeLessThanOrEqual(128);
+      expect(inheritedReads).toBe(0);
     });
 
-    test('counts in full again the arrays a pass sized before it was caught and sized again', () => {
+    test('counts an inner array in full inside an array whose Proxy prototype answers for every hole', () => {
       const inner = Array.from({ length: 1000 }, () => 'x'.repeat(10));
       const value: unknown[] = [inner];
       value.length = 2;
@@ -1682,30 +1672,46 @@ describe('LRUCache', () => {
       expect(cache.byteSize).toBe(40 + 40 + 1000 * 20);
     });
 
-    test('sizes many arrays that are each caught and sized again in time linear in their count', () => {
-      const prototype = new Proxy(Object.create(Array.prototype) as object, {
-        has: () => true,
-      });
-      // Each caught at its hole and sized again, after every array before it was sized.
-      const value = Array.from({ length: 120_000 }, () => {
-        const array: unknown[] = [1];
-        array.length = 2;
-        Object.setPrototypeOf(array, prototype);
-        return array;
-      });
-      const cache = new LRUCache<string, unknown>(5, { maxSize: 1e12 });
+    test("sizes an Array subclass's sparse array the same every time when its Proxy prototype claims one late hole", () => {
+      const run = 70_000;
+      const length = run + 33_000;
+      let inheritedReads = 0;
+      const value: unknown[] = new (class List extends Array<unknown> {})();
+      value.length = length;
+      value[0] = 1;
+      // A long run of holes, then one entry in every 33, the hole after the first of them
+      // claimed by the prototype.
+      for (let index = run; index < length; index += 33) {
+        value[index] = 1;
+      }
+      const claimed = String(run + 1);
+      Object.setPrototypeOf(
+        value,
+        new Proxy(Object.getPrototypeOf(value) as object, {
+          has: (target, key) => key === claimed || Reflect.has(target, key),
+          get: (target, key, receiver) => {
+            if (key === claimed) {
+              inheritedReads++;
+              return 'x'.repeat(10_000);
+            }
+            return Reflect.get(target, key, receiver) as unknown;
+          },
+        }),
+      );
+      // 40 for the array and 8 for each of its own numbers.
+      const ownSize = 40 + (1 + Math.ceil((length - run) / 33)) * 8;
+      // Between that and the size with the claimed hole counted as its 10,000-character
+      // string, so counting it would leave the value uncached.
+      const maxSize = ownSize + 10_000;
 
-      const startedAt = performance.now();
-      cache.set('a', value);
-      const elapsedMS = performance.now() - startedAt;
-
-      // 40 for the outer array, and 40 and 8 for its one number for each array in it.
-      expect(cache.byteSize).toBe(40 + 120_000 * 48);
-      // No count a caller can see tells the two apart - the prototype is asked the same
-      // questions either way - so the bound is time. Linear in the arrays' count this is
-      // under a tenth of a second; quadratic, over ten. The bound sits far from both.
-      expect(elapsedMS).toBeLessThan(4_000);
-    }, 30_000);
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const cache = new LRUCache<string, unknown>(5, { maxSize });
+        cache.set('a', value);
+        expect(cache.has('a')).toBe(true);
+        expect(cache.byteSize).toBe(ownSize);
+      }
+      expect(inheritedReads).toBe(0);
+    });
 
     test("neither reads nor walks the holes a Proxy prototype's has answers for", () => {
       let inheritedReads = 0;

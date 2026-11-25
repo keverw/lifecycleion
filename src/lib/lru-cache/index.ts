@@ -6,23 +6,12 @@ import {
 import { copyArrayValue, readArrayLength } from '../internal/array-copy';
 import {
   holdsOwnIndex,
-  indexFreePrototype,
   indicesFrom,
   isMostlyHoles,
   walksOnByIndex,
   WALKED_HOLES_PER_ENTRY,
 } from '../internal/array-indices';
 import type { FillCheckpoint } from '../internal/array-indices';
-
-/**
- * The index below which every entry `in` reports held on an Array subclass's or another
- * realm's array is checked with `Object.hasOwn` by the default size estimate (see
- * `calculateSize`); past it, one at random every so often.
- */
-const CHECKED_LEAD = 4096;
-
-/** The widest gap between later checks, each drawn at random up to it. */
-const CHECK_GAP = 128;
 
 /**
  * How deep the default size estimate follows arrays nested in arrays: one nested deeper
@@ -46,28 +35,6 @@ interface ArraySizing {
    * estimate only.
    */
   readonly sized: Set<object>;
-  /**
-   * The arrays in `sized`, in the order they were sized, so an array sized again from the
-   * start forgets the arrays its abandoned pass sized - each counted in a total that was
-   * thrown away - and counts them in full again (see `forgetSizedAfter`).
-   */
-  readonly sizedOrder: object[];
-}
-
-/** Records `array` as sized; see `ArraySizing.sized`. */
-function markSized(sizing: ArraySizing, array: object): void {
-  sizing.sized.add(array);
-  sizing.sizedOrder.push(array);
-}
-
-/**
- * Forgets every array sized after the first `count`, latest first, so a restart costs
- * the arrays it forgets rather than all those sized so far.
- */
-function forgetSizedAfter(sizing: ArraySizing, count: number): void {
-  while (sizing.sizedOrder.length > count) {
-    sizing.sized.delete(sizing.sizedOrder.pop() as object);
-  }
 }
 
 /**
@@ -671,7 +638,6 @@ export class LRUCache<K, V> {
       sizing ??= {
         visiting: new WeakSet(),
         sized: new Set(),
-        sizedOrder: [],
       };
 
       if (sizing.visiting.has(items)) {
@@ -714,52 +680,20 @@ export class LRUCache<K, V> {
         let entries = 0;
         let checkpoint: FillCheckpoint | undefined;
         let sparseFrom: number | undefined;
-        // As `deepClone`'s walk tells an index held - `in` on this realm's
-        // `Array.prototype`, `Object.hasOwn` otherwise, which costs hundreds of times as
-        // much per index on a large array on JavaScriptCore - save on an Array subclass's
-        // or another realm's array whose prototypes list no index: that one is read by
-        // `in` too, while its prototype is the one it had when sizing began. A `Proxy`
-        // prototype can answer `in` for a hole whatever keys it lists, so what `in` reports
-        // held is checked with `Object.hasOwn` - every one below `CHECKED_LEAD`, then one
-        // at random every so often, which the prototype is never asked about and cannot
-        // foresee - and one caught answering for a hole is sized again from the start by
-        // `Object.hasOwn`, so its holes count for nothing and a sparse one's length is not
-        // walked. An array whose prototypes answer `in` truly is sized the same every time;
-        // only one that answers for a hole can be caught at a different index from one
-        // `set()` to the next, its getters run up to a gap's worth of times before it is.
-        let checkedPrototype = indexFreePrototype(items);
-        let untilCheck = 1;
-        const sizedBefore = sizing.sizedOrder.length;
 
+        // Each index is told as `deepClone`'s walk tells it (see `holdsOwnIndex`): by `in`
+        // while the array's prototype is this realm's `Array.prototype`, and by
+        // `Object.hasOwn` on an Array subclass's or another realm's array, whose prototype
+        // can answer `in` for a hole - a `Proxy` whose `has` answers for any - so a hole
+        // its prototype claims is never read as an entry, and the same array is sized the
+        // same way every time. A `Proxy` array is sized as its own traps answer: one whose
+        // `has` and `ownKeys` disagree can be read either way past a long run of holes
+        // (see `walksOnByIndex`).
         for (let index = 0; index < length; index++) {
           let isOwn: boolean;
 
           try {
-            if (
-              checkedPrototype !== undefined &&
-              checkedPrototype !== Array.prototype &&
-              Reflect.getPrototypeOf(items) === checkedPrototype
-            ) {
-              isOwn = index in items;
-
-              if (isOwn && (index < CHECKED_LEAD || --untilCheck === 0)) {
-                untilCheck = 1 + Math.floor(Math.random() * CHECK_GAP);
-
-                if (!Object.hasOwn(items, index)) {
-                  forgetSizedAfter(sizing, sizedBefore);
-
-                  checkedPrototype = undefined;
-                  estimatedSize = 40;
-                  holes = 0;
-                  entries = 0;
-                  checkpoint = undefined;
-                  index = -1;
-                  continue;
-                }
-              }
-            } else {
-              isOwn = holdsOwnIndex(items, index);
-            }
+            isOwn = holdsOwnIndex(items, index);
           } catch {
             return estimatedSize + UNSIZED_VALUE_BYTES;
           }
@@ -768,30 +702,35 @@ export class LRUCache<K, V> {
             // Enough holes, as `deepClone` counts them: the rest by the array's own index
             // keys.
             if (isMostlyHoles(++holes, entries)) {
-              // See `walksOnByIndex`.
+              let isPlain: boolean;
+
               try {
-                // A hole is told by `in` on the checked prototype, and by
-                // `holdsOwnIndex` - `in` for this realm's arrays alone - otherwise.
-                const prototype = Reflect.getPrototypeOf(items);
-                checkpoint = walksOnByIndex(
-                  items,
-                  index + 1,
-                  length,
-                  holes,
-                  entries,
-                  checkpoint,
-                  prototype === Array.prototype ||
-                    (checkedPrototype !== undefined &&
-                      prototype === checkedPrototype)
-                    ? WALKED_HOLES_PER_ENTRY
-                    : 1,
-                );
+                isPlain = Reflect.getPrototypeOf(items) === Array.prototype;
               } catch {
                 return estimatedSize + UNSIZED_VALUE_BYTES;
               }
 
-              if (checkpoint !== undefined) {
-                continue;
+              // A plain array may go on by index, its holes told by `in` (see
+              // `walksOnByIndex`); any other goes straight to its own index keys, as a
+              // hole walked by `Object.hasOwn` costs about what listing an entry does.
+              if (isPlain) {
+                try {
+                  checkpoint = walksOnByIndex(
+                    items,
+                    index + 1,
+                    length,
+                    holes,
+                    entries,
+                    checkpoint,
+                    WALKED_HOLES_PER_ENTRY,
+                  );
+                } catch {
+                  return estimatedSize + UNSIZED_VALUE_BYTES;
+                }
+
+                if (checkpoint !== undefined) {
+                  continue;
+                }
               }
 
               sparseFrom = index + 1;
@@ -839,7 +778,7 @@ export class LRUCache<K, V> {
         return estimatedSize;
       } finally {
         sizing.visiting.delete(items);
-        markSized(sizing, items);
+        sizing.sized.add(items);
       }
     } else if (typeof value === 'object') {
       try {

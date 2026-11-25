@@ -334,6 +334,8 @@ When no `sizeCalculator` is provided the cache uses a built-in estimator:
 
 Within one value, an array met again - the same array in two places - counts 8 bytes, a reference, rather than its elements again; one met inside itself (a cycle) counts 1000 bytes, and so does one nested more than 1000 arrays deep, so a deeply nested value does not overflow the stack. An object is sized by its JSON text, arrays inside it included, which spells out a value shared within it once per place it appears - a value whose parts are shared at every level is large and slow to size that way; give it a `sizeCalculator`.
 
+An array counts its own entries only: a hole counts nothing, one its prototype fills included. An Array subclass's or another realm's array is checked index by index with `Object.hasOwn`, since its prototype can claim a hole; on Bun that takes about 145 ms per million entries, against about 1 ms for a plain array, so give a large one a `sizeCalculator`.
+
 The `Object` row applies to values that reach the object/JSON-size estimation branch. Values outside the listed branches, such as functions and symbols, fall back to the generic `Other non-object values` estimate.
 
 A buffer or view is measured as the cache's value or as an array's entry; one nested in an object is part of that object's JSON text. An `ArrayBuffer` or `SharedArrayBuffer` is told by its prototype chain, so one whose prototype was replaced with one that is not a buffer's (`Object.setPrototypeOf(buffer, null)`) is estimated as an object. For values like these, give the cache a `sizeCalculator`.

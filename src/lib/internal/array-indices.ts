@@ -1,5 +1,3 @@
-import { MAX_PROTOTYPE_DEPTH } from './prototype-depth';
-
 /**
  * How many holes an array is walked through index by index, at the least, before the rest
  * of it is read by its own keys instead: a dense array never reaches it, and one item at
@@ -70,8 +68,8 @@ export interface FillCheckpoint {
  * `holesPerEntry` steps an entry. A `Proxy` whose traps claim every index is walked
  * as full, as it would be without the samples. Which way the rest is read can differ
  * from one walk to the next; for an array that nothing changes during the walk, and
- * whose `has` and `getOwnPropertyDescriptor` traps agree, what either way visits is the
- * same. Throws as `in` or `Object.hasOwn` throws on `source`.
+ * whose `has`, `getOwnPropertyDescriptor` and `ownKeys` traps agree, what either way
+ * visits is the same. Throws as `in` or `Object.hasOwn` throws on `source`.
  */
 export function walksOnByIndex(
   source: object,
@@ -103,7 +101,7 @@ export function walksOnByIndex(
  * `holesPerEntry + 1`, judged from {@link FILL_SAMPLES} of them picked at random (see
  * {@link walksOnByIndex}). Each is held
  * only when `in` and `Object.hasOwn` both say so, which every walk's own test then says
- * too - `holdsOwnIndex`, `holdsCopiedIndex`, and `LRUCache`'s read by `in` - so neither a
+ * too - `holdsOwnIndex` and `holdsCopiedIndex` - so neither a
  * `Proxy` whose `has` and `getOwnPropertyDescriptor` disagree, nor a prototype that
  * answers `in` for the indices sampled, passes them with an array a walk reads as holes.
  * Throws as either throws on `source`.
@@ -157,8 +155,8 @@ export function holdsOwnIndex(array: unknown[], index: number): boolean {
  * `Object.hasOwn` costs hundreds of times as much per index on JavaScriptCore - and by
  * `Object.hasOwn` where `in` says no, or the prototype is any other. So a hole an Array
  * subclass's or other prototype fills is not read as an entry, and nor is an own entry a
- * `Proxy`'s `has` hides lost; this realm's `Array.prototype` and `Object.prototype` are
- * taken as filling none, as `indexFreePrototype` takes them. A `Proxy` whose `has`
+ * `Proxy`'s `has` hides lost; this realm's `Array.prototype` is taken as filling none.
+ * A `Proxy` whose `has`
  * answers for a hole is read as holding it, as `holdsOwnIndex` reads one. Unlike
  * `holdsOwnIndex`, a hole costs an `Object.hasOwn`.
  */
@@ -192,42 +190,6 @@ export function isIndexKey(key: string | symbol): boolean {
   return (
     index >>> 0 === index && index !== 2 ** 32 - 1 && String(index) === key
   );
-}
-
-/**
- * `array`'s prototype, read once, when no prototype it inherits from lists an index of its
- * own as it stands now - an Array subclass's prototype or another realm's
- * `Array.prototype` as much as this realm's, which with `Object.prototype` is taken as
- * listing none - and `undefined` otherwise: for a chain that cannot be read, or one over
- * 64 deep, too. Not proof that `in` tells `array`'s own indices: a `Proxy` prototype
- * answers `has` as its trap does, whatever keys it lists, so a walk that reads by `in` on
- * this answer checks what it reads (see `LRUCache`'s size estimate).
- */
-export function indexFreePrototype(array: object): object | null | undefined {
-  try {
-    const arrayPrototype = Reflect.getPrototypeOf(array);
-    let prototype = arrayPrototype;
-
-    for (let depth = 0; depth < MAX_PROTOTYPE_DEPTH; depth++) {
-      if (
-        prototype === null ||
-        prototype === Array.prototype ||
-        prototype === Object.prototype
-      ) {
-        return arrayPrototype;
-      }
-
-      if (Reflect.ownKeys(prototype).some(isIndexKey)) {
-        return undefined;
-      }
-
-      prototype = Reflect.getPrototypeOf(prototype);
-    }
-  } catch {
-    // Read by `Object.hasOwn` instead.
-  }
-
-  return undefined;
 }
 
 /**
