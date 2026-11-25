@@ -7626,6 +7626,122 @@ describe('HTTPClient — listRequests', () => {
     },
   );
 
+  /**
+   * An adapter that answers at once while its upload is still going out: the upload ends
+   * only when the attempt's signal aborts. Run with `AbortSignal.any` removed, so the
+   * client composes the caller's signal by listening to it.
+   */
+  async function withRunningUpload(
+    run: (
+      client: HTTPClient,
+      state: { adapterSignal?: AbortSignal },
+    ) => Promise<void>,
+  ): Promise<void> {
+    const state: { adapterSignal?: AbortSignal } = {};
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest) => {
+        const { signal } = request;
+        state.adapterSignal = signal;
+        const requestBodySettled = new Promise<Error | undefined>((resolve) => {
+          signal?.addEventListener(
+            'abort',
+            () => resolve(new Error('upload aborted')),
+            { once: true },
+          );
+        });
+        return Promise.resolve<AdapterResponse>({
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled,
+        });
+      },
+    };
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      await run(new HTTPClient({ adapter }), state);
+    } finally {
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  }
+
+  test("a caller's abort from a final observer that never settles still reaches an upload that is running, and the listeners go once it settles", async () => {
+    await withRunningUpload(async (client, state) => {
+      const controller = new AbortController();
+      const removeSpy = spyOn(controller.signal, 'removeEventListener');
+      const seen: { releases: number; isAdapterAborted?: boolean }[] = [];
+      let upload: Promise<Error | undefined> | undefined;
+
+      let enter = (): void => {};
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      client.addResponseObserver(
+        (response) => {
+          const releases = removeSpy.mock.calls.length;
+          controller.abort();
+          seen.push({
+            releases,
+            isAdapterAborted: state.adapterSignal?.aborted,
+          });
+          upload = response.requestBodySettled;
+          enter();
+          return new Promise<void>(() => {});
+        },
+        { phases: ['final'] },
+      );
+
+      void client
+        .post('https://example.com/upload')
+        .signal(controller.signal)
+        .json({ value: 1 })
+        .retryPolicy(null)
+        .send();
+      await entered;
+
+      expect(seen).toEqual([{ releases: 0, isAdapterAborted: true }]);
+      expect((await upload)?.message).toContain('upload aborted');
+      // A turn for the release that follows the upload's settling.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(removeSpy.mock.calls.length).toBeGreaterThan(0);
+    });
+  });
+
+  test("a caller's abort after send() answers still reaches an upload that is running", async () => {
+    await withRunningUpload(async (client, state) => {
+      const controller = new AbortController();
+      const removeSpy = spyOn(controller.signal, 'removeEventListener');
+
+      const response = await client
+        .post('https://example.com/upload')
+        .signal(controller.signal)
+        .json({ value: 1 })
+        .retryPolicy(null)
+        .send();
+
+      expect(response.status).toBe(200);
+      expect(removeSpy.mock.calls.length).toBe(0);
+      controller.abort();
+      expect(state.adapterSignal?.aborted).toBe(true);
+      expect((await response.requestBodySettled)?.message).toContain(
+        'upload aborted',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(removeSpy.mock.calls.length).toBeGreaterThan(0);
+    });
+  });
+
   test('listRequests() defaults to own scope', async () => {
     const root = makeClient();
     const sub = root.createSubClient();

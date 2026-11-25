@@ -1058,22 +1058,65 @@ export class BaseHTTPClient {
     // attempt - registers how to release its listeners here; see `_composeSignals`.
     const signalReleasers: Array<() => void> = [];
 
-    // Run as the request settles, not when `send()` answers: a `final` observer is waited
-    // for with no timeout, and one that never settles must not keep a finished request
-    // listed or its listeners on a caller's long-lived signal. The `finally` below runs it
-    // for a request that ends by throwing.
-    const releaseRequest = (): void => {
-      this._tracker.remove(requestID);
+    /**
+     * The upload outcome the request reports so far, wherever it ended up: kept by the
+     * attempt runner (see its `latestUpload` parameter) across the redirect loop below,
+     * and attached to the response where `finalResponse` is taken - or, for a throw out
+     * of the loop, in the `catch` around it - rather than by each terminal branch.
+     * Declared out here so those two, and `releaseRequest`, which waits on it, can see
+     * it, and read there rather than copied out after each hop, so a throw out of the
+     * runner itself reports the attempt it got to.
+     *
+     * Kept by the runner rather than read off a hop's result: an attempt that *threw*
+     * has no adapter response to carry it, and most terminal redirect branches below
+     * build their `HTTPResponse` with `adapterResponse: null` - a redirect the caller
+     * disabled, a loop, an interceptor that threw, a cancel between hops - so that
+     * response has no field of its own to read. An early `3xx` mid-upload is exactly
+     * the shape where it is not empty.
+     */
+    //
+    // Carried across hops and attempts, not recomputed per hop: the latest attempt that
+    // had a body is the answer. A followed `301`/`302`/`303` rewrites a `POST` to a
+    // bodiless `GET`, so the final hop has no writer and nothing of its own to report -
+    // and reading only that hop would answer `undefined`, the documented "the body went
+    // out" value, for exactly the early-ack `POST` -> `302` -> `GET` shape this field
+    // exists for. A `307`/`308` resends the body and its own outcome is the one that
+    // reached the final response, while a bodiless hop or retry after it changes
+    // nothing about what the upload did. A bodied attempt given up on with its adapter
+    // still out reports that its upload's fate is unknown, and one that reported none -
+    // a custom adapter's untagged throw - leaves none, rather than an earlier hop's
+    // "the body went out" for an upload whose fate nobody knows.
+    const latestUpload: {
+      outcome: Promise<Error | undefined> | undefined;
+    } = { outcome: undefined };
 
-      // Each guarded: a caller's signal whose `removeEventListener` throws would reject a
-      // request that has already ended, and skip the releasers after it. The listener it
-      // keeps is `once`, and inert now the request is over.
+    // Each guarded: a caller's signal whose `removeEventListener` throws would reject a
+    // request that has already ended, and skip the releasers after it. The listener it
+    // keeps is `once`, and inert now the request is over. Run once: the list is emptied.
+    const releaseSignals = (): void => {
       for (const release of signalReleasers.splice(0)) {
         try {
           release();
         } catch {
           // Nothing more to do for that signal.
         }
+      }
+    };
+
+    // Run as the request settles, not when `send()` answers: a `final` observer is waited
+    // for with no timeout, and one that never settles must not keep a finished request
+    // listed or its listeners on a caller's long-lived signal. An upload still going out
+    // keeps the listeners until it settles, so a caller's abort - from a `final` observer,
+    // or after `send()` answers - still stops it, as a natively composed signal does. The
+    // `finally` below runs this for a request that ends by throwing.
+    const releaseRequest = (): void => {
+      this._tracker.remove(requestID);
+
+      const upload = latestUpload.outcome;
+      if (upload === undefined) {
+        releaseSignals();
+      } else {
+        void upload.then(releaseSignals, releaseSignals);
       }
     };
 
@@ -1135,37 +1178,6 @@ export class BaseHTTPClient {
       let cancelReason: string | undefined;
       let isRetriesExhausted = false;
       let completedAttemptCount = 0;
-
-      /**
-       * The upload outcome the request reports so far, wherever it ended up: kept by the
-       * attempt runner (see its `latestUpload` parameter) across the redirect loop below,
-       * and attached to the response where `finalResponse` is taken - or, for a throw out
-       * of the loop, in the `catch` around it - rather than by each terminal branch.
-       * Declared here so both can see it, and read there rather than copied out after
-       * each hop, so a throw out of the runner itself reports the attempt it got to.
-       *
-       * Kept by the runner rather than read off a hop's result: an attempt that *threw*
-       * has no adapter response to carry it, and most terminal redirect branches below
-       * build their `HTTPResponse` with `adapterResponse: null` - a redirect the caller
-       * disabled, a loop, an interceptor that threw, a cancel between hops - so that
-       * response has no field of its own to read. An early `3xx` mid-upload is exactly
-       * the shape where it is not empty.
-       */
-      //
-      // Carried across hops and attempts, not recomputed per hop: the latest attempt that
-      // had a body is the answer. A followed `301`/`302`/`303` rewrites a `POST` to a
-      // bodiless `GET`, so the final hop has no writer and nothing of its own to report -
-      // and reading only that hop would answer `undefined`, the documented "the body went
-      // out" value, for exactly the early-ack `POST` -> `302` -> `GET` shape this field
-      // exists for. A `307`/`308` resends the body and its own outcome is the one that
-      // reached the final response, while a bodiless hop or retry after it changes
-      // nothing about what the upload did. A bodied attempt given up on with its adapter
-      // still out reports that its upload's fate is unknown, and one that reported none -
-      // a custom adapter's untagged throw - leaves none, rather than an earlier hop's
-      // "the body went out" for an upload whose fate nobody knows.
-      const latestUpload: {
-        outcome: Promise<Error | undefined> | undefined;
-      } = { outcome: undefined };
 
       /**
        * The request's URL as the initial-phase interceptors left it - `url` until they
