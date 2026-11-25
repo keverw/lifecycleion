@@ -10259,6 +10259,131 @@ describe('NodeAdapter — crl option (normalization)', () => {
     }
   });
 
+  test('a CRL in shared memory written while it is validated is cached by the bytes validated, so the next request reads the new list', async () => {
+    // As a worker refreshing the list mid-validation would: the old list is validated,
+    // and the memory holds the new one by the time a key copied from it is taken.
+    const size = Math.max(fixtures.crlEmpty.length, fixtures.crlRevoked.length);
+    const shared = Buffer.from(new SharedArrayBuffer(size));
+    const fill = (text: string): void => {
+      shared.fill(0x0a);
+      shared.write(text, 'latin1');
+    };
+    fill(fixtures.crlEmpty);
+
+    const createSecureContext = tls.createSecureContext;
+    let hasRefreshed = false;
+    const parseSpy = spyOn(tls, 'createSecureContext').mockImplementation(
+      (options) => {
+        if (!hasRefreshed) {
+          hasRefreshed = true;
+          fill(fixtures.crlRevoked);
+        }
+
+        return createSecureContext(options);
+      },
+    );
+    const captured: unknown[] = [];
+    const requestSpy = spyOnCRLRequests(captured);
+
+    try {
+      await new NodeAdapter({ crl: shared }).send({
+        requestURL: 'https://crl.test/api',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(hasRefreshed).toBe(true);
+      expect((captured[0] as Buffer).toString('latin1').trim()).toBe(
+        fixtures.crlRevoked.trim(),
+      );
+    } finally {
+      requestSpy.mockRestore();
+      parseSpy.mockRestore();
+    }
+  });
+
+  test('a CRL view over growable shared memory, empty when read, is copied rather than handed to tls once it grows', () => {
+    // Grown, and filled with a CRL, by the read of the entry after it.
+    const GrowableSharedArrayBuffer = SharedArrayBuffer as unknown as new (
+      length: number,
+      options: { maxByteLength: number },
+    ) => SharedArrayBuffer & { grow(length: number): void };
+    const memory = new GrowableSharedArrayBuffer(0, {
+      maxByteLength: fixtures.crlEmpty.length,
+    });
+    const tracking = new Uint8Array(memory);
+    const crl: unknown[] = [tracking];
+    Object.defineProperty(crl, 1, {
+      get() {
+        memory.grow(fixtures.crlEmpty.length);
+        Buffer.from(memory).write(fixtures.crlEmpty, 'latin1');
+        return fixtures.crlEmpty;
+      },
+      enumerable: true,
+    });
+
+    const createSecureContext = tls.createSecureContext;
+    let isSharedHandedToTLS = false;
+    // Never handed on over shared memory, which takes Bun down.
+    const parseSpy = spyOn(tls, 'createSecureContext').mockImplementation(
+      (options) => {
+        const entries = ([] as unknown[]).concat(options?.crl ?? []);
+        if (
+          entries.some(
+            (entry) =>
+              ArrayBuffer.isView(entry) &&
+              arrayBufferKindOf(entry.buffer) === 'SharedArrayBuffer',
+          )
+        ) {
+          isSharedHandedToTLS = true;
+          throw new Error('shared memory handed to tls');
+        }
+
+        return createSecureContext(options);
+      },
+    );
+
+    try {
+      // The view held nothing when it was read: refused as empty bytes are.
+      expect(() => new NodeAdapter({ crl: crl as never })).toThrow(
+        'NodeAdapter crl must be PEM',
+      );
+      expect(isSharedHandedToTLS).toBe(false);
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
+  test('a CRL Buffer whose prototype is a Proxy is never asked for it, so the bytes validated are the bytes sent', async () => {
+    // Its trap rewrites the buffer to a bundle of two on its second call: after a single
+    // CRL was read and validated, before it would be passed on as itself.
+    const bundle = fixtures.unrelatedCRL + fixtures.crlRevoked;
+    const buffer = Buffer.alloc(bundle.length, 0x0a);
+    buffer.write(fixtures.crlEmpty, 'latin1');
+    let trapCalls = 0;
+    Object.setPrototypeOf(
+      buffer,
+      new Proxy(Buffer.prototype, {
+        getPrototypeOf(target) {
+          if (++trapCalls === 2) {
+            buffer.write(bundle, 'latin1');
+          }
+
+          return Reflect.getPrototypeOf(target);
+        },
+      }),
+    );
+
+    const captured = await captureCRL({ crl: buffer });
+
+    expect(trapCalls).toBe(0);
+    expect(
+      Buffer.from(captured as Uint8Array)
+        .toString('latin1')
+        .trim(),
+    ).toBe(fixtures.crlEmpty.trim());
+  });
+
   test('a DER Buffer is refused, since Node reads PEM CRLs only', () => {
     // Accepted, it would fail every HTTPS request when the TLS context is built.
     const der = Buffer.from([0x30, 0x82, 0x01, 0x2a, 0x30, 0x81, 0xd1]);

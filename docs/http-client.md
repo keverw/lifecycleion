@@ -1966,7 +1966,7 @@ The value is read on **every HTTPS request**, and normalized again whenever what
 
 - **Buffers too.** `fs.readFileSync('bundle.pem')` without an encoding returns a Buffer, and its contents are PEM like any other bundle, so it would otherwise be truncated exactly as a string would.
 - **Inside arrays.** Strings and Buffers nested inside an array are split too, so `[bundleOfTwo, oneMore]` contributes three CRLs rather than two.
-- **Other binary input.** Any binary view is read, and so is an `ArrayBuffer` (shared or not), as `ca` reads one - what `await (await fetch(crlURL)).arrayBuffer()` returns. One CRL block is passed on as a `Buffer` over the same bytes; several are split into one string each.
+- **Other binary input.** Any binary view is read, and so is an `ArrayBuffer` (shared or not), as `ca` reads one - what `await (await fetch(crlURL)).arrayBuffer()` returns. One CRL block is passed on as a `Buffer` over the same bytes, or over a copy when they are in a `SharedArrayBuffer` or a resizable `ArrayBuffer`; several are split into one string each.
 
 **Refused up front.** Each of these is refused when the adapter is constructed, and when a changed value is read for a request - as a non-retryable error, rather than failing every HTTPS request:
 

@@ -11,10 +11,11 @@ import {
 } from '../../internal/ascii-text';
 import {
   arrayBufferKindOf,
+  fixedUnsharedByteLength,
   plainBytesView,
   readBinaryByteLength,
-  readTypedArrayBuffer,
   readTypedArrayByteOffset,
+  readViewBuffer,
 } from '../../internal/binary-view';
 import { describeValue } from '../../internal/describe-value';
 import {
@@ -4473,11 +4474,12 @@ function normalizeCRL(
     // an offset (a `subarray`) is copied there, since Bun's `tls` reads a view from the
     // start of its memory - and the copy kept here is that copy. The offset is the one
     // its internal slot holds, which is where `tls` reads from, not the one it reports.
-    // Not one over shared memory, which `normalizeCRLEntry` copies too.
+    // Told a Buffer by its own prototype, not `instanceof`, which would run a `Proxy`
+    // prototype's trap - caller code that could rewrite the bytes just compared. Bytes over
+    // shared or resizable memory are never given here: `snapshotCRLInput` copied them.
     return last.isPassedThrough &&
-      Buffer.isBuffer(given) &&
-      readTypedArrayByteOffset(given) === 0 &&
-      !isOverSharedMemory(given)
+      isPlainBuffer(given) &&
+      readTypedArrayByteOffset(given) === 0
       ? given
       : last.normalized;
   }
@@ -4535,7 +4537,8 @@ function copyTrustList<V>(value: V, label: string): V {
  * newer CRL was lost to a hole would enforce only the CRLs around it, and the copy is the
  * cache key `isSameCRLInput` compares entry by entry, so one kept as a hole would match a
  * later list with a CRL at that index. An `ArrayBuffer` is read as a view of all its
- * bytes (see `crlEntryView`); anything else is left as given.
+ * bytes, and bytes over shared or resizable memory are copied (see `crlEntryView`);
+ * anything else is left as given.
  */
 function snapshotCRLInput(
   crl: TLSMaterial | TLSMaterial[],
@@ -4565,19 +4568,45 @@ function snapshotCRLInput(
 /**
  * A `crl` entry with an `ArrayBuffer` (shared or not) as a `Uint8Array` over all its
  * bytes, so it is read, compared and copied as any other view is. A detached one reads as
- * empty, as a view over it does. Anything else is left as given, to be refused by
- * `normalizeCRLEntry` if it is not a string or a view.
+ * empty, as a view over it does. A view over memory that is not a fixed, unshared
+ * `ArrayBuffer` - a `SharedArrayBuffer`, growable or not, or a resizable `ArrayBuffer` -
+ * is copied into memory of this adapter's own, here, whatever its length, before the
+ * cache is asked: memory another thread writes, or that grows, while it is validated
+ * would otherwise leave a cache key holding bytes other than the CRLs validated and kept,
+ * or hand Bun's `tls` shared memory, which takes the process down. Anything else is left
+ * as given, to be refused by `normalizeCRLEntry` if it is not a string or a view.
  */
 function crlEntryView(entry: TLSMaterial): string | ArrayBufferView {
-  if (
-    typeof entry !== 'object' ||
-    entry === null ||
-    arrayBufferKindOf(entry) === undefined
-  ) {
-    return entry as string | ArrayBufferView;
+  if (typeof entry !== 'object' || entry === null) {
+    return entry;
   }
 
-  return arrayBufferBytes(entry as ArrayBuffer);
+  const view =
+    arrayBufferKindOf(entry) === undefined
+      ? (entry as ArrayBufferView)
+      : arrayBufferBytes(entry as ArrayBuffer);
+
+  if (
+    !ArrayBuffer.isView(view) ||
+    fixedUnsharedByteLength(readViewBuffer(view)) !== null
+  ) {
+    return view;
+  }
+
+  return copyToOwnMemory(viewBytesOf(view));
+}
+
+/**
+ * Whether `value` is a Buffer, told by its own prototype rather than `instanceof`, which
+ * walks the chain through a `Proxy` prototype's trap - caller code. A Buffer subclass
+ * answers no, and is copied where a Buffer would be passed on as itself.
+ */
+function isPlainBuffer(value: unknown): value is Buffer {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Object.getPrototypeOf(value) === Buffer.prototype
+  );
 }
 
 /** An `ArrayBuffer` as a `Uint8Array` over all its bytes, or an empty one when detached. */
@@ -4621,11 +4650,6 @@ function viewBytesOf(view: ArrayBufferView): Buffer {
 
   const plain = plainBytesView(view);
   return Buffer.from(plain.buffer, plain.byteOffset, plain.byteLength);
-}
-
-/** Whether a typed array's memory, by its internal slot, is a `SharedArrayBuffer`. */
-function isOverSharedMemory(view: Uint8Array): boolean {
-  return arrayBufferKindOf(readTypedArrayBuffer(view)) === 'SharedArrayBuffer';
 }
 
 /**
@@ -4755,7 +4779,7 @@ function normalizeCRLEntry(
   // bytes are read by the view's internal slots (see `viewBytesOf`), so what is checked
   // here is everything `tls` will read, however the view reports its own size.
   const candidate: unknown = entry;
-  if (!Buffer.isBuffer(candidate) && !ArrayBuffer.isView(candidate)) {
+  if (!ArrayBuffer.isView(candidate)) {
     throw crlKindRefusal(candidate);
   }
   const bytes = viewBytesOf(candidate);
@@ -4787,16 +4811,14 @@ function normalizeCRLEntry(
       ? bytes.subarray(3)
       : bytes;
 
-  // Copied when its memory is a `SharedArrayBuffer`: Bun's `tls` takes the process down
-  // on a CRL over shared memory, where Node reads it.
-  const isShared = isOverSharedMemory(bytes);
-
-  // The caller's own Buffer when it is one and needs nothing taken off, by the offset its
-  // internal slot holds: its bytes are the ones just read, from the start of its memory.
+  // Never over shared memory, which Bun's `tls` takes the process down on: the snapshot
+  // `normalizeCRL` reads copied any (see `crlEntryView`). The caller's own Buffer when it
+  // is one - by its prototype, running none of its code (see `isPlainBuffer`) - and needs
+  // nothing taken off, by the offset its internal slot holds: its bytes are the ones just
+  // read, from the start of its memory.
   if (
     withoutBOM === bytes &&
-    !isShared &&
-    Buffer.isBuffer(candidate) &&
+    isPlainBuffer(candidate) &&
     readTypedArrayByteOffset(candidate) === 0
   ) {
     return candidate;
@@ -4805,9 +4827,7 @@ function normalizeCRLEntry(
   // Copied when it starts partway into its memory (a `subarray`, a view at an offset):
   // Bun's `tls` reads such a view from the start of the memory, and would fail to parse
   // it.
-  return withoutBOM.byteOffset === 0 && !isShared
-    ? withoutBOM
-    : copyToOwnMemory(withoutBOM);
+  return withoutBOM.byteOffset === 0 ? withoutBOM : copyToOwnMemory(withoutBOM);
 }
 
 /**
