@@ -512,10 +512,10 @@ export class BaseHTTPClient {
     const adapterCandidate: unknown = snapshot.adapter;
     // An adapter by its two methods, said as the other options are, rather than as the
     // engine's `getType is not a function` from the call below or `send` on the first
-    // request.
+    // request. A function carrying both is an adapter too.
     if (
       !isNullish(adapterCandidate) &&
-      (typeof adapterCandidate !== 'object' ||
+      (!isObjectLike(adapterCandidate) ||
         typeof readUnknownMember(adapterCandidate, 'getType') !== 'function' ||
         typeof readUnknownMember(adapterCandidate, 'send') !== 'function')
     ) {

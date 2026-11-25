@@ -1513,6 +1513,23 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(builder.error?.cancelReason).toBe('gave up waiting');
   });
 
+  test('a function carrying getType() and send() is accepted as an adapter', async () => {
+    const adapter = Object.assign(() => {}, {
+      getType: () => 'fetch' as const,
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({ status: 200, headers: {}, body: null }),
+    }) satisfies HTTPAdapter;
+
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .get('/')
+      .send();
+
+    expect(response.status).toBe(200);
+  });
+
   test('an adapter whose requestBodySettled never settles fails the redirect as a timeout at the request timeout', async () => {
     // `NodeAdapter` bounds its own promise through the upload stall watchdog. A custom
     // adapter is a public extension point, and one that set the field and never settled

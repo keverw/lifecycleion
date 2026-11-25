@@ -1327,6 +1327,9 @@ test('a misspelled config or request option is refused rather than read as absen
   expect(() => new HTTPClient({ adapter: {} as never })).toThrow(
     'HTTPClient adapter must be an object with getType() and send() methods (got object)',
   );
+  expect(() => new HTTPClient({ adapter: (() => {}) as never })).toThrow(
+    'HTTPClient adapter must be an object with getType() and send() methods (got function)',
+  );
   expect(() => new MockAdapter({ onHandlerError: 'x' } as never)).toThrow(
     'MockAdapter onHandlerError must be a function (got string)',
   );
