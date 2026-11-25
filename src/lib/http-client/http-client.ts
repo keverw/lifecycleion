@@ -3058,6 +3058,7 @@ export class BaseHTTPClient {
           errorCode?: HTTPClientError['code'];
           adapterCause?: Error;
           cancelReason?: string;
+          isNetworkErrorOverride?: boolean;
         },
       ) => {
         clearTimeout(timeoutID);
@@ -3349,6 +3350,28 @@ export class BaseHTTPClient {
         }, timeout);
       }
 
+      // The adapter's `send`, read once and called as read: whether the body is copied for
+      // it is decided by the function handed it. One that is not a function, or whose read
+      // throws, is a configuration error, as MockAdapter's invalid delay is: the attempt
+      // ends before it is dispatched - a redirect hop is not followed - not retried, and
+      // not a network error.
+      let send: HTTPAdapter['send'];
+      try {
+        const candidate: unknown = Reflect.get(this._adapter, 'send');
+        if (typeof candidate !== 'function') {
+          throw new TypeError(
+            `HTTPClient adapter send must be a function (got ${describeValue(candidate)})`,
+          );
+        }
+        send = candidate as HTTPAdapter['send'];
+      } catch (error) {
+        return endBeforeDispatch(reportBeforeDispatch(attemptRequest), {
+          errorCode: 'adapter_error',
+          adapterCause: normalizeError(error),
+          isNetworkErrorOverride: false,
+        });
+      }
+
       let sentRequest: HeldAttemptRequest;
       // The body handed to the adapter: the client's own, not the observers' `body`.
       let sentBody: AttemptRequest['body'];
@@ -3500,14 +3523,6 @@ export class BaseHTTPClient {
         // `adoptPromise()`.
         const streamResponse = options.streamResponse;
         const adapter = this._adapter;
-        // Read once, before the request is built as a call reads it, and called as read:
-        // whether the body is copied for it is decided by the function handed it.
-        const send: unknown = Reflect.get(adapter, 'send');
-        if (typeof send !== 'function') {
-          throw new TypeError(
-            `HTTPClient adapter send must be a function (got ${describeValue(send)})`,
-          );
-        }
         // Told once, for the stream factory's timeout and the body the adapter is handed.
         const isBuiltInSend = isBuiltInNetworkSend(adapter, send);
         isBuiltInNodeSend = this._adapterType === 'node' && isBuiltInSend;
@@ -3685,7 +3700,7 @@ export class BaseHTTPClient {
           });
         }
         const adapterPromise = adoptPromise(
-          Reflect.apply(send as HTTPAdapter['send'], adapter, [adapterRequest]),
+          Reflect.apply(send, adapter, [adapterRequest]),
         );
         // Raced against the attempt's own abort, so a timeout or a cancel ends the
         // attempt even when the adapter ignores its signal and never settles: awaited

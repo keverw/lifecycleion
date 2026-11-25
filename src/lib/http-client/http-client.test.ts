@@ -1586,19 +1586,85 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(sendReads).toBe(1);
   });
 
-  test('an adapter without a send is built, and fails each request as an adapter_error saying so', async () => {
+  test('an adapter without a send is built, and fails a request once, as a configuration adapter_error saying so', async () => {
+    let sendReads = 0;
+    const adapter = { getType: () => 'fetch' } as unknown as HTTPAdapter;
+    Object.defineProperty(adapter, 'send', {
+      get() {
+        sendReads++;
+        return undefined;
+      },
+    });
     const client = new HTTPClient({
-      adapter: { getType: () => 'fetch' } as unknown as HTTPAdapter,
+      adapter,
       baseURL: 'http://example.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 0 },
     });
     const builder = client.get('/');
     const response = await builder.send();
 
+    expect(sendReads).toBe(1);
+    expect(builder.attemptCount).toBe(1);
     expect(response.isFailed).toBe(true);
+    expect(response.isNetworkError).toBe(false);
     expect(builder.error?.code).toBe('adapter_error');
     expect(String(builder.error?.cause)).toContain(
       'HTTPClient adapter send must be a function (got undefined)',
     );
+  });
+
+  test('an adapter send whose read throws fails the request once, as a configuration adapter_error', async () => {
+    let sendReads = 0;
+    const adapter = { getType: () => 'fetch' } as unknown as HTTPAdapter;
+    Object.defineProperty(adapter, 'send', {
+      get() {
+        sendReads++;
+        throw new Error('no send');
+      },
+    });
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 0 },
+    }).get('/');
+    const response = await builder.send();
+
+    expect(sendReads).toBe(1);
+    expect(response.isNetworkError).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(String(builder.error?.cause)).toContain('no send');
+  });
+
+  test('a redirect hop whose adapter send is gone is not followed: nothing was sent to its target', async () => {
+    let sendReads = 0;
+    const adapter = { getType: () => 'node' } as unknown as HTTPAdapter;
+    // A working send for the first hop only.
+    Object.defineProperty(adapter, 'send', {
+      get() {
+        if (++sendReads > 1) {
+          return undefined;
+        }
+
+        return (): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 302,
+            headers: { location: 'http://example.test/next' },
+            body: null,
+          });
+      },
+    });
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+    }).get('/start');
+    const response = await builder.send();
+
+    expect(sendReads).toBe(2);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(response.isNetworkError).toBe(false);
+    expect(response.wasRedirectFollowed).toBe(false);
+    expect(response.detectedRedirectURL).toBe('http://example.test/next');
   });
 
   test('an adapter whose requestBodySettled never settles fails the redirect as a timeout at the request timeout', async () => {
