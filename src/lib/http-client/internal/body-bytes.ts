@@ -19,7 +19,8 @@ const INDEX_COPY_BYTES = 64;
 
 /**
  * A response body's bytes, kept as each chunk is read and joined once by
- * {@link concatChunks}. A chunk of {@link KEEP_BYTES} or more that spans at least half
+ * {@link concatChunks} - or, for a body that fills exactly one of its own blocks, handed
+ * back as that block. A chunk of {@link KEEP_BYTES} or more that spans at least half
  * the fixed, unshared buffer it is a view over is kept as it is, so its bytes are copied
  * once, by the join. Any other is copied into a block shared with the chunks around it -
  * what is left of it past the block it starts in going into one of its own size - so what
@@ -106,12 +107,25 @@ export class BodyBytes {
   }
 
   /**
-   * The bytes appended, as a plain `Uint8Array` spanning an `ArrayBuffer` of its own:
-   * joined by {@link concatChunks}, which hands back a fresh view over a lone part that
-   * already spans such a buffer, without copying it.
+   * The bytes appended, as a plain `Uint8Array` spanning an `ArrayBuffer` of its own.
+   * A body that fills exactly one of this body's own blocks is that block; any other is
+   * joined by {@link concatChunks} into a copy, so a chunk kept as it is cannot change the
+   * body through its producer reusing that memory once the body is delivered.
    */
   public bytes(): Uint8Array {
     this.endPart();
+
+    // The buffer and length checks hold whenever the first two do, as blocks are sized
+    // today; kept so a part that is not the whole of an own block is never handed back.
+    if (
+      this.parts.length === 1 &&
+      this.block !== undefined &&
+      readTypedArrayBuffer(this.parts[0]) === this.block.buffer &&
+      this.written === this.block.length
+    ) {
+      return new Uint8Array(this.block.buffer);
+    }
+
     return concatChunks(this.parts, this.written);
   }
 

@@ -100,6 +100,36 @@ describe('FetchAdapter', () => {
     expect(new FetchAdapter().getType()).toBe('fetch');
   });
 
+  test('a body that arrives as one large chunk is copied, so its producer reusing the chunk does not change the delivered body', async () => {
+    const chunk = new Uint8Array(8 * 1024).fill(7);
+
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(chunk);
+              controller.close();
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+
+    const answer = await new FetchAdapter().send({
+      requestURL: 'https://local.test/one-chunk',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 64 * 1024,
+    });
+    chunk.fill(0);
+
+    const body = answer.body as Uint8Array;
+    expect(body.byteLength).toBe(8 * 1024);
+    expect(body.buffer).not.toBe(chunk.buffer);
+    expect(body.every((byte) => byte === 7)).toBe(true);
+  });
+
   test('a status below 100 is answered as a malformed response, its body let go', async () => {
     // Bun's `fetch` hands a server's `099` on as `status: 99`, and `000` as a response
     // with `status: 0`, where Node's refuses the response. Either way it is a transport

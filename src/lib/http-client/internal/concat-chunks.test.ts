@@ -42,15 +42,16 @@ describe('concatChunks', () => {
     expect([...result]).toEqual([1, 2, 3]);
   });
 
-  test('a lone plain chunk spanning a plain buffer is a view over that buffer, not a copy', () => {
+  test('a lone plain chunk spanning a plain buffer is copied, so a later write to it does not reach the result', () => {
     const chunk = new Uint8Array([1, 2, 3]);
     const result = concatChunks([chunk], 3);
+    chunk.fill(0);
 
-    expect(result.buffer).toBe(chunk.buffer);
+    expect(result.buffer).not.toBe(chunk.buffer);
     expect([...result]).toEqual([1, 2, 3]);
   });
 
-  test('a lone chunk with properties of its own is a fresh view that carries none of them', () => {
+  test('a lone chunk with properties of its own is copied into a view that carries none of them', () => {
     const chunk = new Uint8Array([1, 2, 3]);
     Object.defineProperties(chunk, {
       byteLength: { value: 0 },
@@ -61,7 +62,7 @@ describe('concatChunks', () => {
     const result = concatChunks([chunk], 3);
 
     expect(result).not.toBe(chunk);
-    expect(result.buffer).toBe(chunk.buffer);
+    expect(result.buffer).not.toBe(chunk.buffer);
     expect(result.byteLength).toBe(3);
     expect(result.length).toBe(3);
     expect(
@@ -71,7 +72,7 @@ describe('concatChunks', () => {
     ).toEqual([]);
   });
 
-  test('a lone chunk over a buffer with a byteLength of its own is copied', () => {
+  test('a chunk over a buffer with a byteLength of its own is copied by the bytes it holds', () => {
     const chunk = new Uint8Array([1, 2, 3]);
     Object.defineProperty(chunk.buffer, 'byteLength', { value: 0 });
 
@@ -82,7 +83,7 @@ describe('concatChunks', () => {
     expect([...result]).toEqual([1, 2, 3]);
   });
 
-  test('a lone chunk is judged by its internal slots, not its own properties', () => {
+  test('a chunk is read through its internal slots, not its own properties', () => {
     // A view one byte into its buffer, claiming to start at 0 over a buffer of its own.
     const chunk = new Uint8Array([0, 1, 2, 3]).subarray(1);
     Object.defineProperties(chunk, {
@@ -96,7 +97,7 @@ describe('concatChunks', () => {
     expect([...result]).toEqual([1, 2, 3]);
   });
 
-  test('a lone empty chunk over a detached buffer is an empty result', () => {
+  test('an empty chunk over a detached buffer is an empty result', () => {
     const buffer = new ArrayBuffer(0);
     const chunk = new Uint8Array(buffer);
     structuredClone(buffer, { transfer: [buffer] });

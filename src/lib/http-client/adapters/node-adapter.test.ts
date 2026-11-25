@@ -27,7 +27,6 @@ import * as zlib from 'node:zlib';
 import * as responseDecoding from '../internal/response-decoding';
 import { NodeAdapter } from './node-adapter';
 import { FetchAdapter } from './fetch-adapter';
-import * as concatChunksModule from '../internal/concat-chunks';
 import { BodyBytes } from '../internal/body-bytes';
 import { listenForStreamFailureSettled } from '../internal/stream-failure-settled';
 import {
@@ -232,12 +231,11 @@ test('a buffered body that cannot be joined settles as a stream error, not an un
   }
   // As one array too large to allocate fails, under a `maxResponseBytes` of `Infinity`.
   const tooLarge = new RangeError('Array buffer allocation failed');
-  const concatSpy = spyOn(
-    concatChunksModule,
-    'concatChunks',
-  ).mockImplementation(() => {
-    throw tooLarge;
-  });
+  const concatSpy = spyOn(BodyBytes.prototype, 'bytes').mockImplementation(
+    () => {
+      throw tooLarge;
+    },
+  );
   try {
     const response = await new NodeAdapter().send(
       makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`),
@@ -365,7 +363,7 @@ test('a buffered body cancelled from its final progress event is not joined', as
     throw new Error('No test address');
   }
   const controller = new AbortController();
-  const concatSpy = spyOn(concatChunksModule, 'concatChunks');
+  const joinSpy = spyOn(BodyBytes.prototype, 'bytes');
   try {
     let caught: unknown;
     try {
@@ -384,9 +382,9 @@ test('a buffered body cancelled from its final progress event is not joined', as
     }
 
     expect((caught as Error).name).toBe('AbortError');
-    expect(concatSpy).not.toHaveBeenCalled();
+    expect(joinSpy).not.toHaveBeenCalled();
   } finally {
-    concatSpy.mockRestore();
+    joinSpy.mockRestore();
     await new Promise((resolve) => server.close(resolve));
   }
 });

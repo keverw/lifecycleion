@@ -112,13 +112,16 @@ describe('BodyBytes', () => {
     expect([...body.bytes()]).toEqual([1, 2, 3]);
   });
 
-  test('a lone chunk of 4 KiB or more spanning a plain buffer is the body over its buffer, not copied', () => {
+  test('a lone chunk of 4 KiB or more is copied by the join, so its producer reusing it does not change the body', () => {
     for (const length of [4096, 16_000, 20_000]) {
       const chunk = counting(length);
       const body = new BodyBytes(100_000);
       body.append(chunk, chunk.length);
+      const bytes = body.bytes();
+      chunk.fill(0);
 
-      expect(body.bytes().buffer).toBe(chunk.buffer);
+      expect(bytes.buffer).not.toBe(chunk.buffer);
+      expect(bytes[1]).toBe(1);
     }
   });
 
