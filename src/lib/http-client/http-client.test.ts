@@ -1564,6 +1564,43 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(receivers[0]).toBe(adapter);
   });
 
+  test('the send of an adapter is not read when the client is built, but once as each attempt goes out, and that read is the one called', async () => {
+    let sendReads = 0;
+    const adapter = { getType: () => 'fetch' } as unknown as HTTPAdapter;
+    // Hands out one handler, on its first read only.
+    Object.defineProperty(adapter, 'send', {
+      get() {
+        if (++sendReads > 1) {
+          return undefined;
+        }
+
+        return (): Promise<AdapterResponse> =>
+          Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    });
+
+    const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+
+    expect(sendReads).toBe(0);
+    expect((await client.get('/').send()).status).toBe(200);
+    expect(sendReads).toBe(1);
+  });
+
+  test('an adapter without a send is built, and fails each request as an adapter_error saying so', async () => {
+    const client = new HTTPClient({
+      adapter: { getType: () => 'fetch' } as unknown as HTTPAdapter,
+      baseURL: 'http://example.test',
+    });
+    const builder = client.get('/');
+    const response = await builder.send();
+
+    expect(response.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(String(builder.error?.cause)).toContain(
+      'HTTPClient adapter send must be a function (got undefined)',
+    );
+  });
+
   test('an adapter whose requestBodySettled never settles fails the redirect as a timeout at the request timeout', async () => {
     // `NodeAdapter` bounds its own promise through the upload stall watchdog. A custom
     // adapter is a public extension point, and one that set the field and never settled

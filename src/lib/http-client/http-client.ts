@@ -517,21 +517,18 @@ export class BaseHTTPClient {
       internal.inheritedAdapter.adapter === adapterCandidate
         ? internal.inheritedAdapter
         : undefined;
-    // An adapter by its two methods, said as the other options are, rather than as the
-    // engine's `getType is not a function` from the call below or `send` on the first
-    // request. A function carrying both is an adapter too. `getType` is read once: the
-    // method checked is the one called, with the adapter as its receiver.
+    // An adapter by its `getType`, said as the other options are, rather than as the
+    // engine's `getType is not a function` from the call below. A function carrying it is
+    // an adapter too. `getType` is read once: the method checked is the one called, with
+    // the adapter as its receiver. `send` is not read here but as each attempt goes out,
+    // once, and that read is the one checked and called (see `_dispatchRequestAttempts`).
     let getType: unknown;
     if (!isNullish(adapterCandidate) && inherited === undefined) {
       getType = readUnknownMember(adapterCandidate, 'getType');
 
-      if (
-        !isObjectLike(adapterCandidate) ||
-        typeof getType !== 'function' ||
-        typeof readUnknownMember(adapterCandidate, 'send') !== 'function'
-      ) {
+      if (!isObjectLike(adapterCandidate) || typeof getType !== 'function') {
         throw new TypeError(
-          `HTTPClient adapter must be an object with getType() and send() methods (got ${describeValue(adapterCandidate)})`,
+          `HTTPClient adapter must be an object with a getType() method (got ${describeValue(adapterCandidate)})`,
         );
       }
     }
@@ -3506,6 +3503,11 @@ export class BaseHTTPClient {
         // Read once, before the request is built as a call reads it, and called as read:
         // whether the body is copied for it is decided by the function handed it.
         const send: unknown = Reflect.get(adapter, 'send');
+        if (typeof send !== 'function') {
+          throw new TypeError(
+            `HTTPClient adapter send must be a function (got ${describeValue(send)})`,
+          );
+        }
         // Told once, for the stream factory's timeout and the body the adapter is handed.
         const isBuiltInSend = isBuiltInNetworkSend(adapter, send);
         isBuiltInNodeSend = this._adapterType === 'node' && isBuiltInSend;

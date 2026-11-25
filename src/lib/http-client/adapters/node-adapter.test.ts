@@ -10302,6 +10302,52 @@ describe('NodeAdapter — crl option (normalization)', () => {
     }
   });
 
+  test.each([
+    [
+      'a list entry in shared memory',
+      (): unknown => {
+        const shared = Buffer.from(
+          new SharedArrayBuffer(fixtures.crlEmpty.length),
+        );
+        shared.write(fixtures.crlEmpty, 'latin1');
+        return [shared];
+      },
+    ],
+    [
+      'a Buffer with a byte-order mark',
+      (): unknown => Buffer.from('﻿' + fixtures.crlEmpty, 'utf8'),
+    ],
+  ])(
+    'a CRL that is %s is copied once: the copy handed to tls is the one kept for the next request',
+    async (_label, makeCRL) => {
+      // Set after construction, so the first request is the one that validates it.
+      const config: { crl?: never } = {};
+      const adapter = new NodeAdapter(config);
+      config.crl = makeCRL() as never;
+      const captured: unknown[] = [];
+      const requestSpy = spyOnCRLRequests(captured);
+      const send = () =>
+        adapter.send({
+          requestURL: 'https://crl.test/api',
+          method: 'GET',
+          headers: {},
+        });
+
+      try {
+        await send();
+        await send();
+
+        const [first, second] = captured.map((crl) =>
+          Array.isArray(crl) ? crl[0] : crl,
+        );
+        expect(Buffer.isBuffer(first)).toBe(true);
+        expect(second).toBe(first);
+      } finally {
+        requestSpy.mockRestore();
+      }
+    },
+  );
+
   test('a CRL view over growable shared memory, empty when read, is copied rather than handed to tls once it grows', () => {
     // Grown, and filled with a CRL, by the read of the entry after it.
     const GrowableSharedArrayBuffer = SharedArrayBuffer as unknown as new (

@@ -4500,7 +4500,9 @@ function normalizeCRL(
   // bytes in another buffer would be answered with that one - which its owner may since
   // have reused for something else.
   // One copy, not two: a value that normalized to itself keeps its input copy as its
-  // normalized form too.
+  // normalized form too, and bytes this adapter copied already while reading the value -
+  // shared or resizable memory, a block with its byte-order mark cut off - are kept as
+  // they are, copied no more.
   const input = copyCRLInput(given);
   const isPassedThrough = normalized === given;
   const owned = isPassedThrough
@@ -4593,7 +4595,20 @@ function crlEntryView(entry: TLSMaterial): string | ArrayBufferView {
     return view;
   }
 
-  return copyToOwnMemory(viewBytesOf(view));
+  return ownCRLCopy(viewBytesOf(view));
+}
+
+/**
+ * The CRL bytes this adapter copied into memory of its own while reading a `crl` value:
+ * no caller holds them, so keeping one in the cache needs no second copy.
+ */
+const ownCRLCopies = new WeakSet<object>();
+
+/** `bytes` copied as {@link copyToOwnMemory} copies them, recorded as this adapter's own. */
+function ownCRLCopy(bytes: Uint8Array): Buffer {
+  const copy = copyToOwnMemory(bytes);
+  ownCRLCopies.add(copy);
+  return copy;
 }
 
 /**
@@ -4616,9 +4631,14 @@ function arrayBufferBytes(buffer: ArrayBufferLike): Uint8Array {
     : new Uint8Array(buffer);
 }
 
-/** A normalized CRL entry this adapter owns: a string as is, a buffer copied. */
+/**
+ * A normalized CRL entry this adapter owns: a string as is, a buffer copied unless it is
+ * a copy this adapter made already.
+ */
 function ownCRLEntry(entry: string | Buffer): string | Buffer {
-  return typeof entry === 'string' ? entry : copyToOwnMemory(entry);
+  return typeof entry === 'string' || ownCRLCopies.has(entry)
+    ? entry
+    : copyToOwnMemory(entry);
 }
 
 /**
@@ -4662,14 +4682,20 @@ function plainBodyBytes(body: Uint8Array): Buffer {
     : Buffer.from(plainBytesView(body));
 }
 
-/** A `crl` value as given, copied: a string as is, a buffer's bytes into one of its own. */
+/**
+ * A `crl` value as given, copied: a string as is, a buffer's bytes into one of its own -
+ * unless it is a copy this adapter made already, as one over shared or resizable memory
+ * is (see `crlEntryView`).
+ */
 type CRLInputCopy = string | Buffer | Array<string | Buffer>;
 
 function copyCRLInput(
   crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
 ): CRLInputCopy {
   const copyEntry = (entry: string | ArrayBufferView): string | Buffer =>
-    typeof entry === 'string' ? entry : copyToOwnMemory(viewBytesOf(entry));
+    typeof entry === 'string' || ownCRLCopies.has(entry)
+      ? (entry as string | Buffer)
+      : copyToOwnMemory(viewBytesOf(entry));
 
   return Array.isArray(crl) ? crl.map(copyEntry) : copyEntry(crl);
 }
@@ -4827,7 +4853,7 @@ function normalizeCRLEntry(
   // Copied when it starts partway into its memory (a `subarray`, a view at an offset):
   // Bun's `tls` reads such a view from the start of the memory, and would fail to parse
   // it.
-  return withoutBOM.byteOffset === 0 ? withoutBOM : copyToOwnMemory(withoutBOM);
+  return withoutBOM.byteOffset === 0 ? withoutBOM : ownCRLCopy(withoutBOM);
 }
 
 /**

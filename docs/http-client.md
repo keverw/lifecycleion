@@ -185,7 +185,7 @@ builder disables retries inherited from the client.
 
 **Configs must be objects.** The config of `new HTTPClient()`, `createSubClient()`, `new NodeAdapter()`, `new CookieJar()` and `new MockAdapter()`, request options and the `listRequests()` filter must each be an object - not an array, a string or another value. `null` means no options for the last four (`new CookieJar()`, `new MockAdapter()`, request options, the `listRequests()` filter) and is refused for the others.
 
-- An `adapter` must be an object with `getType()` and `send()` methods.
+- An `adapter` must be an object (or a function) with a `getType()` method. Its `send` is read once as each attempt goes out - each retry and redirect hop reads it again - and the method read is the one called: a `send` that is not a function fails that attempt as an `adapter_error`.
 - A `MockAdapter`'s `onHandlerError` must be a function.
 
 **`new NodeAdapter()` checks its option types.** Without these checks a request could go out presenting no client certificate, or over TCP.
