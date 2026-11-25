@@ -111,6 +111,7 @@ import {
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
   UPLOAD_SOURCE_STALL_GRACE_MS,
+  UPLOAD_STALL_GRACE_MS,
 } from './consts';
 import type {
   AttemptEndEvent,
@@ -1118,16 +1119,27 @@ export class BaseHTTPClient {
     // for with no timeout, and one that never settles must not keep a finished request
     // listed or its listeners on a caller's long-lived signal. An upload still going out
     // keeps the listeners until it settles, so a caller's abort - from a `final` observer,
-    // or after `send()` answers - still stops it, as a natively composed signal does. The
-    // `finally` below runs this for a request that ends by throwing.
+    // or after `send()` answers - still stops it, as a natively composed signal does - or
+    // until it has made no progress for the longer of the request's timeout and twice the
+    // upload stall grace, past `NodeAdapter`'s own watchdog on a live upload's pauses: a
+    // custom adapter whose `requestBodySettled` never settles would otherwise leave one
+    // listener per request on a signal reused across them. That wait's timer does not keep
+    // the process alive, and none is armed when there is nothing to release. The `finally`
+    // below runs this for a request that ends by throwing.
     const releaseRequest = (): void => {
       this._tracker.remove(requestID);
 
       const upload = latestUpload.outcome;
-      if (upload === undefined) {
+      if (upload === undefined || signalReleasers.length === 0) {
         releaseSignals();
       } else {
-        void upload.then(releaseSignals, releaseSignals);
+        void settleUploadBeforeNextDispatch(
+          upload,
+          cancelSignal,
+          Math.max(timeout, 2 * UPLOAD_STALL_GRACE_MS),
+          () => lastUploadActivityAt(uploadActivity),
+          { isBackground: true },
+        ).then(releaseSignals, releaseSignals);
       }
     };
 
@@ -7111,7 +7123,10 @@ function awaitAdapterSend<T>(
 
 /**
  * Wait for an attempt's upload to settle before the next dispatch - the next redirect hop,
- * or the retry that replaces it.
+ * or the retry that replaces it - or, once the request has settled, before its listeners
+ * on the caller's signal are released (see `releaseRequest`), which passes its own bound
+ * and `isBackground`, so its timer does not keep the process alive, and only lets the
+ * listeners go at the bound.
  *
  * Never throws and never rejects, whatever the adapter handed over: adoption happens at
  * the attempt runner, and this wait observes the adopted outcome's settlement either way,
@@ -7130,14 +7145,15 @@ function awaitAdapterSend<T>(
  * every followed redirect, or a retry, until the caller aborts: no timeout, no error,
  * nothing on any channel. An adapter that reports no progress at all gets the bound from
  * dispatch. `0` disables it exactly as it disables the per-attempt timer. What happens at
- * the bound is decided at each site - the request fails as a timeout rather than
- * dispatching a second upload beside one that may still be going out.
+ * the bound is decided at each site - before a dispatch, the request fails as a timeout
+ * rather than dispatching a second upload beside one that may still be going out.
  */
 async function settleUploadBeforeNextDispatch(
   settled: Promise<Error | undefined> | undefined,
   cancelSignal: AbortSignal,
   stallMS: number,
   lastActivityAt: () => number,
+  { isBackground = false }: { isBackground?: boolean } = {},
 ): Promise<UploadSettleWait> {
   // The cancel is answered first, before there is any promise to wait on. Both retry
   // sites reach here straight after the backoff delay, and a cancel that landed during
@@ -7182,6 +7198,10 @@ async function settleUploadBeforeNextDispatch(
 
         arm(stallMS - quietForMS);
       }, clampTimerDelayMS(sinceMS));
+
+      if (isBackground) {
+        unrefTimer(deadlineID);
+      }
     };
 
     // Count silence before this wait, including retry backoff. Even an overdue check
@@ -7209,6 +7229,18 @@ async function settleUploadBeforeNextDispatch(
     if (deadlineID !== undefined) {
       clearTimeout(deadlineID);
     }
+  }
+}
+
+/** Lets `id` not keep the process alive, where the runtime's timers can say so. */
+function unrefTimer(id: ReturnType<typeof setTimeout>): void {
+  const timer: unknown = id;
+  if (
+    typeof timer === 'object' &&
+    timer !== null &&
+    typeof (timer as { unref?: unknown }).unref === 'function'
+  ) {
+    (timer as { unref(): void }).unref();
   }
 }
 

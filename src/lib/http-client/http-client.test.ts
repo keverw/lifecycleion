@@ -5,6 +5,7 @@ import {
   beforeAll,
   describe,
   expect,
+  jest,
   spyOn,
   test,
 } from 'bun:test';
@@ -3183,6 +3184,129 @@ describe('HTTPClient — cancel reason via AbortError-throwing adapters', () => 
       addEventListenerSpy.mockRestore();
       removeEventListenerSpy.mockRestore();
 
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
+  test('a caller signal reused across sends whose uploads never settle is let go once each upload has been quiet for ten seconds, when AbortSignal.any is unavailable', async () => {
+    // A custom adapter that answers and leaves `requestBodySettled` pending for good.
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: new Promise(() => {}),
+        }),
+    };
+    const client = new HTTPClient({ adapter, timeout: 300 });
+    const controller = new AbortController();
+    const flushMicrotasks = async (): Promise<void> => {
+      for (let i = 0; i < 20; i += 1) {
+        await Promise.resolve();
+      }
+    };
+    jest.useFakeTimers();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+    const addEventListenerSpy = spyOn(controller.signal, 'addEventListener');
+    const removeEventListenerSpy = spyOn(
+      controller.signal,
+      'removeEventListener',
+    );
+    const countAbortCalls = (calls: unknown[][]): number =>
+      calls.filter((call) => call[0] === 'abort').length;
+    const abortListenersOutstanding = (): number =>
+      countAbortCalls(addEventListenerSpy.mock.calls) -
+      countAbortCalls(removeEventListenerSpy.mock.calls);
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      for (let i = 0; i < 12; i += 1) {
+        const res = await client
+          .post(`https://example.com/upload/${i}`, { body: 'x' })
+          .signal(controller.signal)
+          .send();
+
+        expect(res.status).toBe(200);
+      }
+
+      // Kept while each upload might still be going out - past the request's timeout, as
+      // NodeAdapter lets a live upload pause for longer - so an abort still reaches it.
+      jest.advanceTimersByTime(9_000);
+      await flushMicrotasks();
+      expect(abortListenersOutstanding()).toBe(12);
+
+      jest.advanceTimersByTime(1_100);
+      await flushMicrotasks();
+      expect(abortListenersOutstanding()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+      addEventListenerSpy.mockRestore();
+      removeEventListenerSpy.mockRestore();
+
+      if (originalAnyDescriptor) {
+        Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
+      }
+    }
+  });
+
+  test('a caller abort reaches an upload quiet for longer than the timeout after send() answers, when AbortSignal.any is unavailable', async () => {
+    // A pause NodeAdapter lets a live upload take after an early answer.
+    let adapterSignal: AbortSignal | undefined;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        adapterSignal = request.signal;
+
+        return Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: new Promise((resolve) => {
+            request.signal?.addEventListener(
+              'abort',
+              () => resolve(new Error('upload aborted')),
+              { once: true },
+            );
+          }),
+        });
+      },
+    };
+    const client = new HTTPClient({ adapter, timeout: 100 });
+    const controller = new AbortController();
+    const originalAnyDescriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal,
+      'any',
+    );
+
+    Object.defineProperty(AbortSignal, 'any', {
+      value: undefined,
+      configurable: true,
+    });
+
+    try {
+      const res = await client
+        .post('https://example.com/upload', { body: 'x' })
+        .signal(controller.signal)
+        .send();
+
+      expect(res.status).toBe(200);
+
+      await Bun.sleep(300);
+      controller.abort();
+
+      expect(adapterSignal?.aborted).toBe(true);
+    } finally {
       if (originalAnyDescriptor) {
         Object.defineProperty(AbortSignal, 'any', originalAnyDescriptor);
       }
