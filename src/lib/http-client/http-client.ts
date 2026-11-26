@@ -116,6 +116,7 @@ import {
 import type {
   AttemptEndEvent,
   HTTPClientConfig,
+  RequestHeadersInput,
   HTTPMethod,
   HTTPResponse,
   HTTPClientError,
@@ -454,6 +455,38 @@ interface InternalClientState {
   };
 }
 
+/**
+ * Default header records merged as {@link mergeHeaders} merges them, each read once, with
+ * a `user-agent` the last of them to name one removed - set to `null` or `undefined` - kept
+ * as `null`: the built-in `User-Agent` is merged beneath the defaults on each request, and
+ * a removal dropped here would leave it sent. A sub-client merging its own defaults over
+ * these inherits the removal, and can set the header again.
+ */
+function copyDefaultHeaders(
+  ...headerSets: Array<RequestHeadersInput | null | undefined>
+): RequestHeadersInput {
+  // `null` is no record, as `undefined` is.
+  const copies = headerSets.map((headers) =>
+    isNullish(headers)
+      ? undefined
+      : Object.fromEntries(Object.entries(headers)),
+  );
+  const merged: RequestHeadersInput = mergeHeaders(...copies);
+  const doesNameUserAgent = copies.some(
+    (headers) =>
+      headers !== undefined &&
+      Object.keys(headers).some(
+        (name) => lowerCaseHeaderName(name) === 'user-agent',
+      ),
+  );
+
+  if (doesNameUserAgent && merged['user-agent'] === undefined) {
+    merged['user-agent'] = null;
+  }
+
+  return merged;
+}
+
 export class BaseHTTPClient {
   protected _clientID: string;
   protected _config: Required<
@@ -566,8 +599,9 @@ export class BaseHTTPClient {
       baseURL: snapshot.baseURL ?? undefined,
       // Copied, as `retryPolicy` is: names lowercased and unset values dropped, read
       // once here rather than on every request, so changing the object afterwards does
-      // not reach this client - or its sub-clients, which would share it.
-      defaultHeaders: mergeHeaders(snapshot.defaultHeaders ?? undefined),
+      // not reach this client - or its sub-clients, which would share it. A removed
+      // `user-agent` is kept, as removing the built-in one (see `copyDefaultHeaders`).
+      defaultHeaders: copyDefaultHeaders(snapshot.defaultHeaders ?? undefined),
       timeout: resolveRequestTimeoutMS(
         snapshot.timeout,
         undefined,
@@ -878,7 +912,7 @@ export class BaseHTTPClient {
     );
     const defaultHeaders =
       defaultHeadersStrategy === 'merge'
-        ? mergeHeaders(this._config.defaultHeaders, overrideHeaders)
+        ? copyDefaultHeaders(this._config.defaultHeaders, overrideHeaders)
         : (overrideHeaders ?? this._config.defaultHeaders);
 
     const config: HTTPClientConfig = {

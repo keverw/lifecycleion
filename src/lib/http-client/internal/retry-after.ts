@@ -197,10 +197,11 @@ const MONTH_AND_YEAR = new RegExp(
  * read) - is unreadable, and the retry policy's own delay is used.
  *
  * Only the first value is read. A header seen twice reaches the client joined
- * (`120, 60`) from `fetch` and XHR, and as its first value from Node, which drops a
- * repeated `Retry-After` - as the client keeps the first of one an adapter hands over as
- * an array (see `normalizeAdapterResponseHeaders`) - so each runtime waits the same: the
- * first value, whether or not the others agree with it. Told apart by the commas between
+ * (`120, 60`) from `fetch` and a browser's XHR, and as its first value from an XHR that
+ * gives each on a line of its own (see `parseXHRResponseHeaders`) and from Node, which
+ * drops a repeated `Retry-After` - as the client keeps the first of one an adapter hands
+ * over as an array (see `normalizeAdapterResponseHeaders`) - so each runtime waits for
+ * the first value, whether or not the others agree with it. Told apart by the commas between
  * them: a number of seconds is the first comma-separated piece, and a date the most of
  * the first pieces that read as one, as a date's own commas - after its day name, after
  * a day that follows the month, after the year - split it across up to four.

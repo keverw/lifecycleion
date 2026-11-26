@@ -1868,6 +1868,26 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('a single-value header on lines of its own keeps its first line, and another is joined', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/busy',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 503;
+    lastXHR.responseURL = 'https://api.test/busy';
+    lastXHR.getAllResponseHeadersResult =
+      'retry-after: Wed Oct 21 07:28:00 2026\r\nRetry-After: soon\r\nx-note: a\r\nx-note: b\r\n';
+    lastXHR.response = textBody('');
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    // Joined, the asctime date and `soon` would read as no date at all.
+    expect(response.headers['retry-after']).toBe('Wed Oct 21 07:28:00 2026');
+    expect(response.headers['x-note']).toBe('a, b');
+  });
+
   test('a Location on lines of its own keeps its first line whole, as no XHR joined it', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://api.test/start',
@@ -6343,6 +6363,13 @@ describe('XHRAdapter - a cancel at a followed redirect, and a body declared past
     ['a HEAD answer', 'HEAD', 200, 'content-length: 10\r\n'],
     ['a 304', 'GET', 304, 'content-length: 10\r\n'],
     ['a body within the limit', 'GET', 200, 'content-length: 4\r\n'],
+    // Lines that disagree declare no length: the body is measured instead.
+    [
+      'a body whose Content-Length lines disagree',
+      'GET',
+      200,
+      'content-length: 10\r\nContent-Length: 1\r\n',
+    ],
     // The chunks frame the body, not the length (RFC 9112 §6.3).
     [
       'a chunked body',

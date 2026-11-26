@@ -1487,7 +1487,7 @@ export function extractFetchHeaders(
  * than joining: each can hold a single value, so a joined `location` or `content-type`
  * would be no value at all.
  */
-const SINGLE_VALUE_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
+export const SINGLE_VALUE_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
   'age',
   'authorization',
   'content-length',

@@ -2619,6 +2619,61 @@ describe('HTTPClient — headers', () => {
 
     expect(capturedHeaders['user-agent']).toBe(DEFAULT_USER_AGENT);
   });
+
+  test('a user-agent removed in defaultHeaders sends none, and a sub-client inherits the removal until it sets one', async () => {
+    const sent: Array<string | string[] | undefined> = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        sent.push(request.headers['user-agent']);
+
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const defaultHeaders: Record<string, string | null> = {
+      'User-Agent': null,
+    };
+    const client = new HTTPClient({ adapter, defaultHeaders });
+    // Copied when the client is built.
+    defaultHeaders['User-Agent'] = 'changed';
+
+    await client.get('https://example.com/a').send();
+    await client
+      .createSubClient({
+        defaultHeadersStrategy: 'merge',
+        defaultHeaders: { accept: 'text/plain' },
+      })
+      .get('https://example.com/b')
+      .send();
+    await client.createSubClient({}).get('https://example.com/c').send();
+    await client
+      .createSubClient({
+        defaultHeadersStrategy: 'merge',
+        defaultHeaders: null as never,
+      })
+      .get('https://example.com/c2')
+      .send();
+    await client
+      .createSubClient({
+        defaultHeadersStrategy: 'merge',
+        defaultHeaders: { 'user-agent': 'sub/1.0' },
+      })
+      .get('https://example.com/d')
+      .send();
+    await client
+      .createSubClient({ defaultHeaders: { accept: 'text/plain' } })
+      .get('https://example.com/e')
+      .send();
+
+    expect(sent).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'sub/1.0',
+      DEFAULT_USER_AGENT,
+    ]);
+  });
 });
 
 describe('HTTPClient — response flags', () => {

@@ -11,6 +11,7 @@ import {
 import { asciiUppercase, trimHTTPWhitespace } from '../../internal/ascii-text';
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
+import { SINGLE_VALUE_RESPONSE_HEADERS } from '../utils';
 import {
   byteProgressEvent,
   completeProgressEvent,
@@ -1722,7 +1723,10 @@ function readResponseBody(
  * values. Those are collected here as `string[]` to match the
  * `AdapterResponse.headers` contract. Any other header but `Location` given on
  * more than one line - by an XHR outside a browser - is joined with `, ` as a
- * browser joins it, so both forms read the same. A repeated `Location` keeps its
+ * browser joins it, except one that holds a single value (see
+ * `SINGLE_VALUE_RESPONSE_HEADERS`; `Content-Length` aside), which keeps its first
+ * line, as Node keeps it: lines of their own are known to be separate values, which
+ * joining them would make ambiguous. A repeated `Location` keeps its
  * first value that is not empty: the first such line's, whole, when the XHR gives
  * each on a line of its own (the first line when all are empty), and otherwise the
  * first of one the XHR joined, as FetchAdapter keeps it.
@@ -1802,6 +1806,20 @@ function parseXHRResponseHeaders(
       locations.push(value);
     } else {
       const existing = Object.hasOwn(result, key) ? result[key] : undefined;
+
+      // A header that holds one value keeps its first line, as Node's `http` keeps it:
+      // lines of their own are known to be separate values, which joining would make
+      // ambiguous - an asctime `Retry-After` joined with a second line reads as a date
+      // with a zone it does not know, and is not waited for. Not `Content-Length`: its
+      // lines are joined, so lengths that disagree are read as no declared length and
+      // the body is measured instead.
+      if (
+        existing !== undefined &&
+        key !== 'content-length' &&
+        SINGLE_VALUE_RESPONSE_HEADERS.has(key)
+      ) {
+        continue;
+      }
 
       // Defined, not assigned, as every other adapter does: a `__proto__` header
       // would otherwise hit the prototype setter and vanish.
