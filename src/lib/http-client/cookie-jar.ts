@@ -11,6 +11,7 @@ import {
   HOST_TO_ASCII_OPTIONS,
   canonicalizeBracketedIPv6Content,
   checkDNSLength,
+  hasBracketedNonAddressHost,
   isIPv4,
   isIPv6,
   toAsciiDots,
@@ -1483,6 +1484,11 @@ export class CookieJar {
 
     let requestScheme: string;
 
+    // A bracketed host that is no address is no host's (see `hasBracketedNonAddressHost`).
+    if (hasBracketedNonAddressHost(url)) {
+      return [];
+    }
+
     try {
       const parsed = new URL(url);
       hostname = parsed.hostname;
@@ -2014,6 +2020,12 @@ export class CookieJar {
       parsed.name.length + parsed.value.length >
       MAX_COOKIE_NAME_VALUE_BYTES
     ) {
+      return;
+    }
+
+    // A bracketed host that is no address sets no cookie (see
+    // `hasBracketedNonAddressHost`).
+    if (hasBracketedNonAddressHost(url)) {
       return;
     }
 

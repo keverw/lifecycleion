@@ -293,6 +293,34 @@ describe('CookieJar', () => {
       expect(jar.getAllCookies()).toEqual([]);
     });
 
+    test('a URL whose bracketed host is no address neither reads nor sets cookies', () => {
+      // Bun's URL parser reads `http://[::1:]/` as `http://[::1]/`; Node's refuses it.
+      jar.setCookie({
+        name: 'sid',
+        value: 'x',
+        domain: '[::1]',
+        path: '/',
+        secure: true,
+        createdAt: Date.now(),
+      });
+
+      for (const url of [
+        'http://[::1:]/',
+        'https://[::1:]:8443/a',
+        'http:[::1:]/',
+        'http://u@[::1:]/',
+      ]) {
+        expect(jar.getCookiesFor(url)).toEqual([]);
+        expect(jar.getCookieHeaderString(url)).toBe('');
+      }
+
+      jar.parseSetCookieHeader('planted=1; Path=/', 'http://[::1:]/');
+      expect(jar.getAllCookies().map((cookie) => cookie.name)).toEqual(['sid']);
+      expect(
+        jar.getCookiesFor('http://[::1]/').map((cookie) => cookie.name),
+      ).toEqual(['sid']);
+    });
+
     test('bracketed and unbracketed IPv6 match the same URL host', () => {
       jar.setCookie({
         name: 'sid',

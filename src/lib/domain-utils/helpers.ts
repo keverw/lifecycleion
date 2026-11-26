@@ -4,6 +4,7 @@ import {
   asciiLowercase,
   hasNonHTTPWhitespaceEdge,
   trimHTTPWhitespace,
+  trimWhere,
 } from '../internal/ascii-text';
 
 // Defense-in-depth: cap label processing to avoid pathological patterns
@@ -148,6 +149,36 @@ export function isIPv6(str: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether a URL's text puts brackets around what is no IPv6 address as its host. Bun's
+ * URL parser takes `http://[::1:]/`, which the URL standard and Node's refuse, and reads
+ * it as `[::1]`; so this is asked of the text before it is parsed. The authority is found
+ * as the parser finds it for a special scheme (`http`, `https`, `ws`, `wss`): past the
+ * scheme and any slashes (or backslashes) after it, up to the first `/`, `\`, `?` or `#`,
+ * its host past any userinfo.
+ */
+export function hasBracketedNonAddressHost(url: string): boolean {
+  // A `URL` a JavaScript caller passed was parsed already, its host rewritten.
+  if (typeof url !== 'string') {
+    return false;
+  }
+
+  // Tabs and newlines are removed anywhere, and C0 controls and spaces at the ends, as
+  // the parser removes them.
+  const text = trimWhere(url.replace(/[\t\n\r]/g, ''), (code) => code <= 0x20);
+  const authority = /^[a-z][a-z\d+\-.]*:[/\\]*([^/\\?#]*)/i.exec(text)?.[1];
+  if (authority === undefined) {
+    return false;
+  }
+
+  // By index, not a pattern, which would rescan from each `[` of a host with no `]`.
+  const host = authority.slice(authority.lastIndexOf('@') + 1);
+  const open = host.indexOf('[');
+  const close = open === -1 ? -1 : host.indexOf(']', open);
+
+  return close !== -1 && !isIPv6(host.slice(open + 1, close));
 }
 
 /**
