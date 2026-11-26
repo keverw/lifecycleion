@@ -705,6 +705,24 @@ function matchesWildcardPatternIn(
 }
 
 /**
+ * Whether a bare domain entry's host, as the URL parser maps it, ends with a dot: after
+ * the dots are folded and the characters IDNA removes (a soft hyphen, a zero-width
+ * space) are gone, as `canonicalOrigin` reads an origin's host.
+ */
+function hasMappedTrailingDot(entry: string): boolean {
+  const trimmed = readTrimmedEntry(entry);
+  if (trimmed === undefined) {
+    return false;
+  }
+
+  try {
+    return parseURL(`https://${trimmed}`).hostname.endsWith('.');
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether an origin's host and a host wildcard pattern agree on a trailing dot: the dot is
  * part of the origin, as browsers read it (see `canonicalOrigin`), so `*.example.com`
  * matches `https://a.example.com` and `*.example.com.` matches `https://a.example.com.`,
@@ -1872,16 +1890,13 @@ function readExactOriginEntry(allowed: string): ExactOriginEntry {
 
   if (!allowed.includes('://')) {
     const hostname = normalizeDomain(allowed);
-    // Kept, as an origin's host keeps it (see `canonicalOrigin`): `example.com.` - or
-    // `example.com。`, its dot folded as the parser folds it - matches
-    // `https://example.com.` and not `https://example.com`. Not for an IP address, whose
-    // dot the URL parser drops from an origin's host.
-    const trimmed = readTrimmedEntry(allowed);
+    // Kept, as an origin's host keeps it (see `canonicalOrigin`): `example.com.` matches
+    // `https://example.com.` and not `https://example.com`. Read off the host the URL
+    // parser maps the entry to, as an origin's is: `example.com。` is dotted, and
+    // `example.com.\u00AD`, whose soft hyphen the mapping removes, is too - as its
+    // `https://` form reads. Not for an IP address, whose dot the parser drops.
     const trailingDot =
-      hostname !== '' &&
-      !isIPAddress(hostname) &&
-      trimmed !== undefined &&
-      toAsciiDots(trimmed).endsWith('.')
+      hostname !== '' && !isIPAddress(hostname) && hasMappedTrailingDot(allowed)
         ? '.'
         : '';
 

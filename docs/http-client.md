@@ -1188,7 +1188,7 @@ await client
 
 A `CookieJar` provides cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling. As in browsers, cookies are stored from and sent to `http:`, `https:`, `ws:` and `wss:` URLs only: a URL of any other scheme (`ftp:`, `file:`, an app's own) stores none and is sent none.
 
-A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `setCookie()` and `fromJSON()` hold `maxAge` and `expires` to 400 days from the cookie's `createdAt`. A cookie is sent for exactly as long as `clearExpiredCookies()` keeps it.
+A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `setCookie()` and `fromJSON()` hold `maxAge` and `expires` to 400 days from the cookie's `createdAt`. A cookie is sent for exactly as long as `clearExpiredCookies()` keeps it. A `Max-Age` decides a cookie's lifetime over an `Expires`, as RFC 6265bis has it, so a cookie given both - by a `Set-Cookie`, `setCookie()` or `fromJSON()` - is stored with its `maxAge` and no `expires`.
 
 - **`Expires`** is read with RFC 6265's cookie-date algorithm, in UTC whatever zone is written. A value that is not a cookie-date (`Expires=0`) is ignored, leaving a session cookie.
 - **Size:** a cookie whose name and value together pass 4096 bytes is ignored, and refused by `setCookie()` and `fromJSON()`.

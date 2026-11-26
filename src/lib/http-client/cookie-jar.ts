@@ -108,16 +108,17 @@ function cookieLifetime(
 
 /**
  * `cookie`'s expiry fields set to `lifetime`'s: those it carries, each the jar's own
- * value, so a stored cookie reads as the jar judges its expiry.
+ * value, so a stored cookie reads as the jar judges its expiry. A `maxAge` decides it, as
+ * `Max-Age` wins over `Expires` (RFC 6265bis §5.7), so an `expires` beside one - which
+ * would read as a lifetime the jar does not keep - is dropped.
  */
 function applyLifetime(cookie: Cookie, lifetime: CookieLifetime): void {
   cookie.createdAt = lifetime.createdAt;
 
   if (lifetime.maxAge !== undefined) {
     cookie.maxAge = lifetime.maxAge;
-  }
-
-  if (lifetime.expires !== undefined) {
+    delete cookie.expires;
+  } else if (lifetime.expires !== undefined) {
     cookie.expires = new Date(lifetime.expires);
   }
 }
@@ -169,7 +170,10 @@ export interface Cookie {
   hostOnly?: boolean;
   path?: string;
   expires?: Date;
-  /** Seconds from {@link createdAt}; no synthetic `expires` when only Max-Age was sent (RFC 6265). */
+  /**
+   * Seconds from {@link createdAt}; no synthetic `expires` when only Max-Age was sent (RFC 6265).
+   * It decides the lifetime over an `expires`, which is not stored beside it.
+   */
   maxAge?: number;
   secure?: boolean;
   httpOnly?: boolean;

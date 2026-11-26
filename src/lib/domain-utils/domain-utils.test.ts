@@ -407,6 +407,28 @@ describe('domain-utils', () => {
         expect(matchesOriginList('https://example.com.', [entry])).toBe(true);
         expect(matchesOriginList('https://example.com', [entry])).toBe(false);
       }
+      // A character IDNA removes after the dot leaves it the last character, as the
+      // URL parser maps the host - the bare entry reads as its `https://` form does.
+      for (const ignored of [
+        '\u00AD',
+        '\u200B',
+        '\u2060',
+        '\uFE0F',
+        '\u034F',
+      ]) {
+        for (const matches of [matchesOriginList, matchesCORSCredentialsList]) {
+          for (const entry of [
+            `example.com.${ignored}`,
+            `https://example.com.${ignored}`,
+          ]) {
+            expect(matches('https://example.com.', [entry])).toBe(true);
+            expect(matches('https://example.com', [entry])).toBe(false);
+          }
+        }
+      }
+      expect(
+        matchesOriginList('https://example.com.', ['example.com\u00AD.']),
+      ).toBe(true);
       // An IPv4 address's dot is dropped, as the URL parser drops it from a host.
       for (const matches of [matchesOriginList, matchesCORSCredentialsList]) {
         expect(matches('https://127.0.0.1', ['127.0.0.1.'])).toBe(true);

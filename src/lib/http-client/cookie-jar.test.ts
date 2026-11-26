@@ -1231,6 +1231,58 @@ describe('CookieJar', () => {
     });
   });
 
+  describe('a Max-Age beside an Expires', () => {
+    test.each([
+      [
+        'a past',
+        'Wed, 21 Oct 2015 07:28:00 GMT',
+        new Date('2015-10-21T07:28:00Z'),
+      ],
+      [
+        'a later',
+        'Wed, 21 Oct 2099 07:28:00 GMT',
+        new Date('2099-10-21T07:28:00Z'),
+      ],
+    ])(
+      'decides the lifetime, and %s expires is not stored beside it',
+      (_label, expiresText, expiresDate) => {
+        const url = 'https://example.com/a/';
+        const parsed = new CookieJar();
+        parsed.parseSetCookieHeader(
+          `s=1; Secure; Max-Age=3600; Expires=${expiresText}`,
+          url,
+        );
+
+        const set = new CookieJar();
+        set.setCookie({
+          name: 's',
+          value: '1',
+          domain: 'example.com',
+          secure: true,
+          maxAge: 3600,
+          expires: expiresDate,
+        });
+
+        const restored = new CookieJar();
+        restored.fromJSON({
+          ...set.toJSON(),
+          cookies: set.toJSON().cookies.map((cookie) => ({
+            ...cookie,
+            expires: expiresDate.toISOString(),
+          })),
+        } as never);
+
+        for (const jar of [parsed, set, restored]) {
+          const [cookie] = jar.getAllCookies();
+          expect(cookie?.maxAge).toBe(3600);
+          expect(cookie?.expires).toBeUndefined();
+          expect(jar.getCookiesFor(url)).toHaveLength(1);
+          expect(jar.toJSON().cookies[0]?.expires).toBeUndefined();
+        }
+      },
+    );
+  });
+
   describe('processResponseHeaders', () => {
     test('processes set-cookie header string', () => {
       jar.processResponseHeaders(

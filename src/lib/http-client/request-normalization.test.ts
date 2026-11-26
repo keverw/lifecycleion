@@ -12142,10 +12142,20 @@ test("setCookie caps a lifetime at 400 days from the cookie's creation", () => {
     expires: new Date(createdAt + tenYears * 1000),
   });
 
-  const [stored] = jar.getAllCookies();
+  jar.setCookie({
+    name: 'b',
+    value: '1',
+    domain: 'example.com',
+    createdAt,
+    expires: new Date(createdAt + tenYears * 1000),
+  });
+
+  const [withMaxAge, withExpires] = jar.getAllCookies();
   const cap = 400 * 24 * 60 * 60;
-  expect(stored.maxAge).toBe(cap);
-  expect(stored.expires?.getTime()).toBe(createdAt + cap * 1000);
+  expect(withMaxAge.maxAge).toBe(cap);
+  // The `maxAge` decides its lifetime, so the `expires` beside it is not kept.
+  expect(withMaxAge.expires).toBeUndefined();
+  expect(withExpires.expires?.getTime()).toBe(createdAt + cap * 1000);
 });
 
 test("a cookie's creation is never taken from the future", () => {
