@@ -229,6 +229,7 @@ describe('HTTPRequestBuilder', () => {
     test('label() rejects empty or whitespace-only labels', () => {
       const { builder } = makeBuilder();
       expect(() => builder.label('')).toThrow(/non-empty, non-whitespace/i);
+      expect(() => builder.label(' ')).toThrow(TypeError);
       expect(() => builder.label('   ')).toThrow(/non-empty, non-whitespace/i);
     });
 

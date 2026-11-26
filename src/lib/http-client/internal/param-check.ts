@@ -11,6 +11,17 @@ import { isHighSurrogate } from '../../internal/surrogates';
 export const MAX_PARAM_DEPTH = 1000;
 
 /**
+ * How many entries a `.params()` value may hold in all, counted as the query is written:
+ * an object reached by more than one path counts once for each, as `qs` writes it once
+ * for each. A shared graph (`x = { l: x, r: x }` nested) doubles at each level, so one
+ * a few dozen levels deep would otherwise be written into a URL of gigabytes. Far more
+ * than any server takes in a URL, whose request line is limited to some kilobytes.
+ */
+export const MAX_PARAM_ENTRIES = 100_000;
+
+export const PARAM_ENTRIES_EXCEEDED_MESSAGE = `Params hold more than ${MAX_PARAM_ENTRIES} entries`;
+
+/**
  * Whether an object at `depth` with `keyCount` entries nests past
  * {@link MAX_PARAM_DEPTH}: its entries are a level below it, and `qs` refuses one only
  * when there is an entry to put there. The rule both {@link assertSerializableParams} and

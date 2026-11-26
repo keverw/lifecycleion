@@ -272,6 +272,27 @@ export function parseURL(input: string | URL, base?: string | URL): URL {
     : new URL(inputValue, baseValue);
 }
 
+/**
+ * `url`'s origin as the URL standard serializes it, on every runtime: a `blob:` URL's is
+ * that of the URL it wraps, read through {@link parseURL} - so `blob:http://[::1:]/x`,
+ * whose inner URL does not parse, has the opaque origin `'null'`, where Bun's `origin`
+ * reads it as `http://[::1]` - and an http(s) one only; any other URL's is its `origin`.
+ */
+export function urlOrigin(url: URL): string {
+  if (url.protocol !== 'blob:') {
+    return url.origin;
+  }
+
+  try {
+    const inner = parseURL(url.pathname);
+    return inner.protocol === 'http:' || inner.protocol === 'https:'
+      ? inner.origin
+      : 'null';
+  } catch {
+    return 'null';
+  }
+}
+
 /** The error the URL parser throws for a URL it cannot read, without the input it names. */
 function invalidURLError(): TypeError {
   return Object.assign(new TypeError('Invalid URL'), {

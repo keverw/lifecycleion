@@ -4136,6 +4136,60 @@ describe('HTTPClient — adapter marker flags', () => {
     expect(sent[1]?.url).toBe('http://b.test/next');
   });
 
+  test.each([
+    // The same port, however each URL writes it.
+    ['http://a.test:443/next', 'https://a.test/next', 'Bearer for-target'],
+    ['http://a.test/next', 'https://a.test:80/next', 'Bearer for-target'],
+    [
+      'http://a.test:8080/next',
+      'https://a.test:8080/next',
+      'Bearer for-target',
+    ],
+    // A trailing dot on the hop's host is the same host.
+    ['http://a.test./next', 'https://a.test/next', 'Bearer for-target'],
+    // Another port is another origin.
+    ['http://a.test:8080/next', 'https://a.test:8443/next', undefined],
+    ['http://a.test/next', 'https://a.test:8443/next', undefined],
+    ['http://a.test:443/next', 'https://a.test:8443/next', undefined],
+  ] as const)(
+    'a redirect-phase https upgrade of %s to %s keeps the credential it added only on the same port',
+    async (location, upgraded, expected) => {
+      const sent: Array<{ url: string; authorization: unknown }> = [];
+      const adapter: HTTPAdapter = {
+        getType: () => 'mock' as const,
+        send: (request): Promise<AdapterResponse> => {
+          sent.push({
+            url: request.requestURL,
+            authorization: request.headers.authorization,
+          });
+          return Promise.resolve<AdapterResponse>(
+            new URL(request.requestURL).pathname === '/start'
+              ? { status: 302, headers: { location }, body: null }
+              : { status: 200, headers: {}, body: null },
+          );
+        },
+      };
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'https://a.test',
+        followRedirects: true,
+      });
+      client.addRequestInterceptor(
+        (request) => ({
+          ...request,
+          requestURL: upgraded,
+          headers: { ...request.headers, authorization: 'Bearer for-target' },
+        }),
+        { phases: ['redirect'] },
+      );
+
+      await client.get('/start').send();
+
+      expect(sent).toHaveLength(2);
+      expect(sent[1]?.authorization).toBe(expected);
+    },
+  );
+
   test("a header an adapter reports it added is not carried to the next same-origin hop as the caller's", async () => {
     const sent: Array<Record<string, string | string[]>> = [];
     const adapter: HTTPAdapter = {
@@ -11447,6 +11501,22 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(res.status).toBe(200);
     expect(res.isFailed).toBe(false);
     expect(builder.error).toBeNull();
+  });
+
+  test('MockAdapter without baseURL joins a relative path with a colon in its first segment, as a baseURL does', async () => {
+    const adapter = new MockAdapter();
+    const seen: string[] = [];
+    adapter.routes.post('/items:batchGet', (request) => {
+      seen.push(request.path);
+      return { status: 200, body: { ok: true } };
+    });
+
+    const client = new HTTPClient({ adapter });
+    const response = await client.post('items:batchGet').send();
+
+    expect(response.status).toBe(200);
+    expect(response.requestURL).toBe('http://localhost/items:batchGet');
+    expect(seen).toEqual(['/items:batchGet']);
   });
 
   test('MockAdapter without baseURL still rejects non-http absolute-like paths', async () => {

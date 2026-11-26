@@ -243,7 +243,7 @@ client.request<T>(method, path, options?)
 - Protocol-relative `//host/path` URLs also bypass `baseURL` as a path prefix. If `baseURL` is configured, they are resolved using its scheme. If `baseURL` is omitted, browser runtimes resolve them against the current page/worker scheme, `MockAdapter` materializes them as `http://host/...`, and other server-side adapters cannot resolve them so the request fails at send time as a configuration error.
 - A host in brackets that is no IPv6 address (`http://[::1:]/`) is refused as an invalid URL on every runtime, as the URL standard and Node refuse it, though Bun's own parser reads it as `[::1]`: as a request's URL, `baseURL`, a redirect's `Location` or one given to an adapter. The cookie jar reads and stores no cookies for one.
 
-All paths are resolved as far as possible before interceptors, the cookie jar, or any adapter sees them. For the real transport adapters (`fetch`, `xhr`, `node`) that means an absolute `http(s)://` URL. For `MockAdapter`, requests without a client `baseURL` are resolved before interceptors run using deterministic mock defaults: true path-only inputs become `http://localhost/...`, and protocol-relative inputs (`//host/...`) become `http://host/...`. Other unresolved non-HTTP inputs still fail during request setup.
+All paths are resolved as far as possible before interceptors, the cookie jar, or any adapter sees them. For the real transport adapters (`fetch`, `xhr`, `node`) that means an absolute `http(s)://` URL. For `MockAdapter`, requests without a client `baseURL` are resolved before interceptors run using deterministic mock defaults: path-only inputs become `http://localhost/...`, joined as a `baseURL` joins them, so a first segment with a colon (`items:batchGet`) is a path too, while an `http(s)` URL the parser reads alone (`http:host/x`) is read as it is with no `baseURL`, and protocol-relative inputs (`//host/...`) become `http://host/...`. Other unresolved non-HTTP inputs still fail during request setup.
 
 For `MockAdapter`, those resolved URLs are used for features that inspect the resolved URL, such as host/scheme filters and shared `CookieJar` state. If you want mock clients to use different default origins, use distinct cookie jars, protocol-relative request URLs, or give each client an explicit absolute `baseURL`.
 
@@ -407,6 +407,8 @@ client.get('/search?page=2&sort=new').params({ page: 3 }).send();
 - a value nested more than 1000 levels deep.
 
 `.params()` throws for these when you call it. One that only turns up when the request is sent - from a getter, or a nested object changed after `.params()` - rejects `send()` instead: a collection with the same `TypeError`, anything else with `qs`'s `RangeError` (`Input depth exceeded depth option of 1000`, say).
+
+Params that would write more than 100,000 entries in all reject `send()` with a `RangeError` (`Params hold more than 100000 entries`). An object reached by more than one path is written once for each, so a graph whose objects share children (`x = { l: x, r: x }`, nested) counts each path: a few dozen levels of one would otherwise be written into a URL of gigabytes.
 
 Any other object, such as a class instance or a function, is written by its own enumerable properties, so one that keeps its state in private fields or on its prototype writes nothing, as `{}` does.
 
@@ -883,7 +885,7 @@ interface RequestInterceptorContext {
 
 ## Response Observers
 
-Observers run **after** an adapter attempt and have no say in the outcome: what they return is ignored, and a throw is reported, not raised. They are handed the response and error themselves, not copies - a final observer's change to the response is what `send()` returns and the next observer sees - so treat them as read-only. The request is a copy, its header record included, taken for each response or error and shared by the observers it is handed to: an edit in place to its `requestURL`, `method` or headers is seen by the observers after it, and reaches nothing the client reads - not the request a redirect hop is built from, nor the URL a cancelled request reports. Its `body` and `rawBody` are the attempt's own (see below). They are the right place for logging, metrics, cache writes, and reading token state out of response bodies. The request waits for them in order, with no timeout, so one that never settles holds it up. In the `redirect` and `retry` phases a cancel stops that wait: `send()` answers at once, the observer it was waiting on carries on by itself, and no later observer of that phase runs. A `final` observer runs after the request has settled, so `send()` waits for it regardless; the request has by then left `listRequests()` and the client's listeners have left your signal, so one that never settles holds up only that `send()`.
+Observers run **after** an adapter attempt and have no say in the outcome: what they return is ignored, and a throw is reported, not raised. They are handed the response and error themselves, not copies - a final observer's change to the response is what `send()` returns and the next observer sees - so treat them as read-only. The request is a copy, its header record included, taken for each response or error and shared by the observers it is handed to: an edit in place to its `requestURL`, `method` or headers is seen by the observers after it, and reaches nothing the client reads - not the request a redirect hop is built from, nor the URL a cancelled request reports. Its `body` and `rawBody` are the attempt's own (see below). They are the right place for logging, metrics, cache writes, and reading token state out of response bodies. The request waits for them in order, with no timeout, so one that never settles holds it up. In the `redirect` and `retry` phases a cancel stops that wait: `send()` answers at once, the observer it was waiting on carries on by itself, and no later observer of that phase runs. A `final` observer runs after the request has settled, so `send()` waits for it regardless; the request has by then left `listRequests()` and the client's listeners have left your signal - unless an upload is still going out, when they stay on your signal until it settles or makes no progress for the longer of the request timeout and twice the upload stall grace (ten seconds with the timeout disabled) - so one that never settles holds up only that `send()`.
 
 ```typescript
 const removeObserver = client.addResponseObserver(
@@ -1194,6 +1196,7 @@ A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265
 **What `setCookie()` and `fromJSON()` refuse or adjust:**
 
 - A cookie a header cannot carry - a name or value with a character above U+00FF - is refused.
+- An IPv6 domain is taken bracketed or bare (`[::1]` or `::1`), and stored and returned bare: a stored cookie's `domain` is `::1`, where `URL#hostname` is `[::1]`.
 - A `sameSite` other than `'Strict'`, `'Lax'` or `'None'`, which no `Set-Cookie` stores, is refused, and so is a `path` that is not a string. `fromJSON()` reads a `null` `sameSite` or `path` as absent.
 - `setCookie()` stores the cookie's own fields and nothing else of the object it is given.
 - A cookie already expired when it arrives is not stored and is not counted (`setCookie()` returns `false`). It deletes the stored cookie of the same name, domain, path and host-only flag, as an expired `Set-Cookie` does.
@@ -1463,7 +1466,7 @@ A `Location` with no fragment of its own takes the request's, as fetch's redirec
 | 303      | Other methods                 | GET             |
 | 307, 308 | Any                           | Unchanged       |
 
-Cross-origin redirects carry only an allow-list of headers: `accept`, `accept-encoding` (the caller's own; NodeAdapter's default one is not carried), `accept-language`, `content-encoding`, `content-language`, `content-type`, `user-agent`, `range` and the conditional headers (`if-range`, `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`). Everything else - `Authorization`, `Cookie`, and any custom header such as `X-API-Key` that might be a credential - is stripped. This is stricter than fetch, which drops only `Authorization`; a redirect-phase interceptor can add a header back for a target it trusts. That holds while it keeps the server's target: one that also rewrites `requestURL` to another origin - the request's own included - has the same allow-list applied to what it returns, the headers it added among them, since the rule is read from the server's target to the one it sends to. Cookies are recomputed from the jar for the target.
+Cross-origin redirects carry only an allow-list of headers: `accept`, `accept-encoding` (the caller's own; NodeAdapter's default one is not carried), `accept-language`, `content-encoding`, `content-language`, `content-type`, `user-agent`, `range` and the conditional headers (`if-range`, `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`). Everything else - `Authorization`, `Cookie`, and any custom header such as `X-API-Key` that might be a credential - is stripped. This is stricter than fetch, which drops `Authorization`, `Cookie` and `Proxy-Authorization` and forwards every other header, a custom credential header (`X-API-Key`) included; a redirect-phase interceptor can add a header back for a target it trusts. That holds while it keeps the server's target: one that also rewrites `requestURL` to another origin - the request's own included - has the same allow-list applied to what it returns, the headers it added among them, since the rule is read from the server's target to the one it sends to. Cookies are recomputed from the jar for the target.
 
 A retry on that hop follows the same rule. The hop's request is the stripped one, plus whatever the redirect-phase interceptors added. The `retry`-phase interceptors that run on it, including a parent client's, can change the values of headers the hop already carries; a header they add off the allow-list, and their changes to the URL (but for an upgrade to `https:`, below) and the body, are discarded. All of this is silent, as the hop's own headers are dropped silently.
 
@@ -1779,7 +1782,7 @@ const client = new HTTPClient({ adapter: new FetchAdapter() });
 
 No configuration options. Adapter-level behavior is controlled through `HTTPClientConfig`.
 
-The adapter resolves a relative request URL as `fetch` does - against the document's base URL, or the worker's `location` - and sends only an absolute `http:` or `https:` URL. URL userinfo is withheld from that resolved URL when it is cross-origin to the initial URL. Only an initial URL that starts with `/` - root-relative (`/start`) or protocol-relative (`//host/start`) - is resolved against the same base first. Any other relative initial URL is treated as cross-origin, as one that cannot be resolved is: `''`, `#top`, `?q`, `start` and `https:start` (a path under an `https:` page, as the browser reads it) name no origin of their own, and other spellings a browser reads as root- or protocol-relative (`\\host/start`, a leading space or tab) are not resolved either. The client always sends an absolute `http:` or `https:` URL. Driven directly with a URL of any other scheme (`file:`, `data:`, `blob:`, ...), or with a relative request URL where there is nothing to resolve it against (no document or `location`, as outside a browser), the adapter refuses it before calling `fetch` with a non-retryable `TypeError` (an `adapter_error` through the client), as NodeAdapter refuses a URL it cannot send. Driven directly with a `GET` or `HEAD` that carries any body but `null`, an empty string included, it refuses the request before calling `fetch`, as `fetch` refuses one, as a non-retryable error rather than a network failure retried to no end.
+The adapter resolves a relative request URL as `fetch` does - against the document's base URL, or the worker's `location` - and sends only an absolute `http:` or `https:` URL. URL userinfo is withheld from that resolved URL when it is cross-origin to the initial URL. Only an initial URL that starts with `/` - root-relative (`/start`) or protocol-relative (`//host/start`) - is resolved against the same base first. Any other relative initial URL is treated as cross-origin, as one that cannot be resolved is: `''`, `#top`, `?q`, `start` and `https:start` (a path under an `https:` page, as the browser reads it) name no origin of their own, and other spellings a browser reads as root- or protocol-relative (`\\host/start`, a leading space or tab) are not resolved either. The client always sends an absolute `http:` or `https:` URL. Driven directly with a URL of any other scheme (`file:`, `data:`, `blob:`, ...), or with a relative request URL where there is nothing to resolve it against (no document or `location`, as outside a browser), the adapter refuses it before calling `fetch` with a non-retryable `TypeError` (an `adapter_error` through the client), as NodeAdapter refuses a URL it cannot send. Driven directly with a `GET` or `HEAD` that carries any body but `null`, an empty string included, it refuses the request before calling `fetch`, as `fetch` refuses one, as a non-retryable error rather than a network failure retried to no end. On Bun, a URL whose path starts with `//` (`https://api.test//a//b`) is refused the same way: Bun's `fetch` would send it as `/a//b`, another resource than the one written. Use NodeAdapter for such a path.
 
 **Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. A request the adapter refuses before calling `fetch` fires neither. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
 
@@ -1913,7 +1916,7 @@ interface NodeAdapterConfig {
     ca?: TLSMaterial | TLSMaterial[]; // Trust anchor for the server, added to `ca`. Applies on every hop, like `ca`.
   };
   crl?: TLSMaterial | TLSMaterial[]; // PEM certificate revocation list(s). A concatenated PEM bundle is split for you - see below.
-  rejectUnauthorized?: boolean; // Default: true. A non-boolean throws.
+  rejectUnauthorized?: boolean; // true verifies certificates whatever NODE_TLS_REJECT_UNAUTHORIZED says; false accepts any. Unset, the runtime default applies: verified unless the environment sets NODE_TLS_REJECT_UNAUTHORIZED=0 (with mtls, unset verifies as true does). A non-boolean throws.
   decompress?: boolean; // Default: true - decode gzip/deflate/br/zstd bodies and send Accept-Encoding. false hands bodies over as received. A non-boolean throws.
 }
 ```
@@ -1930,10 +1933,10 @@ nothing. On a hop to another origin, all network adapters
 withhold URL userinfo, and `NodeAdapter` also withholds `servername` and
 `mtls.cert` / `mtls.key`. The client strips cross-origin Location userinfo before
 recording the followed hop. Same-origin userinfo is preserved. Node uses it for Basic
-auth. `fetch` sends none of it: Node's and browsers' `fetch` refuse a URL with
-credentials, and Bun's drops them without a word, so a FetchAdapter request to
-`https://user:pass@host/` goes out unauthenticated there. Set `Authorization` yourself
-with FetchAdapter.
+auth. `fetch` sends none of it: the Fetch Standard has `fetch` refuse a URL with
+credentials, so FetchAdapter refuses one (`https://user:pass@host/`, `https://user@host/`)
+on every runtime, Bun included, as a non-retryable `adapter_error` before calling
+`fetch`. Set `Authorization` yourself with FetchAdapter.
 
 TLS trust settings (`ca`, `mtls.ca`, `crl`, and `rejectUnauthorized`) apply on every
 connection. A target requiring the withheld client certificate can fail TLS or reject
@@ -2093,6 +2096,7 @@ Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `
 **Matching:**
 
 - A request's method is matched, and handed to the handler as `req.method`, uppercased, as a server receives it from Node's `http`.
+- A trailing slash is ignored: a `/users` route answers `/users/`, which a server that tells them apart may answer `404`. An empty segment is a value too: `/users//` matches `/users/:id` with `params.id` of `''`.
 - A `HEAD` request needs its own `head` route - it is not answered from a `get` route.
 - A `CONNECT` request is refused when it is sent, whatever is registered for it - and `HTTPClient` refuses one before it reaches the adapter.
 - A path parameter up to 16,384 characters once decoded (16 KiB, the whole request head Node's `http` server takes by default) matches its route, so a token or JWT in the path does. A longer one does not, and the request falls to a `/*` route or the default `404`.
@@ -2101,6 +2105,8 @@ Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `
 **Requests and handlers:**
 
 - Header names in `req.headers` are lowercase.
+- A body declared JSON that does not parse reaches the handler as its text, a string, rather than failing the request.
+- A handler's object body is answered with `content-type: application/json`, with no `charset` parameter and no `content-length` header.
 - When a request carries two cookies with the same name, `req.cookies` holds the first, as common server parsers do.
 - A handler that returns no response, or a body the mock cannot serialize, fails the request as a non-retryable `adapter_error`.
 - Driven directly with a path-only request URL, the adapter resolves a redirect's `Location` against `http://localhost`, the base the client gives a mock request with no `baseURL`: `/start` answered with `Location: /next` reports `detectedRedirectURL: 'http://localhost/next'`.
@@ -2660,6 +2666,7 @@ FetchAdapter;
 // Request
 (HTTPMethod, ContentType, QueryValue, QueryObject, RequestHeadersInput);
 (HTTPClientConfig, SubClientConfig, HTTPRequestOptions);
+HTTPRetryPolicyOptions; // The retryPolicy config and .retryPolicy() take
 (InterceptedRequest, AttemptRequest);
 
 // Response

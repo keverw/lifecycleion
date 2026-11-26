@@ -1240,6 +1240,23 @@ describe('CookieJar', () => {
       expect(jar.getCookieFor('a', 'https://example.com')?.value).toBe('1');
     });
 
+    test("does not read another header's value, so a getter that throws there costs no cookie", () => {
+      const headers: Record<string, string> = { 'set-cookie': 'a=1; Path=/' };
+      let reads = 0;
+      Object.defineProperty(headers, 'x-other', {
+        enumerable: true,
+        get() {
+          reads++;
+          throw new Error('getter boom');
+        },
+      });
+
+      jar.processResponseHeaders(headers, 'https://example.com');
+
+      expect(jar.getCookieFor('a', 'https://example.com')?.value).toBe('1');
+      expect(reads).toBe(0);
+    });
+
     test("reads a set-cookie array by index, not through the array's own iterator", () => {
       const lines = ['a=1; Path=/'];
       Object.defineProperty(lines, Symbol.iterator, {

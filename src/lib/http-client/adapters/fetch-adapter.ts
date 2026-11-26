@@ -81,6 +81,8 @@ import {
 } from '../internal/transport-refusal';
 import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
 import { isHighSurrogate } from '../../internal/surrogates';
+import { isBunRuntime } from '../../internal/is-bun-runtime';
+import { parseURL } from '../../domain-utils/helpers';
 
 export class FetchAdapter implements HTTPAdapter {
   constructor() {
@@ -135,6 +137,29 @@ export class FetchAdapter implements HTTPAdapter {
       throw nonRetryableRefusal(
         TypeError,
         blockedPortMessage('FetchAdapter', blockedPort),
+      );
+    }
+
+    const dispatched = parseURL(dispatchedURL);
+
+    // The Fetch Standard has `fetch` refuse a URL with credentials, and Node's and every
+    // browser's do, on every attempt; Bun's sends one with a password unauthenticated, and
+    // one with a username alone to a host named `user@host`, a DNS failure retried to no
+    // end. Refused here, on every runtime: set `Authorization` instead.
+    if (dispatched.username !== '' || dispatched.password !== '') {
+      throw nonRetryableRefusal(
+        TypeError,
+        '[FetchAdapter] fetch does not send a URL with credentials (user:pass@). Set an Authorization header instead, or use NodeAdapter.',
+      );
+    }
+
+    // Bun's `fetch` drops the empty segments a path starts with - `//a//b` goes out as
+    // `/a//b` - so the server would be asked for another resource than the one written.
+    // Refused there; Node's and browsers' `fetch` send the path as written.
+    if (isBunRuntime && dispatched.pathname.startsWith('//')) {
+      throw nonRetryableRefusal(
+        Error,
+        "[FetchAdapter] Bun's fetch would send a path that starts with // without its leading empty segments. Use NodeAdapter for it.",
       );
     }
 

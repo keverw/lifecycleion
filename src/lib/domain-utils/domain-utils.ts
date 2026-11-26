@@ -2124,7 +2124,9 @@ function hasForbiddenDomainCodePoint(name: string): boolean {
  * - IPv4 addresses: "127.0.0.1" or "127.0.0.1:8080"
  *
  * The returned domain has brackets stripped for normalization
- * (e.g., "[::1]" → "::1"), while port is returned separately.
+ * (e.g., "[::1]" → "::1"), while port is returned separately, as the URL parser reads
+ * it: an empty port (`example.com:`) is none, and leading zeros are dropped
+ * (`example.com:00080` → port `'80'`).
  *
  * **Strict validation:** For bracketed IPv6 addresses, after the closing bracket `]`,
  * only the following are valid:
@@ -2170,12 +2172,14 @@ export function parseHostHeader(host: string): ParsedHost {
     return { domain: '', port: '' };
   }
 
-  function parsePortOrFail(port: string): ParsedHost | null {
-    if (!isValidPortString(port)) {
-      return { domain: '', port: '' };
+  // A port as the URL parser reads one: `''` (`example.com:`) is none, and leading zeros
+  // are dropped (`00080` is `80`). `undefined` for one that is no port.
+  function readPort(port: string): string | undefined {
+    if (port === '') {
+      return '';
     }
 
-    return null;
+    return isValidPortString(port) ? String(Number(port)) : undefined;
   }
 
   // Handle IPv6 brackets
@@ -2196,12 +2200,9 @@ export function parseHostHeader(host: string): ParsedHost {
       }
 
       if (rest.startsWith(':')) {
-        const invalid = parsePortOrFail(rest.slice(1));
-        if (invalid) {
-          return invalid;
-        }
+        const port = readPort(rest.slice(1));
 
-        return { domain, port: rest.slice(1) };
+        return port === undefined ? { domain: '', port: '' } : { domain, port };
       }
 
       // Malformed: has junk after closing bracket (e.g., "[::1]garbage" or "[::1][::2]")
@@ -2227,12 +2228,9 @@ export function parseHostHeader(host: string): ParsedHost {
     return { domain, port: '' };
   }
 
-  const invalid = parsePortOrFail(trimmedHost.slice(idx + 1));
-  if (invalid) {
-    return invalid;
-  }
+  const port = readPort(trimmedHost.slice(idx + 1));
 
-  return { domain, port: trimmedHost.slice(idx + 1) };
+  return port === undefined ? { domain: '', port: '' } : { domain, port };
 }
 
 /**

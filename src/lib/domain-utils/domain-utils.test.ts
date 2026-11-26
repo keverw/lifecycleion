@@ -3742,6 +3742,18 @@ describe('domain-utils', () => {
 
   describe('parseHostHeader', () => {
     test.each([
+      ['example.com:00080', { domain: 'example.com', port: '80' }],
+      ['example.com:065535', { domain: 'example.com', port: '65535' }],
+      ['example.com:000', { domain: 'example.com', port: '0' }],
+      ['[::1]:00080', { domain: '::1', port: '80' }],
+      ['example.com:', { domain: 'example.com', port: '' }],
+      ['[::1]:', { domain: '::1', port: '' }],
+      ['example.com:065536', { domain: '', port: '' }],
+    ])('reads the port as the URL parser does: %s', (host, expected) => {
+      expect(parseHostHeader(host)).toEqual(expected);
+    });
+
+    test.each([
       'good.test@evil.test',
       'good.test/path',
       'good.test?x',
@@ -3966,11 +3978,6 @@ describe('domain-utils', () => {
 
     it('should reject invalid port values as malformed', () => {
       expect(parseHostHeader('example.com:abc')).toEqual({
-        domain: '',
-        port: '',
-      });
-
-      expect(parseHostHeader('example.com:')).toEqual({
         domain: '',
         port: '',
       });

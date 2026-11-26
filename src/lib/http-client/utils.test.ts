@@ -5,8 +5,14 @@ import { MockAdapter } from './adapters/mock-adapter';
 import {
   assertSupportedAdapterRuntimeAndConfig,
   buildURL,
+  decodeWireLocation,
   derivedRedirectFields,
+  detectedRedirectTarget,
   extractFetchHeaders,
+  firstNonEmptyValue,
+  isAmbiguousSetCookieLine,
+  locationHeader,
+  resolveRedirectLocation,
   extractHostname,
   firstJoinedLocation,
   isAbsoluteWebURL,
@@ -28,6 +34,7 @@ import {
   locationText,
 } from './utils';
 import { materializeRequestHeaders } from './internal/header-utils';
+import { MAX_PARAM_ENTRIES } from './internal/param-check';
 import { matchesHostPattern } from './test-helpers/host-pattern';
 
 const originalXMLHttpRequest = (globalThis as Record<string, unknown>)
@@ -177,6 +184,28 @@ describe('buildURL', () => {
       ).toBe(false);
     },
   );
+
+  test('params whose shared objects would write more than MAX_PARAM_ENTRIES entries are refused', () => {
+    let shared: Record<string, unknown> = { v: 1 };
+    for (let level = 0; level < 40; level++) {
+      shared = { l: shared, r: shared };
+    }
+
+    const started = performance.now();
+    expect(() => buildURL('https://a.test', '/x', { p: shared })).toThrow(
+      new RangeError(`Params hold more than ${MAX_PARAM_ENTRIES} entries`),
+    );
+    // Refused once the budget is spent, not after writing the graph out.
+    expect(performance.now() - started).toBeLessThan(5_000);
+
+    let small: Record<string, unknown> = { v: 1 };
+    for (let level = 0; level < 10; level++) {
+      small = { l: small, r: small };
+    }
+    expect(
+      buildURL('https://a.test', '/x', { p: small }).length,
+    ).toBeGreaterThan(1000);
+  });
 
   test('adds no slash when there is no path to join', () => {
     expect(buildURL('https://api.test/v1', '')).toBe('https://api.test/v1');
@@ -2104,5 +2133,82 @@ describe('locationText', () => {
     expect(locationText('\u00ef\u00bb\u00bf')).toBe('\ufeff');
     // A lone latin1 byte is no UTF-8 sequence.
     expect(locationText('/caf\u00e9')).toBe('/caf\u00e9');
+  });
+});
+
+describe('redirect Location helpers', () => {
+  test('firstNonEmptyValue skips values of HTTP whitespace alone', () => {
+    expect(firstNonEmptyValue(['', ' \t', '/next', '/other'])).toBe('/next');
+    expect(firstNonEmptyValue(['', ' '])).toBeUndefined();
+    expect(firstNonEmptyValue([])).toBeUndefined();
+  });
+
+  test('locationHeader reads the first Location, and one of whitespace alone as none', () => {
+    expect(locationHeader({ location: '/next' })).toBe('/next');
+    expect(locationHeader({ location: ['/a', '/b'] })).toBe('/a');
+    expect(locationHeader({ location: ' \t ' })).toBeUndefined();
+    expect(locationHeader({})).toBeUndefined();
+  });
+
+  test('decodeWireLocation reads a Location given a character per byte as UTF-8', () => {
+    const headers: Record<string, string | string[]> = {
+      location: '/caf\u00c3\u00a9',
+    };
+    decodeWireLocation(headers);
+    expect(headers.location).toBe('/caf\u00e9');
+
+    // Bytes that are not UTF-8 are kept as they came.
+    const invalid: Record<string, string | string[]> = { location: '/\u00ff' };
+    decodeWireLocation(invalid);
+    expect(invalid.location).toBe('/\u00ff');
+  });
+
+  test.each([
+    ['/next', 'https://a.test/start#sec', 'https://a.test/next#sec'],
+    ['/next#own', 'https://a.test/start#sec', 'https://a.test/next#own'],
+    ['/next#', 'https://a.test/start#sec', 'https://a.test/next#'],
+    ['/next', 'https://a.test/start#', 'https://a.test/next#'],
+    ['next', 'https://a.test/dir/start', 'https://a.test/dir/next'],
+    ['//b.test/x', 'https://a.test/start', 'https://b.test/x'],
+  ])(
+    'resolveRedirectLocation(%j) answered for %s is %s',
+    (location, base, expected) => {
+      expect(resolveRedirectLocation(location, base).href).toBe(expected);
+    },
+  );
+
+  test('resolveRedirectLocation with no base resolves only an absolute Location', () => {
+    expect(resolveRedirectLocation('https://b.test/x', undefined).href).toBe(
+      'https://b.test/x',
+    );
+    expect(() => resolveRedirectLocation('/next', undefined)).toThrow();
+  });
+
+  test("detectedRedirectTarget does not copy the request URL's userinfo into the target", () => {
+    expect(detectedRedirectTarget('/next', 'https://u:p@a.test/start')).toBe(
+      'https://a.test/next',
+    );
+    // The server's own userinfo is kept only on the request's origin.
+    expect(
+      detectedRedirectTarget(
+        'https://s:t@a.test/next',
+        'https://u:p@a.test/start',
+      ),
+    ).toBe('https://s:t@a.test/next');
+    expect(
+      detectedRedirectTarget('https://s:t@b.test/next', 'https://a.test/start'),
+    ).toBe('https://b.test/next');
+    expect(detectedRedirectTarget('http://[::1:]/x', 'https://a.test/')).toBe(
+      undefined,
+    );
+  });
+
+  test.each([
+    ['a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT', false],
+    ['a=1, b=2', true],
+    ['a=1; Path=/x,y=z', true],
+    ['a=1; Path=/x,y', false],
+  ])('isAmbiguousSetCookieLine(%j) is %p', (line, isAmbiguous) => {
+    expect(isAmbiguousSetCookieLine(line)).toBe(isAmbiguous);
   });
 });

@@ -404,7 +404,7 @@ export class HTTPRequestBuilder<T = unknown> {
     }
 
     if (isBlankText(label)) {
-      throw new Error(
+      throw new TypeError(
         'HTTPRequestBuilder.label() requires a non-empty, non-whitespace label.',
       );
     }

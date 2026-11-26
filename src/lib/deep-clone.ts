@@ -442,21 +442,23 @@ function cloneBuiltIn(
     }
   }
 
-  if (
-    (obj instanceof Map || foreignTypes.includes('Map')) &&
-    getIntrinsic(Map.prototype, 'size', obj) !== undefined
-  ) {
+  const mapSize =
+    obj instanceof Map || foreignTypes.includes('Map')
+      ? getIntrinsic(Map.prototype, 'size', obj)
+      : undefined;
+  if (typeof mapSize === 'number') {
     const cloned = remember<Map<unknown, unknown>>(state.seen, obj, new Map());
-    state.frames.push(new MapFrame(obj, cloned));
+    state.frames.push(new MapFrame(obj, cloned, mapSize));
     return cloned;
   }
 
-  if (
-    (obj instanceof Set || foreignTypes.includes('Set')) &&
-    getIntrinsic(Set.prototype, 'size', obj) !== undefined
-  ) {
+  const setSize =
+    obj instanceof Set || foreignTypes.includes('Set')
+      ? getIntrinsic(Set.prototype, 'size', obj)
+      : undefined;
+  if (typeof setSize === 'number') {
     const cloned = remember<Set<unknown>>(state.seen, obj, new Set());
-    state.frames.push(new SetFrame(obj, cloned));
+    state.frames.push(new SetFrame(obj, cloned, setSize));
     return cloned;
   }
 
@@ -770,6 +772,11 @@ class MapFrame implements Frame {
   constructor(
     source: object,
     private readonly target: Map<unknown, unknown>,
+    /**
+     * The entries still to clone: the size read when the map was met, as an array is
+     * bounded by its length then, so entries a getter adds during the walk are not.
+     */
+    private remaining: number,
   ) {
     this.entries = callIntrinsic(Map.prototype, 'entries', source) as Iterator<
       [unknown, unknown]
@@ -782,10 +789,16 @@ class MapFrame implements Frame {
     for (;;) {
       // An entry whose key was cloned last step, its value still to come.
       if (this.entry === undefined) {
+        if (this.remaining <= 0) {
+          return false;
+        }
+
         const next = this.entries.next();
         if (next.done === true) {
           return false;
         }
+
+        this.remaining--;
 
         this.entry = next.value;
         this.key = cloneValue(this.entry[0], state);
@@ -812,6 +825,8 @@ class SetFrame implements Frame {
   constructor(
     source: object,
     private readonly target: Set<unknown>,
+    /** The values still to clone: the size read when the set was met (see `MapFrame`). */
+    private remaining: number,
   ) {
     this.values = callIntrinsic(
       Set.prototype,
@@ -824,11 +839,16 @@ class SetFrame implements Frame {
     const depth = state.frames.length;
 
     for (;;) {
+      if (this.remaining <= 0) {
+        return false;
+      }
+
       const next = this.values.next();
       if (next.done === true) {
         return false;
       }
 
+      this.remaining--;
       this.target.add(cloneValue(next.value, state));
 
       if (state.frames.length !== depth) {

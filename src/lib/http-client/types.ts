@@ -553,8 +553,9 @@ export interface HTTPClientConfig {
   baseURL?: string;
   defaultHeaders?: RequestHeadersInput;
   /**
-   * Null or undefined selects `DEFAULT_TIMEOUT_MS`. In `createSubClient` overrides,
-   * either inherits the parent client's timeout instead.
+   * Milliseconds each attempt may take. Null or undefined selects `DEFAULT_TIMEOUT_MS`.
+   * In `createSubClient` overrides, either inherits the parent client's timeout instead.
+   * `<= 0` or `Infinity` disables the per-attempt timer.
    */
   timeout?: number | null;
   /**
@@ -632,7 +633,10 @@ export interface HTTPRequestOptions {
    * is not sent. See `HTTPRequestBuilder.body`.
    */
   body?: unknown;
-  /** Null or undefined inherits the client's configured `timeout`. */
+  /**
+   * Milliseconds each attempt may take. Null or undefined inherits the client's
+   * configured `timeout`. `<= 0` or `Infinity` disables the per-attempt timer.
+   */
   timeout?: number | null;
   /**
    * Per-request override for {@link HTTPClientConfig.maxResponseBytes}. Null or
@@ -873,7 +877,7 @@ export interface HTTPClientError {
  *   never twice for the same adapter response (a status is either a redirect hop or a retry
  *   trigger, not both). The filter list is **OR** on `phase.type`.
  *
- * - **Policy retry (`type: ‘retry’`):** fires once per reattempt. Interceptors and observers
+ * - **Policy retry (`type: 'retry'`):** fires once per reattempt. Interceptors and observers
  *   always see the URL being retried, which is the redirect target when a redirect preceded
  *   the retry. The optional `phase.redirect` field is metadata that tells you which redirect
  *   hop led to this retry (`{ hop, from, to, statusCode }`), so you don’t have to track
@@ -1027,16 +1031,16 @@ export interface RequestInterceptorFilter extends PhaseFilter {
  * Filter for response observers. See {@link RequestPhaseName} for how `retry` and
  * `redirect` fit together as intermediate phases.
  *
- * Default phases: `[‘final’]`. Terminal **HTTP** response for this `send()` only.
+ * Default phases: `['final']`. Terminal **HTTP** response for this `send()` only.
  *
- * - **`’retry’`**: the adapter returned a **retryable HTTP status** (including `0`
+ * - **`'retry'`**: the adapter returned a **retryable HTTP status** (including `0`
  *   when it is in the client’s retryable set) and a further attempt will run. Phase is
- *   `{ type: ‘retry’, attempt, maxAttempts, redirect? }` (aligned with
+ *   `{ type: 'retry', attempt, maxAttempts, redirect? }` (aligned with
  *   `onAttemptEnd.attemptNumber`, with `redirect` only for retries on a post-redirect URL).
  *   If the adapter **throws** but a retry will follow, that path uses **error**
  *   observers with the same phase shape, not response observers.
- * - **`’redirect’`**: each redirect **response** before following `Location`. Phase is
- *   `{ type: ‘redirect’, hop, from, to, statusCode }` (see {@link RedirectHopInfo}).
+ * - **`'redirect'`**: each redirect **response** before following `Location`. Phase is
+ *   `{ type: 'redirect', hop, from, to, statusCode }` (see {@link RedirectHopInfo}).
  *
  * When `send()` **settles** with `status === 0`, **error** observers run with phase
  * `final` only. **Before** that, each retryable `0` response in a retry cycle can

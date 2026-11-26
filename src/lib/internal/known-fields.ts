@@ -24,8 +24,13 @@ export function assertOptionsObject(
   }
 }
 
-/** What a field name reads as when it is an option's, or a typo of one. */
-const OPTION_NAME = /^[A-Za-z_$][\w$]{0,63}$/;
+/**
+ * What a field name reads as when it is an option's, or a typo of one: an identifier no
+ * more than a few characters longer than the longest field taken. A token pasted in as a
+ * key (`ghp_` and 36 characters) is an identifier too, and longer than any option.
+ */
+const OPTION_NAME = /^[A-Za-z_$][\w$]*$/;
+const OPTION_NAME_SLACK = 3;
 
 /**
  * Refuses, with a `TypeError` naming `label`, an object holding an own enumerable field
@@ -36,9 +41,10 @@ const OPTION_NAME = /^[A-Za-z_$][\w$]{0,63}$/;
  * is let through, as a filter's is - a wider options shape forwarded with its extra
  * fields unset. Anything that is not an object is left to the caller's own check.
  *
- * The refusal names the field when it reads as an option name - a short identifier, as a
- * typo of one is. Any other key is not written into the message: it may be the wrong value
- * pasted in as a key (`'Bearer …'`).
+ * The refusal names the field when it reads as an option name - an identifier no longer
+ * than the longest field taken by more than a few characters, as a typo of one is. Any
+ * other key is not written into the message: it may be the wrong value pasted in as a key
+ * (`'Bearer …'`, a token).
  */
 export function assertKnownFields(
   value: unknown,
@@ -65,9 +71,11 @@ export function assertKnownFields(
       continue;
     }
 
-    const field = OPTION_NAME.test(key)
-      ? `${JSON.stringify(key)} field`
-      : 'field by that name';
+    const longestField = Math.max(0, ...fields.map((name) => name.length));
+    const field =
+      OPTION_NAME.test(key) && key.length <= longestField + OPTION_NAME_SLACK
+        ? `${JSON.stringify(key)} field`
+        : 'field by that name';
     throw new TypeError(
       `${label} has no ${field} (it takes ${fields.join(', ')})`,
     );

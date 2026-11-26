@@ -469,8 +469,10 @@ export interface NodeAdapterConfig {
   decompress?: boolean;
 
   /**
-   * Set to false to accept self-signed certificates in dev/test environments.
-   * Defaults to true (Node.js default — rejects invalid certs).
+   * Set to false to accept self-signed certificates in dev/test environments. Set to
+   * true to verify certificates whatever `NODE_TLS_REJECT_UNAUTHORIZED` says. Left unset,
+   * the runtime's default applies: certificates are verified unless the environment sets
+   * `NODE_TLS_REJECT_UNAUTHORIZED=0`. With `mtls`, unset verifies as `true` does.
    */
   rejectUnauthorized?: boolean;
 }
@@ -904,6 +906,10 @@ export class NodeAdapter implements HTTPAdapter {
         // Dev-only: accept self-signed certs. Explicit false required — we do
         // not default to insecure, this must be an intentional opt-in.
         httpsOptions.rejectUnauthorized = false;
+      } else if (rejectUnauthorizedOption === true) {
+        // Explicit true verifies whatever the environment says: left unset, the
+        // runtime's default applies, which `NODE_TLS_REJECT_UNAUTHORIZED=0` turns off.
+        httpsOptions.rejectUnauthorized = true;
       }
     }
 
@@ -3090,7 +3096,7 @@ export class NodeAdapter implements HTTPAdapter {
 
         // Network / transport errors (DNS failure, connection refused, cert errors)
         req.on('error', (error) => {
-          // Abort signal fired before network error — priorities the abort path. Read
+          // Abort signal fired before network error — prioritises the abort path. Read
           // guarded: this runs as an emitter listener, where a throw is an uncaught
           // exception and the request never settles. See `readIsAborted`.
           if (readIsAborted()) {
@@ -3265,8 +3271,8 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            destroyRequestQuietly(req);
             failRequest(makeRequestAbortError());
+            destroyRequestQuietly(req);
             releaseResponseBody?.();
           };
 
@@ -5394,11 +5400,19 @@ const PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
 /**
  * The same, for a connection to a Unix socket, which fails on its `connect` with a file
  * system error: `ENOENT` for a socket file that does not exist, `EACCES` for one this
- * process may not open. Read so on Node and Bun alike.
+ * process may not open, `ENOTSOCK` for a path that is a file but no socket, `ENOTDIR` for
+ * one under a file, `ENAMETOOLONG` or `EINVAL` for a path longer than a socket address
+ * holds, and `ELOOP` for a symlink loop. Which one a runtime reports varies (Bun reports
+ * a path under a file as `ECONNREFUSED`, already counted).
  */
 const SOCKET_PATH_PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
   'ENOENT',
   'EACCES',
+  'ENOTSOCK',
+  'ENOTDIR',
+  'ENAMETOOLONG',
+  'ELOOP',
+  'EINVAL',
 ]);
 
 /**
@@ -5426,14 +5440,10 @@ function isPreConnectionError(
   );
 }
 
+// `cause` as `new Error` defines it, not enumerable: a spread or `JSON.stringify` of the
+// error does not carry the socket error's fields (its address and port) along.
 function makeResponseStreamError(message: string, cause?: Error): Error {
-  const error = new Error(message);
-
-  if (cause) {
-    error.cause = cause;
-  }
-
-  return error;
+  return cause ? new Error(message, { cause }) : new Error(message);
 }
 
 function markStreamFactoryError(

@@ -1377,6 +1377,17 @@ test('a misspelled config or request option is refused rather than read as absen
   );
   expect((refusal as Error).message).not.toContain('secret-token');
 
+  // Nor is a token-shaped key, an identifier longer than any option name.
+  const token = `ghp_${'A1b2C3d4E5'.repeat(4)}`;
+  expect(() => new HTTPClient({ adapter, [token]: 1 })).toThrow(
+    'HTTPClient config has no field by that name',
+  );
+  expect(() => new HTTPClient({ adapter, [token]: 1 })).not.toThrow(token);
+  // A typo of a long option name is still named.
+  expect(
+    () => new HTTPClient({ adapter, maxResponseBytess: 1 } as never),
+  ).toThrow('HTTPClient config has no "maxResponseBytess" field');
+
   // An unknown field left unset would be read as absent either way, and is let through.
   expect(() =>
     client.get('/x', { timout: undefined, extra: null } as never),
@@ -3370,6 +3381,46 @@ test.each([
       '[HTTPClient] Request URL is not a valid absolute http(s) URL.',
     );
     expect(sent).toEqual([]);
+  },
+);
+
+test.each(['//h:99999/x', '//[::1:]/x'])(
+  'with a baseURL, a protocol-relative URL that does not resolve is refused with no baseURL hint: %s',
+  async (url) => {
+    const sent: string[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request) => {
+        sent.push(request.requestURL);
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const client = new HTTPClient({ adapter, baseURL: 'https://api.test/v1' });
+
+    const builder = client.get(url);
+    await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.cause?.message).toBe(
+      '[HTTPClient] Request URL is not a valid absolute http(s) URL.',
+    );
+    expect(sent).toEqual([]);
+  },
+);
+
+test.each([
+  'http:a.test',
+  'https:/a.test',
+  ' https://a.test',
+  'https://a.test ',
+  'https://a.test\t',
+  'http:\\\\a.test',
+])(
+  'a baseURL not written http(s):// is refused, though the URL parser reads a host from it: %s',
+  (baseURL) => {
+    expect(
+      () => new HTTPClient({ adapter: new MockAdapter(), baseURL }),
+    ).toThrow('HTTPClient baseURL must be an absolute http(s) URL');
   },
 );
 
@@ -6401,11 +6452,14 @@ test('label and scope arguments are checked', async () => {
     TypeError,
   );
   expect(() => client.cancelOwnWithLabel('  ')).toThrow(/non-empty/);
+  expect(() => client.cancelOwnWithLabel('  ')).toThrow(TypeError);
+  expect(() => client.cancelAllWithLabel('')).toThrow(TypeError);
   expect(() => client.listRequests({ scope: 'mine' as never })).toThrow(
     TypeError,
   );
   expect(() => client.listRequests({ label: 5 as never })).toThrow(TypeError);
   expect(() => client.listRequests({ label: '' })).toThrow(/non-empty/);
+  expect(() => client.listRequests({ label: '' })).toThrow(TypeError);
   expect(client.listRequests().count).toBe(1);
   // `null` is no label filter, as a filter field set to `null` is read as absent.
   expect(client.listRequests({ label: null as never }).count).toBe(1);
@@ -12351,6 +12405,18 @@ test('an opaque origin is cross-origin, even to the same URL', () => {
   expect(isCrossOrigin('file:///a', new URL('file:///a'))).toBe(true);
   expect(isCrossOrigin('https://a.test/x', 'foo://a.test/x')).toBe(true);
   expect(isCrossOrigin('https://a.test/x', 'https://a.test/y')).toBe(false);
+});
+
+test("a blob: URL's origin is the http(s) URL it wraps, read as the standard reads it", () => {
+  expect(isCrossOrigin('blob:http://[::1]/x', 'http://[::1]/')).toBe(false);
+  expect(
+    isCrossOrigin('blob:https://a.test:8443/x', 'https://a.test:8443/'),
+  ).toBe(false);
+  // An inner URL that does not parse, or is not http(s), is an opaque origin - though
+  // Bun's own `origin` reads `blob:http://[::1:]/x` as `http://[::1]`.
+  expect(isCrossOrigin('blob:http://[::1:]/x', 'http://[::1]/')).toBe(true);
+  expect(isCrossOrigin('blob:ftp://a.test/x', 'ftp://a.test/x')).toBe(true);
+  expect(isCrossOrigin('blob:foo', 'blob:foo')).toBe(true);
 });
 
 test("detectedRedirectURL does not copy the request's userinfo onto a relative Location", async () => {

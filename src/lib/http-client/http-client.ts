@@ -964,13 +964,15 @@ export class BaseHTTPClient {
     // For MockAdapter only, synthesize a deterministic absolute base URL when
     // no baseURL is configured so interceptors and observers do not depend on
     // ambient browser location state:
-    //   - true path-only inputs -> http://localhost/...
+    //   - path-only inputs -> http://localhost/..., as a baseURL joins them: a first
+    //     segment with a colon (`items:batchGet`) included
     //   - protocol-relative //host/... inputs -> http://host/...
-    // Other non-HTTP absolute-like inputs still fail validation later.
+    // A `scheme://` input, or an http(s) URL the parser reads alone (`http:host/x`), is
+    // read as it is with no baseURL: a non-http(s) one fails validation later.
     const effectiveBaseURL =
       this._config.baseURL ??
       (this._adapterType === 'mock'
-        ? !/^[a-z][a-z0-9+\-.]*:/i.test(path) && !isAbsoluteWebURL(path)
+        ? !/^[a-z][a-z0-9+\-.]*:\/\//i.test(path) && !isAbsoluteWebURL(path)
           ? MOCK_ADAPTER_DEFAULT_BASE_URL
           : undefined
         : undefined);
@@ -1121,19 +1123,19 @@ export class BaseHTTPClient {
      * disabled, a loop, an interceptor that threw, a cancel between hops - so that
      * response has no field of its own to read. An early `3xx` mid-upload is exactly
      * the shape where it is not empty.
+     *
+     * Carried across hops and attempts, not recomputed per hop: the latest attempt that
+     * had a body is the answer. A followed `301`/`302`/`303` rewrites a `POST` to a
+     * bodiless `GET`, so the final hop has no writer and nothing of its own to report -
+     * and reading only that hop would answer `undefined`, the documented "the body went
+     * out" value, for exactly the early-ack `POST` -> `302` -> `GET` shape this field
+     * exists for. A `307`/`308` resends the body and its own outcome is the one that
+     * reached the final response, while a bodiless hop or retry after it changes
+     * nothing about what the upload did. A bodied attempt given up on with its adapter
+     * still out reports that its upload's fate is unknown, and one that reported none -
+     * a custom adapter's untagged throw - leaves none, rather than an earlier hop's
+     * "the body went out" for an upload whose fate nobody knows.
      */
-    //
-    // Carried across hops and attempts, not recomputed per hop: the latest attempt that
-    // had a body is the answer. A followed `301`/`302`/`303` rewrites a `POST` to a
-    // bodiless `GET`, so the final hop has no writer and nothing of its own to report -
-    // and reading only that hop would answer `undefined`, the documented "the body went
-    // out" value, for exactly the early-ack `POST` -> `302` -> `GET` shape this field
-    // exists for. A `307`/`308` resends the body and its own outcome is the one that
-    // reached the final response, while a bodiless hop or retry after it changes
-    // nothing about what the upload did. A bodied attempt given up on with its adapter
-    // still out reports that its upload's fate is unknown, and one that reported none -
-    // a custom adapter's untagged throw - leaves none, rather than an earlier hop's
-    // "the body went out" for an upload whose fate nobody knows.
     const latestUpload: {
       outcome: Promise<Error | undefined> | undefined;
     } = { outcome: undefined };
@@ -1296,11 +1298,13 @@ export class BaseHTTPClient {
         // Validate the resolved URL is a proper http(s) URL. Protocol-relative
         // //host paths without a baseURL to supply the scheme stay unresolved and
         // must fail here as a request_setup_error rather than reaching the adapter.
-        // One written `scheme://` is no path a baseURL could resolve, so its refusal
-        // names the URL itself (an invalid port or host, another scheme), not a baseURL.
+        // One written `scheme://`, or any URL once a baseURL is set, is not one a baseURL
+        // could resolve, so its refusal names the URL itself (an invalid port or host,
+        // another scheme), not a baseURL.
         if (!isAbsoluteWebURL(url)) {
           throw new Error(
-            /^[a-z][a-z0-9+.-]*:\/\//i.test(url)
+            !isNullish(this._config.baseURL) ||
+              /^[a-z][a-z0-9+.-]*:\/\//i.test(url)
               ? `[HTTPClient] Request URL is not a valid absolute http(s) URL.`
               : `[HTTPClient] Request URL could not be resolved to an absolute http(s) URL. ` +
                   `Set a baseURL with an http(s) scheme or pass an absolute URL.`,
@@ -1910,7 +1914,8 @@ export class BaseHTTPClient {
 
             // Cross-origin safety: strip every header outside a fixed allow-list when the
             // redirect crosses origins (scheme + host + port) - stricter than fetch, which
-            // forwards everything but `Authorization`; see `_sanitizeRedirectRequest`.
+            // drops `Authorization`, `Cookie` and `Proxy-Authorization` and forwards the
+            // rest; see `_sanitizeRedirectRequest`.
             // Authorization, X-API-Key, etc. must not leak to a different host. Cookies
             // and internal headers (request ID) are re-attached below as needed.
             const nextRedirectHistory = [...redirectHistory, redirectURL];
@@ -2676,7 +2681,8 @@ export class BaseHTTPClient {
       const safeHeaders: Record<string, string | string[]> = {};
       // Cross-origin safety: strip every header outside a short allow-list when the
       // redirect crosses origins (scheme + host + port). Stricter than fetch, which
-      // drops only `Authorization`: a caller's own credential header (`X-API-Key`) is
+      // drops `Authorization`, `Cookie` and `Proxy-Authorization` and forwards the rest:
+      // a caller's own credential header (`X-API-Key`) is
       // unknown to us, so nothing that could be one is carried to a host the caller did
       // not name. Cookies and internal headers are re-attached later as needed.
       //
@@ -5351,16 +5357,18 @@ export class BaseHTTPClient {
    *
    * Error code priority:
    * 1. isCancelled → cancelled, whatever the override
-   * 2. isTimeout → timeout, over every override but a stream code: a streamed-body
-   *    failure keeps its stream_* code while still surfacing `isTimeout: true`
+   * 2. isTimeout → timeout, over every override but a stream code or
+   *    response_too_large: a streamed-body failure keeps its stream_* code, and a body
+   *    over the limit its response_too_large, while still surfacing `isTimeout: true`
    * 3. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error,
    *    adapter_error, interceptor_error, stream_write_error, stream_response_error,
    *    stream_setup_error, response_too_large)
    * 4. Default fallback → network_error
    *
    * Key distinction:
-   * - `adapter_error`: Adapter threw an exception (DNS failure, connection refused, etc.)
-   *   The adapter failed to handle the error gracefully.
+   * - `adapter_error`: Adapter threw an exception instead of reporting, whatever the
+   *   cause. The built-in adapters report a DNS failure or a refused connection as a
+   *   `network_error`.
    * - `network_error`: Adapter reported a transport-level failure cleanly via
    *   `isTransportError`, or returned `status: 0` to indicate a transport
    *   failure.
@@ -6248,7 +6256,7 @@ function assertLabelArgument(label: unknown, method: string): void {
   }
 
   if (isBlankText(label)) {
-    throw new Error(
+    throw new TypeError(
       `HTTPClient.${method}() requires a non-empty, non-whitespace label.`,
     );
   }

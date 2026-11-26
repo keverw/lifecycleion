@@ -155,6 +155,7 @@ interface ParsedCookie {
 export interface Cookie {
   name: string;
   value: string;
+  /** The host the cookie belongs to; an IPv6 address without its brackets (`::1`). */
   domain?: string;
   /**
    * True when the cookie must not match subdomains: a Set-Cookie with no `Domain=`, a last
@@ -273,7 +274,11 @@ const COOKIE_SCHEMES: ReadonlySet<string> = new Set([
   'wss:',
 ]);
 
-/** RFC 6265bis §5.6: a cookie whose name and value together pass this is ignored. */
+/**
+ * RFC 6265bis §5.6: a cookie whose name and value together pass this is ignored.
+ * Compared with `String#length`, which counts octets here: a `Set-Cookie` line is read a
+ * character per byte (latin1), and `setCookie` refuses a character above U+00FF.
+ */
 const MAX_COOKIE_NAME_VALUE_BYTES = 4096;
 
 // The limits Chromium keeps (`CookieMonster`): past the maximum, cookies are evicted down
@@ -544,7 +549,8 @@ export class CookieJar {
    * tab, or starts or ends with a space or tab (one inside it is kept, as RFC 6265bis
    * keeps it), or a value holding `;` or a control character other than a tab or starting
    * or ending with a space or tab, or a name and value together longer than 4096
-   * characters, the limit a `Set-Cookie` is held to. A name may be empty - a nameless
+   * characters, the limit a `Set-Cookie` is held to, or a name or value with a character
+   * above U+00FF, which a header cannot carry. A name may be empty - a nameless
    * cookie, sent as its value alone - when the value is not empty and does not start with
    * a name prefix (`__Secure-`, `__Host-`, `__Http-`, `__Host-Http-`). The header is
    * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` would be
@@ -554,7 +560,8 @@ export class CookieJar {
    * tampered with.
    *
    * Valid domains include: hostnames (example.com, localhost, myapp.test),
-   * IPv4 (127.0.0.1), and IPv6 ([::1]). One trailing dot is kept as part of the host:
+   * IPv4 (127.0.0.1), and IPv6, bracketed or bare ([::1] or ::1), which is stored and
+   * returned bare (`::1`), unlike `URL#hostname` (`[::1]`). One trailing dot is kept as part of the host:
    * `example.com.` is stored, sent and cleared apart from `example.com`, as a request host
    * keeps it (RFC 6265bis §5.1.2). An IPv4 address with one (`127.0.0.1.`) is refused,
    * since the URL parser reads it as the address and no request host is that string.
@@ -692,8 +699,15 @@ export class CookieJar {
     // Every line checked before any is stored, so a refused call leaves the jar as it
     // found it rather than holding the cookies that came before the bad line.
     const lines: string[] = [];
-    for (const [name, raw] of Object.entries(headers)) {
-      if (asciiLowercase(name) !== 'set-cookie' || isNullish(raw)) {
+    // By name, each value read only once its name is `set-cookie`: another header's
+    // getter is not run, so one that throws does not cost the response its cookies.
+    for (const name of Object.keys(headers)) {
+      if (asciiLowercase(name) !== 'set-cookie') {
+        continue;
+      }
+
+      const raw = headers[name];
+      if (isNullish(raw)) {
         continue;
       }
 

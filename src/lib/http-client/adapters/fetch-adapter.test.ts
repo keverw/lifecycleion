@@ -475,22 +475,68 @@ describe('FetchAdapter', () => {
     },
   );
 
-  test('keeps URL userinfo when the initial and request origins match', async () => {
-    let capturedURL = '';
+  test.each([
+    'https://user:hunter2@api.example.test/next',
+    'https://user:@api.example.test/next',
+    'https://user@api.example.test/next',
+    'https://:hunter2@api.example.test/next',
+  ])(
+    'refuses same-origin URL userinfo, as fetch does, on every runtime: %s',
+    async (requestURL) => {
+      let calls = 0;
+      (globalThis as any).fetch = () => {
+        calls++;
+        return Promise.resolve(new Response(null, { status: 204 }));
+      };
 
+      const refusal = await new FetchAdapter()
+        .send({
+          requestURL,
+          initialURL: 'https://api.example.test/start',
+          method: 'GET',
+          headers: {},
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(String(refusal?.message)).toBe(
+        '[FetchAdapter] fetch does not send a URL with credentials (user:pass@). Set an Authorization header instead, or use NodeAdapter.',
+      );
+      expect(refusal?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(errorText(refusal)).not.toContain('hunter2');
+      expect(calls).toBe(0);
+    },
+  );
+
+  test("on Bun, refuses a path that starts with //, which Bun's fetch would send without its leading empty segments", async () => {
+    const sent: string[] = [];
     (globalThis as any).fetch = (url: string) => {
-      capturedURL = url;
+      sent.push(url);
       return Promise.resolve(new Response(null, { status: 204 }));
     };
+    const send = (requestURL: string) =>
+      new FetchAdapter().send({ requestURL, method: 'GET', headers: {} }).then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
 
-    await new FetchAdapter().send({
-      requestURL: 'https://user:hunter2@api.example.test/next',
-      initialURL: 'https://api.example.test/start',
-      method: 'GET',
-      headers: {},
-    });
+    for (const url of [
+      'https://api.test//double//slash',
+      'https://api.test///three',
+      'https://api.test//a?x=1',
+    ]) {
+      const error = await send(url);
+      expect(String(error?.message)).toBe(
+        "[FetchAdapter] Bun's fetch would send a path that starts with // without its leading empty segments. Use NodeAdapter for it.",
+      );
+      expect(error?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
 
-    expect(capturedURL).toBe('https://user:hunter2@api.example.test/next');
+    expect(sent).toEqual([]);
+    expect(await send('https://api.test/plain//x')).toBeUndefined();
+    expect(sent).toEqual(['https://api.test/plain//x']);
   });
 
   test('withholds userinfo from a protocol-relative cross-origin URL', async () => {
@@ -548,7 +594,7 @@ describe('FetchAdapter', () => {
     }
   });
 
-  test('same-origin userinfo is kept once resolved against the page', async () => {
+  test('same-origin userinfo is kept once resolved against the page, and so refused', async () => {
     let capturedURL = '';
     (globalThis as any).document = { baseURI: 'https://api.test/page' };
     (globalThis as any).fetch = (url: string) => {
@@ -562,15 +608,23 @@ describe('FetchAdapter', () => {
     delete (globalThis as { Request?: unknown }).Request;
 
     try {
-      const response = await new FetchAdapter().send({
-        requestURL: '//u:p@api.test/x',
-        initialURL: 'https://api.test/start',
-        method: 'GET',
-        headers: {},
-      });
+      const refusal = await new FetchAdapter()
+        .send({
+          requestURL: '//u:p@api.test/x',
+          initialURL: 'https://api.test/start',
+          method: 'GET',
+          headers: {},
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Error,
+        );
 
-      expect(response.status).toBe(204);
-      expect(capturedURL).toBe('https://u:p@api.test/x');
+      // Kept, so refused, as fetch refuses a URL with credentials.
+      expect(refusal?.message).toBe(
+        '[FetchAdapter] fetch does not send a URL with credentials (user:pass@). Set an Authorization header instead, or use NodeAdapter.',
+      );
+      expect(capturedURL).toBe('');
     } finally {
       globalThis.Request = originalRequest;
     }
@@ -914,22 +968,26 @@ describe('FetchAdapter', () => {
     const originalRequest = globalThis.Request;
     delete (globalThis as { Request?: unknown }).Request;
 
+    // A URL whose userinfo is kept is refused, as fetch refuses one with credentials.
     const sentURL = async (requestURL: string): Promise<string> => {
-      await new FetchAdapter().send({
-        requestURL,
-        initialURL: '/start',
-        method: 'GET',
-        headers: {},
-      });
-      return capturedURL;
+      capturedURL = '';
+      return new FetchAdapter()
+        .send({
+          requestURL,
+          initialURL: '/start',
+          method: 'GET',
+          headers: {},
+        })
+        .then(
+          () => capturedURL,
+          () => 'refused',
+        );
     };
 
     try {
       (globalThis as any).document = { baseURI: 'https://api.test/page' };
       // `/start` on this page is `https://api.test/start`: same origin, kept.
-      expect(await sentURL('https://u:p@api.test/x')).toBe(
-        'https://u:p@api.test/x',
-      );
+      expect(await sentURL('https://u:p@api.test/x')).toBe('refused');
       // Another origin than the page's: withheld.
       expect(await sentURL('https://u:p@evil.test/x')).toBe(
         'https://evil.test/x',
@@ -961,14 +1019,20 @@ describe('FetchAdapter', () => {
     delete (globalThis as { Request?: unknown }).Request;
     const previousDocument = (globalThis as any).document;
 
+    // A URL whose userinfo is kept is refused, as fetch refuses one with credentials.
     const sentURL = async (initialURL: string): Promise<string> => {
-      await new FetchAdapter().send({
-        requestURL: 'https://u:p@app.test/x',
-        initialURL,
-        method: 'GET',
-        headers: {},
-      });
-      return capturedURL;
+      capturedURL = '';
+      return new FetchAdapter()
+        .send({
+          requestURL: 'https://u:p@app.test/x',
+          initialURL,
+          method: 'GET',
+          headers: {},
+        })
+        .then(
+          () => capturedURL,
+          () => 'refused',
+        );
     };
 
     try {
@@ -979,7 +1043,7 @@ describe('FetchAdapter', () => {
       }
 
       for (const initialURL of ['/start', '//app.test/start']) {
-        expect(await sentURL(initialURL)).toBe('https://u:p@app.test/x');
+        expect(await sentURL(initialURL)).toBe('refused');
       }
     } finally {
       if (previousDocument === undefined) {
@@ -1073,21 +1137,20 @@ describe('FetchAdapter', () => {
     );
     expect(errorText(name)).not.toContain(secret);
 
-    // Node's refusal of a URL with credentials, which quotes the URL.
+    // A URL the runtime refuses, quoting it with its userinfo and query, as Node's
+    // `Request` does.
     const OriginalRequest = globalThis.Request;
     globalThis.Request = class {
       constructor(url: string) {
         throw Object.assign(
-          new TypeError(
-            `Request cannot be constructed from a URL that includes credentials: ${url}`,
-          ),
+          new TypeError(`Request cannot be constructed from ${url}`),
           { input: url },
         );
       }
     } as unknown as typeof Request;
     try {
       const url = await send({
-        requestURL: `https://user:${secret}@api.test/x?token=${secret}`,
+        requestURL: `https://api.test/x?token=${secret}`,
       });
       expect(String(url?.message)).toBe(
         'FetchAdapter request could not be built: the runtime refused its URL or method',
@@ -1096,6 +1159,15 @@ describe('FetchAdapter', () => {
     } finally {
       globalThis.Request = OriginalRequest;
     }
+
+    // A URL with credentials is refused before the runtime is asked, without them.
+    const credentials = await send({
+      requestURL: `https://user:${secret}@api.test/x?token=${secret}`,
+    });
+    expect(String(credentials?.message)).toBe(
+      '[FetchAdapter] fetch does not send a URL with credentials (user:pass@). Set an Authorization header instead, or use NodeAdapter.',
+    );
+    expect(errorText(credentials)).not.toContain(secret);
 
     expect(calls).toBe(0);
   });

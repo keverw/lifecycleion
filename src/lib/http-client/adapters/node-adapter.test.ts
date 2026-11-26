@@ -3325,6 +3325,10 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       expect((result.errorCause?.cause as Error | undefined)?.message).toBe(
         'simulated stream error',
       );
+      // Not enumerable, as `new Error(message, { cause })` defines it: a spread or
+      // `JSON.stringify` of the error does not carry the socket error along.
+      expect(Object.keys(result.errorCause as object)).not.toContain('cause');
+      expect(JSON.stringify(result.errorCause)).not.toContain('simulated');
     } finally {
       requestSpy.mockRestore();
     }
@@ -8953,6 +8957,61 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(outcomes).toEqual([true, true, undefined, undefined]);
   });
 
+  test('a socketPath that is a regular file proves nothing was sent', async () => {
+    // `ENOTSOCK` for the file and `ENOTDIR` or `ECONNREFUSED` under it, by runtime: each
+    // is the socket's `connect`.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'node-adapter-sock-'));
+    const file = path.join(dir, 'regular');
+    fs.writeFileSync(file, '');
+
+    try {
+      for (const socketPath of [file, path.join(file, 'under')]) {
+        const res = await new NodeAdapter({ socketPath }).send({
+          requestURL: 'http://localhost/thing',
+          method: 'POST',
+          headers: {},
+          body: 'payload',
+        });
+
+        expect(res.isTransportError).toBe(true);
+        expect(res.wasDefinitelyNotSent).toBe(true);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(['ENOTSOCK', 'ENOTDIR', 'ENAMETOOLONG', 'ELOOP', 'EINVAL'])(
+    'a socketPath connect %s proves nothing was sent',
+    async (code) => {
+      const req = new MockClientRequest();
+      const requestSpy = spyOn(http, 'request').mockImplementation(() => {
+        queueMicrotask(() => {
+          req.emit(
+            'error',
+            Object.assign(new Error('failed'), { code, syscall: 'connect' }),
+          );
+        });
+        return req as unknown as http.ClientRequest;
+      });
+
+      try {
+        const res = await new NodeAdapter({
+          socketPath: '/tmp/test.sock',
+        }).send({
+          requestURL: 'http://localhost/thing',
+          method: 'POST',
+          headers: {},
+          body: 'payload',
+        });
+
+        expect(res.wasDefinitelyNotSent).toBe(true);
+      } finally {
+        requestSpy.mockRestore();
+      }
+    },
+  );
+
   // --- query params ---
 
   test('query params are serialized and echoed back', async () => {
@@ -9423,6 +9482,38 @@ describe('NodeAdapter — custom CA (ca option)', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
+  });
+
+  test('rejectUnauthorized:true verifies when NODE_TLS_REJECT_UNAUTHORIZED=0; unset follows the environment', async () => {
+    const previous = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+    try {
+      const strict = await new HTTPClient({
+        adapter: new NodeAdapter({ rejectUnauthorized: true }),
+        baseURL: tlsServer.url,
+      })
+        .get('/api/test')
+        .send();
+
+      expect(strict.isFailed).toBe(true);
+      expect(strict.isNetworkError).toBe(true);
+
+      const unset = await new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: tlsServer.url,
+      })
+        .get('/api/test')
+        .send();
+
+      expect(unset.status).toBe(200);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+      } else {
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = previous;
+      }
+    }
   });
 
   test('ca as Buffer is accepted', async () => {
@@ -15054,6 +15145,40 @@ test('a 101 without an Upgrade header is refused as a protocol switch, not answe
     await raw.close();
   }
 });
+
+test.each([
+  ['GET', null],
+  ['POST', 'payload'],
+] as const)(
+  'a 101 with Connection: Upgrade and an Upgrade header is refused as a protocol switch: %s',
+  async (method, body) => {
+    const raw = await listenRawAnswer(
+      'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: foo\r\n\r\n',
+    );
+    try {
+      let refusal: unknown;
+      try {
+        await new NodeAdapter().send(
+          makeAdapterRequest(`http://127.0.0.1:${raw.port}/`, { method, body }),
+        );
+      } catch (error) {
+        refusal = error;
+      }
+
+      expect(refusal).toBeInstanceOf(TypeError);
+      expect((refusal as Error).message).toBe(
+        'NodeAdapter received a protocol switch it cannot read',
+      );
+      expect(
+        (refusal as Record<PropertyKey, unknown>)[
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+        ],
+      ).toBe(true);
+    } finally {
+      await raw.close();
+    }
+  },
+);
 
 /** Every `ErrorEvent` put on the host's `'error'` channel until `stop` is called. */
 function collectHostReports(): { reports: Event[]; stop: () => void } {

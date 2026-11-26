@@ -44,18 +44,6 @@ interface ArraySizing {
   readonly sized: Set<object>;
 }
 
-/**
- * TTL-aware LRU (Least Recently Used) Cache implementation
- *
- * Features:
- * - Configurable maximum entries to limit item count
- * - Optional maximum size in bytes to limit memory usage
- * - Optional TTL (Time To Live) for cache entries
- * - Lazy cleanup of expired entries during cache operations
- * - Efficient LRU eviction policy
- * - Size-aware eviction when memory limits are reached
- */
-
 type CacheEntry<V> = {
   value: V;
   expires?: number;
@@ -187,6 +175,17 @@ function siftDownExpiry<K, V>(
   heap[index] = node;
 }
 
+/**
+ * TTL-aware LRU (Least Recently Used) Cache implementation
+ *
+ * Features:
+ * - Configurable maximum entries to limit item count
+ * - Optional maximum size in bytes to limit memory usage
+ * - Optional TTL (Time To Live) for cache entries
+ * - Lazy cleanup of expired entries during cache operations
+ * - Efficient LRU eviction policy
+ * - Size-aware eviction when memory limits are reached
+ */
 export class LRUCache<K, V> {
   private maxEntries: number;
   private maxSize?: number; // Optional maximum size in bytes

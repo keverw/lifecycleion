@@ -2,10 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import {
   assertNoBrowserRestrictedHeaders,
   describeRefusedHeader,
+  hasUnclosedQuotedString,
   isBrowserRestrictedHeader,
   materializeRequestHeaders,
   presentHeaderValue,
   requestHeaderPairs,
+  splitHeaderValues,
 } from './header-utils';
 import { errorText } from '../test-helpers/error-text';
 import { copyRequestHeaders } from './request-fields';
@@ -314,5 +316,38 @@ describe('Cookie joining', () => {
 
     expect(requestHeaderPairs(headers)).toEqual([['x-a', '1']]);
     expect(materializeRequestHeaders(headers)).toEqual({ 'x-a': '1' });
+  });
+});
+
+describe('splitHeaderValues', () => {
+  test.each([
+    ['a, b', ['a', 'b']],
+    ['a,,b', ['a', '', 'b']],
+    ['', ['']],
+    [' a ,\tb\t', ['a', 'b']],
+    ['"a,b", c', ['"a,b"', 'c']],
+    ['"a\\"b,c", d', ['"a\\"b,c"', 'd']],
+    [
+      'text/csv; delimiter=",", text/plain',
+      ['text/csv; delimiter=","', 'text/plain'],
+    ],
+    // An unclosed quote runs to the end of the input.
+    ['"a, b', ['"a, b']],
+  ])('splits %j as the Fetch standard does', (input, expected) => {
+    expect(splitHeaderValues(input)).toEqual(expected);
+  });
+});
+
+describe('hasUnclosedQuotedString', () => {
+  test.each([
+    ['', false],
+    ['"a"', false],
+    ['"a', true],
+    ['"a\\"', true],
+    ['"a\\\\"', false],
+    ['a\\"', true],
+    ['"a" "b', true],
+  ])('%j opens a quote it never closes: %p', (input, isUnclosed) => {
+    expect(hasUnclosedQuotedString(input)).toBe(isUnclosed);
   });
 });

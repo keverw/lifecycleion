@@ -19,6 +19,8 @@ import { inKeyOrder } from './internal/param-array-copy';
 import { isFormData, isMethodlessFormData } from './internal/form-entries';
 import {
   MAX_PARAM_DEPTH,
+  MAX_PARAM_ENTRIES,
+  PARAM_ENTRIES_EXCEEDED_MESSAGE,
   exceedsParamDepth,
   PARAM_DEPTH_EXCEEDED_MESSAGE,
   unreadableCollectionRefusal,
@@ -52,7 +54,7 @@ import type {
   RequestHeadersInput,
   AdapterResponse,
 } from './types';
-import { parseURL } from '../domain-utils/helpers';
+import { parseURL, urlOrigin } from '../domain-utils/helpers';
 
 /**
  * If `path` is an absolute HTTP(S) URL, returns its canonical `href` (normalized
@@ -198,6 +200,12 @@ function snapshotParamValue(
     throw new RangeError(PARAM_DEPTH_EXCEEDED_MESSAGE);
   }
 
+  // Counted per path, as `qs` writes a shared object once for each.
+  walk.entries += keys.length;
+  if (walk.entries > MAX_PARAM_ENTRIES) {
+    throw new RangeError(PARAM_ENTRIES_EXCEEDED_MESSAGE);
+  }
+
   walk.ancestors.add(value);
   const copy = (Array.isArray(value) ? [] : {}) as Record<string, unknown>;
   for (const key of keys) {
@@ -257,6 +265,8 @@ function qsBufferRead(
 interface ParamSnapshotWalk extends CollectionLookup {
   /** The objects the entry being copied is nested inside. */
   readonly ancestors: Set<object>;
+  /** The entries copied so far, which {@link MAX_PARAM_ENTRIES} bounds. */
+  entries: number;
 }
 
 /** `params` with its nested values snapshot (see {@link snapshotParamValue}). */
@@ -267,9 +277,14 @@ function snapshotParams(
     path: [],
     ancestors: new Set(),
     collectionReads: undefined,
+    entries: 0,
   };
   const snapshot: Record<string, unknown> = {};
   const keys = Object.keys(params);
+  walk.entries = keys.length;
+  if (walk.entries > MAX_PARAM_ENTRIES) {
+    throw new RangeError(PARAM_ENTRIES_EXCEEDED_MESSAGE);
+  }
 
   for (const key of keys) {
     walk.path.push(key);
@@ -303,13 +318,11 @@ function topLevelQueryKey(wirePair: string): string | undefined {
 
 /**
  * A `.params()` key as `qs` sends it: each lone surrogate as U+FFFD, so it is compared
- * with the path's keys as they decode.
+ * with the path's keys as they decode. In Unicode mode a pair is one code point, so the
+ * surrogate class matches only a lone one.
  */
 function wellFormedParamKey(key: string): string {
-  return key.replace(
-    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
-    '\uFFFD',
-  );
+  return key.replace(/[\uD800-\uDFFF]/gu, '\uFFFD');
 }
 
 /**
@@ -510,11 +523,12 @@ export function isCrossOrigin(
   toURL: string | URL,
 ): boolean {
   try {
-    const fromOrigin = (
-      typeof fromURL === 'string' ? parseURL(fromURL) : fromURL
-    ).origin;
-    const toOrigin = (typeof toURL === 'string' ? parseURL(toURL) : toURL)
-      .origin;
+    const fromOrigin = urlOrigin(
+      typeof fromURL === 'string' ? parseURL(fromURL) : fromURL,
+    );
+    const toOrigin = urlOrigin(
+      typeof toURL === 'string' ? parseURL(toURL) : toURL,
+    );
 
     return (
       fromOrigin === 'null' || toOrigin === 'null' || fromOrigin !== toOrigin
@@ -1852,8 +1866,18 @@ export function derivedRedirectFields(
   };
 }
 
+/**
+ * A `baseURL` is written `http://` or `https://`, with no whitespace at its end, and
+ * parses as one: the parser alone also reads a host from `http:a.test` and
+ * ` https://a.test`, which a request path is not read as a URL for (see
+ * {@link buildURL}), and trims `https://a.test `, whose space a joined path would keep.
+ */
 export function assertValidBaseURL(baseURL: string): void {
-  if (!isAbsoluteWebURL(baseURL)) {
+  if (
+    !/^https?:\/\//i.test(baseURL) ||
+    /\s$/.test(baseURL) ||
+    !isAbsoluteWebURL(baseURL)
+  ) {
     throw new Error(
       'HTTPClient baseURL must be an absolute http(s) URL (for example "https://api.example.com").',
     );

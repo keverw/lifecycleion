@@ -614,6 +614,41 @@ describe('deepClone', () => {
   });
 
   describe('Map objects', () => {
+    test.each(['Map', 'Set'] as const)(
+      'a %s is cloned up to the size it had when met, not the entries a getter adds during the walk',
+      (kind) => {
+        const collection: Map<unknown, unknown> | Set<unknown> =
+          kind === 'Map' ? new Map() : new Set();
+        const add = (value: number): void => {
+          if (collection instanceof Map) {
+            collection.set(value, value);
+          } else {
+            collection.add(value);
+          }
+        };
+        let added = 0;
+        const grower = {
+          get value(): number {
+            if (added < 5000) {
+              added++;
+              add(1000 + added);
+            }
+            return 1;
+          },
+        };
+        if (collection instanceof Map) {
+          collection.set('grower', grower);
+        } else {
+          collection.add(grower);
+        }
+
+        const clone = deepClone(collection);
+
+        expect(clone.size).toBe(1);
+        expect(added).toBe(1);
+      },
+    );
+
     test('should clone Map objects', () => {
       const original = new Map([
         ['key1', 'value1'],

@@ -26,6 +26,31 @@ function restrictedMembers(methods, message) {
   ].map((selector) => ({ selector, message }));
 }
 
+/**
+ * A regex lookbehind (`(?<=`, `(?<!`) fails to parse in Safari before 16.4, so a module
+ * holding one fails to load there: refused in shipped source, as a regex literal or as a
+ * `RegExp` built from a string.
+ */
+const NO_REGEX_LOOKBEHIND = [
+  'Literal[regex.pattern=/\\(\\?<[=!]/]',
+  "NewExpression[callee.name='RegExp'] > Literal.arguments:first-child[value=/\\(\\?<[=!]/]",
+  "CallExpression[callee.name='RegExp'] > Literal.arguments:first-child[value=/\\(\\?<[=!]/]",
+  "NewExpression[callee.name='RegExp'] > TemplateLiteral.arguments:first-child > TemplateElement[value.raw=/\\(\\?<[=!]/]",
+  "CallExpression[callee.name='RegExp'] > TemplateLiteral.arguments:first-child > TemplateElement[value.raw=/\\(\\?<[=!]/]",
+].map((selector) => ({
+  selector,
+  message:
+    'A regex lookbehind does not parse in Safari before 16.4, which then fails to load the module. Match without one.',
+}));
+
+/** Shipped source: tests and test support may use what the test runtime parses. */
+const SHIPPED_SOURCE_IGNORES = [
+  '**/*.test.ts',
+  '**/*.browser-script.ts',
+  '**/*test-utils.ts',
+  '**/test-helpers/**',
+];
+
 export default [
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
@@ -440,6 +465,13 @@ export default [
     },
   },
   {
+    files: ['src/**/*.ts'],
+    ignores: SHIPPED_SOURCE_IGNORES,
+    rules: {
+      'no-restricted-syntax': ['error', ...NO_REGEX_LOOKBEHIND],
+    },
+  },
+  {
     // Wire and config text in the HTTP client and domain utilities is read by ASCII and
     // HTTP rules, never the Unicode-aware built-ins: `toLowerCase` turns the Kelvin sign
     // into `k`, and `trim()` takes a no-break space (the last byte of a UTF-8 `à` read as
@@ -447,15 +479,11 @@ export default [
     // key (`x['trim']`), `.call` / `.apply`, an alias (assigned or destructured) and
     // `Reflect.apply` are caught too. Tests and test support are left alone.
     files: ['src/lib/http-client/**/*.ts', 'src/lib/domain-utils/**/*.ts'],
-    ignores: [
-      '**/*.test.ts',
-      '**/*.browser-script.ts',
-      '**/*test-utils.ts',
-      '**/test-helpers/**',
-    ],
+    ignores: SHIPPED_SOURCE_IGNORES,
     rules: {
       'no-restricted-syntax': [
         'error',
+        ...NO_REGEX_LOOKBEHIND,
         ...restrictedMembers(
           'trim|trimStart|trimEnd|trimLeft|trimRight',
           'Unicode-aware trim also takes a no-break space. Use trimHTTPWhitespace or trimSpacesAndTabs (src/lib/internal/ascii-text.ts), or isBlankText / hasWhitespaceEdge where any whitespace is meant.',
