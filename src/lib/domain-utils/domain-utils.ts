@@ -343,6 +343,7 @@ function readBareOrigin(origin: string): BareOrigin | undefined {
   // "https://example.com/" without broadening real paths.
   if (
     !url ||
+    hasBracketedNonAddress(text) ||
     url.username ||
     url.password ||
     (url.pathname && url.pathname !== '/') ||
@@ -353,6 +354,19 @@ function readBareOrigin(origin: string): BareOrigin | undefined {
   }
 
   return { text, url };
+}
+
+/**
+ * Whether `text`'s authority holds brackets around what is no IPv6 address. Bun's URL
+ * parser takes `[::1:]`, which Node's refuses, and such a host, its brackets dropped,
+ * would run into the port.
+ */
+function hasBracketedNonAddress(text: string): boolean {
+  const bracketMatch = extractAuthority(text, text.indexOf('://')).match(
+    /\[([^\]]+)\]/,
+  );
+
+  return bracketMatch !== null && !isIPv6(bracketMatch[1]);
 }
 
 /**

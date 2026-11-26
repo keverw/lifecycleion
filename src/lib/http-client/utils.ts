@@ -31,6 +31,7 @@ import {
   nonRetryableAdapterErrorFrom,
 } from './internal/adapter-error';
 import {
+  describeRefusedHeader,
   lowerCaseHeaderName,
   presentHeaderValue,
 } from './internal/header-utils';
@@ -1567,8 +1568,10 @@ export function normalizeAdapterResponseHeaders(
           : !isAdapterHeaderValue(item),
       )
     ) {
+      // Named only when the name is a token: an adapter that put a whole header line in
+      // the key (`Authorization: Bearer ...`) would otherwise write its credential here.
       throw new TypeError(
-        `HTTPClient adapter answered with a ${lower} header value that is not ${lower === 'set-cookie' ? 'a string' : 'a string or finite number'}`,
+        `HTTPClient adapter answered with ${describeRefusedHeader(lower, 'header')} whose value is not ${lower === 'set-cookie' ? 'a string' : 'a string or finite number'}`,
       );
     }
     const lines = value.map((item) => String(item));

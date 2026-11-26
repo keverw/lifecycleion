@@ -59,6 +59,7 @@ import {
   completeProgressEvent,
 } from '../internal/progress';
 import {
+  describeRefusedHeader,
   isBodilessContentLengthSent,
   lowerCaseHeaderName,
   materializeRequestHeaders,
@@ -1835,8 +1836,10 @@ function assertRouteHeaderValue(name: string, value: unknown): void {
         (isSetCookie ? typeof item !== 'string' : !isAdapterHeaderValue(item)),
     )
   ) {
+    // Named only when the name is a token: a route that put a whole header line in the
+    // key (`Authorization: Bearer ...`) would otherwise write its credential here.
     throw new TypeError(
-      `MockAdapter route returned a ${lowerName} header value that is not ${isSetCookie ? 'a string' : 'a string or finite number'}`,
+      `MockAdapter route returned ${describeRefusedHeader(lowerName, 'header')} whose value is not ${isSetCookie ? 'a string' : 'a string or finite number'}`,
     );
   }
 }

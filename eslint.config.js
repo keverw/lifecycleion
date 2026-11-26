@@ -32,7 +32,7 @@ export default [
   {
     ignores: [
       // Worktrees the Claude desktop app creates inside the repo, each a full checkout
-      '.claude/**',
+      '.claude/worktrees/**',
       // Build outputs
       '**/dist/**',
       '**/coverage/**',

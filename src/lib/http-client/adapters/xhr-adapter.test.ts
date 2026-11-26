@@ -2502,7 +2502,18 @@ describe('XHRAdapter', () => {
     ]);
   });
 
-  test('drops a set-cookie line joined from several cookies, keeping a date comma', async () => {
+  test.each([
+    {
+      name: 'is dropped when it may be several the XHR joined',
+      line: 'sid=abc; Path=/; HttpOnly, role=user; Path=/admin',
+      expected: undefined,
+    },
+    {
+      name: 'is kept when its comma is a date',
+      line: 'theme=dark; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
+      expected: ['theme=dark; Expires=Wed, 21 Oct 2037 07:28:00 GMT'],
+    },
+  ])('a lone set-cookie line $name', async ({ line, expected }) => {
     // An XHR outside a browser may join repeated `Set-Cookie`s with commas: such a line
     // cannot be split safely, and kept whole it would give `sid` the other's `Path`.
     const adapter = new XHRAdapter();
@@ -2514,16 +2525,37 @@ describe('XHRAdapter', () => {
 
     lastXHR.status = 200;
     lastXHR.response = textBody('ok');
+    lastXHR.getAllResponseHeadersResult = `set-cookie: ${line}\r\n`;
+    lastXHR.simulateLoad();
+
+    const response = await promise;
+
+    expect(response.headers['set-cookie'] as unknown).toEqual(expected);
+  });
+
+  test('keeps each set-cookie line whole when the XHR gives several', async () => {
+    // An XHR that gives each `Set-Cookie` a line of its own joined none of them, so a
+    // comma before another `name=value` is part of that one cookie.
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
     lastXHR.getAllResponseHeadersResult =
-      'set-cookie: sid=abc; Path=/; HttpOnly, role=user; Path=/admin\r\n' +
-      'set-cookie: theme=dark; Expires=Wed, 21 Oct 2037 07:28:00 GMT\r\n' +
+      'set-cookie: session={"id":"x","sig":"abcd=="}; Path=/; HttpOnly\r\n' +
+      'set-cookie: prefs=a,b=c\r\n' +
       'set-cookie: lang=en\r\n';
     lastXHR.simulateLoad();
 
     const response = await promise;
 
     expect(response.headers['set-cookie']).toEqual([
-      'theme=dark; Expires=Wed, 21 Oct 2037 07:28:00 GMT',
+      'session={"id":"x","sig":"abcd=="}; Path=/; HttpOnly',
+      'prefs=a,b=c',
       'lang=en',
     ]);
   });

@@ -41,6 +41,25 @@ describe('domain-utils', () => {
   });
 
   describe('isIPAddress', () => {
+    it('refuses an IPv6 form with a stray trailing colon on every runtime', () => {
+      // Bun's URL parser takes `::1:`, which Node's refuses: such text is no address.
+      for (const text of ['::1:', '[::1:]', '2001:db8::1:']) {
+        expect(isIPv6(text)).toBe(false);
+      }
+
+      expect(isIPv6('1::')).toBe(true);
+      expect(isIPv6('::')).toBe(true);
+      expect(parseHostHeader('[::1:]:8080')).toEqual({ domain: '', port: '' });
+      expect(matchesDomainList('::1:', ['::1'])).toBe(false);
+      expect(validateConfigEntry('[::1:]', 'domain').valid).toBe(false);
+      // As an origin's host too: without its brackets it would run into the port.
+      expect(normalizeOrigin('http://[::1:]:8080')).toBe('');
+      expect(matchesWildcardOrigin('http://[::1:]', '*')).toBe(false);
+      expect(matchesWildcardOrigin('http://[::1:]', 'http://*')).toBe(false);
+      expect(matchesOriginList('http://[::1:]', ['http://[::1]'])).toBe(false);
+      expect(normalizeOrigin('http://[::1]:8080')).toBe('http://[::1]:8080');
+    });
+
     it('should detect IPv4 addresses', () => {
       expect(isIPAddress('192.168.1.1')).toBe(true);
       expect(isIPAddress('127.0.0.1')).toBe(true);

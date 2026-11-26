@@ -4042,19 +4042,35 @@ describe('MockAdapter - a route handler that is no function', () => {
 
 describe("MockAdapter - a route's header value that no response carries", () => {
   test.each([
-    ['an object', { 'X-Bad': {} }, 'x-bad', 'a string or finite number'],
-    ['NaN', { 'x-bad': Number.NaN }, 'x-bad', 'a string or finite number'],
+    [
+      'an object',
+      { 'X-Bad': {} },
+      "header 'x-bad'",
+      'a string or finite number',
+    ],
+    [
+      'NaN',
+      { 'x-bad': Number.NaN },
+      "header 'x-bad'",
+      'a string or finite number',
+    ],
     [
       'an object in a list',
       { 'x-bad': ['ok', {}] },
-      'x-bad',
+      "header 'x-bad'",
       'a string or finite number',
     ],
     [
       'a number as a set-cookie line',
       { 'Set-Cookie': [1] },
-      'set-cookie',
+      "header 'set-cookie'",
       'a string',
+    ],
+    [
+      'an object under a name that is a whole header line',
+      { 'Authorization: Bearer abc123': {} },
+      'a header name',
+      'a string or finite number',
     ],
   ] as const)(
     '%s is refused as the route mistake, in the mock’s words',
@@ -4077,7 +4093,7 @@ describe("MockAdapter - a route's header value that no response carries", () => 
         )) as Error & Record<string, unknown>;
 
       expect(rejection.message).toBe(
-        `MockAdapter route returned a ${name} header value that is not ${expected}`,
+        `MockAdapter route returned ${name} whose value is not ${expected}`,
       );
       expect(rejection[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
       expect(runs).toBe(1);

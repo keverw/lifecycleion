@@ -1745,6 +1745,7 @@ function parseXHRResponseHeaders(
   // joined from repeats ends in `, ` when the last was empty, which trimming would turn
   // into a `,` that reads as part of the URL.
   let firstLocationLine: string | undefined;
+  const setCookies: string[] = [];
 
   if (!raw) {
     return result;
@@ -1775,25 +1776,12 @@ function parseXHRResponseHeaders(
     }
 
     if (key === 'set-cookie') {
-      // Each Set-Cookie directive arrives as its own line — collect into an
+      // Each Set-Cookie directive arrives as its own line — collected below into an
       // array so callers never need to split on commas (which are valid inside
       // cookie values). Guarded by the XHR spec in standard browsers, but kept
       // for correctness in legacy environments or platforms with non-standard
-      // XHR implementations. A line such an XHR joined from several is dropped, as
-      // FetchAdapter drops one (see `isAmbiguousSetCookieLine`).
-      if (isAmbiguousSetCookieLine(value)) {
-        continue;
-      }
-
-      const existing = result['set-cookie'];
-
-      if (existing === undefined) {
-        result['set-cookie'] = [value];
-      } else if (Array.isArray(existing)) {
-        existing.push(value);
-      } else {
-        result['set-cookie'] = [existing, value];
-      }
+      // XHR implementations.
+      setCookies.push(value);
     } else if (key === 'location') {
       // Kept below: lines of their own are repeats, and not joined.
       if (locations.length === 0) {
@@ -1829,6 +1817,17 @@ function parseXHRResponseHeaders(
         existing === undefined ? value : `${existing as string}, ${value}`,
       );
     }
+  }
+
+  // An XHR that gives `Set-Cookie` on lines of their own joins none of them, so each is
+  // one whole cookie, a comma before another `name=value` included. A lone line may be
+  // several such an XHR joined, and one that may be is dropped, as FetchAdapter drops
+  // one (see `isAmbiguousSetCookieLine`).
+  if (
+    setCookies.length > 1 ||
+    (setCookies.length === 1 && !isAmbiguousSetCookieLine(setCookies[0]))
+  ) {
+    result['set-cookie'] = setCookies;
   }
 
   // A `Location` on one line may be one the XHR joined from repeats (a browser joins

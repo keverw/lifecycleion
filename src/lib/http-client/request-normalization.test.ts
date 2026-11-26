@@ -3251,6 +3251,32 @@ test('a contentTypeHeaders entry with a partial wildcard or a list is refused', 
   }
 });
 
+test('a contentTypeHeaders entry whose type or subtype is not a token is refused, and token ones are accepted', () => {
+  // A valid media type is a token pair, so a pattern with any other character is no
+  // media type.
+  const client = new HTTPClient();
+  for (const pattern of [
+    'application/json:',
+    'text/pl@in',
+    'app(lication)/json',
+  ]) {
+    expect(() =>
+      client.addResponseObserver(() => {}, { contentTypeHeaders: [pattern] }),
+    ).toThrow(TypeError);
+  }
+
+  for (const pattern of [
+    'application/vnd.api+json',
+    'image/*',
+    '*/*',
+    'text/csv; delimiter=","',
+  ]) {
+    expect(() =>
+      client.addResponseObserver(() => {}, { contentTypeHeaders: [pattern] }),
+    ).not.toThrow();
+  }
+});
+
 test('response header keys that differ only in case are combined as a repeat', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/h', () => ({

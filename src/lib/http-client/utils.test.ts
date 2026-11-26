@@ -1102,6 +1102,31 @@ describe('extractFetchHeaders', () => {
 });
 
 describe('normalizeAdapterResponseHeaders', () => {
+  test('names a refused value by its header only when the name is a token', () => {
+    // A whole header line used as the key would put its credential in the message.
+    let message = '';
+    try {
+      normalizeAdapterResponseHeaders({
+        'Authorization: Bearer abc123': {},
+      } as unknown as Record<string, string>);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toBe(
+      'HTTPClient adapter answered with a header name whose value is not a string or finite number',
+    );
+    expect(message.toLowerCase()).not.toContain('bearer');
+    expect(message).not.toContain('abc123');
+    expect(() =>
+      normalizeAdapterResponseHeaders({
+        'x-count': {},
+      } as unknown as Record<string, string>),
+    ).toThrow(
+      "HTTPClient adapter answered with header 'x-count' whose value is not a string or finite number",
+    );
+  });
+
   test('lowercases keys', () => {
     expect(
       normalizeAdapterResponseHeaders({

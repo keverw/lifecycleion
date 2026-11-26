@@ -279,6 +279,20 @@ describe('CookieJar', () => {
       ).toBe(true);
     });
 
+    test('returns false for an IPv6 form with a stray trailing colon', () => {
+      // Bun's URL parser takes `::1:`; it is no address, so it scopes no cookie to `::1`.
+      expect(
+        jar.setCookie({
+          name: 'a',
+          value: '1',
+          domain: '[::1:]',
+          path: '/',
+          createdAt: Date.now(),
+        }),
+      ).toBe(false);
+      expect(jar.getAllCookies()).toEqual([]);
+    });
+
     test('bracketed and unbracketed IPv6 match the same URL host', () => {
       jar.setCookie({
         name: 'sid',

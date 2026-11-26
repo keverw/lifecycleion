@@ -1158,7 +1158,9 @@ export class BaseHTTPClient {
     // Or until it has been quiet for the longer of the request's timeout and twice the
     // upload stall grace, past `NodeAdapter`'s own watchdog on a live upload's pauses: a
     // custom adapter whose `requestBodySettled` never settles would otherwise leave one
-    // listener per request on a signal reused across them. Quiet is counted from the later
+    // listener per request on a signal reused across them. With the timeout disabled
+    // (`0`) that is the ten seconds alone: a custom adapter's upload quiet for longer
+    // stops hearing a caller's abort once that wait runs out. Quiet is counted from the later
     // of the upload's last progress and the last call here, so a slow answer does not use
     // the wait up before the caller has the response, nor do `final` observers that finish
     // within it. One still running when it runs out does not hold the listeners. That
@@ -5853,11 +5855,9 @@ export class BaseHTTPClient {
    * Released when the request settles rather than when the attempt does: an attempt's
    * signal stays in an adapter's hands after `send()` resolves - `NodeAdapter` listens on
    * it for the settle-deadline teardown of an early-ack upload - and the attempt loop has
-   * several exits, where the request has one. What the fallback gives up by that is only
-   * a cancel arriving *after* the request settled, from a `final` observer or once the
-   * response was handed back, which would no longer reach an upload still trailing on
-   * that attempt's socket; the adapter's own stall watchdog ends such an upload
-   * regardless.
+   * several exits, where the request has one. An upload still going out keeps them until
+   * it settles or has been quiet for the bound `releaseRequest` sets, so a cancel from a
+   * `final` observer, or once the response was handed back, still reaches it.
    */
   private _composeSignals(
     a: AbortSignal,

@@ -136,6 +136,12 @@ export function isIPv6(str: string): boolean {
     return false;
   }
 
+  // An address ends in a colon only as `::`. Bun's URL parser takes a stray one after a
+  // `::` form (`::1:`), which Node's and the WHATWG URL standard refuse.
+  if (cleaned.endsWith(':') && !cleaned.endsWith('::')) {
+    return false;
+  }
+
   try {
     new URL(`http://[${cleaned}]/`);
     return true;

@@ -831,7 +831,7 @@ All specified filter fields are ANDed together. Within each field, values are OR
 **Entries that can never match** are refused:
 
 - a `statusCodes` entry that is not `0` or an integer from 100 to 999;
-- a `contentTypeHeaders` entry that is not one media type, such as `json`, `application/*+json` or a comma list (a comma inside a quoted parameter value, as in `text/csv; delimiter=","`, is part of the one media type). `*` works only as a whole subtype (`image/*`) or as `*/*`, which matches any type;
+- a `contentTypeHeaders` entry that is not one media type, such as `json`, `application/*+json`, `application/json:` (a type or subtype that is not an HTTP token, which no valid media type has) or a comma list (a comma inside a quoted parameter value, as in `text/csv; delimiter=","`, is part of the one media type). `*` works only as a whole subtype (`image/*`) or as `*/*`, which matches any type;
 - a `hosts` entry with a scheme, path or port (`api.test:8080` - give the hostname alone), or with an empty label;
 - a `hosts` entry with whitespace at an end other than spaces, tabs, CRs and LFs (a no-break space picked up from pasted config: `'\u00A0*'` is not `*`);
 - a `hosts` wildcard mixed into a label (`*api.example.com`), a wildcard IP (`10.*.0.1`; only `*` alone matches an IP), or a wildcard over a Public Suffix List wildcard rule (`*.kawasaki.jp`, whose every label is itself a public suffix);
@@ -1813,7 +1813,7 @@ Compressed responses are handled as `fetch` handles them: NodeAdapter asks for c
 
 - Bun's `fetch` ignores bytes after a compressed stream.
 - Node's `fetch` returns what decoded from a body cut short, with a matching `Content-Length`, as a complete response: through FetchAdapter on Node a truncated gzip body is a success holding part of the text, where NodeAdapter, and FetchAdapter on Bun, fail it as a stream error. Use NodeAdapter where a cut-short compressed body must fail.
-- They can differ on a well-formed body with more than one coding too: Bun's `fetch` hands a stacked body (`br, gzip`) over undecoded, and Node's `fetch` one that lists `identity` beside a coding (`identity, gzip`). NodeAdapter decodes both.
+- They can differ on a well-formed body with more than one coding too: Bun's `fetch` hands a stacked body (`br, gzip`, `gzip, gzip`) over undecoded, and Node's `fetch` one that lists `identity` beside a coding (`identity, gzip`). FetchAdapter delivers such a body as it came, as a success, so a JSON one fails to parse (`isParseError`). NodeAdapter decodes both; use it on Bun where a server stacks codings.
 
 **A body that cannot be decoded** fails as a stream error with the response's status. Where what failed is the decoding rather than the transfer, the status still counts, as browsers treat it:
 
@@ -2032,7 +2032,7 @@ The adapter resolves the request URL to an absolute URL once, as the browser doe
 
 A body is read from `xhr.response`: an `ArrayBuffer`, or a copy of the bytes of a view over one (a `Uint8Array`, as happy-dom answers `responseType = 'arraybuffer'`, or a Node `Buffer`), from any realm. An XHR outside a browser that does not honor `responseType` and hands over a string, or has no `response` at all and holds the body in `responseText`, has it taken as UTF-8 bytes; one that hands over anything else fails as a `stream_response_error` with the real status, rather than reading as an empty answer.
 
-A browser hides `Set-Cookie` from XHR. An XHR outside a browser that shows it may join repeated ones onto one line with commas; a `Set-Cookie` line with a comma before another `name=value` cannot be split safely, so it is dropped, as `FetchAdapter` drops one from a `Headers` with no `getSetCookie`. A comma inside an `Expires` date is kept.
+A browser hides `Set-Cookie` from XHR. An XHR outside a browser that shows it may join repeated ones onto one line with commas. When it gives a single `Set-Cookie` line, one with a comma before another `name=value` cannot be split safely, so it is dropped, as `FetchAdapter` drops one from a `Headers` with no `getSetCookie`; a comma inside an `Expires` date is kept. When it gives several `Set-Cookie` lines, it joined none of them, so each line is kept whole as one cookie, commas included.
 
 Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, as the response headers arrive, the adapter compares `xhr.responseURL` to the absolute URL it opened (for an XHR outside a browser that reports no change of state, at its first progress event or at `load`). If a redirect is detected the request ends there - the page it led to is not read further - and the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`. Its download progress ends at `0` bytes, as no body is handed over - unless the request was cancelled or timed out first, which reports no completion, as for any download.
 

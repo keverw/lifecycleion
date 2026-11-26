@@ -10,6 +10,7 @@ import { isRealmRootPrototype } from './plain-record';
 import { isAdapterStatus } from './status-code';
 import { trimHTTPWhitespace } from '../../internal/ascii-text';
 import { hasUnclosedQuotedString, splitHeaderValues } from './header-utils';
+import { isHTTPToken } from './http-token';
 import { normalizeFilterMethods } from '../utils';
 import { readHostPattern } from '../../domain-utils/host-filter';
 import { validateHostFilterEntry } from '../../domain-utils/domain-utils';
@@ -72,12 +73,11 @@ function describeUnmatchableMediaTypePattern(
     splitHeaderValues(entry).length > 1 ||
     // An unclosed quote would swallow a list's later entries into the first.
     hasUnclosedQuotedString(entry) ||
-    // A quote belongs only in a parameter value, never the type or subtype.
-    mediaType.includes('"') ||
-    /\s/.test(mediaType) ||
-    slash <= 0 ||
-    subtype === '' ||
-    subtype.includes('/') ||
+    slash < 0 ||
+    // Each a token, as a valid media type's type and subtype are: a quote, a space, a
+    // second `/` or a `:` makes it no media type.
+    !isHTTPToken(type) ||
+    !isHTTPToken(subtype) ||
     // `*` only as a whole subtype (`image/*`) or as `*/*`.
     (subtype.includes('*') && subtype !== '*') ||
     (type.includes('*') && mediaType !== '*/*')
