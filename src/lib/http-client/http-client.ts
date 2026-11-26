@@ -959,7 +959,8 @@ export class BaseHTTPClient {
     // Wire up builder state
     callbacks.setState('sending');
 
-    // buildURL: relative path + baseURL, OR absolute http(s) / //host path unchanged.
+    // buildURL: relative path + baseURL, OR a `scheme://` or `//host` path unjoined (one
+    // that is no valid http(s) URL fails validation below).
     // For MockAdapter only, synthesize a deterministic absolute base URL when
     // no baseURL is configured so interceptors and observers do not depend on
     // ambient browser location state:

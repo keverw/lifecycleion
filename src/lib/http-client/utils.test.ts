@@ -9,6 +9,7 @@ import {
   extractFetchHeaders,
   extractHostname,
   firstJoinedLocation,
+  isAbsoluteWebURL,
   isBrowserEnvironment,
   matchesFilter,
   matchesFilterPhase,
@@ -156,6 +157,27 @@ describe('buildURL', () => {
     );
   });
 
+  test.each([
+    'http://u:p@[::1:]/x?token=1',
+    'http://host:99999/x',
+    'http://h:99999/../../../../../admin/delete?id=1',
+    'ftp://files.test/a',
+    'file:///etc/passwd',
+    'foo://bar/x',
+  ])(
+    'with a base, a scheme:// path that is no valid http(s) URL is left as written: %s',
+    (path) => {
+      const base = 'http://api.test/v1/public';
+      expect(buildURL(base, path)).toBe(path);
+      expect(
+        resolveAbsoluteURL(buildURL(base, path), base).startsWith(base),
+      ).toBe(false);
+      expect(
+        isAbsoluteWebURL(resolveAbsoluteURL(buildURL(base, path), base)),
+      ).toBe(false);
+    },
+  );
+
   test('adds no slash when there is no path to join', () => {
     expect(buildURL('https://api.test/v1', '')).toBe('https://api.test/v1');
     expect(buildURL('https://api.test/v1', '?page=2')).toBe(
@@ -263,9 +285,9 @@ describe('buildURL', () => {
     );
   });
 
-  test('non-http(s) schemes are still joined with base (ftp, etc.)', () => {
+  test('a non-http(s) scheme:// URL is not joined with base (ftp, etc.)', () => {
     expect(buildURL('https://api.example.com', 'ftp://files.test/x')).toBe(
-      'https://api.example.com/ftp://files.test/x',
+      'ftp://files.test/x',
     );
   });
 });

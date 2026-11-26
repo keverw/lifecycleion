@@ -3337,6 +3337,39 @@ describe('a URL whose bracketed host is no IPv6 address', () => {
   );
 });
 
+test.each([
+  ['node', 'http://u:p@[::1:]/x?token=1'],
+  ['node', 'http://host:99999/x'],
+  ['node', 'http://h:99999/../../../../../admin/delete?id=1'],
+  ['node', 'ftp://files.test/a'],
+  ['mock', 'http://h:99999/../../../../../admin/delete?id=1'],
+  ['mock', 'ftp://files.test/a'],
+] as const)(
+  'with a baseURL, a %s client refuses a scheme:// URL that is no valid http(s) URL, nothing sent: %s',
+  async (type, url) => {
+    const sent: string[] = [];
+    const adapter: HTTPAdapter = {
+      getType: () => type,
+      send: (request) => {
+        sent.push(request.requestURL);
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test/v1/public',
+      defaultHeaders: { authorization: 'Bearer base-token' },
+    });
+
+    const builder = client.get(url);
+    const response = await builder.send();
+
+    expect(response.status).toBe(0);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(sent).toEqual([]);
+  },
+);
+
 test('response header keys that differ only in case are combined as a repeat', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/h', () => ({

@@ -356,9 +356,10 @@ function topLevelKeyOf(key: string): string | undefined {
  * `baseURL: https://api.test`, `path: /v1/users` → `https://api.test/v1/users`. An empty
  * `path`, or one that is only a query or fragment, is added to `baseURL` as written.
  *
- * **Absolute / protocol-relative `path` (escape hatch)** — If `path` is a full
- * `http://` or `https://` URL, it is **not** prefixed with `baseURL` (after
- * normalization via `URL#href`). With no `baseURL` to stay on, the parser's slashless
+ * **Absolute / protocol-relative `path` (escape hatch)** — If `path` starts
+ * `scheme://`, it is **not** prefixed with `baseURL`: a valid `http://` or `https://`
+ * URL is normalized via `URL#href`, and any other is left as written, to be refused as
+ * a request URL. With no `baseURL` to stay on, the parser's slashless
  * spellings (`http:host/x`) are read as URLs too. The same applies to protocol-relative URLs
  * (`//cdn.example/x`): they are left for {@link resolveAbsoluteURL} to resolve
  * using the client `baseURL`’s scheme. Use this for one-off cross-origin calls,
@@ -378,15 +379,15 @@ export function buildURL(
 ): string {
   let url: string;
 
-  // With a base, an http(s) URL skips the join only if it starts `scheme://`: the parser
-  // also reads a host from `http:evil.test` and ` http://evil.test`, spellings that pass
-  // a caller's check for `://`, a leading `//` or a leading `http`.
-  const absoluteHref =
-    baseURL && !/^[a-z][a-z0-9+.-]*:\/\//i.test(path)
-      ? null
-      : tryAbsoluteWebHref(path);
+  // With a base, a URL skips the join only if it starts `scheme://`: the parser also
+  // reads a host from `http:evil.test` and ` http://evil.test`, spellings that pass a
+  // caller's check for `://`, a leading `//` or a leading `http`. One that starts
+  // `scheme://` is never joined, so one that is not a valid http(s) URL
+  // (`http://h:99999/x`, `ftp://files.test/a`) is refused as it is with no base, not
+  // sent to the base host with its text as a path.
+  const isWrittenAbsolute = /^[a-z][a-z0-9+.-]*:\/\//i.test(path);
 
-  if (baseURL && absoluteHref === null && !path.startsWith('//')) {
+  if (baseURL && !isWrittenAbsolute && !path.startsWith('//')) {
     if (path === '' || path.startsWith('?') || path.startsWith('#')) {
       // No path to join: the base as written, with no slash the caller did not ask for.
       url = `${baseURL}${path}`;
@@ -397,10 +398,8 @@ export function buildURL(
       const p = path.startsWith('/') ? path : `/${path}`;
       url = `${base}${p}`;
     }
-  } else if (absoluteHref !== null) {
-    url = absoluteHref;
   } else {
-    url = path;
+    url = tryAbsoluteWebHref(path) ?? path;
   }
 
   if (params && Object.keys(params).length > 0) {
