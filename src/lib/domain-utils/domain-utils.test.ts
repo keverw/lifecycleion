@@ -381,13 +381,51 @@ describe('domain-utils', () => {
       expect(normalizeOrigin('http://[0:0:0:0:0:0:0:1]')).toBe('http://[::1]');
     });
 
-    it('should handle trailing dots in origins', () => {
+    it('matches a trailing-dot origin only to an entry with the dot, as browsers read it', () => {
+      for (const matches of [matchesOriginList, matchesCORSCredentialsList]) {
+        expect(matches('https://example.com.', ['https://example.com'])).toBe(
+          false,
+        );
+        expect(matches('https://example.com', ['https://example.com.'])).toBe(
+          false,
+        );
+        expect(matches('https://example.com.', ['https://example.com.'])).toBe(
+          true,
+        );
+      }
+      expect(matchesOriginList('https://example.com.', ['example.com'])).toBe(
+        false,
+      );
+      expect(matchesOriginList('https://example.com.', ['example.com.'])).toBe(
+        true,
+      );
+      expect(matchesOriginList('https://example.com', ['example.com.'])).toBe(
+        false,
+      );
+      // A Unicode full stop is folded to `.` first, as the URL parser folds it.
+      for (const entry of ['example.com\u3002', 'example.com\uFF0E']) {
+        expect(matchesOriginList('https://example.com.', [entry])).toBe(true);
+        expect(matchesOriginList('https://example.com', [entry])).toBe(false);
+      }
+      // An IPv4 address's dot is dropped, as the URL parser drops it from a host.
+      for (const matches of [matchesOriginList, matchesCORSCredentialsList]) {
+        expect(matches('https://127.0.0.1', ['127.0.0.1.'])).toBe(true);
+        expect(matches('https://127.0.0.1', ['0x7f.0.0.1.'])).toBe(true);
+      }
+    });
+
+    it('keeps a trailing dot as part of the origin, as browsers read it', () => {
       expect(normalizeOrigin('https://example.com.')).toBe(
-        'https://example.com',
+        'https://example.com.',
+      );
+      expect(normalizeOrigin('HTTPS://Example.COM.:443')).toBe(
+        'https://example.com.',
       );
       expect(normalizeOrigin('http://api.example.com.:8080')).toBe(
-        'http://api.example.com:8080',
+        'http://api.example.com.:8080',
       );
+      // The URL parser reads an IPv4 address's dot as none.
+      expect(normalizeOrigin('http://127.0.0.1.')).toBe('http://127.0.0.1');
       expect(normalizeOrigin('https://example.com..')).toBe('');
       expect(normalizeOrigin('http://api.example.com..:8080')).toBe('');
     });
@@ -926,18 +964,37 @@ describe('domain-utils', () => {
         );
       });
 
-      it('should handle trailing dots in wildcard matching', () => {
+      it('matches a trailing-dot origin only with a trailing-dot pattern, as browsers read it', () => {
         expect(
           matchesWildcardOrigin(
             'https://api.example.com.',
             'https://*.example.com',
           ),
-        ).toBe(true);
+        ).toBe(false);
         expect(
           matchesWildcardOrigin(
             'https://api.example.com',
             'https://*.example.com.',
           ),
+        ).toBe(false);
+        expect(
+          matchesWildcardOrigin(
+            'https://api.example.com.',
+            'https://*.example.com.',
+          ),
+        ).toBe(true);
+        expect(
+          matchesWildcardOrigin('https://api.example.com.', '*.example.com.'),
+        ).toBe(true);
+        expect(
+          matchesWildcardOrigin('https://api.example.com.', '*.example.com'),
+        ).toBe(false);
+        // The global and protocol wildcards match any origin, a dotted one included.
+        expect(matchesWildcardOrigin('https://api.example.com.', '*')).toBe(
+          true,
+        );
+        expect(
+          matchesWildcardOrigin('https://api.example.com.', 'https://*'),
         ).toBe(true);
       });
 

@@ -288,7 +288,8 @@ function normalizeOriginHostname(protocol: string, hostname: string): string {
 
 /**
  * Normalize a bare origin for consistent comparison.
- * Returns the canonical origin form with a normalized hostname,
+ * Returns the canonical origin form with a normalized hostname (one trailing dot kept, as
+ * browsers keep it: `https://example.com.` is another origin than `https://example.com`),
  * lowercase scheme, no trailing slash, and every special scheme's default port removed
  * (`:443` for `https` and `wss`, `:80` for `http` and `ws`, `:21` for `ftp`).
  */
@@ -408,14 +409,25 @@ function canonicalOrigin({
     host = normalizedHostname;
   }
 
+  // A host's trailing dot is part of the origin, as browsers read it: `https://example.com.`
+  // is another origin than `https://example.com`. `normalizeDomain` drops it, so it is put
+  // back; `normalizeDomain` has already refused a repeated one, and the URL parser drops
+  // an IPv4 address's.
+  const trailingDot =
+    host === normalizedHostname &&
+    url.hostname.endsWith('.') &&
+    !normalizedHostname.endsWith('.')
+      ? '.'
+      : '';
+
   // An empty `url.port` is the scheme's default: the parser drops every special
   // scheme's (`wss://x.com:443` reads as `wss://x.com`), so it stays off.
   const port = url.port ? `:${url.port}` : '';
 
   // Explicitly use lowercase protocol for consistency
   return {
-    origin: `${protocolLower}//${host}${port}`,
-    hostname: normalizedHostname,
+    origin: `${protocolLower}//${host}${trailingDot}${port}`,
+    hostname: `${normalizedHostname}${trailingDot}`,
   };
 }
 
@@ -657,12 +669,15 @@ function matchesWildcardPatternIn(
     }
 
     // Check domain pattern using direct domain matching
-    return matchesNormalizedWildcardIn(
-      normalizedHostname,
-      domainPattern,
-      isCached,
-      host.isIP,
-      host.readSuffix,
+    return (
+      hasSameTrailingDot(originURL, domainPattern) &&
+      matchesNormalizedWildcardIn(
+        normalizedHostname,
+        domainPattern,
+        isCached,
+        host.isIP,
+        host.readSuffix,
+      )
     );
   }
 
@@ -674,16 +689,32 @@ function matchesWildcardPatternIn(
       return false;
     }
 
-    return matchesNormalizedWildcardIn(
-      normalizedHostname,
-      normalizedPattern,
-      isCached,
-      host.isIP,
-      host.readSuffix,
+    return (
+      hasSameTrailingDot(originURL, normalizedPattern) &&
+      matchesNormalizedWildcardIn(
+        normalizedHostname,
+        normalizedPattern,
+        isCached,
+        host.isIP,
+        host.readSuffix,
+      )
     );
   }
 
   return false;
+}
+
+/**
+ * Whether an origin's host and a host wildcard pattern agree on a trailing dot: the dot is
+ * part of the origin, as browsers read it (see `canonicalOrigin`), so `*.example.com`
+ * matches `https://a.example.com` and `*.example.com.` matches `https://a.example.com.`,
+ * and neither the other.
+ */
+function hasSameTrailingDot(originURL: URL, pattern: string): boolean {
+  return (
+    originURL.hostname.endsWith('.') ===
+    trimHTTPWhitespace(pattern).endsWith('.')
+  );
 }
 
 /**
@@ -1841,10 +1872,24 @@ function readExactOriginEntry(allowed: string): ExactOriginEntry {
 
   if (!allowed.includes('://')) {
     const hostname = normalizeDomain(allowed);
+    // Kept, as an origin's host keeps it (see `canonicalOrigin`): `example.com.` - or
+    // `example.com。`, its dot folded as the parser folds it - matches
+    // `https://example.com.` and not `https://example.com`. Not for an IP address, whose
+    // dot the URL parser drops from an origin's host.
+    const trimmed = readTrimmedEntry(allowed);
+    const trailingDot =
+      hostname !== '' &&
+      !isIPAddress(hostname) &&
+      trimmed !== undefined &&
+      toAsciiDots(trimmed).endsWith('.')
+        ? '.'
+        : '';
 
     return {
       kind: 'domain',
-      hostname: isAllowedExactHostname(hostname) ? hostname : '',
+      hostname: isAllowedExactHostname(hostname)
+        ? `${hostname}${trailingDot}`
+        : '',
     };
   }
 
@@ -1855,7 +1900,8 @@ function readExactOriginEntry(allowed: string): ExactOriginEntry {
   // (`chrome-extension://<id>`).
   const isMatchable =
     parsed !== null &&
-    (parsed.isOpaqueHost || isAllowedExactHostname(parsed.normalizedHostname));
+    (parsed.isOpaqueHost ||
+      isAllowedExactHostname(withoutTrailingDot(parsed.normalizedHostname)));
 
   return { kind: 'origin', origin: isMatchable ? parsed.normalizedOrigin : '' };
 }
@@ -1901,7 +1947,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
   const trimmed = toAsciiDots(trimHTTPWhitespace(pattern));
 
   function isValidCredentialWildcardHost(written: string): boolean {
-    // One trailing dot dropped, as the other matchers drop it: its empty last label
+    // One trailing dot dropped for this check only (the matchers compare it): its empty last label
     // would refuse `https://*.example.com.`, which `validateConfigEntry` and
     // `matchesOriginList` both accept.
     // Leading and trailing whitespace dropped, as the other matchers drop it: `https://

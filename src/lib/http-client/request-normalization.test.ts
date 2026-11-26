@@ -8604,9 +8604,18 @@ test('MockAdapter drops a path-only URL fragment and a 1xx body', async () => {
 });
 
 test('credentials-list trailing-dot wildcards and whitespace in origin patterns', () => {
+  // The dot is part of the origin, as browsers read it: a dotted pattern matches only a
+  // dotted origin.
   expect(
     matchesCORSCredentialsList(
       'https://a.example.com',
+      ['https://*.example.com.'],
+      { allowWildcardSubdomains: true },
+    ),
+  ).toBe(false);
+  expect(
+    matchesCORSCredentialsList(
+      'https://a.example.com.',
       ['https://*.example.com.'],
       { allowWildcardSubdomains: true },
     ),
