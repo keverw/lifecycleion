@@ -11466,7 +11466,9 @@ describe('HTTPClient — phase-aware interceptors', () => {
     expect(res.status).toBe(0);
     expect(res.isFailed).toBe(true);
     expect(builder.error?.code).toBe('request_setup_error');
-    expect(builder.error?.cause?.message).toMatch(/could not be resolved/i);
+    expect(builder.error?.cause?.message).toBe(
+      '[HTTPClient] Request URL is not a valid absolute http(s) URL.',
+    );
   });
 
   test('MockAdapter interceptor rejects path-only requestURL rewrites without baseURL', async () => {

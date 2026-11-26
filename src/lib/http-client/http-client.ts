@@ -1296,10 +1296,14 @@ export class BaseHTTPClient {
         // Validate the resolved URL is a proper http(s) URL. Protocol-relative
         // //host paths without a baseURL to supply the scheme stay unresolved and
         // must fail here as a request_setup_error rather than reaching the adapter.
+        // One written `scheme://` is no path a baseURL could resolve, so its refusal
+        // names the URL itself (an invalid port or host, another scheme), not a baseURL.
         if (!isAbsoluteWebURL(url)) {
           throw new Error(
-            `[HTTPClient] Request URL could not be resolved to an absolute http(s) URL. ` +
-              `Set a baseURL with an http(s) scheme or pass an absolute URL.`,
+            /^[a-z][a-z0-9+.-]*:\/\//i.test(url)
+              ? `[HTTPClient] Request URL is not a valid absolute http(s) URL.`
+              : `[HTTPClient] Request URL could not be resolved to an absolute http(s) URL. ` +
+                  `Set a baseURL with an http(s) scheme or pass an absolute URL.`,
           );
         }
 

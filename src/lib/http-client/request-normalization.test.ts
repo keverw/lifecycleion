@@ -3366,9 +3366,36 @@ test.each([
 
     expect(response.status).toBe(0);
     expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.cause?.message).toBe(
+      '[HTTPClient] Request URL is not a valid absolute http(s) URL.',
+    );
     expect(sent).toEqual([]);
   },
 );
+
+test('a relative URL with no baseURL to resolve it is refused with a baseURL hint', async () => {
+  const sent: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sent.push(request.requestURL);
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter });
+
+  for (const url of ['/v1/users', '//cdn.test/x']) {
+    const builder = client.get(url);
+    await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.cause?.message).toContain(
+      'Set a baseURL with an http(s) scheme or pass an absolute URL.',
+    );
+  }
+
+  expect(sent).toEqual([]);
+});
 
 test('response header keys that differ only in case are combined as a repeat', async () => {
   const adapter = new MockAdapter();
