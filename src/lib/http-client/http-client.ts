@@ -210,6 +210,7 @@ import {
 } from '../internal/adopt-promise';
 import { attachIntrinsicReactions } from '../internal/promise-reactions';
 import { isObjectLike } from '../internal/is-object-like';
+import { parseURL } from '../domain-utils/helpers';
 
 type RemoveFn = () => void;
 
@@ -2204,7 +2205,7 @@ export class BaseHTTPClient {
               // the rest, and the response reports the target in full.
               let locationScheme: string | undefined;
               try {
-                locationScheme = new URL(redirectInterceptURL).protocol;
+                locationScheme = parseURL(redirectInterceptURL).protocol;
               } catch {
                 // Not a URL on its own: said so, without quoting it.
               }
@@ -7673,8 +7674,8 @@ function exactHTTPSUpgradeOf(
   interceptedURL: string,
 ): URL | undefined {
   try {
-    const hop = new URL(hopURL);
-    const intercepted = new URL(interceptedURL);
+    const hop = parseURL(hopURL);
+    const intercepted = parseURL(interceptedURL);
 
     if (
       hop.protocol !== 'http:' ||

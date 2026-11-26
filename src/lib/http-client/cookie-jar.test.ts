@@ -314,6 +314,12 @@ describe('CookieJar', () => {
         expect(jar.getCookieHeaderString(url)).toBe('');
       }
 
+      // A JavaScript caller's `String` object is read as its text.
+      expect(
+        // eslint-disable-next-line unicorn/new-for-builtins
+        jar.getCookiesFor(new String('http://[::1:]/') as unknown as string),
+      ).toEqual([]);
+
       jar.parseSetCookieHeader('planted=1; Path=/', 'http://[::1:]/');
       expect(jar.getAllCookies().map((cookie) => cookie.name)).toEqual(['sid']);
       expect(

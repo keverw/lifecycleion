@@ -11,7 +11,7 @@ import {
   HOST_TO_ASCII_OPTIONS,
   canonicalizeBracketedIPv6Content,
   checkDNSLength,
-  hasBracketedNonAddressHost,
+  parseURL,
   isIPv4,
   isIPv6,
   toAsciiDots,
@@ -1484,13 +1484,8 @@ export class CookieJar {
 
     let requestScheme: string;
 
-    // A bracketed host that is no address is no host's (see `hasBracketedNonAddressHost`).
-    if (hasBracketedNonAddressHost(url)) {
-      return [];
-    }
-
     try {
-      const parsed = new URL(url);
+      const parsed = parseURL(url);
       hostname = parsed.hostname;
       pathname = parsed.pathname;
       // RFC 6265 §5.4 — Secure cookies must not be sent on non-secure requests.
@@ -1672,7 +1667,7 @@ export class CookieJar {
       // URL parser reads it as the address, so no request host is ever that string.
       return ascii &&
         checkDNSLength(ascii) &&
-        new URL(`http://${ascii}/`).hostname === ascii
+        parseURL(`http://${ascii}/`).hostname === ascii
         ? ascii
         : '';
     } catch {
@@ -2023,16 +2018,10 @@ export class CookieJar {
       return;
     }
 
-    // A bracketed host that is no address sets no cookie (see
-    // `hasBracketedNonAddressHost`).
-    if (hasBracketedNonAddressHost(url)) {
-      return;
-    }
-
     let address: URL;
 
     try {
-      address = new URL(url);
+      address = parseURL(url);
     } catch {
       return;
     }

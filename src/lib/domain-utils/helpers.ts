@@ -151,24 +151,69 @@ export function isIPv6(str: string): boolean {
   }
 }
 
+/** The special schemes other than `file`: their host follows any run of slashes. */
+const SPECIAL_HOST_SCHEMES: ReadonlySet<string> = new Set([
+  'ftp',
+  'http',
+  'https',
+  'ws',
+  'wss',
+]);
+
+/** A URL's scheme, lowercased, and the text after its colon; `undefined` for none. */
+function readScheme(text: string): { name: string; rest: string } | undefined {
+  const scheme = /^([a-z][a-z\d+\-.]*):/i.exec(text);
+
+  return scheme === null
+    ? undefined
+    : { name: asciiLowercase(scheme[1]), rest: text.slice(scheme[0].length) };
+}
+
 /**
- * Whether a URL's text puts brackets around what is no IPv6 address as its host. Bun's
- * URL parser takes `http://[::1:]/`, which the URL standard and Node's refuse, and reads
- * it as `[::1]`; so this is asked of the text before it is parsed. The authority is found
- * as the parser finds it for a special scheme (`http`, `https`, `ws`, `wss`): past the
- * scheme and any slashes (or backslashes) after it, up to the first `/`, `\`, `?` or `#`,
- * its host past any userinfo.
+ * The authority `text` gives, found as the URL standard's parser finds one, or
+ * `undefined` when it gives none (a path, query or fragment):
+ * - a special scheme but `file` (`http`, `https`, `ws`, `wss`, `ftp`): past the scheme
+ *   and any slashes or backslashes after it - or, relative to a base of the same scheme,
+ *   only when two of them follow, `http:x` and `http:/x` being paths on it - up to the
+ *   first `/`, `\`, `?` or `#`;
+ * - `file`: past exactly two slashes or backslashes, up to the first of those;
+ * - any other scheme: past `//`, up to the first `/`, `?` or `#`.
+ *
+ * Text with no scheme gives one only relative to `baseScheme`'s URL, by that scheme's
+ * rule, after its slashes.
  */
-export function hasBracketedNonAddressHost(url: string): boolean {
-  // A `URL` a JavaScript caller passed was parsed already, its host rewritten.
-  if (typeof url !== 'string') {
-    return false;
+function urlAuthority(
+  text: string,
+  baseScheme: string | undefined,
+): string | undefined {
+  const scheme = readScheme(text);
+  const name = scheme?.name ?? baseScheme;
+  if (name === undefined) {
+    return undefined;
   }
 
-  // Tabs and newlines are removed anywhere, and C0 controls and spaces at the ends, as
-  // the parser removes them.
-  const text = trimWhere(url.replace(/[\t\n\r]/g, ''), (code) => code <= 0x20);
-  const authority = /^[a-z][a-z\d+\-.]*:[/\\]*([^/\\?#]*)/i.exec(text)?.[1];
+  const rest = scheme?.rest ?? text;
+  // Relative text is a network-path reference only past two slashes, as is a special
+  // scheme's text past its colon relative to a base of that scheme.
+  const doesNeedTwoSlashes = scheme === undefined || name === baseScheme;
+
+  if (SPECIAL_HOST_SCHEMES.has(name)) {
+    if (doesNeedTwoSlashes && !/^[/\\]{2}/.test(rest)) {
+      return undefined;
+    }
+
+    return /^[/\\]*([^/\\?#]*)/.exec(rest)?.[1];
+  }
+
+  if (name === 'file') {
+    return /^[/\\]{2}([^/\\?#]*)/.exec(rest)?.[1];
+  }
+
+  return /^\/\/([^/?#]*)/.exec(rest)?.[1];
+}
+
+/** Whether `authority`'s host, past any userinfo, puts brackets around no IPv6 address. */
+function hasBracketedNonAddress(authority: string | undefined): boolean {
   if (authority === undefined) {
     return false;
   }
@@ -179,6 +224,59 @@ export function hasBracketedNonAddressHost(url: string): boolean {
   const close = open === -1 ? -1 : host.indexOf(']', open);
 
   return close !== -1 && !isIPv6(host.slice(open + 1, close));
+}
+
+/** `text` as the URL parser reads it: tabs and newlines removed, C0 controls and spaces trimmed. */
+function urlParserText(text: string): string {
+  return trimWhere(text.replace(/[\t\n\r]/g, ''), (code) => code <= 0x20);
+}
+
+/**
+ * `new URL(input, base)`, held to the URL standard where a runtime's parser is looser:
+ * a host in brackets that is no IPv6 address (`http://[::1:]/`, `foo://[::1:]`) is
+ * refused, as the standard and Node's parser refuse it, where Bun's reads it as `[::1]` -
+ * and a request there would go to `[::1]` on Bun and fail on Node. Refused with the
+ * `TypeError` the parser throws for any URL it cannot read (`Invalid URL`,
+ * `ERR_INVALID_URL`), so every caller's handling of an unreadable URL applies. Asked of
+ * the text, before it is parsed: the parsed URL no longer shows it. A `URL` passed in was
+ * parsed already, and is taken as it is; anything else is read as its text once, as the
+ * parser would read it.
+ */
+export function parseURL(input: string | URL, base?: string | URL): URL {
+  const inputValue = input instanceof URL ? input : String(input);
+  let baseValue: string | URL | undefined;
+  let baseScheme: string | undefined;
+
+  if (base instanceof URL) {
+    baseValue = base;
+    baseScheme = asciiLowercase(base.protocol.slice(0, -1));
+  } else if (base !== undefined) {
+    baseValue = String(base);
+    const baseText = urlParserText(baseValue);
+    if (hasBracketedNonAddress(urlAuthority(baseText, undefined))) {
+      throw invalidURLError();
+    }
+
+    baseScheme = readScheme(baseText)?.name;
+  }
+
+  if (
+    typeof inputValue === 'string' &&
+    hasBracketedNonAddress(urlAuthority(urlParserText(inputValue), baseScheme))
+  ) {
+    throw invalidURLError();
+  }
+
+  return baseValue === undefined
+    ? new URL(inputValue)
+    : new URL(inputValue, baseValue);
+}
+
+/** The error the URL parser throws for a URL it cannot read, without the input it names. */
+function invalidURLError(): TypeError {
+  return Object.assign(new TypeError('Invalid URL'), {
+    code: 'ERR_INVALID_URL',
+  });
 }
 
 /**
@@ -321,7 +419,7 @@ export function canonicalizeBracketedIPv6Content(content: string): string {
   }
 
   try {
-    const url = new URL(`http://[${content}]/`);
+    const url = parseURL(`http://[${content}]/`);
     return url.hostname.replace(/^\[|\]$/g, '');
   } catch {
     // Callers normally validate before canonicalizing; keep this helper

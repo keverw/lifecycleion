@@ -52,6 +52,7 @@ import type {
   RequestHeadersInput,
   AdapterResponse,
 } from './types';
+import { parseURL } from '../domain-utils/helpers';
 
 /**
  * If `path` is an absolute HTTP(S) URL, returns its canonical `href` (normalized
@@ -67,7 +68,7 @@ function tryAbsoluteWebHref(path: string): string | null {
   }
 
   try {
-    const u = new URL(path);
+    const u = parseURL(path);
     if (u.protocol === 'http:' || u.protocol === 'https:') {
       return u.href;
     }
@@ -481,7 +482,7 @@ export function resolveAbsoluteURL(url: string, baseURL?: string): string {
   }
 
   try {
-    return new URL(url).href;
+    return parseURL(url).href;
   } catch {
     // Not a standalone absolute URL
   }
@@ -489,7 +490,7 @@ export function resolveAbsoluteURL(url: string, baseURL?: string): string {
   if (baseURL) {
     try {
       const base = baseURL.endsWith('/') ? baseURL : `${baseURL}/`;
-      return new URL(url, base).href;
+      return parseURL(url, base).href;
     } catch {
       // fall through
     }
@@ -511,9 +512,9 @@ export function isCrossOrigin(
 ): boolean {
   try {
     const fromOrigin = (
-      typeof fromURL === 'string' ? new URL(fromURL) : fromURL
+      typeof fromURL === 'string' ? parseURL(fromURL) : fromURL
     ).origin;
-    const toOrigin = (typeof toURL === 'string' ? new URL(toURL) : toURL)
+    const toOrigin = (typeof toURL === 'string' ? parseURL(toURL) : toURL)
       .origin;
 
     return (
@@ -543,7 +544,7 @@ export function isCrossOrigin(
  */
 export function stripURLCredentials(url: string): string {
   try {
-    const parsed = new URL(url);
+    const parsed = parseURL(url);
 
     if (!parsed.username && !parsed.password) {
       return url;
@@ -593,7 +594,7 @@ function withoutTextualUserinfo(url: string): string {
   const cut = prefix + host.slice(at) + text.slice(whole.length);
 
   try {
-    new URL(cut);
+    parseURL(cut);
     return url;
   } catch {
     return cut;
@@ -637,7 +638,7 @@ export function stripCrossOriginURLCredentials(
   let initial: URL;
 
   try {
-    initial = new URL(initialURL);
+    initial = parseURL(initialURL);
   } catch {
     // The initial origin cannot be trusted. An absolute URL can be handled by the
     // ordinary helper; a network-path reference needs a base merely to expose its
@@ -645,14 +646,17 @@ export function stripCrossOriginURLCredentials(
     // (`\\host`, `/\host`, a leading space or tab), which a `startsWith('//')` check
     // would let through with their credentials.
     try {
-      new URL(requestURL);
+      parseURL(requestURL);
       return stripURLCredentials(requestURL);
     } catch {
       // Not absolute: resolved against a placeholder below.
     }
 
     try {
-      const target = new URL(requestURL, 'http://credential-sanitizer.invalid');
+      const target = parseURL(
+        requestURL,
+        'http://credential-sanitizer.invalid',
+      );
 
       if (!target.username && !target.password) {
         return requestURL;
@@ -660,7 +664,9 @@ export function stripCrossOriginURLCredentials(
 
       return withoutUserinfo(target, true);
     } catch {
-      return requestURL;
+      // Unreadable even so: its userinfo is cut from the text, as an unreadable
+      // absolute URL's is.
+      return withoutTextualUserinfo(requestURL);
     }
   }
 
@@ -671,9 +677,9 @@ export function stripCrossOriginURLCredentials(
     // against the page (see `resolveBrowserRequestURL`).
     let target: URL;
     try {
-      target = new URL(requestURL);
+      target = parseURL(requestURL);
     } catch {
-      target = new URL(requestURL, initial);
+      target = parseURL(requestURL, initial);
     }
 
     // The client's cross-origin rule rather than comparing `origin`s: every opaque origin
@@ -739,14 +745,14 @@ export function resolveBrowserRequestURL(url: string): string | undefined {
 
   if (base !== undefined) {
     try {
-      return new URL(url, base).href;
+      return parseURL(url, base).href;
     } catch {
       // A base that is no URL itself: the URL is read on its own below.
     }
   }
 
   try {
-    return new URL(url).href;
+    return parseURL(url).href;
   } catch {
     return undefined;
   }
@@ -780,7 +786,7 @@ export function resolveBrowserInitialURL(
   const base = getBrowserResolutionBase();
 
   try {
-    const alone = new URL(initialURL).href;
+    const alone = parseURL(initialURL).href;
 
     if (base === undefined || isReadAloneAgainst(initialURL, base, alone)) {
       return alone;
@@ -794,7 +800,7 @@ export function resolveBrowserInitialURL(
   }
 
   try {
-    return new URL(initialURL, base).href;
+    return parseURL(initialURL, base).href;
   } catch {
     return null;
   }
@@ -806,7 +812,7 @@ export function resolveBrowserInitialURL(
  */
 function isReadAloneAgainst(url: string, base: string, alone: string): boolean {
   try {
-    return new URL(url, base).href === alone;
+    return parseURL(url, base).href === alone;
   } catch {
     return true;
   }
@@ -1715,8 +1721,8 @@ export function resolveRedirectLocation(
   location: string,
   base: string | URL | undefined,
 ): URL {
-  const baseURL = typeof base === 'string' ? new URL(base) : base;
-  const target = new URL(location, baseURL);
+  const baseURL = typeof base === 'string' ? parseURL(base) : base;
+  const target = parseURL(location, baseURL);
   const baseHref = baseURL?.href ?? '';
   const fragmentAt = baseHref.indexOf('#');
 
@@ -1751,7 +1757,7 @@ export function detectedRedirectTarget(
 ): string | undefined {
   let base: URL | undefined;
   try {
-    base = new URL(requestURL);
+    base = parseURL(requestURL);
     base.username = '';
     base.password = '';
   } catch {
@@ -1785,7 +1791,7 @@ export function reportedRedirectTarget(
   const reported = stripCrossOriginURLCredentials(targetURL, requestURL);
 
   try {
-    const request = new URL(requestURL);
+    const request = parseURL(requestURL);
     const { username, password } = request;
     // A relative target is resolved against the request URL without its userinfo, so
     // only userinfo written into the target itself is found on it.
@@ -1793,9 +1799,9 @@ export function reportedRedirectTarget(
     request.password = '';
     let target: URL;
     try {
-      target = new URL(reported);
+      target = parseURL(reported);
     } catch {
-      target = new URL(reported, request);
+      target = parseURL(reported, request);
     }
 
     if (
@@ -1976,7 +1982,7 @@ export function isRequestBodyBytes(body: unknown): body is Uint8Array {
  */
 export function extractHostname(url: string): string {
   try {
-    return new URL(url).hostname;
+    return parseURL(url).hostname;
   } catch {
     return '';
   }

@@ -79,6 +79,7 @@ import {
   stripURLCredentials,
 } from '../utils';
 import { markBuiltInNetworkAdapter } from '../internal/built-in-adapter';
+import { parseURL } from '../../domain-utils/helpers';
 
 /**
  * XHR-based adapter for environments that expose `XMLHttpRequest`. Primary
@@ -1881,7 +1882,7 @@ function compareResponseURL(
   normalizedResponse.hash = '';
   const responseHref = stripURLCredentials(normalizedResponse.href);
 
-  const request = new URL(dispatchedURL);
+  const request = parseURL(dispatchedURL);
   // Taken from the serialized URL, not `hash`, which reads `''` for an empty fragment
   // (`/a#`) as for none: a `Location` inherits an empty one too, as Fetch has it.
   const fragmentIndex = request.href.indexOf('#');

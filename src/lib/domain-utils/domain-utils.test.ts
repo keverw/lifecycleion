@@ -23,7 +23,83 @@ import {
   compileWildcardPattern,
   matchesWildcardLabels,
   normalizeWildcardPattern,
+  parseURL,
 } from './helpers';
+
+describe('parseURL', () => {
+  // Bun's URL parser takes a bracketed host that is no IPv6 address and reads it as
+  // `[::1]`; the URL standard and Node's refuse it, and so does this.
+  test.each([
+    ['an absolute URL', 'http://[::1:]/x', undefined],
+    [
+      'an uppercase scheme with a port',
+      'HTTPS://[2001:db8::1:]:8443/',
+      undefined,
+    ],
+    ['no slashes after the scheme', 'http:[::1:]/x', undefined],
+    ['backslashes and userinfo', 'http:\\\\u@[::1:]/x', undefined],
+    ['a tab inside', 'http://[::\t1:]/', undefined],
+    ['a base with such a host', '/x', 'http://[::1:]/'],
+    ['a scheme-relative URL', '//[::1:]/x', 'http://a.test/'],
+    ['another scheme than the base', 'ws://[::1:]/', 'http://a.test/'],
+    ['a scheme that is not special', 'foo://u@[::1:]:8/x', undefined],
+    ['a file URL', 'file://[::1:]/x', undefined],
+    ['a file URL with backslashes', 'file:\\\\[::1:]/x', undefined],
+    ['a host relative to a file base', '//[::1:]/x', 'file:///x'],
+    ['a host relative to another scheme', '//[::1:]/x', 'foo://a/b'],
+    ['a base of another scheme with such a host', '/x', 'foo://[::1:]/'],
+  ])('refuses %s as the parser refuses a URL', (_label, input, base) => {
+    let caught: unknown;
+    try {
+      parseURL(input, base);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(TypeError);
+    expect((caught as TypeError).message).toBe('Invalid URL');
+    expect((caught as { code?: string }).code).toBe('ERR_INVALID_URL');
+  });
+
+  test.each([
+    ['http://[::1]/x', undefined, 'http://[::1]/x'],
+    ['http://[1::]:8/', undefined, 'http://[1::]:8/'],
+    ['http://[::ffff:1.2.3.4]/', undefined, 'http://[::ffff:102:304]/'],
+    ['http://[a]@example.com/', undefined, 'http://%5Ba%5D@example.com/'],
+    [
+      'http://example.com/[::1:]?[::1:]',
+      undefined,
+      'http://example.com/[::1:]?[::1:]',
+    ],
+    // The same scheme as the base with fewer than two slashes is a path on it.
+    ['http:[::1:]', 'http://a.test/dir/', 'http://a.test/dir/[::1:]'],
+    ['/x', 'http://[::1]/', 'http://[::1]/x'],
+    ['mailto:[::1:]', undefined, 'mailto:[::1:]'],
+    // Paths, not hosts: no authority is read from them.
+    ['foo:/[::1:]', undefined, 'foo:/[::1:]'],
+    ['file:///[::1:]', undefined, 'file:///[::1:]'],
+    ['file:[::1:]', undefined, 'file:///[::1:]'],
+  ])('reads %s as the URL standard reads it', (input, base, href) => {
+    expect(parseURL(input, base).href).toBe(href);
+  });
+
+  test('reads a value that is neither a string nor a URL as its text', () => {
+    expect(() =>
+      // eslint-disable-next-line unicorn/new-for-builtins
+      parseURL(new String('http://[::1:]/') as unknown as string),
+    ).toThrow('Invalid URL');
+    expect(() =>
+      // eslint-disable-next-line unicorn/new-for-builtins
+      parseURL('/x', new String('http://[::1:]/') as unknown as string),
+    ).toThrow('Invalid URL');
+    expect(parseURL(new URL('http://a.test/x')).href).toBe('http://a.test/x');
+  });
+
+  test('a stray-colon IPv6 literal is not canonicalized as an address', () => {
+    expect(canonicalizeBracketedIPv6Content('::1:')).toBe('::1:');
+    expect(canonicalizeBracketedIPv6Content('::0:1')).toBe('::1');
+  });
+});
 
 describe('domain-utils', () => {
   describe('safeParseURL', () => {
@@ -58,6 +134,10 @@ describe('domain-utils', () => {
       expect(matchesWildcardOrigin('http://[::1:]', 'http://*')).toBe(false);
       expect(matchesOriginList('http://[::1:]', ['http://[::1]'])).toBe(false);
       expect(normalizeOrigin('http://[::1]:8080')).toBe('http://[::1]:8080');
+      // For every scheme the parser reads a host for.
+      expect(normalizeOrigin('foo://[::1:]')).toBe('');
+      expect(normalizeOrigin('file://[::1:]')).toBe('');
+      expect(matchesOriginList('foo://[::1:]', ['foo://[::1:]'])).toBe(false);
     });
 
     it('should detect IPv4 addresses', () => {

@@ -22,7 +22,7 @@ import {
   INVALID_DOMAIN_CHARS,
   MAX_LABELS,
   readTrimmedEntry,
-  hasBracketedNonAddressHost,
+  parseURL,
 } from './helpers';
 import { describeValue } from '../internal/describe-value';
 import { isNullish } from '../internal/is-nullish';
@@ -135,7 +135,7 @@ function readBooleanOption(
 
 export function safeParseURL(input: string): URL | null {
   try {
-    return new URL(input);
+    return parseURL(input);
   } catch {
     return null;
   }
@@ -344,7 +344,6 @@ function readBareOrigin(origin: string): BareOrigin | undefined {
   // "https://example.com/" without broadening real paths.
   if (
     !url ||
-    hasBracketedNonAddressHost(text) ||
     url.username ||
     url.password ||
     (url.pathname && url.pathname !== '/') ||
@@ -1163,7 +1162,7 @@ function urlHostnameOf(host: string): string | undefined {
   const authority =
     host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
   try {
-    return new URL(`http://${authority}/`).hostname;
+    return parseURL(`http://${authority}/`).hostname;
   } catch {
     return undefined;
   }

@@ -131,6 +131,7 @@ import { reportCallbackError } from '../../safe-handle-callback';
 import { guardAbortListeners } from '../../internal/guarded-abort-signal';
 import { reportToHost } from '../../internal/report-to-host';
 import { readUnknownMember } from '../../internal/read-member';
+import { parseURL } from '../../domain-utils/helpers';
 
 // The pending-error absorber, in one place, because the shape of it is easy to misread.
 //
@@ -575,7 +576,7 @@ export class NodeAdapter implements HTTPAdapter {
     // error, which carries the whole URL as its `input` - userinfo and query with it.
     let parsedURL: URL;
     try {
-      parsedURL = new URL(request.requestURL);
+      parsedURL = parseURL(request.requestURL);
     } catch {
       throw nonRetryableAdapterErrorFrom(
         new TypeError('NodeAdapter request URL is not a valid absolute URL'),

@@ -105,6 +105,7 @@ import {
   isTimeoutValidationError,
   resolveTimeoutMS,
 } from '../../internal/timer-limits';
+import { parseURL } from '../../domain-utils/helpers';
 
 /**
  * A form body as a server reads it off the wire NodeAdapter and `fetch` write: field
@@ -1083,7 +1084,7 @@ const MOCK_FORM_BOUNDARY = '----lifecycleion-mock-boundary';
  */
 function parseMockURL(requestURL: string): URL | null {
   try {
-    return new URL(requestURL, MOCK_ADAPTER_DEFAULT_BASE_URL);
+    return parseURL(requestURL, MOCK_ADAPTER_DEFAULT_BASE_URL);
   } catch {
     return null;
   }

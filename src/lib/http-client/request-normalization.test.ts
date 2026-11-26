@@ -3277,6 +3277,66 @@ test('a contentTypeHeaders entry whose type or subtype is not a token is refused
   }
 });
 
+describe('a URL whose bracketed host is no IPv6 address', () => {
+  // Bun's URL parser reads `http://[::1:]/` as `http://[::1]/`; the URL standard and
+  // Node's refuse it, and so does every URL the client reads, on every runtime.
+  test('is refused as a request URL, a baseURL and a redirect target, nothing sent', async () => {
+    const adapter = new MockAdapter();
+    const hits: string[] = [];
+    adapter.routes.get('/x', (request) => {
+      hits.push(request.path);
+      return { status: 200, body: 'ok' };
+    });
+    adapter.routes.get('/redir', () => ({
+      status: 302,
+      headers: { location: 'http://[::1:]/x' },
+    }));
+    const client = new HTTPClient({ adapter, followRedirects: true });
+
+    for (const url of ['http://[::1:]/x', 'http://a.test/redir']) {
+      const builder = client.get(url);
+      const response = await builder.send();
+
+      expect(response.isFailed).toBe(true);
+      expect(builder.error?.code).toBe('request_setup_error');
+    }
+
+    expect(
+      () => new HTTPClient({ adapter, baseURL: 'http://[::1:]:8080' }),
+    ).toThrow('HTTPClient baseURL must be an absolute http(s) URL');
+    expect(hits).toEqual([]);
+  });
+
+  test.each([
+    [
+      'NodeAdapter',
+      () => new NodeAdapter(),
+      'NodeAdapter request URL is not a valid absolute URL',
+    ],
+    [
+      'FetchAdapter',
+      () => new FetchAdapter(),
+      'FetchAdapter request URL could not be resolved to an absolute URL',
+    ],
+  ])(
+    'is refused by %s driven directly',
+    async (_name, makeAdapter, message) => {
+      const rejection = await makeAdapter()
+        .send({
+          requestURL: 'http://[::1:]/x',
+          method: 'GET',
+          headers: {},
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+
+      expect((rejection as Error).message).toContain(message);
+    },
+  );
+});
+
 test('response header keys that differ only in case are combined as a repeat', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/h', () => ({

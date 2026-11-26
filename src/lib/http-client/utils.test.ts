@@ -418,6 +418,18 @@ describe('stripCrossOriginURLCredentials', () => {
     ).toBe('//evil.test/collect');
   });
 
+  test.each([
+    ['a bracketed host that is no address', '//u:p@[::1:]/x', '//@[::1:]/x'],
+    ['a port out of range', '//u:p@h:99999/x', '//@h:99999/x'],
+  ])(
+    'cuts the credentials from a protocol-relative target with %s, which does not parse',
+    (_label, target, expected) => {
+      expect(stripCrossOriginURLCredentials(target, 'not a URL')).toBe(
+        expected,
+      );
+    },
+  );
+
   test('does not rewrite a credential-free protocol-relative target', () => {
     expect(
       stripCrossOriginURLCredentials('//cdn.test/a/../asset', 'not a URL'),
