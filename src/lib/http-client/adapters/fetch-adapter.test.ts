@@ -5229,7 +5229,19 @@ describe('FetchAdapter: a fetch that followed a redirect itself', () => {
       'https://api.test/a%7Eb',
       false,
     ],
-    ['an empty query', 'https://api.test/a?', 'https://api.test/a', false],
+    [
+      'an empty query dropped',
+      'https://api.test/a?',
+      'https://api.test/a',
+      true,
+    ],
+    ['an empty query added', 'https://api.test/a', 'https://api.test/a?', true],
+    [
+      'an empty query kept',
+      'https://api.test/a?',
+      'https://api.test/a?',
+      false,
+    ],
     ['another path', 'https://api.test/a', 'https://api.test/b', true],
     [
       'an escaped slash against a slash',

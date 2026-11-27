@@ -377,6 +377,23 @@ describe('XHRAdapter', () => {
     });
   });
 
+  test('a redirect that only adds an empty query is detected', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/resource',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 200;
+    lastXHR.responseURL = 'https://api.test/resource?';
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.status).toBe(0);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://api.test/resource?');
+  });
+
   test('withholds URL userinfo on a cross-origin hop', async () => {
     const promise = new XHRAdapter().send({
       requestURL: 'https://user:hunter2@evil.test/collect',
