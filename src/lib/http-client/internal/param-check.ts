@@ -61,7 +61,9 @@ export const PARAM_DEPTH_EXCEEDED_MESSAGE = `Input depth exceeded depth option o
  *
  * Kept separate from `buildURL`'s snapshot of the nested values (`snapshotParamValue`),
  * which reads through getters - it is the read `qs` serializes - where this check must
- * not. The two share {@link MAX_PARAM_DEPTH}.
+ * not. The two share {@link MAX_PARAM_DEPTH}. {@link MAX_PARAM_ENTRIES} is held only by the
+ * snapshot, at `send()`: it counts an object once per path, as `qs` writes it, where this
+ * walk visits a shared object once.
  */
 export function assertSerializableParams(
   params: Record<string, unknown>,

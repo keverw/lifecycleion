@@ -1104,8 +1104,9 @@ export class BaseHTTPClient {
     };
     this._tracker.add(trackedRequest);
 
-    // Every composition of a signal made for this request - the caller's and one per
-    // attempt - registers how to release its listeners here; see `_composeSignals`.
+    // Every composition of a signal made for this request - the caller's, and the two
+    // each attempt makes - registers how to release its listeners here; see
+    // `_composeSignals`.
     const signalReleasers: Array<() => void> = [];
 
     /**
@@ -2356,10 +2357,11 @@ export class BaseHTTPClient {
                     cancelReason = signalReason;
                   }
                 } else {
-                  reportUploadSettleDeadline(
+                  adapterCause = reportUploadSettleDeadline(
                     this._adapterType,
                     timeout,
                     'redirect',
+                    requestID,
                   );
                   // The hop whose upload was given up on is torn down with the request,
                   // as a per-attempt timeout tears one down. See `abortAttempt`.
@@ -2463,7 +2465,11 @@ export class BaseHTTPClient {
             redirectHistory,
             isNetworkErrorOverride: false,
           }),
-          latestUpload.outcome,
+          isCancelled &&
+            latestUpload.outcome !== undefined &&
+            !settledUploadOutcomes.has(latestUpload.outcome)
+            ? settleWithinAbortGrace(latestUpload.outcome)
+            : latestUpload.outcome,
         );
 
         const normalizedError = isCancelled
@@ -2552,7 +2558,17 @@ export class BaseHTTPClient {
       //
       // The upload outcome goes on here, once, for every terminal branch above: see
       // `withRequestBodySettled`.
-      response = withRequestBodySettled(response, latestUpload.outcome);
+      // A cancel tears the upload down: an adapter that ignores the abort must not leave
+      // `requestBodySettled` pending for good, so it settles within the abort grace, as
+      // an attempt given up on does (see `settleWithinAbortGrace`).
+      response = withRequestBodySettled(
+        response,
+        response.isCancelled &&
+          latestUpload.outcome !== undefined &&
+          !settledUploadOutcomes.has(latestUpload.outcome)
+          ? settleWithinAbortGrace(latestUpload.outcome)
+          : latestUpload.outcome,
+      );
       const finalResponse = response;
       // Set before the final observers run, with the state and error: otherwise an
       // observer reading the builder would see a settled state and a `null` response.
@@ -3061,8 +3077,16 @@ export class BaseHTTPClient {
             ? getSignalCancelReason(cancelSignal)
             : undefined;
 
-        if (wait === 'deadline') {
-          reportUploadSettleDeadline(this._adapterType, timeout, 'retry');
+        const deadlineError =
+          wait === 'deadline'
+            ? reportUploadSettleDeadline(
+                this._adapterType,
+                timeout,
+                'retry',
+                requestID,
+              )
+            : undefined;
+        if (deadlineError !== undefined) {
           abortAttempt();
         }
 
@@ -3082,6 +3106,9 @@ export class BaseHTTPClient {
           wasCancelled: wait === 'cancelled',
           wasTimeout: wait === 'deadline',
           isRetriesExhausted: false,
+          ...(deadlineError !== undefined
+            ? { adapterCause: deadlineError }
+            : {}),
           ...(signalReason !== undefined ? { cancelReason: signalReason } : {}),
         };
       };
@@ -3413,6 +3440,10 @@ export class BaseHTTPClient {
       // adapter reports, so it is never retried or followed as a failed decode.
       // Declared before the timer, which reads it.
       let didCallStreamFactory = false;
+      // A late transport failure's proof that nothing was sent, carried past the timeout
+      // it is rethrown as, so the catch path below may replay any method on it as the
+      // answer path does.
+      let wasLateAnswerNotSent = false;
 
       // Armed after the retry-phase interceptors, as the initial phase's run before any
       // attempt is timed: one that refreshes a token on a retry does not spend the
@@ -4136,6 +4167,7 @@ export class BaseHTTPClient {
         }
 
         if (isLateTransportFailure) {
+          wasLateAnswerNotSent = adapterResponse.wasDefinitelyNotSent === true;
           throw timeoutController.signal.reason;
         }
 
@@ -4713,18 +4745,25 @@ export class BaseHTTPClient {
               // An adapter's own AbortError once the factory had started a stream is no
               // cancel anyone made: the cut stream, as any unflagged rejection then is.
               return endAsCutStream();
-            } else {
-              // AbortError without our timeout flag — treat as non-retryable cancel.
-              // This path includes StreamResponseFactory returning null / { cancel: true }.
+            } else if (isFactoryCancel || didCallStreamFactory) {
+              // A `streamResponse` factory's decline - `null` or `{ cancel: true }` - which
+              // the adapter rejected with as an AbortError: a non-retryable cancel. Told by
+              // the adapter's tag, or, for a custom adapter that tags nothing, by the
+              // factory having been called and no stream started. Any other AbortError no
+              // one asked for is the adapter's own failure, and falls through below.
               const factoryCancelValue = tags.factoryCancelValue;
-              // The decline's own reason, or - for one with none - that of a cancel its
+              // The decline's own reason - from the adapter's tag, or from the answer the
+              // client's wrapper recorded - or, for one with none, that of a cancel its
               // cleanup listener made after it.
+              const recordedReason = declinedFactoryReason(streamFactoryAnswer);
               const factoryCancelReason =
                 typeof factoryCancelValue === 'string'
                   ? factoryCancelValue
-                  : isCancelOutcome()
-                    ? getSignalCancelReason(cancelSignal)
-                    : undefined;
+                  : recordedReason !== undefined
+                    ? recordedReason
+                    : isCancelOutcome()
+                      ? getSignalCancelReason(cancelSignal)
+                      : undefined;
               params.markCancelled(factoryCancelReason);
 
               emitAttemptEnd({
@@ -4867,6 +4906,7 @@ export class BaseHTTPClient {
           !isCancelOutcome() &&
           !isUploadAbandoned &&
           (allowNonIdempotentRetry ||
+            wasLateAnswerNotSent ||
             IDEMPOTENT_METHODS.has(sentRequest.method))
         ) {
           const { shouldRetry, delayMS } = policy.shouldRetry(
@@ -4964,6 +5004,7 @@ export class BaseHTTPClient {
           const isSuppressedByMethod =
             isRetrySuppressible &&
             !allowNonIdempotentRetry &&
+            !wasLateAnswerNotSent &&
             !IDEMPOTENT_METHODS.has(sentRequest.method);
           const retrySuppressedReason = isSuppressedByMethod
             ? ('non_idempotent_method' as const)
@@ -5292,8 +5333,8 @@ export class BaseHTTPClient {
     );
     const contentType = parseContentType(contentTypeHeader);
 
-    // An empty body is no body, whichever adapter read it: NodeAdapter already answers
-    // `null` for one, while FetchAdapter and XHRAdapter hand over an empty array, which a
+    // An empty body is no body, whichever adapter read it: NodeAdapter, FetchAdapter and
+    // XHRAdapter hand over an empty array for one, which a
     // JSON `Content-Type` would otherwise report as a parse error - a `200` with nothing
     // in it (a bodiless `204`-style answer) failing to parse. axios, got and ky read it
     // as empty too.
@@ -5320,9 +5361,13 @@ export class BaseHTTPClient {
 
     if ((contentType === 'json' || contentType === 'text') && rawBody) {
       // A custom adapter's string body is already text: decoding it as bytes would throw.
+      // Its leading BOM is dropped, as the decoder drops the same bytes' BOM, so the two
+      // forms of one body read alike.
       decodedTextBody =
         typeof answered === 'string'
-          ? answered
+          ? answered.startsWith('\uFEFF')
+            ? answered.slice(1)
+            : answered
           : new TextDecoder().decode(rawBody);
     }
 
@@ -6915,6 +6960,33 @@ function isOwnCancelAnswer(answer: object): boolean {
 }
 
 /**
+ * The `reason` of a factory's `{ cancel: true, reason }` answer the client's wrapper
+ * recorded: own data properties only, read without running a getter, as the adapter has
+ * already read the answer once.
+ */
+function declinedFactoryReason(answer: object | undefined): string | undefined {
+  if (answer === undefined) {
+    return undefined;
+  }
+
+  try {
+    const cancel = Reflect.getOwnPropertyDescriptor(answer, 'cancel');
+    const reason = Reflect.getOwnPropertyDescriptor(answer, 'reason');
+    return cancel !== undefined &&
+      'value' in cancel &&
+      cancel.value === true &&
+      reason !== undefined &&
+      'value' in reason &&
+      typeof reason.value === 'string'
+      ? reason.value
+      : undefined;
+  } catch {
+    // A proxy's trap threw: no reason can be read.
+    return undefined;
+  }
+}
+
+/**
  * Watch a `streamResponse` factory's answer, reading nothing of it: the adapter reads it -
  * once, as a cancel or a sink - and a second read of a getter could answer otherwise. An
  * object returned as it is is the answer at once; a plain native promise - an `async`
@@ -7113,6 +7185,9 @@ const ADAPTER_ABORT_GRACE_MS = 1000;
 function settleWithinAbortGrace(
   outcome: Promise<Error | undefined>,
 ): Promise<Error | undefined> {
+  // The grace timer is ref'd: a caller awaiting `requestBodySettled` in an otherwise idle
+  // process must see it settle, which an unref'd timer would not let happen. So the
+  // process may stay up to the grace past `send()` for an adapter that ignores its abort.
   return new Promise((resolve) => {
     const graceID = setTimeout(() => {
       resolve(new Error(ABANDONED_UPLOAD_MESSAGE));
@@ -7320,12 +7395,15 @@ function reportUploadSettleDeadline(
   adapterType: AdapterType,
   deadlineMS: number,
   nextDispatch: 'redirect' | 'retry',
-): void {
-  reportToHost(
-    new Error(
-      `HTTPClient waited for the previous attempt's upload to settle before the next ${nextDispatch}, and it made no progress for ${String(deadlineMS)}ms without settling - the server may have stopped reading the body after answering, or the '${adapterType}' adapter's requestBodySettled does not settle. The request failed as a timeout rather than dispatching a second upload beside the first.`,
-    ),
+  requestID: string,
+): Error {
+  const error = new Error(
+    `HTTPClient request ${requestID} waited for the previous attempt's upload to settle before the next ${nextDispatch}, and it made no progress for ${String(deadlineMS)}ms without settling - the server may have stopped reading the body after answering, or the '${adapterType}' adapter's requestBodySettled does not settle. The request failed as a timeout rather than dispatching a second upload beside the first.`,
   );
+  // Reported on the host's channel, and returned as the timeout's `cause`, so the request
+  // that failed carries why.
+  reportToHost(error);
+  return error;
 }
 
 /**

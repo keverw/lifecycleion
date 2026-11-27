@@ -24,13 +24,72 @@ export function assertOptionsObject(
   }
 }
 
-/**
- * What a field name reads as when it is an option's, or a typo of one: an identifier no
- * more than a few characters longer than the longest field taken. A token pasted in as a
- * key (`ghp_` and 36 characters) is an identifier too, and longer than any option.
- */
+/** What a field name reads as: an identifier. */
 const OPTION_NAME = /^[A-Za-z_$][\w$]*$/;
-const OPTION_NAME_SLACK = 3;
+
+/**
+ * A camelCase name made of words, as every option is (`delayMS`, `maxRetryAfterMS`): a
+ * lowercase word, then words that start uppercase, then at most one short acronym, no
+ * digit or `_` - one way to read any key, so no key makes it backtrack. A key shaped so
+ * names an option of some kind - another variant's, say - not a secret.
+ */
+const WORDS_NAME = /^[a-z]+(?:[A-Z][a-z]+)*(?:[A-Z]{2,4})?$/;
+
+/** How many single-character edits away from a field a key may be and still be named. */
+const MAX_TYPO_DISTANCE = 2;
+
+/**
+ * Whether `key` reads as an option's name, or a typo of one of `fields`: a camelCase name
+ * of words ({@link WORDS_NAME}), the same name as a field in another case, or one at most
+ * {@link MAX_TYPO_DISTANCE} edits from it (`folowRedirects`, `timout`). A token pasted in
+ * as a key - an API key, an AWS access key ID - is an identifier too, but none of these,
+ * so it is not written into the refusal.
+ */
+function readsAsOptionName(key: string, fields: readonly string[]): boolean {
+  if (!OPTION_NAME.test(key)) {
+    return false;
+  }
+
+  if (WORDS_NAME.test(key)) {
+    return true;
+  }
+
+  const lowerKey = key.toLowerCase();
+  return fields.some(
+    (field) =>
+      field.toLowerCase() === lowerKey ||
+      editDistanceAtMost(key, field, MAX_TYPO_DISTANCE),
+  );
+}
+
+/** Whether `a` and `b` are at most `limit` single-character edits apart (Levenshtein). */
+function editDistanceAtMost(a: string, b: string, limit: number): boolean {
+  if (Math.abs(a.length - b.length) > limit) {
+    return false;
+  }
+
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= a.length; row++) {
+    const current = [row];
+    let rowMin = row;
+    for (let column = 1; column <= b.length; column++) {
+      const cost = a[row - 1] === b[column - 1] ? 0 : 1;
+      const value = Math.min(
+        previous[column] + 1,
+        current[column - 1] + 1,
+        previous[column - 1] + cost,
+      );
+      current.push(value);
+      rowMin = Math.min(rowMin, value);
+    }
+    if (rowMin > limit) {
+      return false;
+    }
+    previous = current;
+  }
+
+  return previous[b.length] <= limit;
+}
 
 /**
  * Refuses, with a `TypeError` naming `label`, an object holding an own enumerable field
@@ -41,10 +100,9 @@ const OPTION_NAME_SLACK = 3;
  * is let through, as a filter's is - a wider options shape forwarded with its extra
  * fields unset. Anything that is not an object is left to the caller's own check.
  *
- * The refusal names the field when it reads as an option name - an identifier no longer
- * than the longest field taken by more than a few characters, as a typo of one is. Any
- * other key is not written into the message: it may be the wrong value pasted in as a key
- * (`'Bearer …'`, a token).
+ * The refusal names the field when it reads as an option's name, or a typo of one taken
+ * (see `readsAsOptionName`). Any other key is not written into the message: it may be the wrong
+ * value pasted in as a key (`'Bearer …'`, a token).
  */
 export function assertKnownFields(
   value: unknown,
@@ -71,11 +129,9 @@ export function assertKnownFields(
       continue;
     }
 
-    const longestField = Math.max(0, ...fields.map((name) => name.length));
-    const field =
-      OPTION_NAME.test(key) && key.length <= longestField + OPTION_NAME_SLACK
-        ? `${JSON.stringify(key)} field`
-        : 'field by that name';
+    const field = readsAsOptionName(key, fields)
+      ? `${JSON.stringify(key)} field`
+      : 'field by that name';
     throw new TypeError(
       `${label} has no ${field} (it takes ${fields.join(', ')})`,
     );

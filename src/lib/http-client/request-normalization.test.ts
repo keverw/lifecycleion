@@ -22,6 +22,7 @@ import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
 import type { HTTPSubClient } from './http-client';
 import {
+  assertSupportedAdapterRuntimeAndConfig,
   buildURL,
   derivedRedirectFields,
   extractFetchHeaders,
@@ -1383,6 +1384,16 @@ test('a misspelled config or request option is refused rather than read as absen
     'HTTPClient config has no field by that name',
   );
   expect(() => new HTTPClient({ adapter, [token]: 1 })).not.toThrow(token);
+  // Nor a short one shaped like an option name, an AWS access key ID or a service key,
+  // which is no near miss of any option.
+  for (const secret of ['AKIAIOSFODNN7EXAMPLE', 'sk_test_51HabcdEFGHijkl24']) {
+    expect(() => new HTTPClient({ adapter, [secret]: 1 })).toThrow(
+      'HTTPClient config has no field by that name',
+    );
+  }
+  expect(() => new HTTPClient({ adapter, Timeout: 1 } as never)).toThrow(
+    'HTTPClient config has no "Timeout" field',
+  );
   // A typo of a long option name is still named.
   expect(
     () => new HTTPClient({ adapter, maxResponseBytess: 1 } as never),
@@ -19350,5 +19361,258 @@ test.each([
     expect([...new Uint8Array(response.body as ArrayBuffer)]).toEqual([
       1, 2, 3, 4,
     ]);
+  },
+);
+
+test("an adapter's own AbortError that no one asked for is its failure, retried, not a cancel", async () => {
+  let sends = 0;
+  const failure = Object.assign(new Error('own connect timeout'), {
+    name: 'AbortError',
+  });
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: () => {
+        sends++;
+        return Promise.reject(failure);
+      },
+    },
+    baseURL: 'http://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+
+  const builder = client.get('/x');
+  const response = await builder.send();
+
+  expect(sends).toBe(3);
+  expect(response.isCancelled).toBe(false);
+  expect(builder.error?.code).toBe('adapter_error');
+  expect(builder.error?.cause).toBe(failure);
+});
+
+test.each([
+  ['null', null, undefined],
+  ['{ cancel: true, reason }', { cancel: true, reason: 'nope' }, 'nope'],
+] as const)(
+  "a custom adapter's AbortError after its stream factory declined with %s is a cancel, with the decline's reason",
+  async (_label, decline, reason) => {
+    let sends = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: async (request) => {
+          sends++;
+          await request.streamResponse?.(
+            { status: 200, headers: {}, url: request.requestURL } as never,
+            {} as never,
+          );
+          throw Object.assign(new Error('declined'), { name: 'AbortError' });
+        },
+      },
+      baseURL: 'http://api.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+
+    const builder = client.get('/x').streamResponse(() => decline);
+    const response = await builder.send();
+
+    expect(sends).toBe(1);
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.code).toBe('cancelled');
+    expect(builder.error?.cancelReason).toBe(reason);
+  },
+);
+
+test.each([
+  ['a 200', 200, {}],
+  ['a 302 with redirects off', 302, { location: '/next' }],
+] as const)(
+  'a cancel after %s settles requestBodySettled within the abort grace when the adapter ignores the abort',
+  async (_label, status, headers) => {
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () =>
+          Promise.resolve<AdapterResponse>({
+            status,
+            headers,
+            body: null,
+            requestBodySettled: new Promise<Error | undefined>(() => {}),
+          }),
+      },
+      baseURL: 'http://api.test',
+    });
+
+    const builder = client.put('/x').text('payload');
+    builder.onAttemptEnd(() => {
+      builder.cancel();
+    });
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(true);
+    const outcome = await Promise.race([
+      response.requestBodySettled,
+      new Promise((resolve) => setTimeout(() => resolve('pending'), 2500)),
+    ]);
+    expect(outcome).toBeInstanceOf(Error);
+  },
+);
+
+test.each([
+  ['in time', 10],
+  ['after the attempt timer', 80],
+] as const)(
+  'a POST whose transport failure, answered %s, proves nothing was sent is retried',
+  async (_label, delay) => {
+    let sends = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: async () => {
+          sends++;
+          if (sends === 1) {
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            return {
+              status: 0,
+              headers: {},
+              body: null,
+              isTransportError: true,
+              wasDefinitelyNotSent: true,
+            };
+          }
+          return { status: 200, headers: {}, body: null };
+        },
+      },
+      baseURL: 'http://api.test',
+      timeout: 50,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+
+    const response = await client.post('/x').send();
+
+    expect(sends).toBe(2);
+    expect(response.status).toBe(200);
+  },
+);
+
+test.each([
+  ['application/json', '﻿{"a":1}', { a: 1 }],
+  ['text/plain', '﻿hello', 'hello'],
+] as const)(
+  "a custom adapter's %s string body with a leading BOM reads as the same bytes do",
+  async (contentType, text, expected) => {
+    const answer = (body: string | Uint8Array) =>
+      new HTTPClient({
+        adapter: {
+          getType: () => 'node',
+          send: () =>
+            Promise.resolve<AdapterResponse>({
+              status: 200,
+              headers: { 'content-type': contentType },
+              body: body as never,
+            }),
+        },
+        baseURL: 'http://api.test',
+      })
+        .get('/x')
+        .send();
+
+    const fromString = await answer(text);
+    const fromBytes = await answer(new TextEncoder().encode(text));
+
+    expect(fromString.body).toEqual(expected);
+    expect(fromBytes.body).toEqual(expected);
+    expect(fromString.isParseError).toBe(false);
+  },
+);
+
+test("a retry given up on for an upload that never settles carries why as the timeout's cause", async () => {
+  const reports: unknown[] = [];
+  const onError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onError);
+
+  try {
+    const builder = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () =>
+          Promise.resolve<AdapterResponse>({
+            status: 503,
+            headers: {},
+            body: null,
+            requestBodySettled: new Promise<Error | undefined>(() => {}),
+          }),
+      },
+      baseURL: 'http://api.test',
+      timeout: 80,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    })
+      .put('/x')
+      .text('payload');
+    await builder.send();
+
+    expect(builder.error?.code).toBe('timeout');
+    expect(builder.error?.cause?.message).toContain(
+      `HTTPClient request ${builder.requestID} waited for the previous attempt's upload to settle`,
+    );
+    expect(reports).toContain(builder.error?.cause);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+  }
+});
+
+test("an interceptor's malformed requestURL is named before a throwing body getter is read", async () => {
+  const adapter = new MockAdapter();
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  client.addRequestInterceptor(
+    () =>
+      ({
+        requestURL: 5,
+        method: 'GET',
+        headers: {},
+        get body(): never {
+          throw new Error('body getter');
+        },
+      }) as never,
+  );
+
+  const builder = client.get('/x');
+  await builder.send();
+
+  expect(builder.error?.code).toBe('interceptor_error');
+  expect(builder.error?.cause?.message).toBe(
+    '[HTTPClient] Interceptor returned a request whose requestURL is not a string (got number).',
+  );
+});
+
+test('an unknown key of many capitals is refused at once, not by a regex that backtracks', () => {
+  // About 0.5 s of backtracking on Node and Bun for a pattern that can split the run of
+  // capitals many ways; none for one that reads it one way.
+  const key = `a${'A'.repeat(48)}_`;
+  const started = performance.now();
+  expect(
+    () =>
+      new HTTPClient({
+        adapter: new MockAdapter(),
+        [key]: 1,
+      }),
+  ).toThrow('HTTPClient config has no field by that name');
+  expect(performance.now() - started).toBeLessThan(250);
+});
+
+test.each([
+  '/\t/evil.test',
+  '/\n/evil.test',
+  'ht\ttp://evil.test',
+  '/\r/evil.test',
+])(
+  'a browser baseURL with a tab, CR or LF the parser removes is read as the parser reads it: %j',
+  (baseURL) => {
+    expect(() =>
+      assertSupportedAdapterRuntimeAndConfig({ baseURL }, 'fetch', true),
+    ).toThrow('HTTPClient baseURL must be an absolute http(s) URL');
   },
 );

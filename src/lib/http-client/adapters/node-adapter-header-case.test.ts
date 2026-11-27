@@ -117,9 +117,9 @@ test('a CRL with no complete block is refused at construction', () => {
       'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block',
     );
   }
-  // Binary with no block is refused as not PEM.
+  // Blank bytes are refused as the blank text is, not as DER.
   expect(() => new NodeAdapter({ crl: Buffer.from('\n') })).toThrow(
-    'NodeAdapter crl must be PEM',
+    'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block',
   );
 });
 

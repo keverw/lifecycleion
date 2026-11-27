@@ -1357,7 +1357,8 @@ export class XHRAdapter implements HTTPAdapter {
        * End the send on an abort, or on a timeout the runtime's XHR fired itself: over an
        * answer, with it carried out (behind a redirect the browser followed, the redirect).
        * Whether it came from the signal or not - a browser aborts a request whose page is
-       * leaving - the client sorts it: a cancel stays cancelled. `answer` is the one the
+       * leaving - the client sorts it: one the caller's cancel made stays cancelled, and
+       * one no one asked for is the adapter's failure. `answer` is the one the
        * caller has, `undefined` for none: told explicitly, so no caller hands over another
        * by omission. Once the send has settled - its own `abort()` after an answer - it
        * does nothing.

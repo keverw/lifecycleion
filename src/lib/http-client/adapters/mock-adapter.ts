@@ -147,7 +147,12 @@ export interface MockRequest {
 /** Cookie attributes for the `MockResponse.cookies` shorthand. */
 export interface MockCookieOptions {
   value: string;
-  /** Seconds until the cookie expires. Use `0` or a negative value to expire it immediately. */
+  /**
+   * Seconds until the cookie expires. Use `0` or a negative value to expire it
+   * immediately. Written as a whole number: a positive fraction is rounded up (`0.5` is
+   * `Max-Age=1`), other values truncated toward zero, and the result held between `-1`
+   * and 400 days (`MAX_COOKIE_LIFETIME_SECONDS`), as browsers cap a cookie's lifetime.
+   */
   maxAge?: number;
   httpOnly?: boolean;
   secure?: boolean;
@@ -1223,6 +1228,15 @@ function buildRoutes(
     path: string,
     handler: MockRouteHandler,
   ): void {
+    // A path that is no string is refused in this adapter's words, not the router's
+    // assertion.
+    const pathCandidate: unknown = path;
+    if (typeof pathCandidate !== 'string') {
+      throw new TypeError(
+        `MockAdapter route path must be a string (got ${describeValue(pathCandidate)})`,
+      );
+    }
+
     // Refused here, once: registered, a handler that is no function (a mistyped import)
     // would fail every request to the route as a 500, with nothing saying why.
     const candidate: unknown = handler;
@@ -1252,8 +1266,16 @@ function buildRoutes(
     delete: (path, handler) => on('DELETE', path, handler),
     head: (path, handler) => on('HEAD', path, handler),
     options: (path, handler) => on('OPTIONS', path, handler),
-    on: (method, path, handler) =>
-      on(asciiUppercase(method) as Router.HTTPMethod, path, handler),
+    on: (method, path, handler) => {
+      const methodCandidate: unknown = method;
+      if (typeof methodCandidate !== 'string') {
+        throw new TypeError(
+          `MockAdapter routes.on method must be a string (got ${describeValue(methodCandidate)})`,
+        );
+      }
+
+      on(asciiUppercase(method) as Router.HTTPMethod, path, handler);
+    },
     clear: () => router.reset(),
   };
 }

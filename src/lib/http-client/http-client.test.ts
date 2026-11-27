@@ -328,6 +328,45 @@ describe('HTTPClient — basic HTTP methods', () => {
     ).toThrow(/baseURL must be an absolute http\(s\) URL/i);
   });
 
+  test.each([
+    ' https://api.test',
+    '\thttps://api.test',
+    'http:a.test',
+    'https:/a.test',
+    'HTTPS:\\\\a.test',
+    '//api.test',
+    'ftp://api.test',
+  ])(
+    'browser fetch holds a baseURL that is no plain path to the absolute spelling: %j',
+    (baseURL) => {
+      const originalWindow = (globalThis as Record<string, unknown>).window;
+      const originalDocument = (globalThis as Record<string, unknown>).document;
+      (globalThis as Record<string, unknown>).window = {};
+      (globalThis as Record<string, unknown>).document = {};
+
+      try {
+        expect(() => new HTTPClient({ baseURL })).toThrow(
+          'HTTPClient baseURL must be an absolute http(s) URL',
+        );
+        expect(
+          () => new HTTPClient({ baseURL: 'https://api.test/v1' }),
+        ).not.toThrow();
+        expect(() => new HTTPClient({ baseURL: 'api' })).not.toThrow();
+      } finally {
+        if (originalWindow === undefined) {
+          delete (globalThis as Record<string, unknown>).window;
+        } else {
+          (globalThis as Record<string, unknown>).window = originalWindow;
+        }
+        if (originalDocument === undefined) {
+          delete (globalThis as Record<string, unknown>).document;
+        } else {
+          (globalThis as Record<string, unknown>).document = originalDocument;
+        }
+      }
+    },
+  );
+
   test('browser fetch allows relative baseURL prefixes', () => {
     const originalWindow = (globalThis as Record<string, unknown>).window;
     const originalDocument = (globalThis as Record<string, unknown>).document;
@@ -4631,7 +4670,7 @@ describe('HTTPClient — adapter marker flags', () => {
     }
   });
 
-  test('an XHR browser-timeout marker set to false stays a cancel', async () => {
+  test("an XHR browser-timeout marker set to false is no timeout: the adapter's own AbortError is its failure", async () => {
     const client = new HTTPClient({
       adapter: makeThrowingAdapter(
         Object.assign(new Error('Request aborted'), {
@@ -4643,10 +4682,13 @@ describe('HTTPClient — adapter marker flags', () => {
       timeout: 0,
     });
 
-    const response = await client.get('/x').send();
+    const builder = client.get('/x');
+    const response = await builder.send();
 
-    expect(response.isCancelled).toBe(true);
+    // No cancel was made and no factory declined, so it is not a cancel either.
+    expect(response.isCancelled).toBe(false);
     expect(response.isTimeout).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
   });
 
   test('throwing callback marker getters stay on the normalized error path', async () => {
@@ -4704,9 +4746,11 @@ describe('HTTPClient — adapter marker flags', () => {
     const builder = client.get('https://example.com/x');
     const response = await builder.send();
 
-    expect(response.isCancelled).toBe(true);
-    expect(builder.error?.code).toBe('cancelled');
-    expect(builder.error?.cancelReason).toBeUndefined();
+    // The tag cannot be read, so nothing shows a factory declined: the adapter's own
+    // AbortError, its failure - and the getter's throw does not escape.
+    expect(response.isCancelled).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.cause).toBe(abortError);
   });
 });
 

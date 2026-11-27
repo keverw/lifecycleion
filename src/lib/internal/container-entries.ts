@@ -28,6 +28,7 @@
 // rather than copied so the cap the walks bill against and the one this enforces cannot
 // drift apart.
 import { MAX_REDACTION_ENTRIES } from './redact-paths';
+import { isIndexKey } from './array-indices';
 
 /**
  * What a container will admit to holding, or that asking threw.
@@ -139,25 +140,14 @@ export function describeContainer(
 export { defineEntry } from './define-entry';
 
 /**
- * The largest value that is an array *index* rather than an ordinary named property.
- *
- * An index is a key whose `ToString(ToUint32(key))` is the key itself, which stops one
- * short of `length`'s own maximum. `"-1"` and `"4294967296"` are therefore named
- * properties, not indexes - and a `parseInt` round-trip calls both of them indexes, which
- * is how a first cut of the named-property pass below silently dropped them.
+ * Whether `key` addresses an array slot, as opposed to being a name that merely looks
+ * numeric: an index is a key whose `ToString(ToUint32(key))` is the key itself, which
+ * stops one short of `length`'s own maximum, so `"-1"` and `"4294967296"` are named
+ * properties. The one predicate the array copies, `deepClone` and the redaction walks
+ * share (see `isIndexKey`).
  */
-const MAX_ARRAY_INDEX = 2 ** 32 - 2;
-
-/** Whether `key` addresses an array slot, as opposed to being a name that merely looks numeric. */
 export function isArrayIndexKey(key: string): boolean {
-  const asNumber = Number(key);
-
-  return (
-    Number.isInteger(asNumber) &&
-    asNumber >= 0 &&
-    asNumber <= MAX_ARRAY_INDEX &&
-    String(asNumber) === key
-  );
+  return isIndexKey(key);
 }
 
 /**

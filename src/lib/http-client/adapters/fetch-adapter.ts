@@ -27,6 +27,7 @@ import {
 import {
   extractFetchHeaders,
   derivedRedirectFields,
+  reportedRedirectTarget,
   resolveBrowserDispatchURL,
 } from '../utils';
 import {
@@ -211,8 +212,8 @@ export class FetchAdapter implements HTTPAdapter {
       );
     }
 
-    // Checked before it is sent, so a request fetch refuses to build - Node's fetch refuses
-    // a URL carrying credentials, on every attempt - fails once as the non-retryable
+    // Checked before it is sent, so a request fetch refuses to build fails once as the
+    // non-retryable
     // `adapter_error` it is, rather than as a network error retried to no end. Built
     // without the body or signal, which `fetch` below takes, so nothing is consumed. A
     // header value or method `fetch` refuses is caught here too, rather than coming back
@@ -223,8 +224,8 @@ export class FetchAdapter implements HTTPAdapter {
     // so a value it refuses is not retried either.
     //
     // Refused in its own words, and without the runtime's error: that quotes what it
-    // refused - Bun a header value, Node a URL with its userinfo and query - and a
-    // carrier's message and `cause` reach logs.
+    // refused - Bun a header value, Node a URL with its query - and a carrier's message
+    // and `cause` reach logs.
     //
     // The headers are materialized once, here, and kept for `fetch` below.
     let fetchHeaders: HeadersInit;
@@ -270,7 +271,9 @@ export class FetchAdapter implements HTTPAdapter {
     const wasAbortedAtDispatch = isSignalAborted(signal);
 
     // Fire 0% upload progress - once every refusal above has passed, so a request refused
-    // before anything is sent, an aborted one included, reports no upload start.
+    // before anything is sent, an aborted one included, reports no upload start. Two
+    // refusals only `fetch` itself makes, once called, come after it and so report the
+    // start: a signal that is not an `AbortSignal`, and undici's refusal at dispatch.
     if (!wasAbortedAtDispatch) {
       guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
     }
@@ -419,6 +422,35 @@ export class FetchAdapter implements HTTPAdapter {
       return {
         status: 0,
         wasRedirectDetected: true,
+        headers: {},
+        body: null,
+      };
+    }
+
+    // A `fetch` that followed a redirect itself, ignoring `redirect: 'manual'` - an
+    // XHR-based polyfill's, React Native's - answers with the page it led to: told by
+    // `redirected`, or by a `url` other than the one dispatched (a polyfill sets only
+    // that). Reported as XHRAdapter reports a browser-followed redirect, `status: 0` with
+    // the final URL, which the client refuses: answered as the requested URL, the other
+    // page's `Set-Cookie` would be stored for it, and `followRedirects: false` bypassed.
+    const followedURL = followedRedirectURL(response, dispatchedURL);
+    if (followedURL !== undefined) {
+      letGoOfBody();
+      reportUploadEnded();
+
+      if (isSignalAbortedQuietly(signal)) {
+        throw makeAbortError();
+      }
+
+      const detectedRedirectURL =
+        followedURL === ''
+          ? undefined
+          : reportedRedirectTarget(followedURL, dispatchedURL);
+
+      return {
+        status: 0,
+        wasRedirectDetected: true,
+        ...(detectedRedirectURL !== undefined ? { detectedRedirectURL } : {}),
         headers: {},
         body: null,
       };
@@ -1099,6 +1131,46 @@ function materializeFetchHeaders(
   }
 
   return record;
+}
+
+function parsedOrNull(text: string): URL | null {
+  try {
+    return parseURL(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The URL a response says `fetch` followed a redirect to, `''` for one it followed to a URL
+ * it does not name, or `undefined` for one it did not follow: `redirected`, or a `url` that
+ * parses to another URL than the one dispatched, the fragment of each aside - Node's and
+ * browsers' `url` drops it, Bun's keeps it. Each read guarded, as a polyfill's response
+ * may carry any getter.
+ */
+function followedRedirectURL(
+  response: Response,
+  dispatchedURL: string,
+): string | undefined {
+  const url = readUnknownMember(response, 'url');
+  const parsed =
+    typeof url === 'string' && url !== '' ? parsedOrNull(url) : null;
+
+  if (parsed !== null) {
+    const dispatched = parsedOrNull(dispatchedURL);
+    if (dispatched !== null) {
+      const answered = new URL(parsed.href);
+      answered.hash = '';
+      dispatched.hash = '';
+      if (answered.href !== dispatched.href) {
+        return parsed.href;
+      }
+    }
+  }
+
+  return readUnknownMember(response, 'redirected') === true
+    ? (parsed?.href ?? '')
+    : undefined;
 }
 
 /**

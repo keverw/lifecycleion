@@ -5127,3 +5127,107 @@ describe('FetchAdapter - headers observers see', () => {
     expect(Object.hasOwn(observed[0], 'content-length')).toBe(false);
   });
 });
+
+describe('FetchAdapter: a fetch that followed a redirect itself', () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test.each([
+    [
+      'redirected and url',
+      { redirected: true, url: 'https://evil.test/landing' },
+    ],
+    ['url only, as a polyfill sets it', { url: 'https://evil.test/landing' }],
+    ['redirected only', { redirected: true }],
+  ])(
+    'is reported as the redirect, not the page it led to: %s',
+    async (_label, fields) => {
+      let isBodyCancelled = false;
+      (globalThis as any).fetch = () =>
+        Promise.resolve(
+          Object.assign(
+            new Response('landing page', {
+              status: 200,
+              headers: { 'set-cookie': 'a=b' },
+            }),
+            {},
+          ),
+        ).then((response) => {
+          Object.defineProperties(response, {
+            url: { value: 'url' in fields ? fields.url : '' },
+            redirected: { value: 'redirected' in fields },
+            body: {
+              value: {
+                cancel: () => {
+                  isBodyCancelled = true;
+                  return Promise.resolve();
+                },
+              },
+            },
+          });
+          return response;
+        });
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'https://api.test/a',
+        method: 'POST',
+        headers: {},
+        body: 'x',
+      });
+
+      expect(response.status).toBe(0);
+      expect(response.wasRedirectDetected).toBe(true);
+      expect(response.headers).toEqual({});
+      expect(response.detectedRedirectURL).toBe(
+        'url' in fields ? 'https://evil.test/landing' : undefined,
+      );
+      expect(isBodyCancelled).toBe(true);
+    },
+  );
+
+  test('a response whose url is the one dispatched, fragment aside, is the answer', async () => {
+    (globalThis as any).fetch = () => {
+      const response = new Response('ok', { status: 200 });
+      Object.defineProperty(response, 'url', {
+        value: 'https://api.test/a?q=1',
+      });
+      return Promise.resolve(response);
+    };
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://api.test/a?q=1#frag',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.status).toBe(200);
+  });
+});
+
+test.each(['/x#frag', '/x#'])(
+  "a request URL with a fragment is answered, not taken for a followed redirect though Bun's url keeps it: %s",
+  async (path) => {
+    const server = (await import('node:http')).createServer((_req, res) => {
+      res.end('ok');
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: `http://127.0.0.1:${String(port)}${path}`,
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.wasRedirectDetected).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  },
+);

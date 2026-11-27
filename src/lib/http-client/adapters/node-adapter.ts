@@ -100,9 +100,9 @@ import {
   type ResponseBodySource,
 } from '../internal/response-decoding';
 import {
+  declaredContentLength,
   hasResponseBody,
   makeResponseTooLargeError,
-  parseContentLength,
 } from '../internal/response-limit';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
@@ -498,8 +498,11 @@ export class NodeAdapter implements HTTPAdapter {
   constructor(config: NodeAdapterConfig = {}) {
     assertOptionsObject(config, 'NodeAdapter config');
     assertKnownFields(config, NODE_ADAPTER_CONFIG_FIELDS, 'NodeAdapter config');
+    // Not an array's: its indices would be read as unknown fields. One is refused as the
+    // non-object it is, with every other `mtls` that is no object, below.
+    const mtlsCandidate: unknown = readUnknownMember(config, 'mtls');
     assertKnownFields(
-      readUnknownMember(config, 'mtls'),
+      Array.isArray(mtlsCandidate) ? undefined : mtlsCandidate,
       fieldNames<NonNullable<NodeAdapterConfig['mtls']>>({
         cert: true,
         key: true,
@@ -1153,7 +1156,7 @@ export class NodeAdapter implements HTTPAdapter {
          * free to send a complete early response - a 413 or a 401 with `Connection: close` -
          * while the body is still uploading, and tearing that socket down is how it says
          * so. The writers then reject (the chunk truly was not accepted). Were the
-         * `catch` handlers below to answer that with `req.destroy()` and a synthetic
+         * write-failure path (`onBodyWriteFailure`) to answer that with `req.destroy()` and a synthetic
          * `status: 0, isTransportError: true`, racing the real response to `resolve`, the
          * caller would get a fabricated transport error instead of the server's actual
          * status, and the destroy would tear down the connection the response is still
@@ -1206,7 +1209,7 @@ export class NodeAdapter implements HTTPAdapter {
          * already on the wire, and the caller is handed the early status as a clean success.
          *
          * So a writer that is still going is left to finish: it ends the request itself on
-         * success, and on failure the `catch` below destroys what is left. Nothing is
+         * success, and on failure `onBodyWriteFailure` destroys what is left. Nothing is
          * leaked either way, which is what that destroy is there for.
          */
         let isWritingBody = false;
@@ -2052,8 +2055,8 @@ export class NodeAdapter implements HTTPAdapter {
         };
 
         // The http callback is typed as (res: IncomingMessage) => void, so we
-        // cannot make it async directly. We use a void IIFE that routes any
-        // unhandled rejections back to the outer promise's reject.
+        // cannot make it async directly. Its work runs as a named task whose failure
+        // `observeTaskFailure` routes back to the outer promise's reject.
         const req = (requestForCleanup = httpModule.request(options, (res) => {
           // A `101` is a protocol switch whatever headers come with it. One without an
           // `Upgrade` header reaches here as a response rather than through `'upgrade'`
@@ -2563,7 +2566,15 @@ export class NodeAdapter implements HTTPAdapter {
                   cause.cause === undefined &&
                   requestErrorAfterResponse !== undefined
                 ) {
-                  cause.cause = requestErrorAfterResponse;
+                  // Not enumerable, as `makeResponseStreamError` defines it: a parser
+                  // error's `rawPacket` holds the response bytes, which a spread or
+                  // `JSON.stringify` of the error would otherwise write into logs.
+                  Object.defineProperty(cause, 'cause', {
+                    value: requestErrorAfterResponse,
+                    writable: true,
+                    configurable: true,
+                    enumerable: false,
+                  });
                 }
                 const isConnectionFailure =
                   streamResult.code === 'stream_response_error' &&
@@ -3105,7 +3116,7 @@ export class NodeAdapter implements HTTPAdapter {
           }
 
           // The server has already answered, so the response path is the one that gets to
-          // answer - the same rule the write-path `catch` handlers follow, reached from
+          // answer - the same rule the write-failure path follows, reached from
           // the other entry point. An upload-side `EPIPE` / `ECONNRESET` fires *both*:
           // those handlers stand down on `didReceiveResponse`, and were this one to go on
           // resolving a fabricated `{ status: 0, isTransportError: true }` - `resolve` is
@@ -3470,9 +3481,10 @@ export class NodeAdapter implements HTTPAdapter {
 
 /**
  * Whether `response` says its connection closes after it: `Connection: close`, an HTTP/1.0
- * answer without `Connection: keep-alive`, as Node's parser reads it, or a body with
- * neither a `Content-Length` nor a `Transfer-Encoding`, which only the connection's close
- * can end (RFC 9112 §6.3).
+ * answer without `Connection: keep-alive`, as Node's parser reads it, or a body only the
+ * connection's close can end (RFC 9112 §6.3) - one with neither a `Content-Length` nor a
+ * `Transfer-Encoding` (a `205` among them, which the parser reads to the close though it
+ * names no content), or one whose `Transfer-Encoding` does not end in `chunked`.
  */
 function isAnswerClosingConnection(
   response: http.IncomingMessage | undefined,
@@ -3482,10 +3494,21 @@ function isAnswerClosingConnection(
     return false;
   }
 
-  if (
-    response.headers['content-length'] === undefined &&
-    response.headers['transfer-encoding'] === undefined &&
-    hasResponseBody(method, response.statusCode ?? 0)
+  const status = response.statusCode ?? 0;
+  const transferEncoding: unknown = response.headers['transfer-encoding'];
+  const canHaveBody =
+    hasResponseBody(method, status) || (status === 205 && method !== 'HEAD');
+
+  if (transferEncoding === undefined) {
+    if (response.headers['content-length'] === undefined && canHaveBody) {
+      return true;
+    }
+  } else if (
+    canHaveBody &&
+    (typeof transferEncoding === 'string' || Array.isArray(transferEncoding)) &&
+    headerListTokens(transferEncoding as string | string[])
+      .map(asciiLowercase)
+      .at(-1) !== 'chunked'
   ) {
     return true;
   }
@@ -3705,6 +3728,29 @@ async function streamResponseBody(
       });
     };
 
+    // A hand-written sink whose `write` or `end` is `async` reports a failure as the
+    // promise it returns rejecting, not through the callback or `'error'`: that rejection
+    // fails the download as one through the callback does, rather than leaving a
+    // truncated body delivered and the rejection unhandled.
+    const observeSinkReturn = (returned: unknown): void => {
+      const pending = adoptResult(returned);
+      if (pending === undefined || pending instanceof UnreadableReturn) {
+        return;
+      }
+
+      observeRejection(pending, (error: unknown) => {
+        if (isSettled) {
+          return;
+        }
+
+        claimWritableError(error);
+        settle({
+          code: 'stream_write_error',
+          cause: normalizeError(error),
+        });
+      });
+    };
+
     const onResponseData = (chunk: Buffer): void => {
       if (isSettled) {
         return;
@@ -3768,6 +3814,8 @@ async function streamResponseBody(
         return;
       }
 
+      observeSinkReturn(canContinue);
+
       // `isSettled` as well as the backpressure signal. `WritableLike` allows a write to
       // fail through the callback given to `write`, and nothing obliges that callback to
       // be asynchronous: a writable that calls it with an error and then returns `false`
@@ -3799,7 +3847,7 @@ async function streamResponseBody(
       didReceiveEnd = true;
 
       try {
-        writable.end((endError?: Error | null) => {
+        const ended: unknown = writable.end((endError?: Error | null) => {
           if (isSettled) {
             return;
           }
@@ -3838,6 +3886,7 @@ async function streamResponseBody(
             onProgress?.(completeProgressEvent(handedBytes));
           }
         });
+        observeSinkReturn(ended);
       } catch (error) {
         // Same reasoning as the `write` throw above: a throw out of `end` means the
         // stream is being torn down, and its own `error` event is still on the way -
@@ -4823,7 +4872,13 @@ function normalizeCRLEntry(
 
   // Node's `tls` reads PEM CRLs only, so DER bytes would fail every HTTPS request when
   // the context is built. Refused here instead, at construction or for a refreshed value.
+  // Blank bytes, or PEM of another kind (a certificate), are no DER: read as the text
+  // they are, so the string's own refusal names what is wrong.
   if (!text.includes(PEM_CRL_HEADER)) {
+    if (/^[\t\n\r ]*$/.test(text) || text.includes('-----BEGIN ')) {
+      splitCRLString(text);
+    }
+
     throw crlValidationError(
       new TypeError(
         `NodeAdapter crl must be PEM ("${PEM_CRL_HEADER}" blocks); DER is not read by Node's tls. Convert it with \`openssl crl -inform DER -outform PEM\`.`,
@@ -4966,11 +5021,13 @@ function splitCRLString(withBOM: string): string | string[] {
  * it. Unknown once decoded: a compressed body's `Content-Length` counts the encoded bytes,
  * and the limit and progress count what is handed over.
  */
+// A `Content-Length` beside a `Transfer-Encoding` declares nothing (RFC 9112 §6.3), as a
+// lenient parser can hand one over: `declaredContentLength` reads it so.
 function declaredBodyLength(
   headers: Record<string, string | string[]>,
   isDecoded: boolean,
 ): number | undefined {
-  return isDecoded ? undefined : parseContentLength(headers['content-length']);
+  return isDecoded ? undefined : declaredContentLength(headers);
 }
 
 function normalizeResponseHeaders(

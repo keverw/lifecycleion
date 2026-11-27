@@ -407,7 +407,9 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     // fed stopped short of its input. `SniffingInflate` tells its own. Not for gzip:
     // gunzip already fails on bytes after its stream unless they start with a zero byte,
     // which it reads as padding (some servers pad) - a count would refuse what Node and
-    // browsers read.
+    // browsers read. It ignores what follows that byte only within the write that held
+    // it: bytes in a later chunk reach a gunzip that has ended, and fail, as they do for
+    // gunzip itself.
     //
     // A cut-off zstd frame, followed the same way: Node's and Bun's zstd decoders end
     // cleanly on one, handing over what they decoded, where gunzip, brotli and inflate

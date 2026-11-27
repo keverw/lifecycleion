@@ -211,7 +211,7 @@ function cloneValue<T>(obj: T, state: CloneState): T {
   // large buffer - a `subarray` of a file read whole - does not copy the buffer behind it.
   // Two views of one buffer, or a view and its buffer, do not share memory in the clone.
   if (ArrayBuffer.isView(obj)) {
-    return remember(state.seen, obj, cloneView(obj));
+    return remember(state.seen, obj, cloneViewInBounds(obj));
   }
 
   if (Array.isArray(obj)) {
@@ -1229,6 +1229,28 @@ function copyBytes(
 }
 
 /**
+ * {@link cloneView}, its refusal of a view over a detached buffer or one left out of
+ * bounds by a resized buffer in `deepClone`'s words: the engine's own message names a
+ * method the caller never called (Node's, `%TypedArray%.prototype.keys`). The engine's
+ * error is kept as the `cause`. Any other failure - a subclass constructor's own
+ * `TypeError`, say - is thrown as it is.
+ */
+function cloneViewInBounds(view: ArrayBufferView): object {
+  try {
+    return cloneView(view);
+  } catch (error) {
+    if (error instanceof TypeError && isViewOutOfBounds(view)) {
+      throw new TypeError(
+        'deepClone: cannot clone a typed array or DataView that is out of bounds or over a detached buffer',
+        { cause: error },
+      );
+    }
+
+    throw error;
+  }
+}
+
+/**
  * A typed array or `DataView` over a copy of the bytes it covers, of its own type. The
  * copy is a fixed-length buffer of the view's buffer's kind, even under a view of a
  * resizable one. Read through the intrinsic getters, which answer for a view from any
@@ -1236,6 +1258,25 @@ function copyBytes(
  * `slice`, through its own constructor (see {@link isSubclass}); a `DataView` subclass
  * comes back a `DataView`.
  */
+/** Whether `view` cannot be read: over a detached buffer, or out of bounds of a resized one. */
+function isViewOutOfBounds(view: ArrayBufferView): boolean {
+  try {
+    if (typedArrayNameOf(view) !== undefined) {
+      assertTypedArrayInBounds(view);
+    } else {
+      Reflect.apply(
+        Reflect.getOwnPropertyDescriptor(DataView.prototype, 'byteLength')
+          ?.get as () => number,
+        view,
+        [],
+      );
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 function cloneView(view: ArrayBufferView): object {
   const name = typedArrayNameOf(view);
   const read = (key: string): unknown =>

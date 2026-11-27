@@ -4350,3 +4350,35 @@ describe('MockAdapter - route answers it refuses or sets aside', () => {
     },
   );
 });
+
+test.each([
+  [
+    'a number method',
+    () =>
+      new MockAdapter().routes.on(5 as never, '/x', () => ({ status: 200 })),
+    'MockAdapter routes.on method must be a string (got number)',
+  ],
+  [
+    'a null method',
+    () =>
+      new MockAdapter().routes.on(null as never, '/x', () => ({ status: 200 })),
+    'MockAdapter routes.on method must be a string (got null)',
+  ],
+  [
+    'an undefined path',
+    () =>
+      new MockAdapter().routes.get(undefined as never, () => ({ status: 200 })),
+    'MockAdapter route path must be a string (got undefined)',
+  ],
+  [
+    'a number path',
+    () =>
+      new MockAdapter().routes.on('GET', 5 as never, () => ({ status: 200 })),
+    'MockAdapter route path must be a string (got number)',
+  ],
+] as const)(
+  'a route registered with %s is refused with a TypeError naming it',
+  (_label, register, message) => {
+    expect(register).toThrow(new TypeError(message));
+  },
+);

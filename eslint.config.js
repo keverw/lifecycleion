@@ -28,15 +28,16 @@ function restrictedMembers(methods, message) {
 
 /**
  * A regex lookbehind (`(?<=`, `(?<!`) fails to parse in Safari before 16.4, so a module
- * holding one fails to load there: refused in shipped source, as a regex literal or as a
- * `RegExp` built from a string.
+ * holding one fails to load there: refused in shipped source, as a regex literal or as
+ * any string or template text that holds one, however the `RegExp` is then built.
  */
 const NO_REGEX_LOOKBEHIND = [
   'Literal[regex.pattern=/\\(\\?<[=!]/]',
-  "NewExpression[callee.name='RegExp'] > Literal.arguments:first-child[value=/\\(\\?<[=!]/]",
-  "CallExpression[callee.name='RegExp'] > Literal.arguments:first-child[value=/\\(\\?<[=!]/]",
-  "NewExpression[callee.name='RegExp'] > TemplateLiteral.arguments:first-child > TemplateElement[value.raw=/\\(\\?<[=!]/]",
-  "CallExpression[callee.name='RegExp'] > TemplateLiteral.arguments:first-child > TemplateElement[value.raw=/\\(\\?<[=!]/]",
+  // Any string or template text that holds one whole: a pattern built from constants or
+  // through `globalThis.RegExp` takes it from a literal somewhere. One split across two
+  // literals (`'(?' + '<=x)'`) is not caught.
+  'Literal[value=/\\(\\?<[=!]/]',
+  'TemplateElement[value.raw=/\\(\\?<[=!]/]',
 ].map((selector) => ({
   selector,
   message:

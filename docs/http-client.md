@@ -127,7 +127,7 @@ console.log(created.status); // 201
 ```typescript
 interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter
-  baseURL?: string; // Origin / prefix for relative paths: a string with no query or fragment. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL.
+  baseURL?: string; // Origin / prefix for relative paths: a string with no query or fragment. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL. In a browser a relative one (`/api`, `api`) is allowed, and one that is no plain path - a scheme, a leading `//`, or leading whitespace (tabs, CRs and LFs anywhere read as the URL parser reads them) - must be an absolute http(s):// URL too.
   defaultHeaders?: RequestHeadersInput; // Values may be null/undefined: no header
   timeout?: number | null; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
   // NaN or a non-number throws; Infinity disables it like 0 does.
@@ -517,7 +517,8 @@ read since the upload last reported progress - a read that returns no bytes does
 that allowance over. Within it, the inactivity clock restarts when a read answers; past it
 the reads are inactivity. Upload progress always counts.
 On expiry, the client returns a timeout, aborts the attempt, and reports the stalled
-settlement through the global `'error'` channel. Whenever the client tears an upload down - a redirect
+settlement through the global `'error'` channel; the same `Error`, naming the request ID,
+is the timeout's `cause`. Whenever the client tears an upload down - a redirect
 followed without waiting, a cancel during this wait, or its expiry - if the adapter does
 not settle the outcome within a second of the abort, it resolves with the Error saying the
 upload's outcome is unknown, as an attempt given up on does. `timeout: 0`, negative values, and
@@ -529,7 +530,7 @@ disabled-timeout behavior. Do not pass an expired `deadline - Date.now()` direct
 
 An upload is not cut short because the server answered: the server may still be reading
 it. One still running when the request moves on or ends at an answered attempt is left to
-finish - under a final answer, a redirect that follows without waiting (above), and a
+finish - under a final answer, and a
 redirect the client does not follow (`redirect_disabled`, `redirect_loop`) or fails to set
 up - and its outcome is carried onto the response. A cancel while the request is still
 running tears it down, and so does a deadline on the wait above.
@@ -561,8 +562,9 @@ ended the connection - a cancel or timeout, a stream factory that declined or fa
 streaming sink that failed, a response body over `maxResponseBytes` or one that fails to
 decode - settles `requestBodySettled` with that failure but is not reported there, and so
 does one cut short because the answer said it would close the connection (`Connection:
-close`, HTTP/1.0 without keep-alive, or a body with neither a `Content-Length` nor a
-`Transfer-Encoding`, which only the close can end): the runtime stops writing to it as the
+close`, HTTP/1.0 without keep-alive, or a body only the close can end - one with neither a
+`Content-Length` nor a `Transfer-Encoding`, a `205` among them, or one whose
+`Transfer-Encoding` does not end in `chunked`): the runtime stops writing to it as the
 answer ends, so the adapter ends the upload there, settling `requestBodySettled` with
 `Request body upload ended: the answer closed the connection`.
 
@@ -585,7 +587,7 @@ The response `Content-Type` header determines how the body is parsed. Only its m
 | `application/x-www-form-urlencoded`                   | `'text'`      | UTF-8 decoded string      |
 | Absent or anything else (`application/jsonl`)         | `'binary'`    | Raw `Uint8Array`          |
 
-`isText` mirrors `contentType === 'text'`. `isJSON` is `true` only when JSON parsing actually succeeded, and it stays `false` on a parse failure. `isParseError` is `true` when the server sent a JSON `Content-Type` but the body could not be parsed. In that case `contentType` is still `'json'`, `isJSON` is `false`, and `body` falls back to the raw string. An empty body is no body, whatever the `Content-Type` and the adapter: `body` is `null` and `isParseError` is `false`.
+`isText` mirrors `contentType === 'text'`. `isJSON` is `true` only when JSON parsing actually succeeded, and it stays `false` on a parse failure. `isParseError` is `true` when the server sent a JSON `Content-Type` but the body could not be parsed. In that case `contentType` is still `'json'`, `isJSON` is `false`, and `body` falls back to the raw string. An empty body is no body, whatever the `Content-Type` and the adapter: `body` is `null` and `isParseError` is `false`. A JSON or text body is decoded as UTF-8 with the runtime's global `TextDecoder`, a leading byte order mark dropped (a custom adapter's string body's too); a runtime without `TextDecoder` needs a polyfill for one.
 
 ### Response Size Limit
 
@@ -1786,6 +1788,8 @@ The adapter resolves a relative request URL as `fetch` does - against the docume
 
 **Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. A request the adapter refuses before calling `fetch` fires neither. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
 
+A `fetch` that follows a redirect itself, ignoring `redirect: 'manual'` (an XHR-based polyfill's, React Native's), answers with the page the redirect led to. The adapter tells one by the response's `redirected` flag, or by a `url` other than the one it dispatched, and reports it as XHRAdapter reports a browser-followed redirect: `status: 0` with `wasRedirectDetected` and the final URL as `detectedRedirectURL`, which the client refuses as `redirect_disabled`. The other page's headers, its `Set-Cookie` among them, are not handed over as the requested URL's.
+
 **Browser constraints (enforced at client construction):**
 
 - `cookieJar` must not be set
@@ -1800,6 +1804,8 @@ Uses Node.js native `http` / `https` modules. Supports Unix domain sockets, mTLS
 
 A URL on port `0` is refused as a non-retryable `adapter_error` before anything is sent: Node's and Bun's `http` read that port as none and would dial `:80` or `:443` instead, with the request's credentials and cookies.
 
+A response with neither a `Content-Length` nor a `Transfer-Encoding` is read until the connection closes, so a reset that ends it early cannot be told from its end: it is delivered as received, as `fetch` delivers it. A body framed by its length or by chunks that a reset cuts short is a `stream_response_error`.
+
 Compressed responses are handled as `fetch` handles them: NodeAdapter asks for compression and decodes the body before handing it over. Response headers are reported as received, `Content-Encoding` included.
 
 - **What is asked for.** `Accept-Encoding: gzip, deflate, br` is sent unless the request sets its own (`identity` asks for none). `br` is offered over https only, as browsers offer it, and a `Range` request sends `identity`, as the Fetch standard has it.
@@ -1810,7 +1816,7 @@ Compressed responses are handled as `fetch` handles them: NodeAdapter asks for c
 
 **Decoding is strict.** A body that ends before its compressed stream does (a gzip body cut before its trailer), or carries bytes after it, is a stream error.
 
-- gzip follows gunzip's own rule, as Node and browsers do: bytes after a gzip stream fail unless they start with a zero byte, which reads as padding, and what follows that zero byte is ignored; the body still ends only when the response does, so one cut short of its `Content-Length` after that padding is a stream error.
+- gzip follows gunzip's own rule, as Node and browsers do: bytes after a gzip stream fail unless they start with a zero byte, which reads as padding, and what follows that zero byte in the same network chunk is ignored - bytes arriving in a later chunk reach a decoder that has ended, and fail the body, as they do for gunzip itself; the body still ends only when the response does, so one cut short of its `Content-Length` after that padding is a stream error.
 - Under stacked codings, the body ends only once every stage has: an inner gzip stage that ends on such padding still leaves the outer stage to be read to its end, so an outer stage that is cut short, corrupt or followed by junk is a stream error.
 
 **FetchAdapter decodes by its runtime's `fetch` rules**, which are more lenient in places:

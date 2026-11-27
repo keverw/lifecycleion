@@ -458,7 +458,6 @@ export function snapshotInterceptedRequest(
   request: InterceptedRequest,
 ): ResolvedRequest {
   const { requestURL, method, headers } = request;
-  const body = interceptedBody(request);
 
   if (typeof requestURL !== 'string') {
     throw new TypeError(
@@ -493,6 +492,10 @@ export function snapshotInterceptedRequest(
       `[HTTPClient] Interceptor returned a request whose headers is not a plain object (got ${got}).`,
     );
   }
+
+  // Read once the fields above are checked, so a malformed `requestURL`, `method` or
+  // `headers` is what the failure names, not a throwing `body` getter.
+  const body = interceptedBody(request);
 
   // Read as every other phase's headers are: names lowercased, and an unset value
   // removing the header, whatever its capitalization -

@@ -1209,9 +1209,14 @@ export function assertSupportedAdapterRuntimeAndConfig(
     }
   }
 
+  // Where a relative `baseURL` is allowed (a browser's `fetch` or XHR), one that is not
+  // plainly relative - it has a scheme, starts with `//` or two backslashes, or with
+  // whitespace the parser trims - is held to the same spelling: `http:a.test` and
+  // ` https://api.test` would otherwise reach a host here and throw with NodeAdapter.
   if (
     !isNullish(config.baseURL) &&
-    requiresAbsoluteBaseURL(adapterType, isBrowserRuntime)
+    (requiresAbsoluteBaseURL(adapterType, isBrowserRuntime) ||
+      isWrittenAsNonRelative(config.baseURL))
   ) {
     assertValidBaseURL(config.baseURL);
   }
@@ -1274,6 +1279,21 @@ export function assertSupportedAdapterRuntimeAndConfig(
       'HTTPClient redirect handling is not supported with FetchAdapter in browser environments. Set followRedirects: false or use a server runtime.',
     );
   }
+}
+
+/**
+ * Whether `baseURL` is no plain path: a scheme, a leading pair of slashes or backslashes
+ * (`//`, `\\`, read alike), or a leading space or control character.
+ */
+function isWrittenAsNonRelative(baseURL: string): boolean {
+  // Read as the URL parser reads it, with every tab, CR and LF removed: `/\t/evil.test`
+  // is `//evil.test`, and `ht\ttp:` is `http:`.
+  const text = baseURL.replace(/[\t\n\r]/g, '');
+  return (
+    /^[a-z][a-z0-9+.-]*:/i.test(text) ||
+    /^[/\\]{2}/.test(text) ||
+    (baseURL.length > 0 && baseURL.charCodeAt(0) <= 0x20)
+  );
 }
 
 function requiresAbsoluteBaseURL(

@@ -1663,3 +1663,45 @@ describe('deepClone - an error property deleted before its turn', () => {
     expect(Object.hasOwn(cloned, 'later')).toBe(false);
   });
 });
+
+describe('deepClone - a view out of bounds of a resized buffer', () => {
+  test.each(['Uint8Array', 'DataView'] as const)(
+    'a %s is refused in deepClone’s words, with the engine’s error as its cause',
+    (kind) => {
+      const buffer = new ArrayBuffer(8, { maxByteLength: 16 });
+      const view =
+        kind === 'DataView'
+          ? new DataView(buffer, 4, 4)
+          : new Uint8Array(buffer, 4, 4);
+      buffer.resize(5);
+
+      let refusal: unknown;
+      try {
+        deepClone(view);
+      } catch (error) {
+        refusal = error;
+      }
+
+      expect(refusal).toBeInstanceOf(TypeError);
+      expect((refusal as Error).message).toBe(
+        'deepClone: cannot clone a typed array or DataView that is out of bounds or over a detached buffer',
+      );
+      expect((refusal as Error).cause).toBeInstanceOf(TypeError);
+    },
+  );
+});
+
+test("deepClone passes a typed array subclass constructor's own TypeError on as it is", () => {
+  class Vec3 extends Float32Array {
+    constructor(values: unknown) {
+      if (!Array.isArray(values)) {
+        throw new TypeError('Vec3 takes an array');
+      }
+      super(values as number[]);
+    }
+  }
+
+  expect(() => deepClone(new Vec3([1, 2, 3]))).toThrow(
+    new TypeError('Vec3 takes an array'),
+  );
+});

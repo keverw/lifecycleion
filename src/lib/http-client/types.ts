@@ -280,10 +280,12 @@ export interface AdapterResponse {
    * server's explanation dropped, and let an abort during the wait discard a
    * response that had already arrived in full.
    *
-   * Present on every bodied request, from the moment the request has a body
-   * rather than from the first byte written - so an abort before the writer
-   * starts is reported here too, instead of leaving the field absent and
-   * `await` answering `undefined`. Not only the requests whose writer was still
+   * Present on every bodied request the adapter goes on to dispatch, from the
+   * moment the request has a body rather than from the first byte written - so an
+   * abort before the writer starts is reported here too, instead of leaving the
+   * field absent and `await` answering `undefined`. A request the adapter refuses
+   * while setting it up - a `Trailer` header, a body it cannot send - is an
+   * `adapter_error` with nothing sent, and carries none. Not only the requests whose writer was still
    * running when the response resolved, so presence does not mean the upload
    * outlived the answer. On the
    * ordinary shape, where the body went out long before the response came back,

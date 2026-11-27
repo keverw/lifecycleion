@@ -3290,6 +3290,120 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a Content-Length beside a Transfer-Encoding declares no size, so a body under the limit is delivered', async () => {
+    // A lenient parser can hand both over; RFC 9112 §6.3 has the transfer coding win.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'text/plain',
+      'transfer-encoding': 'chunked',
+      'content-length': '1000000',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('hello'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const result = await new NodeAdapter({ decompress: false }).send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: 1000,
+      });
+
+      expect(result.status).toBe(200);
+      expect(result.isStreamError).toBeUndefined();
+      expect(Buffer.from(result.body as Uint8Array).toString()).toBe('hello');
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test.each(['write', 'end'] as const)(
+    'a sink whose async %s rejects fails the download as stream_write_error, with no unhandled rejection',
+    async (failing) => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+      });
+      const failure = new Error('disk full');
+      let writes = 0;
+      const sink = Object.assign(new EventEmitter(), {
+        async write(_chunk: Uint8Array, cb?: (err?: Error | null) => void) {
+          const index = ++writes;
+          await Promise.resolve();
+          if (failing === 'write' && index === 2) {
+            throw failure;
+          }
+          cb?.();
+          return true;
+        },
+        async end(cb?: (err?: Error | null) => void) {
+          await Promise.resolve();
+          if (failing === 'end') {
+            throw failure;
+          }
+          cb?.();
+        },
+        destroy() {},
+      });
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown): void => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandled);
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+          // The body once the adapter reads it: its `'data'` listener is attached.
+          res.on('newListener', (event) => {
+            if (event === 'data') {
+              setTimeout(() => {
+                for (let index = 0; index < 3; index++) {
+                  res.emit('data', Buffer.from('chunk'));
+                }
+                setTimeout(() => res.emit('end'), 5);
+              }, 0);
+            }
+          });
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        const result = await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => sink as never,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(result.isStreamError).toBe(true);
+        expect(result.streamErrorCode).toBe('stream_write_error');
+        expect(result.errorCause).toBe(failure);
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+        requestSpy.mockRestore();
+      }
+    },
+  );
+
   test('buffered response stream error after headers resolves as stream_response_error', async () => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {
@@ -10483,7 +10597,7 @@ describe('NodeAdapter — crl option (normalization)', () => {
     try {
       // The view held nothing when it was read: refused as empty bytes are.
       expect(() => new NodeAdapter({ crl: crl as never })).toThrow(
-        'NodeAdapter crl must be PEM',
+        'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block',
       );
       expect(isSharedHandedToTLS).toBe(false);
     } finally {
@@ -11654,7 +11768,7 @@ test.each([
       expect(res.isFailed).toBe(true);
       expect(attempts).toBe(1);
       expect(builder.error?.cause?.message).toStartWith(
-        'NodeAdapter crl must be PEM',
+        'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block',
       );
       expect(requestSpy).not.toHaveBeenCalled();
     } finally {
@@ -13734,6 +13848,117 @@ test('a stacked body whose inner gzip ends on zero-byte padding is a stream erro
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }, 30_000);
+
+test('a streamed body cut by a parser error carries it as a cause that is not enumerable', async () => {
+  // The bad chunk after the good one, in a packet of its own, so the parser fails once
+  // the stream has started.
+  const sockets: Socket[] = [];
+  const server = net.createServer((socket) => {
+    sockets.push(socket);
+    socket.on('error', () => {});
+    socket.once('data', () => {
+      socket.write(
+        'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n',
+        () => {
+          setTimeout(() => socket.write('ZZ\r\nsecret-body-bytes\r\n'), 30);
+        },
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const raw = {
+    port: (server.address() as AddressInfo).port,
+    close: async () => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+  try {
+    const sink = Object.assign(new EventEmitter(), {
+      write(_chunk: Uint8Array, cb?: (err?: Error | null) => void) {
+        cb?.();
+        return true;
+      },
+      end(cb?: (err?: Error | null) => void) {
+        cb?.();
+      },
+      destroy() {},
+    });
+    const result = await new NodeAdapter().send({
+      ...makeAdapterRequest(`http://127.0.0.1:${raw.port}/`),
+      streamResponse: () => sink,
+    });
+
+    expect(result.isStreamError).toBe(true);
+    expect(result.streamErrorCode).toBe('stream_response_error');
+    expect(result.errorCause?.cause).toBeDefined();
+    expect(Object.keys(result.errorCause as object)).not.toContain('cause');
+    expect(JSON.stringify(result.errorCause)).not.toContain('rawPacket');
+  } finally {
+    await raw.close();
+  }
+});
+
+test.each([
+  ['a 200 with neither framing header', 'HTTP/1.1 200 OK\r\n\r\nhello'],
+  ['a 205 with neither framing header', 'HTTP/1.1 205 Reset Content\r\n\r\n'],
+  [
+    'a 413 whose Transfer-Encoding does not end in chunked',
+    'HTTP/1.1 413 Payload Too Large\r\nTransfer-Encoding: identity\r\n\r\nbig',
+  ],
+])(
+  'an upload %s cuts short is settled as the close, not reported to the host',
+  async (_label, answer) => {
+    const sockets: Socket[] = [];
+    const server = net.createServer((socket) => {
+      sockets.push(socket);
+      let isAnswered = false;
+      socket.on('error', () => {});
+      socket.on('data', (data) => {
+        if (!isAnswered && data.toString('latin1').includes('\r\n\r\n')) {
+          isAnswered = true;
+          socket.pause();
+          socket.end(answer);
+        }
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const { port } = server.address() as AddressInfo;
+    const reports: unknown[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: `http://127.0.0.1:${String(port)}/upload`,
+        method: 'POST',
+        headers: {},
+        body: new Uint8Array(8 * 1024 * 1024),
+      });
+      const outcome = await response.requestBodySettled;
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as Error).message).toBe(
+        'Request body upload ended: the answer closed the connection',
+      );
+      expect(reports).toEqual([]);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  },
+  30_000,
+);
 
 test('an upload a Connection: close answer that fails to decode ends is not settled as the close', async () => {
   // The answer is still arriving - its Content-Length is past what is sent - when the
@@ -16510,3 +16735,31 @@ describe('NodeAdapter - headers observers see', () => {
     }
   });
 });
+
+test.each([
+  [
+    'empty bytes',
+    { crl: Buffer.alloc(0) },
+    'holds no -----BEGIN X509 CRL----- block',
+  ],
+  [
+    'a certificate as bytes',
+    {
+      crl: Buffer.from(
+        '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n',
+      ),
+    },
+    'content outside any complete -----BEGIN/END X509 CRL----- block',
+  ],
+  ['DER bytes', { crl: Buffer.from([0x30, 0x82, 1, 2]) }, 'DER is not read'],
+  [
+    'mtls given as an array',
+    { mtls: ['cert', 'key'] },
+    'NodeAdapter mtls must be an object with cert and key (got an array)',
+  ],
+] as const)(
+  'a NodeAdapter config with %s is refused in words that fit it',
+  (_label, config, message) => {
+    expect(() => new NodeAdapter(config as never)).toThrow(message);
+  },
+);
