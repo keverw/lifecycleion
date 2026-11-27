@@ -147,6 +147,109 @@ function makeErrorWritable(errorAfterBytes: number) {
   });
 }
 
+test('an async sink write holds the response until it fulfils: writes run one at a time, in order, and end comes after the last', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/octet-stream' });
+    let index = 0;
+    const timer = setInterval(() => {
+      res.write(`chunk-${String(index)};`);
+      index++;
+      if (index === 5) {
+        clearInterval(timer);
+        res.end();
+      }
+    }, 15);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  const written: string[] = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let pendingAtEnd = -1;
+  // The first write is the slowest, so a write that overtook it would land first.
+  let delay = 80;
+  const sink = Object.assign(new EventEmitter(), {
+    async write(chunk: Uint8Array) {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      const wait = delay;
+      delay = 5;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      written.push(Buffer.from(chunk).toString());
+      inFlight--;
+      return true;
+    },
+    end(cb?: (err?: Error | null) => void) {
+      pendingAtEnd = inFlight;
+      cb?.();
+    },
+    destroy() {},
+  });
+
+  try {
+    const result = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${String(port)}/`,
+      method: 'GET',
+      headers: {},
+      streamResponse: () => sink,
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.isStreamError).toBeUndefined();
+    expect(written.join('')).toBe('chunk-0;chunk-1;chunk-2;chunk-3;chunk-4;');
+    expect(maxInFlight).toBe(1);
+    expect(pendingAtEnd).toBe(0);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('a sink that closes while end waits on an async write fails the download rather than hanging', async () => {
+  const server = http.createServer((_req, res) => {
+    res.end('hello');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  let isClosed = false;
+  const sink = Object.assign(new EventEmitter(), {
+    async write() {
+      // Its owner destroys it while the write is still running.
+      setTimeout(() => sink.destroy(), 10);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return true;
+    },
+    end(cb?: (err?: Error | null) => void) {
+      if (!isClosed) {
+        cb?.();
+      }
+    },
+    destroy() {
+      if (!isClosed) {
+        isClosed = true;
+        sink.emit('close');
+      }
+    },
+  });
+
+  try {
+    const result = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${String(port)}/`,
+      method: 'GET',
+      headers: {},
+      signal: AbortSignal.timeout(2000),
+      streamResponse: () => sink,
+    });
+
+    expect(result.isStreamError).toBe(true);
+    expect(result.streamErrorCode).toBe('stream_write_error');
+    expect((result.errorCause as Error).message).toBe(
+      'Writable closed before the response body was fully written',
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test.each(['abort', 'close'] as const)(
   'cleans up a pending streamResponse factory after %s',
   async (mode) => {
@@ -3389,7 +3492,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
           requestURL: 'http://example.test/data',
           method: 'GET',
           headers: {},
-          streamResponse: () => sink as never,
+          streamResponse: () => sink,
         });
         await new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -3446,7 +3549,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     ['rejects', true],
     ['fulfils', false],
   ] as const)(
-    "a download waits on an async write still pending when end's callback comes, and the write %s",
+    'a download waits on an async write still pending when the response ends, and the write %s',
     async (_label, shouldReject) => {
       const failure = new Error('disk full');
       let didEnd = false;
@@ -3467,7 +3570,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
       const result = await sendToAsyncSink(sink);
 
-      expect(didEnd).toBe(true);
+      // `end` is called only once the write has fulfilled: not over a failed one.
+      expect(didEnd).toBe(!shouldReject);
       expect(result.status).toBe(200);
       if (shouldReject) {
         expect(result.isStreamError).toBe(true);

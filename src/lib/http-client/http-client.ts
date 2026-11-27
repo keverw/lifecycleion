@@ -4169,7 +4169,11 @@ export class BaseHTTPClient {
         }
 
         if (isLateTransportFailure) {
-          wasLateAnswerNotSent = adapterResponse.wasDefinitelyNotSent === true;
+          // The proof read as the in-time rule below reads it: beside an explicit
+          // `isTransportError` only, never off a bare `status: 0`.
+          wasLateAnswerNotSent =
+            adapterResponse.isTransportError === true &&
+            adapterResponse.wasDefinitelyNotSent === true;
           throw timeoutController.signal.reason;
         }
 
@@ -4906,7 +4910,8 @@ export class BaseHTTPClient {
         // Network / adapter / per-attempt timeout — retry if policy allows. A throw
         // carries no adapter response, so delivery is unproven - and a timed-out answer
         // (one that arrived after the timer fired) proves it but is still a timeout.
-        // Either way a non-idempotent method is not retried. Nor is an attempt whose
+        // Either way a non-idempotent method is not retried, unless that late answer was
+        // an `isTransportError` proving nothing was sent (`wasLateAnswerNotSent`). Nor is an attempt whose
         // stream factory started a stream, or has a sink on its way: part of the body may
         // be in the caller's sink, and a retry would open a second one for the same
         // request. It is the cut stream, ended as one given up on is, not a plain network
@@ -5420,9 +5425,8 @@ export class BaseHTTPClient {
    *    response_too_large: a streamed-body failure keeps its stream_* code, and a body
    *    over the limit its response_too_large, while still surfacing `isTimeout: true`
    * 3. Explicit codeOverride (redirect_disabled, redirect_loop, redirect_unsupported,
-   *    request_setup_error,
-   *    adapter_error, interceptor_error, stream_write_error, stream_response_error,
-   *    stream_setup_error, response_too_large)
+   *    request_setup_error, adapter_error, interceptor_error, stream_write_error,
+   *    stream_response_error, stream_setup_error, response_too_large)
    * 4. Default fallback → network_error
    *
    * Key distinction:

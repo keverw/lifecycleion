@@ -19527,6 +19527,39 @@ test.each([
 );
 
 test.each([
+  ['in time', 10],
+  ['after the attempt timer', 80],
+] as const)(
+  'a POST answered %s with a bare status 0 claiming nothing was sent is not retried: the proof needs isTransportError',
+  async (_label, delay) => {
+    let sends = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: async () => {
+          sends++;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          return {
+            status: 0,
+            headers: {},
+            body: null,
+            wasDefinitelyNotSent: true,
+          };
+        },
+      },
+      baseURL: 'http://api.test',
+      timeout: 50,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+
+    const response = await client.post('/x').send();
+
+    expect(sends).toBe(1);
+    expect(response.isFailed).toBe(true);
+  },
+);
+
+test.each([
   ['application/json', '﻿{"a":1}', { a: 1 }],
   ['text/plain', '﻿hello', 'hello'],
 ] as const)(
@@ -19678,4 +19711,38 @@ test('with redirects on, a redirect the adapter reports with status 0 ends once 
   expect(response.wasRedirectDetected).toBe(true);
   expect(response.detectedRedirectURL).toBe('https://api.test/landing');
   expect(builder.error?.code).toBe('redirect_unsupported');
+});
+
+test('a status-0 detected redirect on a later hop, after a followed 302, ends once as redirect_unsupported', async () => {
+  const sends: string[] = [];
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'fetch',
+      send: (request) => {
+        sends.push(request.requestURL);
+        return Promise.resolve<AdapterResponse>(
+          sends.length === 1
+            ? { status: 302, headers: { location: '/next' }, body: null }
+            : {
+                status: 0,
+                wasRedirectDetected: true,
+                detectedRedirectURL: 'https://api.test/landing',
+                headers: {},
+                body: null,
+              },
+        );
+      },
+    },
+    baseURL: 'https://api.test',
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+
+  const builder = client.get('/start');
+  const response = await builder.send();
+
+  expect(sends).toEqual(['https://api.test/start', 'https://api.test/next']);
+  expect(builder.error?.code).toBe('redirect_unsupported');
+  expect(response.isNetworkError).toBe(false);
+  expect(response.redirectHistory).toEqual(['https://api.test/next']);
 });

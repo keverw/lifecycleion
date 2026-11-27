@@ -5,6 +5,7 @@ import {
   stripURLCredentials,
   type BrowserPage,
 } from '../utils';
+import { asciiUppercase } from '../../internal/ascii-text';
 import { isLoopbackHost } from './loopback-host';
 
 /** `text` parsed as an absolute URL, or `null` for one that does not parse. */
@@ -58,7 +59,10 @@ export function readPageOrigin(
  * - userinfo (omitted by `responseURL`) and hash fragments (not sent over HTTP) are
  *   stripped
  * - URL normalization makes equivalent forms equal (default ports, dot segments,
- *   encoding normalization, etc.)
+ *   encoding normalization, etc.), and so does RFC 3986's for what the parser leaves
+ *   spelled apart (see `equivalentHref`): a percent-escape's hex in either case, an
+ *   unreserved character escaped or not, and an empty query (`/a?`) as none. Any other
+ *   difference - `|` against `%7C`, which the RFC does not make equal - stays one
  *
  * The same URL is `'same'`. On an `https:` page, an `http:` URL answered from its own
  * `https:` form - the scheme changed, a default port staying the default and any other
@@ -84,7 +88,10 @@ export function compareResponseURL(
   }
 
   normalizedResponse.hash = '';
-  const responseHref = stripURLCredentials(normalizedResponse.href);
+  dropEmptyQuery(normalizedResponse);
+  const responseHref = equivalentHref(
+    stripURLCredentials(normalizedResponse.href),
+  );
 
   const request = parseURL(dispatchedURL);
   // Taken from the serialized URL, not `hash`, which reads `''` for an empty fragment
@@ -93,8 +100,9 @@ export function compareResponseURL(
   const fragment =
     fragmentIndex === -1 ? '' : request.href.slice(fragmentIndex);
   request.hash = '';
+  dropEmptyQuery(request);
 
-  if (responseHref === stripURLCredentials(request.href)) {
+  if (responseHref === equivalentHref(stripURLCredentials(request.href))) {
     return { kind: 'same' };
   }
 
@@ -108,11 +116,40 @@ export function compareResponseURL(
 
   request.protocol = 'https:';
 
-  if (responseHref !== stripURLCredentials(request.href)) {
+  if (responseHref !== equivalentHref(stripURLCredentials(request.href))) {
     return { kind: 'redirected' };
   }
 
   return { kind: 'upgraded', upgradedURL: `${request.href}${fragment}` };
+}
+
+/** RFC 3986's unreserved characters (section 2.3), which escaping does not change. */
+const UNRESERVED_CHARACTER = /^[A-Za-z0-9\-._~]$/;
+
+/**
+ * A serialized URL with no fragment, spelled as RFC 3986's normalization (section 6.2.2)
+ * spells it where the URL parser leaves two spellings of one resource apart: each
+ * percent-escape's hex in uppercase, and an escaped unreserved character as itself - the
+ * spellings a networking layer that re-serializes the URL may answer with. An empty
+ * query is dropped from the URL first (see `dropEmptyQuery`).
+ */
+function equivalentHref(href: string): string {
+  return href.replace(/%[0-9A-Fa-f]{2}/g, (escape) => {
+    const character = String.fromCharCode(Number.parseInt(escape.slice(1), 16));
+    return UNRESERVED_CHARACTER.test(character)
+      ? character
+      : asciiUppercase(escape);
+  });
+}
+
+/**
+ * Drops a query with nothing in it (`/a?`), read off the parsed URL: one that ends in a
+ * `?` of its own (`/a?q?`) is not empty, and keeps it.
+ */
+function dropEmptyQuery(url: URL): void {
+  if (url.search === '') {
+    url.search = '';
+  }
 }
 
 /**

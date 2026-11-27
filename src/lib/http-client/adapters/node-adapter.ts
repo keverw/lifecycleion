@@ -3600,6 +3600,9 @@ async function streamResponseBody(
     let isPaused = false;
     let isSettled = false;
     let didReceiveEnd = false;
+    // Whether `end` has been called on the sink: later than `didReceiveEnd` while a write
+    // promise is still running (see `isEndWaitingOnWrites`).
+    let didCallEnd = false;
     // Whether `onWritableDrain` is attached. A sink whose `on('drain', ...)` threw has no
     // way to say it is ready again, so its backpressure is not honoured: the response is
     // not paused for a `'drain'` nothing would deliver.
@@ -3675,7 +3678,10 @@ async function streamResponseBody(
     const onWritableDrain = (): void => {
       if (isPaused) {
         isPaused = false;
-        res.resume();
+        // Still held for a write promise not yet fulfilled (see `observeSinkReturn`).
+        if (pendingWriteReturns === 0) {
+          res.resume();
+        }
       }
     };
 
@@ -3705,14 +3711,15 @@ async function streamResponseBody(
     // paused for backpressure waiting on a `'drain'` that never comes, and the request
     // open until its timeout, or forever with none.
     //
-    // After the response ended it is still a failure when the writable says it did not
-    // finish: a Node stream destroyed with writes still queued calls neither those
+    // Once `end` has been called - not merely once the response ended, as `end` waits
+    // on a write promise still running - it is still a failure when the writable says it
+    // did not finish: a Node stream destroyed with writes still queued calls neither those
     // writes' callbacks nor `end`'s, so the `end` callback never comes to answer. A sink
     // that does not track `writableFinished` is left to its `end` callback - the docs
     // ask a hand-written one to emit `'close'` when it is finished, and it may do so
     // before calling that callback.
     const onWritableClose = (): void => {
-      if (didReceiveEnd) {
+      if (didCallEnd) {
         const finished = readUnknownMember(writable, 'writableFinished');
 
         if (finished === true || typeof finished !== 'boolean') {
@@ -3738,7 +3745,14 @@ async function streamResponseBody(
     // a Node stream's is: an `async` `end` may hand it to an inner stream that is still
     // closing, so its promise fulfilling says nothing about that. The attempt timeout
     // bounds a promise or a callback that never comes.
+    //
+    // A promise `write` returns is also backpressure, as an `await` on each write would
+    // make it: the response is paused until it fulfils (`pendingWriteReturns`), so writes
+    // reach the sink one at a time and in order, and `end` is called only once every
+    // write has fulfilled (`isEndWaitingOnWrites`), never over one still running.
     let pendingSinkReturns = 0;
+    let pendingWriteReturns = 0;
+    let isEndWaitingOnWrites = false;
     let isEndDelivered = false;
 
     const deliverIfWritesDone = (): void => {
@@ -3763,25 +3777,55 @@ async function streamResponseBody(
       });
     };
 
-    const observeSinkReturn = (returned: unknown): void => {
-      const pending = adoptResult(returned);
-      if (pending === undefined || pending instanceof UnreadableReturn) {
+    const onWriteReturnFulfilled = (): void => {
+      pendingWriteReturns--;
+      if (pendingWriteReturns !== 0 || isSettled) {
         return;
       }
 
+      if (isEndWaitingOnWrites) {
+        isEndWaitingOnWrites = false;
+        endSink();
+      } else if (!isPaused) {
+        res.resume();
+      }
+    };
+
+    /** Whether `returned` is a promise the adapter now waits on. */
+    const observeSinkReturn = (
+      returned: unknown,
+      kind: 'write' | 'end',
+    ): boolean => {
+      const pending = adoptResult(returned);
+      if (pending === undefined || pending instanceof UnreadableReturn) {
+        return false;
+      }
+
       pendingSinkReturns++;
+      if (kind === 'write') {
+        pendingWriteReturns++;
+      }
+
       void pending
         .then(
           () => {
             pendingSinkReturns--;
+            if (kind === 'write') {
+              onWriteReturnFulfilled();
+            }
             deliverIfWritesDone();
           },
           (error: unknown) => {
             pendingSinkReturns--;
+            if (kind === 'write') {
+              pendingWriteReturns--;
+            }
             failSinkReturn(error);
           },
         )
         .then(noop, noop);
+
+      return true;
     };
 
     const onResponseData = (chunk: Buffer): void => {
@@ -3789,9 +3833,9 @@ async function streamResponseBody(
         return;
       }
 
-      // Read as `pipe()` reads it: only `false` is backpressure. `WritableLike` declares a
-      // boolean, but a hand-written sink may return nothing, and pausing for that would
-      // wait on a `'drain'` it never emits.
+      // Read as `pipe()` reads it: `false` asks for a pause until `'drain'`, and a promise
+      // holds the response until it fulfils (see `observeSinkReturn`). A hand-written sink
+      // may return nothing, and pausing for that would wait on a `'drain'` it never emits.
       let canContinue: unknown;
       handedBytes += chunk.length;
       // Marked before the write, and cleared below unless it asks for a pause: a sink that
@@ -3847,7 +3891,7 @@ async function streamResponseBody(
         return;
       }
 
-      observeSinkReturn(canContinue);
+      const isWriteAsync = observeSinkReturn(canContinue, 'write');
 
       // `isSettled` as well as the backpressure signal. `WritableLike` allows a write to
       // fail through the callback given to `write`, and nothing obliges that callback to
@@ -3869,6 +3913,10 @@ async function streamResponseBody(
         res.pause();
       } else {
         isPaused = false;
+        // A write promise still running holds the response until it fulfils.
+        if (isWriteAsync && !isSettled && pendingWriteReturns !== 0) {
+          res.pause();
+        }
       }
     };
 
@@ -3879,6 +3927,17 @@ async function streamResponseBody(
 
       didReceiveEnd = true;
 
+      // Not over a write still running: called once the last one has fulfilled.
+      if (pendingWriteReturns !== 0) {
+        isEndWaitingOnWrites = true;
+        return;
+      }
+
+      endSink();
+    };
+
+    const endSink = (): void => {
+      didCallEnd = true;
       try {
         // Held open across the call, so a callback `end` makes from inside it does not
         // deliver before the promise it returns is counted.
@@ -3889,7 +3948,7 @@ async function streamResponseBody(
         } finally {
           pendingSinkReturns--;
         }
-        observeSinkReturn(ended);
+        observeSinkReturn(ended, 'end');
         deliverIfWritesDone();
       } catch (error) {
         // Same reasoning as the `write` throw above: a throw out of `end` means the

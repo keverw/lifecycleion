@@ -5216,6 +5216,57 @@ describe('FetchAdapter: a fetch that followed a redirect itself', () => {
     },
   );
 
+  test.each([
+    [
+      'percent-escape hex case',
+      'https://api.test/a%2fb',
+      'https://api.test/a%2Fb',
+      false,
+    ],
+    [
+      'an escaped unreserved character',
+      'https://api.test/a~b',
+      'https://api.test/a%7Eb',
+      false,
+    ],
+    ['an empty query', 'https://api.test/a?', 'https://api.test/a', false],
+    ['another path', 'https://api.test/a', 'https://api.test/b', true],
+    [
+      'an escaped slash against a slash',
+      'https://api.test/a%2Fb',
+      'https://api.test/a/b',
+      true,
+    ],
+    ['another origin', 'https://api.test/a', 'https://evil.test/a', true],
+    [
+      'a query that ends in a ?',
+      'https://api.test/a?q=a',
+      'https://api.test/a?q=a?',
+      true,
+    ],
+  ])(
+    "a polyfill's url is compared as RFC 3986 normalizes it: %s",
+    async (_label, requestURL, answeredURL, isRedirect) => {
+      (globalThis as any).fetch = () => {
+        const response = new Response('ok', { status: 200 });
+        Object.defineProperties(response, {
+          url: { value: answeredURL },
+          redirected: { value: undefined },
+        });
+        return Promise.resolve(response);
+      };
+
+      const response = await new FetchAdapter().send({
+        requestURL,
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.wasRedirectDetected).toBe(isRedirect);
+      expect(response.status).toBe(isRedirect ? 0 : 200);
+    },
+  );
+
   test('a response whose url is the one dispatched, fragment aside, is the answer', async () => {
     (globalThis as any).fetch = () => {
       const response = new Response('ok', { status: 200 });

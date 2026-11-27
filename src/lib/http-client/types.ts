@@ -131,8 +131,15 @@ export interface AdapterResponse {
    *
    *   - In a browser, CORS constraints cause `redirect: 'manual'` to yield an
    *     opaque response (status 0, no Location). Browser adapters require
-   *     `followRedirects: false`, so a detected redirect always results in
+   *     `followRedirects: false`, so a detected redirect results in
    *     `redirect_disabled`.
+   *
+   *   - A `fetch` that follows a redirect itself (a polyfill's, React Native's) is
+   *     reported as status 0 with the final URL, in any runtime.
+   *
+   * - **Any adapter**: a status-0 detected redirect has no Location to follow, so it
+   *   ends as `redirect_disabled` with `followRedirects: false`, and as
+   *   `redirect_unsupported`, never retried, with `followRedirects: true`.
    *
    * - **XHRAdapter**: the browser always follows redirects with no opt-out.
    *   Detected after the fact by comparing `xhr.responseURL` to the original
@@ -335,16 +342,26 @@ export interface AdapterResponse {
  * a `'close'` keeps the listener only until the bounded timers above expire.
  */
 export interface WritableLike {
-  write(chunk: Uint8Array | string, cb?: (err?: Error | null) => void): boolean;
+  /**
+   * `false` asks for a pause until `'drain'`, as a Node stream's does. A sink may instead
+   * be `async`: the response is held until the promise it returns fulfils, so writes run
+   * one at a time and in order, and one that rejects fails the download.
+   */
+  write(
+    chunk: Uint8Array | string,
+    cb?: (err?: Error | null) => void,
+  ): boolean | PromiseLike<unknown>;
   /**
    * The callback receives an error when the stream could not be finished - a write that
    * failed destroys it, so `end` reports here rather than succeeding. Ignoring the
    * argument settles a broken write as a success. Call it even from an `async` `end`:
-   * the promise it returns fulfilling does not end the download. A promise `end` or `write`
-   * returns may reject with the error, and the download is delivered only once every such
-   * promise has fulfilled.
+   * the promise it returns fulfilling does not end the download. `end` is called only
+   * once every promise `write` returned has fulfilled; a promise `end` returns may reject
+   * with the error, and the download is delivered only once it has fulfilled.
    */
-  end(cb?: (err?: Error | null) => void): void;
+  // `unknown`, so an `async` `end` and a Node stream's, which returns the stream, both fit:
+  // a promise among what it returns is read as the JSDoc above says.
+  end(cb?: (err?: Error | null) => void): unknown;
   on(event: 'error', listener: (err: Error) => void): this;
   on(event: 'close', listener: () => void): this;
   on(event: 'drain', listener: () => void): this;

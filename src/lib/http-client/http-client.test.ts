@@ -13718,3 +13718,20 @@ describe('HTTPClient - request headers observers see', () => {
     },
   );
 });
+
+test('a sink with async write and end methods is a WritableLike', () => {
+  // A compile-time check: without the promise in `write`'s return type, this fails tsc.
+  const sink = {
+    async write(_chunk: Uint8Array | string): Promise<void> {},
+    async end(): Promise<void> {},
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
+    destroy() {},
+  } satisfies WritableLike;
+
+  expect(typeof sink.write).toBe('function');
+});

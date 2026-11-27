@@ -678,7 +678,7 @@ interface HTTPClientError {
 | `network_error`         | Transport-level failure before a response was received, or a response that is malformed: a status line the runtime cannot read, or a status no server may send (`HTTP/1.1 099`)                                                                                               |
 | `timeout`               | Request exceeded the configured timeout                                                                                                                                                                                                                                       |
 | `cancelled`             | Request was cancelled via `builder.cancel()`, `client.cancel()`, AbortSignal, or an interceptor/stream factory cancel                                                                                                                                                         |
-| `redirect_disabled`     | A redirect response with a `Location` was received but `followRedirects` is `false`                                                                                                                                                                                           |
+| `redirect_disabled`     | A redirect was received while `followRedirects` is `false`: a `3xx` with a `Location`, or one the adapter detected with `status: 0` and none (a browser's, or a `fetch` that followed it itself)                                                                              |
 | `redirect_loop`         | The configured `maxRedirects` limit was reached                                                                                                                                                                                                                               |
 | `redirect_unsupported`  | With `followRedirects: true`, the adapter reported a redirect with `status: 0` and no `Location` to follow - one the runtime's `fetch` followed itself, say. Never retried                                                                                                    |
 | `request_setup_error`   | Request setup or local orchestration failure before a normal adapter response was produced (e.g. invalid configuration, a body an interceptor returned that cannot be copied, unresolved URL)                                                                                 |
@@ -1791,7 +1791,7 @@ The adapter resolves a relative request URL as `fetch` does - against the docume
 
 **Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. A request the adapter refuses before calling `fetch` fires neither. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
 
-A `fetch` that follows a redirect itself, ignoring `redirect: 'manual'` (an XHR-based polyfill's, React Native's), answers with the page the redirect led to. The adapter tells one by the response's `redirected` flag where the response has one, as a native `Response` does: its `url` can differ with no redirect followed, as a browser's upgrade to `https:` or a service worker's answer from another URL does. A polyfill's response, which has none, is told by a `url` other than the one dispatched, the fragment aside and a browser's own upgrade to `https:` excepted, as XHRAdapter tells one. It is reported as XHRAdapter reports a browser-followed redirect: `status: 0` with `wasRedirectDetected` and the final URL as `detectedRedirectURL`. The client refuses it as `redirect_disabled`, or with `followRedirects: true`, where there is no `Location` left to follow, as `redirect_unsupported` (`isNetworkError: false`), never retried: a retry would only follow the same redirect again. That holds for any adapter that reports a redirect with `status: 0`. The other page's headers, its `Set-Cookie` among them, are not handed over as the requested URL's.
+A `fetch` that follows a redirect itself, ignoring `redirect: 'manual'` (an XHR-based polyfill's, React Native's), answers with the page the redirect led to. The adapter tells one by the response's `redirected` flag where the response has one, as a native `Response` does: its `url` can differ with no redirect followed, as a browser's upgrade to `https:` or a service worker's answer from another URL does. A polyfill's response, which has none, is told by a `url` other than the one dispatched, as XHRAdapter tells one: the fragment aside, a browser's own upgrade to `https:` excepted, and spellings RFC 3986 makes equal read as one (a percent-escape's hex in either case, an unreserved character escaped or not, an empty query - `/a?` - as none). It is reported as XHRAdapter reports a browser-followed redirect: `status: 0` with `wasRedirectDetected` and the final URL as `detectedRedirectURL`. The client refuses it as `redirect_disabled`, or with `followRedirects: true`, where there is no `Location` left to follow, as `redirect_unsupported` (`isNetworkError: false`), never retried: a retry would only follow the same redirect again. That holds for any adapter that reports a redirect with `status: 0`. The other page's headers, its `Set-Cookie` among them, are not handed over as the requested URL's.
 
 **Browser constraints (enforced at client construction):**
 
@@ -2326,12 +2326,16 @@ Expectations for a custom writable:
   `'error'` is still absorbed rather than becoming an uncaught exception, but it is not
   reported; handle those with your own `'error'` listener. What you save by defining one is
   that listener. Either name works. A Node stream has both.
+- **An `async` `write` is backpressure.** The response is held until the promise it
+  returns fulfils, as an `await` on each write would hold it, so writes reach the sink one
+  at a time and in order, and `end` is called only once the last has fulfilled. One that
+  rejects fails the download as `stream_write_error`, and `end` is not called.
 - **Call `end`'s callback when the sink is finished**, as a Node stream does, even from
   an `async` `end`: its promise fulfilling does not end the download, since such an `end`
-  may hand the callback to an inner stream that is still closing. A promise `write` or
-  `end` returns that rejects fails the download as `stream_write_error`, as an error
-  through the callback does, and the download is delivered only once every such promise
-  has fulfilled. A promise or callback that never comes is bounded by the attempt timeout.
+  may hand the callback to an inner stream that is still closing. A promise `end` returns
+  that rejects fails the download as `stream_write_error`, as an error through the callback
+  does, and the download is delivered only once it has fulfilled. A promise or callback
+  that never comes is bounded by the attempt timeout.
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
   error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the
@@ -2342,8 +2346,9 @@ Expectations for a custom writable:
   poll phase does not expire that coverage before the error arrives.
   See [How long that listener stays](#how-long-that-listener-stays).
 - **Return `false` from `write` only to ask for a pause, then emit `'drain'`.** The
-  adapter pauses the response only for `false`, as `pipe()` does, and resumes it on
-  `'drain'`; any other return, `undefined` included, reads as ready for more. A sink whose
+  adapter pauses the response for `false`, as `pipe()` does, and resumes it on `'drain'`;
+  a promise holds it too, until it fulfils (below), and any other return, `undefined`
+  included, reads as ready for more. A sink whose
   `on('drain', ...)` throws is written to without pausing, since nothing could resume it.
 - **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
   is coming and takes the listener off at once, instead of waiting out the timers below.
