@@ -21,12 +21,12 @@ export class TestComponent extends BaseComponent {
   public startCalled = false;
   public stopCalled = false;
 
-  public start(): Promise<void> | void {
+  public start(_signal?: AbortSignal): Promise<void> | void {
     this.startCalled = true;
     return Promise.resolve();
   }
 
-  public stop(): Promise<void> | void {
+  public stop(_signal?: AbortSignal): Promise<void> | void {
     this.stopCalled = true;
     return Promise.resolve();
   }
@@ -312,24 +312,22 @@ export class MockWorkerComponent extends BaseComponent {
     });
   }
 
-  public async start(): Promise<void> {
+  public async start(signal: AbortSignal): Promise<void> {
     this.aborted = false;
+    signal.addEventListener('abort', () => {
+      this.aborted = true;
+    });
     await sleep(5);
     this.running = true;
     this.logger.info('Worker started');
   }
 
-  public stop(): void {
+  public stop(signal: AbortSignal): void {
+    signal.addEventListener('abort', () => {
+      this.logger.warn('Worker stop aborted');
+    });
     this.running = false;
     this.logger.info('Worker stopped');
-  }
-
-  public onStartupAborted(): void {
-    this.aborted = true;
-  }
-
-  public onGracefulStopTimeout(): void {
-    this.logger.warn('Worker stop aborted');
   }
 
   public healthCheck(): boolean {

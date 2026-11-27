@@ -1,3 +1,9 @@
+import type { ShutdownMethod } from './types';
+import {
+  LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED,
+  LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
+} from './constants';
+
 /**
  * Error thrown when a component name doesn't match kebab-case validation
  *
@@ -127,6 +133,50 @@ export class ComponentStartTimeoutError extends Error {
 }
 
 /**
+ * The reason a shutdown pass with `abortPendingStarts` aborts the signal of a start still
+ * in flight as it begins. A cue to give up, not a failure the manager records: the pass
+ * still waits for that `start()` and keeps its dependencies up until it settles.
+ */
+export class StartupInterruptedByShutdownError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'StartupInterrupted';
+  public additionalInfo: { componentName: string; method: ShutdownMethod };
+
+  constructor(additionalInfo: {
+    componentName: string;
+    method: ShutdownMethod;
+  }) {
+    super(
+      `Component "${additionalInfo.componentName}" startup interrupted by shutdown (${additionalInfo.method})`,
+    );
+    this.name = 'StartupInterruptedByShutdownError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
+ * The reason a start signal aborts when the manager cannot observe the promise `start()`
+ * returned (its `constructor` or species throws): the start fails at once with that
+ * failure, which this carries as `cause`, and the manager stops waiting on the call.
+ */
+export class ComponentStartObservationError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'StartObservationFailed';
+  public additionalInfo: { componentName: string };
+
+  constructor(additionalInfo: { componentName: string }, cause: unknown) {
+    super(
+      `Component "${additionalInfo.componentName}" start() returned a promise that could not be observed`,
+      { cause },
+    );
+    this.name = 'ComponentStartObservationError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
  * Error thrown when a component stop operation times out
  */
 export class ComponentStopTimeoutError extends Error {
@@ -140,6 +190,42 @@ export class ComponentStopTimeoutError extends Error {
       `Component "${additionalInfo.componentName}" stop timed out after ${additionalInfo.timeoutMS}ms`,
     );
     this.name = 'ComponentStopTimeoutError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
+ * The reason a component's `onShutdownForce()` signal aborts when `shutdownForceTimeoutMS`
+ * passes with the call still pending, and the `error` of the stalled result and stall
+ * record that timeout leaves.
+ */
+export class ComponentForceTimeoutError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'ForceTimeout';
+  public additionalInfo: { componentName: string; timeoutMS: number };
+
+  constructor(additionalInfo: { componentName: string; timeoutMS: number }) {
+    super(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT);
+    this.name = 'ComponentForceTimeoutError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
+ * The reason a component's `onShutdownForce()` signal aborts when the graceful `stop()` it
+ * escalated from completes late and ends the force phase first, with the call still
+ * pending. Not a failure: the component did stop, and the stop answers success.
+ */
+export class ForceShutdownSupersededError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'ForceSuperseded';
+  public additionalInfo: { componentName: string };
+
+  constructor(additionalInfo: { componentName: string }) {
+    super(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED);
+    this.name = 'ForceShutdownSupersededError';
     this.additionalInfo = additionalInfo;
   }
 }
@@ -203,5 +289,9 @@ export const lifecycleManagerErrCodes = {
   StartupFailed: 'StartupFailed',
   StartupTimeout: 'StartupTimeout',
   StartTimeout: 'StartTimeout',
+  StartupInterrupted: 'StartupInterrupted',
+  StartObservationFailed: 'StartObservationFailed',
   StopTimeout: 'StopTimeout',
+  ForceTimeout: 'ForceTimeout',
+  ForceSuperseded: 'ForceSuperseded',
 } as const;

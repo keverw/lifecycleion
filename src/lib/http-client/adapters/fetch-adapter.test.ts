@@ -3717,7 +3717,7 @@ describe('FetchAdapter - body chunk types and sizes', () => {
         ),
       );
 
-    return new FetchAdapter().send({
+    return await new FetchAdapter().send({
       requestURL: 'https://local.test/data',
       method: 'GET',
       headers: {},

@@ -147,14 +147,19 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
     return this.manager.startAllComponents(options);
   }
 
+  /**
+   * Requested as this component, so a shutdown it awaits from its own `start()` does
+   * not wait on that start - even after the hook has already yielded.
+   */
   public stopAllComponents(options?: StopAllOptions): Promise<ShutdownResult> {
-    return this.manager.stopAllComponents(options);
+    return this.internalCallbacks.stopAllComponentsInternal(options);
   }
 
+  /** Requested as this component, for the reason {@link stopAllComponents} gives. */
   public restartAllComponents(
     options?: RestartAllOptions,
   ): Promise<RestartResult> {
-    return this.manager.restartAllComponents(options);
+    return this.internalCallbacks.restartAllComponentsInternal(options);
   }
 
   public startComponent(
