@@ -5157,7 +5157,10 @@ describe('FetchAdapter: a fetch that followed a redirect itself', () => {
         ).then((response) => {
           Object.defineProperties(response, {
             url: { value: 'url' in fields ? fields.url : '' },
-            redirected: { value: 'redirected' in fields },
+            // A polyfill's response carries no `redirected`; a native one, a boolean.
+            redirected: {
+              value: 'redirected' in fields ? fields.redirected : undefined,
+            },
             body: {
               value: {
                 cancel: () => {
@@ -5187,11 +5190,38 @@ describe('FetchAdapter: a fetch that followed a redirect itself', () => {
     },
   );
 
+  test.each([
+    ['a service worker answering from another URL', 'https://cdn.test/cached'],
+    ["a browser's upgrade to https:", 'https://api.test/a'],
+  ])(
+    "a native response's redirected: false is the answer, whatever its url: %s",
+    async (_label, answeredURL) => {
+      (globalThis as any).fetch = () => {
+        const response = new Response('ok', { status: 200 });
+        Object.defineProperties(response, {
+          url: { value: answeredURL },
+          redirected: { value: false },
+        });
+        return Promise.resolve(response);
+      };
+
+      const response = await new FetchAdapter().send({
+        requestURL: 'http://api.test/a',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.wasRedirectDetected).toBe(false);
+    },
+  );
+
   test('a response whose url is the one dispatched, fragment aside, is the answer', async () => {
     (globalThis as any).fetch = () => {
       const response = new Response('ok', { status: 200 });
-      Object.defineProperty(response, 'url', {
-        value: 'https://api.test/a?q=1',
+      Object.defineProperties(response, {
+        url: { value: 'https://api.test/a?q=1' },
+        redirected: { value: undefined },
       });
       return Promise.resolve(response);
     };

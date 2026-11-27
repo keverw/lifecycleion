@@ -51,8 +51,9 @@ export function monthIndexOf(name: string): number {
 
 /**
  * The epoch time of a date and time read as UTC, or `undefined` for one that names no
- * real moment: a month outside 0 to 11, a day the month does not have (`31 Feb`), an hour
- * past 23, or a minute or second past 59. A year below 100 is that year, not 19xx.
+ * real moment: a field that is not an integer, a month outside 0 to 11, a day the month
+ * does not have (`31 Feb`), or an hour, minute or second below 0 or past 23, 59 and 59. A
+ * year below 100 is that year, not 19xx.
  */
 export function utcMoment(
   year: number,
@@ -63,6 +64,10 @@ export function utcMoment(
   second: number,
 ): number | undefined {
   if (
+    ![year, month, day, hour, minute, second].every(Number.isInteger) ||
+    hour < 0 ||
+    minute < 0 ||
+    second < 0 ||
     month < 0 ||
     month > 11 ||
     day < 1 ||

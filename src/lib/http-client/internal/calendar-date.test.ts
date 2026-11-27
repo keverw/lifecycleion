@@ -23,6 +23,14 @@ describe('monthIndexOf', () => {
 });
 
 describe('utcMoment', () => {
+  test('a field that is not an integer, or a time field below 0, names no moment', () => {
+    expect(utcMoment(2026, 0, 1.5, 0, 0, 0)).toBeUndefined();
+    expect(utcMoment(2026, 0.5, 1, 0, 0, 0)).toBeUndefined();
+    expect(utcMoment(2026, 0, 2, -1, 0, 0)).toBeUndefined();
+    expect(utcMoment(2026, 0, 2, 0, -1, 0)).toBeUndefined();
+    expect(utcMoment(2026, 0, 2, 0, 0, Number.NaN)).toBeUndefined();
+  });
+
   test('a real date and time is its epoch time, a year below 100 as written', () => {
     expect(utcMoment(2026, 10, 8, 12, 0, 30)).toBe(
       Date.UTC(2026, 10, 8, 12, 0, 30),

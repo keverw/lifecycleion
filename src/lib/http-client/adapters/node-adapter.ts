@@ -36,7 +36,7 @@ import {
 } from '../internal/request-fields';
 import type { AdapterRequestFields } from '../internal/request-fields';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
-import { observeRejection } from '../../internal/promise-reactions';
+import { noop, observeRejection } from '../../internal/promise-reactions';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
@@ -3731,24 +3731,61 @@ async function streamResponseBody(
     // A hand-written sink whose `write` or `end` is `async` reports a failure as the
     // promise it returns rejecting, not through the callback or `'error'`: that rejection
     // fails the download as one through the callback does, rather than leaving a
-    // truncated body delivered and the rejection unhandled.
-    const observeSinkReturn = (returned: unknown): void => {
+    // truncated body delivered and the rejection unhandled. So the download is delivered
+    // only once every promise `write` or `end` returned has fulfilled
+    // (`pendingSinkReturns`, counted from before `end` is called, as its callback may
+    // come from inside it). An `end` that declares no callback parameter ends the
+    // download when its promise fulfils; one that does is waited on for that callback,
+    // which it may hand to an inner stream that is still closing. The attempt timeout
+    // bounds a promise or a callback that never comes.
+    let pendingSinkReturns = 0;
+    let isEndDelivered = false;
+
+    const deliverIfWritesDone = (): void => {
+      if (isEndDelivered && pendingSinkReturns === 0 && settle(true)) {
+        // Settled first: the body is delivered, so a cancel the 100% event makes finds
+        // the stream finished - its factory's signal does not fire over a whole body, as
+        // the docs promise - and is the client's late cancel, not this stream's abort.
+        // Then the 100% download progress, which no chunk sends.
+        onProgress?.(completeProgressEvent(handedBytes));
+      }
+    };
+
+    const failSinkReturn = (error: unknown): void => {
+      if (isSettled) {
+        return;
+      }
+
+      claimWritableError(error);
+      settle({
+        code: 'stream_write_error',
+        cause: normalizeError(error),
+      });
+    };
+
+    const observeSinkReturn = (
+      returned: unknown,
+      onFulfilled: () => void = noop,
+    ): void => {
       const pending = adoptResult(returned);
       if (pending === undefined || pending instanceof UnreadableReturn) {
         return;
       }
 
-      observeRejection(pending, (error: unknown) => {
-        if (isSettled) {
-          return;
-        }
-
-        claimWritableError(error);
-        settle({
-          code: 'stream_write_error',
-          cause: normalizeError(error),
-        });
-      });
+      pendingSinkReturns++;
+      void pending
+        .then(
+          () => {
+            pendingSinkReturns--;
+            onFulfilled();
+            deliverIfWritesDone();
+          },
+          (error: unknown) => {
+            pendingSinkReturns--;
+            failSinkReturn(error);
+          },
+        )
+        .then(noop, noop);
     };
 
     const onResponseData = (chunk: Buffer): void => {
@@ -3847,46 +3884,25 @@ async function streamResponseBody(
       didReceiveEnd = true;
 
       try {
-        const ended: unknown = writable.end((endError?: Error | null) => {
-          if (isSettled) {
-            return;
-          }
-
-          // The callback's error argument is not optional to honour. A write that
-          // failed destroys the stream, so `end` reports here rather than succeeding -
-          // and the writable's own `error` event may not have been delivered yet, so
-          // ignoring this settles a broken download as a success. `errored` is
-          // consulted too, for a runtime that destroys the stream without passing the
-          // error along - read through a guard, like every other member of a
-          // caller-supplied writable, because this callback runs on a later tick with
-          // no `try` above it: a throwing accessor here would be an uncaught exception
-          // rather than a failed download.
-          // Handed back as-is for the truthiness test and normalization below, rather
-          // than narrowed to `Error` here: a runtime that records a failure as something
-          // other than an `Error` would have its broken download settled as a success.
-          const writeFailure =
-            endError ?? readUnknownMember(writable, 'errored');
-
-          if (writeFailure) {
-            claimWritableError(writeFailure);
-            settle({
-              code: 'stream_write_error',
-              cause: normalizeError(writeFailure),
-            });
-
-            return;
-          }
-
-          // Settled first: the body is delivered, so a cancel the 100% event below makes
-          // finds the stream finished - its factory's signal does not fire over a whole
-          // body, as the docs promise - and is the client's late cancel, not this
-          // stream's abort. Then the 100% download progress, which no chunk sends.
-          // Only for a download that did settle as delivered.
-          if (settle(true)) {
-            onProgress?.(completeProgressEvent(handedBytes));
-          }
-        });
-        observeSinkReturn(ended);
+        // Read once, then called: whether it declares a callback parameter decides what
+        // its promise means (see `observeSinkReturn`). Held open across the call, so a
+        // callback `end` makes from inside it does not deliver before the promise it
+        // returns is counted.
+        const endFunction = readUnknownMember(writable, 'end');
+        const doesTakeCallback =
+          typeof endFunction !== 'function' ||
+          readUnknownMember(endFunction, 'length') !== 0;
+        pendingSinkReturns++;
+        let ended: unknown;
+        try {
+          ended = Reflect.apply(endFunction as () => unknown, writable, [
+            onSinkEnded,
+          ]);
+        } finally {
+          pendingSinkReturns--;
+        }
+        observeSinkReturn(ended, doesTakeCallback ? noop : () => onSinkEnded());
+        deliverIfWritesDone();
       } catch (error) {
         // Same reasoning as the `write` throw above: a throw out of `end` means the
         // stream is being torn down, and its own `error` event is still on the way -
@@ -3897,6 +3913,42 @@ async function streamResponseBody(
           cause: normalizeError(error),
         });
       }
+    };
+
+    // `end`'s callback, or the fulfilment of the promise an `async` `end` returns:
+    // whichever comes first ends the download, and the other finds it ended.
+    const onSinkEnded = (endError?: Error | null): void => {
+      if (isSettled || isEndDelivered) {
+        return;
+      }
+
+      // The callback's error argument is not optional to honour. A write that
+      // failed destroys the stream, so `end` reports here rather than succeeding -
+      // and the writable's own `error` event may not have been delivered yet, so
+      // ignoring this settles a broken download as a success. `errored` is
+      // consulted too, for a runtime that destroys the stream without passing the
+      // error along - read through a guard, like every other member of a
+      // caller-supplied writable, because this callback runs on a later tick with
+      // no `try` above it: a throwing accessor here would be an uncaught exception
+      // rather than a failed download.
+      // Handed back as-is for the truthiness test and normalization below, rather
+      // than narrowed to `Error` here: a runtime that records a failure as something
+      // other than an `Error` would have its broken download settled as a success.
+      const writeFailure = endError ?? readUnknownMember(writable, 'errored');
+
+      if (writeFailure) {
+        claimWritableError(writeFailure);
+        settle({
+          code: 'stream_write_error',
+          cause: normalizeError(writeFailure),
+        });
+
+        return;
+      }
+
+      // Delivered once any write still pending has fulfilled.
+      isEndDelivered = true;
+      deliverIfWritesDone();
     };
 
     const onResponseError = (err: Error): void => {

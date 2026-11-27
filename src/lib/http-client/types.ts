@@ -339,7 +339,10 @@ export interface WritableLike {
   /**
    * The callback receives an error when the stream could not be finished - a write that
    * failed destroys it, so `end` reports here rather than succeeding. Ignoring the
-   * argument settles a broken write as a success.
+   * argument settles a broken write as a success. An `async` `end` declared with no
+   * parameter may instead resolve the promise it returns; any `end` or `write` may reject
+   * it with the error, and the download is delivered only once every such promise has
+   * fulfilled.
    */
   end(cb?: (err?: Error | null) => void): void;
   on(event: 'error', listener: (err: Error) => void): this;

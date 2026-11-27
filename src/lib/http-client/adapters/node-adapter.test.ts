@@ -3404,6 +3404,137 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     },
   );
 
+  const sendToAsyncSink = async (sink: object) => {
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        res.on('newListener', (event) => {
+          if (event === 'data') {
+            setTimeout(() => {
+              res.emit('data', Buffer.from('chunk'));
+              res.emit('data', Buffer.from('chunk'));
+              res.emit('end');
+            }, 0);
+          }
+        });
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      return await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        signal: AbortSignal.timeout(2000),
+        streamResponse: () => sink as never,
+      });
+    } finally {
+      requestSpy.mockRestore();
+    }
+  };
+
+  test.each([
+    ['rejects', true],
+    ['fulfils', false],
+  ] as const)(
+    "a download waits on an async write still pending when end's callback comes, and the write %s",
+    async (_label, shouldReject) => {
+      const failure = new Error('disk full');
+      let didEnd = false;
+      const sink = Object.assign(new EventEmitter(), {
+        async write() {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          if (shouldReject) {
+            throw failure;
+          }
+          return true;
+        },
+        end(cb?: (err?: Error | null) => void) {
+          didEnd = true;
+          cb?.();
+        },
+        destroy() {},
+      });
+
+      const result = await sendToAsyncSink(sink);
+
+      expect(didEnd).toBe(true);
+      expect(result.status).toBe(200);
+      if (shouldReject) {
+        expect(result.isStreamError).toBe(true);
+        expect(result.streamErrorCode).toBe('stream_write_error');
+        expect(result.errorCause).toBe(failure);
+      } else {
+        expect(result.isStreamError).toBeUndefined();
+      }
+    },
+  );
+
+  test.each([
+    [
+      "an async end that hands its callback on fails with the callback's later error",
+      {
+        async end(cb?: (err?: Error | null) => void) {
+          await Promise.resolve();
+          setTimeout(() => cb?.(new Error('close failed')), 20);
+        },
+      },
+      'close failed',
+    ],
+    [
+      'an end that calls back clean, then rejects the promise it returns, fails with that rejection',
+      {
+        end(cb?: (err?: Error | null) => void) {
+          cb?.();
+          return Promise.reject(new Error('flush failed'));
+        },
+      },
+      'flush failed',
+    ],
+  ])('%s', async (_label, endMember, message) => {
+    const sink = Object.assign(new EventEmitter(), {
+      write(_chunk: Uint8Array, cb?: (err?: Error | null) => void) {
+        cb?.();
+        return true;
+      },
+      ...endMember,
+      destroy() {},
+    });
+
+    const result = await sendToAsyncSink(sink);
+
+    expect(result.isStreamError).toBe(true);
+    expect(result.streamErrorCode).toBe('stream_write_error');
+    expect((result.errorCause as Error).message).toBe(message);
+  });
+
+  test("a sink whose async end resolves without calling end's callback delivers the download", async () => {
+    const sink = Object.assign(new EventEmitter(), {
+      write(_chunk: Uint8Array, cb?: (err?: Error | null) => void) {
+        cb?.();
+        return true;
+      },
+      async end() {
+        await Promise.resolve();
+      },
+      destroy() {},
+    });
+
+    const result = await sendToAsyncSink(sink);
+
+    expect(result.status).toBe(200);
+    expect(result.isStreamError).toBeUndefined();
+  });
+
   test('buffered response stream error after headers resolves as stream_response_error', async () => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {

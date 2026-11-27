@@ -1250,14 +1250,6 @@ function cloneViewInBounds(view: ArrayBufferView): object {
   }
 }
 
-/**
- * A typed array or `DataView` over a copy of the bytes it covers, of its own type. The
- * copy is a fixed-length buffer of the view's buffer's kind, even under a view of a
- * resizable one. Read through the intrinsic getters, which answer for a view from any
- * realm. A typed array subclass - a `Buffer`, a caller's class - is copied by the shared
- * `slice`, through its own constructor (see {@link isSubclass}); a `DataView` subclass
- * comes back a `DataView`.
- */
 /** Whether `view` cannot be read: over a detached buffer, or out of bounds of a resized one. */
 function isViewOutOfBounds(view: ArrayBufferView): boolean {
   try {
@@ -1277,6 +1269,14 @@ function isViewOutOfBounds(view: ArrayBufferView): boolean {
   }
 }
 
+/**
+ * A typed array or `DataView` over a copy of the bytes it covers, of its own type. The
+ * copy is a fixed-length buffer of the view's buffer's kind, even under a view of a
+ * resizable one. Read through the intrinsic getters, which answer for a view from any
+ * realm. A typed array subclass - a `Buffer`, a caller's class - is copied by the shared
+ * `slice`, through its own constructor (see {@link isSubclass}); a `DataView` subclass
+ * comes back a `DataView`.
+ */
 function cloneView(view: ArrayBufferView): object {
   const name = typedArrayNameOf(view);
   const read = (key: string): unknown =>

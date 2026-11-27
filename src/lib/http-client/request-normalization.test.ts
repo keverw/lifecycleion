@@ -1400,6 +1400,16 @@ test('a misspelled config or request option is refused rather than read as absen
   expect(() => client.get('/x', { [passphrase]: 1 } as never)).toThrow(
     'HTTPRequestOptions has no field by that name',
   );
+  // Nor with a capitalised word or an acronym after it.
+  for (const key of [`${passphrase}Secret`, `${passphrase}AB`]) {
+    expect(() => new HTTPClient({ adapter, [key]: 1 })).toThrow(
+      'HTTPClient config has no field by that name',
+    );
+  }
+  // A long genuine camelCase name is still named.
+  expect(() =>
+    client.get('/x', { requiredMissingDependencies: 1 } as never),
+  ).toThrow('"requiredMissingDependencies" field');
   // A camelCase name is named however short the list of fields taken: another
   // config's option put in the wrong place.
   expect(() => client.listRequests({ requestID: 'x' } as never)).toThrow(
@@ -12323,6 +12333,9 @@ test('junk or a bad gzip trailer in a later chunk is a stream error', async () =
       stackedBody.subarray(stackedBody.length - 8),
     ],
   };
+  // The later chunk is sent once the client has read the first, so the two never arrive
+  // as one read, however slow the machine.
+  let releaseLater: () => void = () => {};
   const server = http.createServer((req, res) => {
     const [encoding, first, later] = bodies[(req.url ?? '/').slice(1)] ?? [
       'identity',
@@ -12333,17 +12346,25 @@ test('junk or a bad gzip trailer in a later chunk is a stream error', async () =
       'content-type': 'text/plain',
       'content-encoding': encoding,
     });
-    res.write(first);
-    setTimeout(() => {
+    releaseLater = () => {
+      releaseLater = () => {};
       res.end(later);
-    }, 50);
+    };
+    res.write(first);
   });
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
     const client = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
     for (const kind of Object.keys(bodies)) {
-      const response = await client.get(`/${kind}`).send();
+      const response = await client
+        .get(`/${kind}`)
+        .onDownloadProgress((event) => {
+          if (event.loaded > 0) {
+            releaseLater();
+          }
+        })
+        .send();
       expect({ kind, isStreamError: response.isStreamError }).toEqual({
         kind,
         isStreamError: true,
@@ -14463,7 +14484,7 @@ test('a status-0 stream error answered after the timer fired is not turned into 
   expect(builder.error?.code).toBe('stream_response_error');
 });
 
-test('a status-0 detected redirect answered after the timer fired is a timeout only where redirects are followed', async () => {
+test('a status-0 detected redirect answered after the timer fired is that answer, not a timeout, whether or not redirects are followed', async () => {
   for (const isFollowing of [true, false]) {
     let sends = 0;
     const adapter: HTTPAdapter = {
@@ -14491,15 +14512,11 @@ test('a status-0 detected redirect answered after the timer fired is a timeout o
     }).get('/a');
     const response = await builder.send();
 
-    if (isFollowing) {
-      expect(sends).toBe(2);
-      expect(response.isTimeout).toBe(true);
-      expect(builder.error?.code).toBe('timeout');
-    } else {
-      expect(sends).toBe(1);
-      expect(response.isTimeout).toBe(false);
-      expect(builder.error?.code).toBe('redirect_disabled');
-    }
+    expect(sends).toBe(1);
+    expect(response.isTimeout).toBe(false);
+    expect(builder.error?.code).toBe(
+      isFollowing ? 'adapter_error' : 'redirect_disabled',
+    );
   }
 });
 
@@ -19380,7 +19397,7 @@ test.each([
 
 test("an adapter's own AbortError that no one asked for is its non-retryable failure, not a cancel", async () => {
   let sends = 0;
-  const failure = Object.assign(new Error('own connect timeout'), {
+  const failure = Object.assign(new Error('aborted by the adapter'), {
     name: 'AbortError',
   });
   const client = new HTTPClient({
@@ -19630,3 +19647,36 @@ test.each([
     ).toThrow('HTTPClient baseURL must be an absolute http(s) URL');
   },
 );
+
+test('with redirects on, a redirect the adapter reports with status 0 ends once as an adapter_error naming it, not a retried network_error', async () => {
+  let sends = 0;
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'fetch',
+      send: () => {
+        sends++;
+        return Promise.resolve({
+          status: 0,
+          wasRedirectDetected: true,
+          detectedRedirectURL: 'https://api.test/landing',
+          headers: {},
+          body: null,
+        });
+      },
+    },
+    baseURL: 'https://api.test',
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+
+  const builder = client.get('/x');
+  const response = await builder.send();
+
+  expect(sends).toBe(1);
+  expect(response.isFailed).toBe(true);
+  expect(response.isNetworkError).toBe(false);
+  expect(response.wasRedirectDetected).toBe(true);
+  expect(response.detectedRedirectURL).toBe('https://api.test/landing');
+  expect(builder.error?.code).toBe('adapter_error');
+  expect(builder.error?.message).toContain('redirect the client cannot follow');
+});

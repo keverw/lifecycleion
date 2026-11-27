@@ -84,6 +84,7 @@ import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
 import { isHighSurrogate } from '../../internal/surrogates';
 import { isBunRuntime } from '../../internal/is-bun-runtime';
 import { parseURL } from '../../domain-utils/helpers';
+import { compareResponseURL, parsedOrNull } from '../internal/response-url';
 
 export class FetchAdapter implements HTTPAdapter {
   constructor() {
@@ -428,11 +429,12 @@ export class FetchAdapter implements HTTPAdapter {
     }
 
     // A `fetch` that followed a redirect itself, ignoring `redirect: 'manual'` - an
-    // XHR-based polyfill's, React Native's - answers with the page it led to: told by
-    // `redirected`, or by a `url` other than the one dispatched (a polyfill sets only
-    // that). Reported as XHRAdapter reports a browser-followed redirect, `status: 0` with
-    // the final URL, which the client refuses: answered as the requested URL, the other
-    // page's `Set-Cookie` would be stored for it, and `followRedirects: false` bypassed.
+    // XHR-based polyfill's, React Native's - answers with the page it led to: told by a
+    // native response's `redirected`, or, on a polyfill's response with none, by its
+    // `url` (see `followedRedirectURL`). Reported as XHRAdapter reports a
+    // browser-followed redirect, `status: 0` with the final URL, which the client
+    // refuses: answered as the requested URL, the other page's `Set-Cookie` would be
+    // stored for it, and `followRedirects: false` bypassed.
     const followedURL = followedRedirectURL(response, dispatchedURL);
     if (followedURL !== undefined) {
       letGoOfBody();
@@ -1133,20 +1135,15 @@ function materializeFetchHeaders(
   return record;
 }
 
-function parsedOrNull(text: string): URL | null {
-  try {
-    return parseURL(text);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * The URL a response says `fetch` followed a redirect to, `''` for one it followed to a URL
- * it does not name, or `undefined` for one it did not follow: `redirected`, or a `url` that
- * parses to another URL than the one dispatched, the fragment of each aside - Node's and
- * browsers' `url` drops it, Bun's keeps it. Each read guarded, as a polyfill's response
- * may carry any getter.
+ * it does not name, or `undefined` for one it did not follow. A native `Response`'s
+ * `redirected`, a boolean, decides: its `url` can differ from the one dispatched with no
+ * redirect followed - a browser's upgrade to `https:`, a service worker's answer from
+ * another URL. A polyfill's response, which carries no `redirected`, is told by its `url`
+ * as XHRAdapter tells a browser-followed redirect (see `compareResponseURL`): another URL,
+ * the fragment aside, except a browser's own upgrade to `https:`. Each read guarded, as a
+ * polyfill's response may carry any getter.
  */
 function followedRedirectURL(
   response: Response,
@@ -1155,21 +1152,16 @@ function followedRedirectURL(
   const url = readUnknownMember(response, 'url');
   const parsed =
     typeof url === 'string' && url !== '' ? parsedOrNull(url) : null;
+  const redirected = readUnknownMember(response, 'redirected');
 
-  if (parsed !== null) {
-    const dispatched = parsedOrNull(dispatchedURL);
-    if (dispatched !== null) {
-      const answered = new URL(parsed.href);
-      answered.hash = '';
-      dispatched.hash = '';
-      if (answered.href !== dispatched.href) {
-        return parsed.href;
-      }
-    }
+  if (typeof redirected === 'boolean') {
+    return redirected ? (parsed?.href ?? '') : undefined;
   }
 
-  return readUnknownMember(response, 'redirected') === true
-    ? (parsed?.href ?? '')
+  return parsed !== null &&
+    parsedOrNull(dispatchedURL) !== null &&
+    compareResponseURL(parsed.href, dispatchedURL).kind === 'redirected'
+    ? parsed.href
     : undefined;
 }
 

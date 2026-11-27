@@ -336,6 +336,14 @@ const ERROR_CODE_MESSAGES: Readonly<Record<HTTPClientError['code'], string>> = {
   response_too_large: 'Response body exceeded maxResponseBytes',
 };
 
+/**
+ * The `adapter_error` message for a redirect the adapter reports with `status: 0` while
+ * redirects are on: one the runtime followed itself, or could not expose, with no
+ * `Location` the client could follow.
+ */
+const UNFOLLOWABLE_REDIRECT_MESSAGE =
+  'Adapter reported a redirect the client cannot follow (status 0, no Location)';
+
 /** The `adapter_error` message when the caller's cookie jar threw on a response. */
 const COOKIE_JAR_FAILURE_MESSAGE =
   'Cookie jar failed to process response headers';
@@ -4130,16 +4138,15 @@ export class BaseHTTPClient {
         // own abort so the catch reads it as the timeout. An adapter veto stays its own.
         // A bare `status: 0` too, wherever the client reads one as a transport failure
         // whether or not `isTransportError` says so: not a stream error, which
-        // `_buildResponse` reads as one, nor a browser's opaque redirect where redirects
-        // are off, which is the answer `redirect_disabled` reports. With redirects on,
-        // that redirect has nowhere to go and is the transport failure below.
+        // `_buildResponse` reads as one, nor a redirect the adapter detected, which is
+        // the answer `redirect_disabled` reports, or with redirects on the adapter_error
+        // below.
         const isLateTransportFailure =
           isTimedOut &&
           (adapterResponse.isTransportError === true ||
             (adapterResponse.status === 0 &&
               adapterResponse.isStreamError !== true &&
-              (adapterResponse.wasRedirectDetected !== true ||
-                this._config.followRedirects))) &&
+              adapterResponse.wasRedirectDetected !== true)) &&
           adapterResponse.isRetryable !== false;
 
         // Store Set-Cookie before retry/backoff so the next attempt matches browsers
@@ -4179,17 +4186,17 @@ export class BaseHTTPClient {
         // Status 0 means no Location header is available, so the normal
         // REDIRECT_STATUS_CODES check in the outer loop can't handle it.
         //
-        // When redirects are disabled this is redirect_disabled.
-        // When enabled, the status-0 response falls
-        // through to the transport error path (nowhere to redirect to).
+        // When redirects are disabled this is redirect_disabled. When enabled, it is a
+        // non-retryable adapter_error: there is nowhere to redirect to, and a retry
+        // would meet the same redirect - one a runtime's `fetch` followed itself would
+        // be followed, and its target's side effects repeated, on every attempt.
         //
         // Real 3xx responses (NodeAdapter, MockAdapter) do NOT reach this path
         // because their status != 0. They fall through to onAttemptEnd with
         // the correct status, and the outer redirect loop handles follow/disable.
         if (
           adapterResponse.wasRedirectDetected &&
-          adapterResponse.status === 0 &&
-          !this._config.followRedirects
+          adapterResponse.status === 0
         ) {
           emitAttemptEnd({
             willRetry: false,
@@ -4203,7 +4210,13 @@ export class BaseHTTPClient {
             wasCancelled: false,
             wasTimeout: false,
             isRetriesExhausted: false,
-            errorCode: 'redirect_disabled',
+            ...(this._config.followRedirects
+              ? {
+                  errorCode: 'adapter_error',
+                  errorMessage: UNFOLLOWABLE_REDIRECT_MESSAGE,
+                  isNetworkErrorOverride: false,
+                }
+              : { errorCode: 'redirect_disabled' }),
           };
         }
 

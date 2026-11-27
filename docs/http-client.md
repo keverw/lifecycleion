@@ -681,7 +681,7 @@ interface HTTPClientError {
 | `redirect_disabled`     | A redirect response with a `Location` was received but `followRedirects` is `false`                                                                                                                                                                                           |
 | `redirect_loop`         | The configured `maxRedirects` limit was reached                                                                                                                                                                                                                               |
 | `request_setup_error`   | Request setup or local orchestration failure before a normal adapter response was produced (e.g. invalid configuration, a body an interceptor returned that cannot be copied, unresolved URL)                                                                                 |
-| `adapter_error`         | The adapter threw an unexpected error, or resolved a response the client could not read (the latter is never retried)                                                                                                                                                         |
+| `adapter_error`         | The adapter threw an unexpected error, or resolved a response the client could not read or a redirect it cannot follow (the latter two are never retried)                                                                                                                     |
 | `interceptor_error`     | A request interceptor threw, or returned a request that is unreadable or invalid                                                                                                                                                                                              |
 | `stream_write_error`    | Writing chunks to the StreamResponseFactory writable failed                                                                                                                                                                                                                   |
 | `stream_response_error` | The upstream response stream errored after headers arrived                                                                                                                                                                                                                    |
@@ -1632,7 +1632,7 @@ The external signal is composed with the client's cancel signal (`builder.cancel
 **What counts as the timeout.** After the timeout's abort and before the response's status has arrived, whatever the adapter's `send()` rejects with, or a transport-failure response it resolves, is the attempt's timeout, so a custom adapter need not reject with an `AbortError`:
 
 - Any rejection is the timeout, except one the adapter flagged non-retryable, which stays its own failure.
-- A transport-failure response it resolves (`isTransportError: true`, or a bare `status: 0` that is not a stream error, nor a detected redirect with `followRedirects` off) is the timeout, except one resolved with `isRetryable: false`, which stays its own failure.
+- A transport-failure response it resolves (`isTransportError: true`, or a bare `status: 0` that is not a stream error, nor a detected redirect) is the timeout, except one resolved with `isRetryable: false`, which stays its own failure.
 
 Once the status has arrived, a timeout that cuts NodeAdapter's `streamResponse` factory mid-setup, or a body mid-read, ends the request as that `stream_setup_error` or `stream_response_error` with `isTimeout: true`, not retried (see [Error Codes](#error-codes)).
 
@@ -1790,7 +1790,7 @@ The adapter resolves a relative request URL as `fetch` does - against the docume
 
 **Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. A request the adapter refuses before calling `fetch` fires neither. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
 
-A `fetch` that follows a redirect itself, ignoring `redirect: 'manual'` (an XHR-based polyfill's, React Native's), answers with the page the redirect led to. The adapter tells one by the response's `redirected` flag, or by a `url` other than the one it dispatched, and reports it as XHRAdapter reports a browser-followed redirect: `status: 0` with `wasRedirectDetected` and the final URL as `detectedRedirectURL`, which the client refuses as `redirect_disabled`. The other page's headers, its `Set-Cookie` among them, are not handed over as the requested URL's.
+A `fetch` that follows a redirect itself, ignoring `redirect: 'manual'` (an XHR-based polyfill's, React Native's), answers with the page the redirect led to. The adapter tells one by the response's `redirected` flag where the response has one, as a native `Response` does: its `url` can differ with no redirect followed, as a browser's upgrade to `https:` or a service worker's answer from another URL does. A polyfill's response, which has none, is told by a `url` other than the one dispatched, the fragment aside and a browser's own upgrade to `https:` excepted, as XHRAdapter tells one. It is reported as XHRAdapter reports a browser-followed redirect: `status: 0` with `wasRedirectDetected` and the final URL as `detectedRedirectURL`. The client refuses it as `redirect_disabled`, or with `followRedirects: true`, where there is no `Location` left to follow, as a non-retryable `adapter_error` (`isNetworkError: false`) whose message says so: a retry would only follow the same redirect again. That holds for any adapter that reports a redirect with `status: 0`. The other page's headers, its `Set-Cookie` among them, are not handed over as the requested URL's.
 
 **Browser constraints (enforced at client construction):**
 
@@ -2325,6 +2325,12 @@ Expectations for a custom writable:
   `'error'` is still absorbed rather than becoming an uncaught exception, but it is not
   reported; handle those with your own `'error'` listener. What you save by defining one is
   that listener. Either name works. A Node stream has both.
+- **An `async` `write` or `end` works too.** A promise it returns that rejects fails the
+  download as `stream_write_error`, as an error through the callback does, and the download
+  is delivered only once every such promise has fulfilled. An `end` declared with no
+  parameter (`async end() { ... }`) ends the download when its promise fulfils; one that
+  takes the callback must call it, and may hand it to an inner stream still closing. A
+  promise or callback that never comes is bounded by the attempt timeout.
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
   error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the
