@@ -327,6 +327,8 @@ const ERROR_CODE_MESSAGES: Readonly<Record<HTTPClientError['code'], string>> = {
   cancelled: 'Request was cancelled',
   redirect_disabled: 'Redirect encountered while redirects are disabled',
   redirect_loop: 'Redirect limit exceeded',
+  redirect_unsupported:
+    'Redirect reported with no Location the client could follow (status 0)',
   request_setup_error: 'Request setup failed',
   adapter_error: 'Adapter error',
   interceptor_error: 'Interceptor error',
@@ -335,14 +337,6 @@ const ERROR_CODE_MESSAGES: Readonly<Record<HTTPClientError['code'], string>> = {
   stream_setup_error: 'Stream response setup failed',
   response_too_large: 'Response body exceeded maxResponseBytes',
 };
-
-/**
- * The `adapter_error` message for a redirect the adapter reports with `status: 0` while
- * redirects are on: one the runtime followed itself, or could not expose, with no
- * `Location` the client could follow.
- */
-const UNFOLLOWABLE_REDIRECT_MESSAGE =
-  'Adapter reported a redirect the client cannot follow (status 0, no Location)';
 
 /** The `adapter_error` message when the caller's cookie jar threw on a response. */
 const COOKIE_JAR_FAILURE_MESSAGE =
@@ -2440,7 +2434,8 @@ export class BaseHTTPClient {
             attemptResult.errorCode === 'request_setup_error' ||
             attemptResult.errorCode === 'interceptor_error' ||
             attemptResult.errorCode === 'stream_setup_error' ||
-            attemptResult.errorCode === 'redirect_disabled'
+            attemptResult.errorCode === 'redirect_disabled' ||
+            attemptResult.errorCode === 'redirect_unsupported'
               ? { isNetworkErrorOverride: false }
               : {}),
           });
@@ -4139,8 +4134,8 @@ export class BaseHTTPClient {
         // A bare `status: 0` too, wherever the client reads one as a transport failure
         // whether or not `isTransportError` says so: not a stream error, which
         // `_buildResponse` reads as one, nor a redirect the adapter detected, which is
-        // the answer `redirect_disabled` reports, or with redirects on the adapter_error
-        // below.
+        // the answer `redirect_disabled` reports, or with redirects on
+        // `redirect_unsupported` below.
         const isLateTransportFailure =
           isTimedOut &&
           (adapterResponse.isTransportError === true ||
@@ -4186,8 +4181,8 @@ export class BaseHTTPClient {
         // Status 0 means no Location header is available, so the normal
         // REDIRECT_STATUS_CODES check in the outer loop can't handle it.
         //
-        // When redirects are disabled this is redirect_disabled. When enabled, it is a
-        // non-retryable adapter_error: there is nowhere to redirect to, and a retry
+        // When redirects are disabled this is redirect_disabled. When enabled, it is
+        // redirect_unsupported, never retried: there is nowhere to redirect to, and a retry
         // would meet the same redirect - one a runtime's `fetch` followed itself would
         // be followed, and its target's side effects repeated, on every attempt.
         //
@@ -4210,13 +4205,9 @@ export class BaseHTTPClient {
             wasCancelled: false,
             wasTimeout: false,
             isRetriesExhausted: false,
-            ...(this._config.followRedirects
-              ? {
-                  errorCode: 'adapter_error',
-                  errorMessage: UNFOLLOWABLE_REDIRECT_MESSAGE,
-                  isNetworkErrorOverride: false,
-                }
-              : { errorCode: 'redirect_disabled' }),
+            errorCode: this._config.followRedirects
+              ? 'redirect_unsupported'
+              : 'redirect_disabled',
           };
         }
 
@@ -5428,7 +5419,8 @@ export class BaseHTTPClient {
    * 2. isTimeout → timeout, over every override but a stream code or
    *    response_too_large: a streamed-body failure keeps its stream_* code, and a body
    *    over the limit its response_too_large, while still surfacing `isTimeout: true`
-   * 3. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error,
+   * 3. Explicit codeOverride (redirect_disabled, redirect_loop, redirect_unsupported,
+   *    request_setup_error,
    *    adapter_error, interceptor_error, stream_write_error, stream_response_error,
    *    stream_setup_error, response_too_large)
    * 4. Default fallback → network_error

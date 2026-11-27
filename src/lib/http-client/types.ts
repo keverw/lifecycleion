@@ -797,6 +797,7 @@ export type ErrorCode =
   | 'cancelled'
   | 'redirect_disabled'
   | 'redirect_loop'
+  | 'redirect_unsupported'
   | 'request_setup_error'
   | 'adapter_error'
   | 'interceptor_error'

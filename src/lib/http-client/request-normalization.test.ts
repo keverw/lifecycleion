@@ -14515,7 +14515,7 @@ test('a status-0 detected redirect answered after the timer fired is that answer
     expect(sends).toBe(1);
     expect(response.isTimeout).toBe(false);
     expect(builder.error?.code).toBe(
-      isFollowing ? 'adapter_error' : 'redirect_disabled',
+      isFollowing ? 'redirect_unsupported' : 'redirect_disabled',
     );
   }
 });
@@ -19648,7 +19648,7 @@ test.each([
   },
 );
 
-test('with redirects on, a redirect the adapter reports with status 0 ends once as an adapter_error naming it, not a retried network_error', async () => {
+test('with redirects on, a redirect the adapter reports with status 0 ends once as redirect_unsupported, not a retried network_error', async () => {
   let sends = 0;
   const client = new HTTPClient({
     adapter: {
@@ -19677,6 +19677,5 @@ test('with redirects on, a redirect the adapter reports with status 0 ends once 
   expect(response.isNetworkError).toBe(false);
   expect(response.wasRedirectDetected).toBe(true);
   expect(response.detectedRedirectURL).toBe('https://api.test/landing');
-  expect(builder.error?.code).toBe('adapter_error');
-  expect(builder.error?.message).toContain('redirect the client cannot follow');
+  expect(builder.error?.code).toBe('redirect_unsupported');
 });
