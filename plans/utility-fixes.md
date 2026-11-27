@@ -90,3 +90,39 @@ Status: not started. These modules were not touched by PR #34; the review rounds
 - **Where:** `src/lib/arrays.ts` lines 7-17; `docs/arrays.md` line 44.
 - **Problem:** the kept items come back trimmed (`['  hello  ', '', '\tworld\n']` gives `['hello', 'world']`), while the docs say only that each item "is trimmed before checking".
 - **Fix:** reword the docs to say the returned strings are trimmed, and add a JSDoc to match. No code change.
+
+## 12. `stringifyValue`'s `maxRenderLength` is not held for nested objects
+
+- **Where:** `src/lib/internal/stringify-template-value.ts`, the object branch's truncation entry (around lines 583-610; the array branch has the same shape), and the key allowance in `src/lib/internal/render-budget.ts` (`MIN_KEY_ALLOWANCE`, 256, around lines 87 and 229). The promise is in `docs/stringify-value.md` around line 105.
+- **Problem:** when the budget runs out deep in a value, every enclosing object that is still open adds one more `"<key>":"[max length exceeded]"` entry as it resumes, and each of those keys is allowed up to 256 characters. The overshoot grows with nesting depth, where the docs say the output passes the cap "by a marker or two - never by more than a small, fixed amount". `onTruncate` is called once however many markers are written.
+- **Repro:** start from `o = 'x'.repeat(100000)` and wrap it `depth` times as `o = { a: o, ['k'.repeat(keyLength)]: 1 }`, then `stringifyValue(o, { maxRenderLength: 1000 })`:
+  - depth 50, 1000-character keys: 15,050 characters, 101 markers.
+  - depth 200, 300-character keys: 28,724 characters, 197 markers.
+  - depth 50, 3-character keys: 2,500 characters, 51 markers.
+  - depth 1, 1000-character key: 1,281 characters, 3 markers, which is the documented behaviour.
+- **Fix:** once one container has written its truncation entry, the containers around it drop their tails without a marker of their own - a flag on the budget that says the tail is already marked - or their trailing key entries are charged and cut against the cap. Test that the output length stays within the cap plus a fixed allowance at depths 1, 50 and 200, that the result is still JSON for a plain object, and that the innermost cut still names its key. Reword the docs sentence if a bound other than "a marker or two" is the result.
+
+## 13. `redactedKeys` normalization withholds every container at the exact entry budget
+
+- **Where:** `src/lib/internal/redact-normalization.ts`, `normalizeAlongRedactPaths`, the `budget <= 0` test around line 385. The budget is `MAX_REDACTION_ENTRIES` (1,000,000) in `src/lib/internal/redact-paths.ts`.
+- **Problem:** the budget is charged only when a container is descended into, but it is tested for every key inspected. When it reaches exactly 0 on the last descent, the next key inspected reports "normalization stopped" and withholds every frame still stacked, though none of them has anything left to descend into. It over-masks and never leaks.
+- **Repro:** `redactValue({ items: Array.from({ length: 999_998 }, () => ({ x: 1 })) }, { redactedKeys: ['items[*].x.y'] })` replaces all 999,998 elements with `***REDACTION FAILED***` and reports `redactedKeys normalization stopped after 1000000 containers; every container not yet reached was withheld`. No element holds an `x` that is a container, so nothing was left to normalize.
+- **To check while here:** with 999,997 elements the same call replaces only the last element and reports nothing. Find out which cap that is, and whether a withheld value with no report is intended.
+- **Fix:** test the budget where it is spent - just before the `budget--` and push for a value that is a container to descend into - so a key whose value is not one cannot trip the stop. Test the boundary on both sides: a value that needs exactly the budget is normalized in full with nothing reported, and one container more stops and reports.
+
+## 14. Comments that narrate what the code used to do
+
+- **Where:** `src/lib/internal/`, in files PR #34 did not change:
+  - `container-entries.ts` around line 147 ("a first cut ... silently dropped them");
+  - `format-reporter.ts` around lines 8 and 33;
+  - `mask-value-deep.ts` around line 45;
+  - `render-budget.ts` around lines 77-94, 223, 243-245 and 336 ("which is what this did", "previously read");
+  - `redact-normalization.ts` around lines 353 and 449 ("It used to be left at that");
+  - `resolve-redaction.ts` around line 81;
+  - `default-redact-function.ts` around line 28;
+  - `path-utils.ts` around line 25;
+  - `stringify-template-value.ts` around lines 101 and 583-596;
+  - `redact-paths.ts` around lines 39, 456 and 1165.
+  - The review also named `is-plain-container.ts` and `report-to-console.ts`; read them for the same wording.
+- **Problem:** these comments describe an earlier version of the code and what it got wrong. The project's rule is that comments describe current behaviour and the reason for it, and history goes in the changelog.
+- **Fix:** rewrite each to state the current rule and why it holds, keeping any example input that explains the rule. No code change and no test.
