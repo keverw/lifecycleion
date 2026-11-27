@@ -4715,6 +4715,12 @@ export class BaseHTTPClient {
         // caller did not make. One the caller did make stays a cancel.
         const isFlaggedAdapterFailure = tags.isFlaggedAdapterFailure;
 
+        // An AbortError no one asked for - no cancel, no timeout, no factory decline, no
+        // answer yet - set below: the adapter's own failure, and not retried, as an abort
+        // is not a transport failure a second attempt would get past (a browser aborting
+        // the page's requests as it unloads, say).
+        let isUninvitedAbort = false;
+
         if (
           isAbortError(error) &&
           !isFactoryOwnAbort &&
@@ -4750,7 +4756,8 @@ export class BaseHTTPClient {
               // the adapter rejected with as an AbortError: a non-retryable cancel. Told by
               // the adapter's tag, or, for a custom adapter that tags nothing, by the
               // factory having been called and no stream started. Any other AbortError no
-              // one asked for is the adapter's own failure, and falls through below.
+              // one asked for is the adapter's own failure, and is ended below as its
+              // non-retryable adapter_error.
               const factoryCancelValue = tags.factoryCancelValue;
               // The decline's own reason - from the adapter's tag, or from the answer the
               // client's wrapper recorded - or, for one with none, that of a cancel its
@@ -4782,6 +4789,8 @@ export class BaseHTTPClient {
                   ? { cancelReason: factoryCancelReason }
                   : {}),
               };
+            } else {
+              isUninvitedAbort = true;
             }
           }
         }
@@ -4809,7 +4818,8 @@ export class BaseHTTPClient {
             : isAbortError(error) || !isNonRetryableClientCallbackFailure);
         const isNonRetryableAdapterFailure =
           (didAdapterResolve && !didTimeoutThisAttempt) ||
-          isFlaggedAdapterFailure;
+          isFlaggedAdapterFailure ||
+          isUninvitedAbort;
 
         if (
           isNonRetryableClientCallbackFailure ||

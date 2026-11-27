@@ -39,8 +39,16 @@ const WORDS_NAME = /^[a-z]+(?:[A-Z][a-z]+)*(?:[A-Z]{2,4})?$/;
 const MAX_TYPO_DISTANCE = 2;
 
 /**
+ * The longest all-lowercase key named as a words name: every single-word option is short
+ * (`timeout`, `hosts`), while a long lowercase run (`correcthorsebatterystaple`) may be a
+ * passphrase pasted in as a key. A key with a capital in it is a camelCase name.
+ */
+const MAX_LOWERCASE_NAME_LENGTH = 12;
+
+/**
  * Whether `key` reads as an option's name, or a typo of one of `fields`: a camelCase name
- * of words ({@link WORDS_NAME}), the same name as a field in another case, or one at most
+ * of words ({@link WORDS_NAME}) - one all in lowercase no longer than
+ * {@link MAX_LOWERCASE_NAME_LENGTH} - the same name as a field in another case, or one at most
  * {@link MAX_TYPO_DISTANCE} edits from it (`folowRedirects`, `timout`). A token pasted in
  * as a key - an API key, an AWS access key ID - is an identifier too, but none of these,
  * so it is not written into the refusal.
@@ -50,7 +58,10 @@ function readsAsOptionName(key: string, fields: readonly string[]): boolean {
     return false;
   }
 
-  if (WORDS_NAME.test(key)) {
+  if (
+    WORDS_NAME.test(key) &&
+    (key.length <= MAX_LOWERCASE_NAME_LENGTH || key !== key.toLowerCase())
+  ) {
     return true;
   }
 

@@ -1391,6 +1391,20 @@ test('a misspelled config or request option is refused rather than read as absen
       'HTTPClient config has no field by that name',
     );
   }
+  // Nor a lowercase passphrase pasted in as a key: a words name, but longer than any
+  // single-word option name, here or where the fields taken are long.
+  const passphrase = 'correcthorsebatterystaple';
+  expect(() => new HTTPClient({ adapter, [passphrase]: 1 } as never)).toThrow(
+    'HTTPClient config has no field by that name',
+  );
+  expect(() => client.get('/x', { [passphrase]: 1 } as never)).toThrow(
+    'HTTPRequestOptions has no field by that name',
+  );
+  // A camelCase name is named however short the list of fields taken: another
+  // config's option put in the wrong place.
+  expect(() => client.listRequests({ requestID: 'x' } as never)).toThrow(
+    '"requestID" field',
+  );
   expect(() => new HTTPClient({ adapter, Timeout: 1 } as never)).toThrow(
     'HTTPClient config has no "Timeout" field',
   );
@@ -19364,7 +19378,7 @@ test.each([
   },
 );
 
-test("an adapter's own AbortError that no one asked for is its failure, retried, not a cancel", async () => {
+test("an adapter's own AbortError that no one asked for is its non-retryable failure, not a cancel", async () => {
   let sends = 0;
   const failure = Object.assign(new Error('own connect timeout'), {
     name: 'AbortError',
@@ -19384,7 +19398,7 @@ test("an adapter's own AbortError that no one asked for is its failure, retried,
   const builder = client.get('/x');
   const response = await builder.send();
 
-  expect(sends).toBe(3);
+  expect(sends).toBe(1);
   expect(response.isCancelled).toBe(false);
   expect(builder.error?.code).toBe('adapter_error');
   expect(builder.error?.cause).toBe(failure);

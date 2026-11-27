@@ -692,6 +692,8 @@ When `adapter_error` comes from a response the client could not read, the server
 
 This covers a body the adapter resolved as neither bytes nor a string (a plain object, a `Blob`), on the final response or a response that would be retried: the request ends as this `adapter_error`, whatever the `Content-Type`, and is not retried. A response that carries no body - a `HEAD`, a `204`, `205` or `304` - ignores it. Nor does such a body stop a redirect: a `3xx` due to be followed is followed, and `redirect`-phase observers, the only ones that read a redirect's body, see it as `null`. A refused redirect (`redirect_disabled`) or one past `maxRedirects` (`redirect_loop`) ends as it would with no body. It also covers an `AbortError` thrown while the client reads an answered response: unless the request was cancelled, that is this `adapter_error`, not a cancel. If the attempt had timed out and that `AbortError` is the timeout's, it is a timeout (`status: 0`, retried as the policy allows) even though the answer arrived.
 
+An `AbortError` an adapter rejects with before any answer, with no cancel made, no attempt timeout and no `streamResponse` factory called, is an `adapter_error` too (`status: 0`, `isNetworkError: false`, that error as the `cause`), and is not retried: an abort is not a transport failure a second attempt gets past - a browser aborting a page's requests as it unloads, say. Once a factory has been called, such an `AbortError` is read as its decline, a cancel, or, once it started a stream, as the cut stream (see [Stream Errors and Replay](#stream-errors-and-replay)).
+
 ## Request Interceptors
 
 Each run of an interceptor or response/error observer chain snapshots its
