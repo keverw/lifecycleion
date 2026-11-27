@@ -2325,12 +2325,12 @@ Expectations for a custom writable:
   `'error'` is still absorbed rather than becoming an uncaught exception, but it is not
   reported; handle those with your own `'error'` listener. What you save by defining one is
   that listener. Either name works. A Node stream has both.
-- **An `async` `write` or `end` works too.** A promise it returns that rejects fails the
-  download as `stream_write_error`, as an error through the callback does, and the download
-  is delivered only once every such promise has fulfilled. An `end` declared with no
-  parameter (`async end() { ... }`) ends the download when its promise fulfils; one that
-  takes the callback must call it, and may hand it to an inner stream still closing. A
-  promise or callback that never comes is bounded by the attempt timeout.
+- **Call `end`'s callback when the sink is finished**, as a Node stream does, even from
+  an `async` `end`: its promise fulfilling does not end the download, since such an `end`
+  may hand the callback to an inner stream that is still closing. A promise `write` or
+  `end` returns that rejects fails the download as `stream_write_error`, as an error
+  through the callback does, and the download is delivered only once every such promise
+  has fulfilled. A promise or callback that never comes is bounded by the attempt timeout.
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
   error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the

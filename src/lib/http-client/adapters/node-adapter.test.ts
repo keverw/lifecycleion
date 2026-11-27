@@ -3491,6 +3491,16 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       'close failed',
     ],
     [
+      'an async end whose callback has a default value still waits for that callback',
+      {
+        async end(cb: (err?: Error | null) => void = () => {}) {
+          await Promise.resolve();
+          setTimeout(() => cb(new Error('close failed')), 20);
+        },
+      },
+      'close failed',
+    ],
+    [
       'an end that calls back clean, then rejects the promise it returns, fails with that rejection',
       {
         end(cb?: (err?: Error | null) => void) {
@@ -3515,24 +3525,6 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(result.isStreamError).toBe(true);
     expect(result.streamErrorCode).toBe('stream_write_error');
     expect((result.errorCause as Error).message).toBe(message);
-  });
-
-  test("a sink whose async end resolves without calling end's callback delivers the download", async () => {
-    const sink = Object.assign(new EventEmitter(), {
-      write(_chunk: Uint8Array, cb?: (err?: Error | null) => void) {
-        cb?.();
-        return true;
-      },
-      async end() {
-        await Promise.resolve();
-      },
-      destroy() {},
-    });
-
-    const result = await sendToAsyncSink(sink);
-
-    expect(result.status).toBe(200);
-    expect(result.isStreamError).toBeUndefined();
   });
 
   test('buffered response stream error after headers resolves as stream_response_error', async () => {

@@ -3734,9 +3734,9 @@ async function streamResponseBody(
     // truncated body delivered and the rejection unhandled. So the download is delivered
     // only once every promise `write` or `end` returned has fulfilled
     // (`pendingSinkReturns`, counted from before `end` is called, as its callback may
-    // come from inside it). An `end` that declares no callback parameter ends the
-    // download when its promise fulfils; one that does is waited on for that callback,
-    // which it may hand to an inner stream that is still closing. The attempt timeout
+    // come from inside it). `end`'s callback is still what says the sink is finished, as
+    // a Node stream's is: an `async` `end` may hand it to an inner stream that is still
+    // closing, so its promise fulfilling says nothing about that. The attempt timeout
     // bounds a promise or a callback that never comes.
     let pendingSinkReturns = 0;
     let isEndDelivered = false;
@@ -3763,10 +3763,7 @@ async function streamResponseBody(
       });
     };
 
-    const observeSinkReturn = (
-      returned: unknown,
-      onFulfilled: () => void = noop,
-    ): void => {
+    const observeSinkReturn = (returned: unknown): void => {
       const pending = adoptResult(returned);
       if (pending === undefined || pending instanceof UnreadableReturn) {
         return;
@@ -3777,7 +3774,6 @@ async function streamResponseBody(
         .then(
           () => {
             pendingSinkReturns--;
-            onFulfilled();
             deliverIfWritesDone();
           },
           (error: unknown) => {
@@ -3884,24 +3880,16 @@ async function streamResponseBody(
       didReceiveEnd = true;
 
       try {
-        // Read once, then called: whether it declares a callback parameter decides what
-        // its promise means (see `observeSinkReturn`). Held open across the call, so a
-        // callback `end` makes from inside it does not deliver before the promise it
-        // returns is counted.
-        const endFunction = readUnknownMember(writable, 'end');
-        const doesTakeCallback =
-          typeof endFunction !== 'function' ||
-          readUnknownMember(endFunction, 'length') !== 0;
+        // Held open across the call, so a callback `end` makes from inside it does not
+        // deliver before the promise it returns is counted.
         pendingSinkReturns++;
         let ended: unknown;
         try {
-          ended = Reflect.apply(endFunction as () => unknown, writable, [
-            onSinkEnded,
-          ]);
+          ended = writable.end(onSinkEnded);
         } finally {
           pendingSinkReturns--;
         }
-        observeSinkReturn(ended, doesTakeCallback ? noop : () => onSinkEnded());
+        observeSinkReturn(ended);
         deliverIfWritesDone();
       } catch (error) {
         // Same reasoning as the `write` throw above: a throw out of `end` means the
@@ -3915,8 +3903,8 @@ async function streamResponseBody(
       }
     };
 
-    // `end`'s callback, or the fulfilment of the promise an `async` `end` returns:
-    // whichever comes first ends the download, and the other finds it ended.
+    // `end`'s callback: the sink is finished, and the download is delivered once every
+    // promise its `write` or `end` returned has fulfilled.
     const onSinkEnded = (endError?: Error | null): void => {
       if (isSettled || isEndDelivered) {
         return;
