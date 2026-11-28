@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
-import { notifyHiddenRequestListener } from './hidden-member';
+import { notifyHiddenRequestListener, setHiddenMember } from './hidden-member';
+import { markNonRetryableAdapterError } from './adapter-error';
+import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
 
 test("a hidden request listener's first throw is reported, and the work that told it goes on", () => {
   const reports: unknown[] = [];
@@ -59,4 +61,32 @@ test("a hidden request listener's rejection is reported once, and is no unhandle
   expect(unhandled).toEqual([]);
   expect(reports).toHaveLength(1);
   expect((reports[0] as Error).cause).toBe(failure);
+});
+
+test('setHiddenMember and the adapter error marks hold under a polluted Object.prototype', () => {
+  const proto = Object.prototype as Record<string, unknown>;
+  proto.get = () => 1;
+  proto.enumerable = true;
+
+  try {
+    const target: Record<symbol, unknown> = {};
+    const key = Symbol.for('lifecycleion.test.hidden');
+    setHiddenMember(target, key, 2);
+
+    expect(target[key]).toBe(2);
+    expect(Object.getOwnPropertyDescriptor(target, key)?.enumerable).toBe(
+      false,
+    );
+
+    const error = new Error('x');
+    markNonRetryableAdapterError(error);
+    expect(
+      (error as unknown as Record<string, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
+  } finally {
+    delete proto.get;
+    delete proto.enumerable;
+  }
 });

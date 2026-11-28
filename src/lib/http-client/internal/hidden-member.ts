@@ -1,4 +1,5 @@
 import { readUnknownMember } from '../../internal/read-member';
+import { defineHiddenValue } from '../../internal/define-entry';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -19,12 +20,7 @@ export function setHiddenMember(
   key: symbol,
   value: unknown,
 ): void {
-  Object.defineProperty(target, key, {
-    value,
-    enumerable: false,
-    configurable: true,
-    writable: true,
-  });
+  defineHiddenValue(target, key, value, true);
 }
 
 /** The listener on `request` under `key`, if it carries one (see `setHiddenMember`). */

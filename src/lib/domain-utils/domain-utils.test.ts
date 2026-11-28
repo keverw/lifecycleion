@@ -335,6 +335,23 @@ describe('domain-utils', () => {
 
   // cspell:ignore tést münchen mple Halfwidth
   describe('normalizeOrigin', () => {
+    test.each([
+      'https://example.com/..',
+      'https://example.com/.',
+      'https://example.com/./',
+      'https://example.com/%2e',
+    ])(
+      'refuses a path the parser reduces to /, as validateConfigEntry does: %s',
+      (origin) => {
+        expect(validateConfigEntry(origin, 'origin').valid).toBe(false);
+        expect(normalizeOrigin(origin)).toBe('');
+        expect(matchesOriginList(origin, ['https://example.com'])).toBe(false);
+        expect(matchesOriginList(origin, ['https://*.example.com'])).toBe(
+          false,
+        );
+      },
+    );
+
     it('should normalize origins with protocol and port', () => {
       expect(normalizeOrigin('https://Example.COM')).toBe(
         'https://example.com',

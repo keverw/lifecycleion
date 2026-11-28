@@ -181,8 +181,20 @@ class FakeXHR {
   }
 
   public simulateDownloadProgress(loaded: number, total: number) {
+    this.dispatchDownloadProgress({
+      loaded,
+      total,
+      lengthComputable: total > 0,
+    });
+  }
+
+  public dispatchDownloadProgress(event: {
+    loaded: number;
+    total: number;
+    lengthComputable: boolean;
+  }) {
     for (const h of this.handlers['progress'] ?? []) {
-      h({ loaded, total, lengthComputable: total > 0 });
+      h(event);
     }
   }
 }
@@ -375,6 +387,25 @@ describe('XHRAdapter', () => {
       method: 'POST',
       url: 'https://api.test/data',
     });
+  });
+
+  test('in a browser page, a redirect to another spelling of the URL is detected, as the browser reports its own', async () => {
+    const response = await withPageOrigin('https://app.test', async () => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/a%7Eb',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 200;
+      lastXHR.responseURL = 'https://api.test/a~b';
+      lastXHR.simulateLoad();
+      return await promise;
+    });
+
+    expect(response.status).toBe(0);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://api.test/a~b');
   });
 
   test('a redirect that only adds an empty query is detected', async () => {
@@ -1385,6 +1416,59 @@ describe('XHRAdapter', () => {
       expect(lastXHR.abortCalled).toBe(true);
     });
   }
+
+  test("a shim's progress event whose counts are no byte counts reports none of them", async () => {
+    const downloads: Array<{
+      loaded: number;
+      total: number;
+      progress: number;
+    }> = [];
+    const uploads: Array<{ loaded: number; total: number; progress: number }> =
+      [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+      onUploadProgress: (event) => {
+        uploads.push(event);
+      },
+      onDownloadProgress: (event) => {
+        downloads.push(event);
+      },
+    });
+
+    lastXHR.upload.dispatch('progress', {
+      loaded: Number.NaN,
+      total: 5,
+      lengthComputable: true,
+    });
+    lastXHR.upload.dispatch('progress', {
+      loaded: 2,
+      total: Number.NaN,
+      lengthComputable: true,
+    });
+    lastXHR.status = 200;
+    for (const event of [
+      { loaded: Number.NaN, total: 10, lengthComputable: true },
+      { loaded: -1, total: 10, lengthComputable: true },
+      { loaded: 4, total: -1, lengthComputable: true },
+    ]) {
+      lastXHR.dispatchDownloadProgress(event);
+    }
+    lastXHR.response = textBody('0123456789');
+    lastXHR.simulateLoad();
+    await promise;
+
+    // After the 0% event every send starts with.
+    expect(uploads[1]).toEqual({ loaded: 2, total: 2, progress: -1 });
+    expect(uploads.at(-1)?.progress).toBe(1);
+    expect(downloads[0]).toEqual({ loaded: 4, total: 4, progress: -1 });
+    for (const event of [...uploads, ...downloads]) {
+      expect(Number.isSafeInteger(event.loaded)).toBe(true);
+      expect(Number.isSafeInteger(event.total)).toBe(true);
+    }
+  });
 
   test('a body refused mid-download still ends with the final upload event', async () => {
     const uploads: number[] = [];
@@ -6101,6 +6185,35 @@ describe('XHRAdapter - totals, listener removal and a send cancelled as it throw
     await promise;
 
     expect(listeners.size).toBe(0);
+  });
+
+  test("a send that throws is refused in the adapter's words, without the runtime's error", async () => {
+    const realSend = Object.getOwnPropertyDescriptor(FakeXHR.prototype, 'send');
+    FakeXHR.prototype.send = () => {
+      throw new Error('could not send https://api.test/data?token=secret');
+    };
+
+    try {
+      const outcome = (await new XHRAdapter()
+        .send({
+          requestURL: 'https://api.test/data?token=secret',
+          method: 'GET',
+          headers: {},
+        })
+        .catch((error: unknown) => error)) as Error;
+
+      expect(outcome.message).toBe(
+        'XHRAdapter could not send the request: the runtime refused it',
+      );
+      expect(JSON.stringify(outcome.cause ?? null)).not.toContain('secret');
+      expect(
+        String((outcome.cause as Error | undefined)?.message),
+      ).not.toContain('secret');
+    } finally {
+      if (realSend) {
+        Object.defineProperty(FakeXHR.prototype, 'send', realSend);
+      }
+    }
   });
 
   test('a send that throws as the request is cancelled ends as the cancel', async () => {

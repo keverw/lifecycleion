@@ -122,7 +122,7 @@ import {
   isRequestBodyBytes,
   mergeObservedHeaders,
 } from '../utils';
-import { defineEntry } from '../../internal/define-entry';
+import { defineEntry, defineHiddenValue } from '../../internal/define-entry';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
 // original value retained on cause for consumers of the normalized error.
@@ -260,11 +260,19 @@ const deliveredWritableErrors = new WeakSet<object>();
  * claiming it in that listener alone would leave the absorber reporting every ordinary
  * streamed-download failure a second time, on the global channel, for an error the caller
  * already has as `errorCause`.
+ *
+ * A claim lasts a {@link PENDING_WRITABLE_ERROR_WINDOW_MS}, the window that emit arrives
+ * in. A sink that fails only through a callback never emits it, and a claim kept past
+ * that would silence the same object emitted for a later request - a sink reusing one
+ * error object - though no caller received it then.
  */
 function claimWritableError(error: unknown): void {
   try {
     if (typeof error === 'object' && error !== null) {
       deliveredWritableErrors.add(error);
+      setTimeout(() => {
+        deliveredWritableErrors.delete(error);
+      }, PENDING_WRITABLE_ERROR_WINDOW_MS).unref?.();
     }
   } catch {
     // Not a usable `WeakSet` key. At worst this error is reported twice, which is the safe
@@ -334,14 +342,6 @@ function reportUnclaimedWritableError(error: unknown): void {
 }
 
 /**
- * PEM text, or its bytes: a `Buffer`, any other typed array, a `DataView`, or an
- * `ArrayBuffer` (shared or not), each handed to TLS as a `Buffer` of its own. A `Blob`,
- * a `Bun.file()` among them, is read by the caller first.
- */
-export type TLSMaterial =
-  string | ArrayBufferView | ArrayBuffer | SharedArrayBuffer;
-
-/**
  * The absorber currently attached to a writable, if any.
  *
  * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
@@ -364,6 +364,14 @@ type StreamResponseBodyResult =
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
+
+/**
+ * PEM text, or its bytes: a `Buffer`, any other typed array, a `DataView`, or an
+ * `ArrayBuffer` (shared or not), each handed to TLS as a `Buffer` of its own. A `Blob`,
+ * a `Bun.file()` among them, is read by the caller first.
+ */
+export type TLSMaterial =
+  string | ArrayBufferView | ArrayBuffer | SharedArrayBuffer;
 
 export interface NodeAdapterConfig {
   /**
@@ -686,7 +694,8 @@ export class NodeAdapter implements HTTPAdapter {
     // Guarded once, at the boundary, so every call site below is covered - including the
     // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
     // `serializeMultipartFormData`. See `readAdapterRequestFields`.
-    // `maxResponseBytes`: the most a buffered body may hold, decoded.
+    //
+    // `maxResponseBytes` is the most a buffered body may hold, decoded.
     const { guardedUploadProgress, guardedDownloadProgress, maxResponseBytes } =
       fields;
     // Read once per request, as the rest of the config is: see `decompress`.
@@ -1038,12 +1047,12 @@ export class NodeAdapter implements HTTPAdapter {
           // internal `Promise` out of an IPC payload - and `JSON.stringify` ignores symbol
           // keys outright. `Symbol.for`, not `Symbol`, so an adapter copy and a client copy
           // from different bundle chunks agree on it.
-          Object.defineProperty(error, REQUEST_BODY_SETTLED_KEY, {
-            value: upload.outcome,
-            enumerable: false,
-            configurable: true,
-            writable: true,
-          });
+          defineHiddenValue(
+            error,
+            REQUEST_BODY_SETTLED_KEY,
+            upload.outcome,
+            true,
+          );
         } catch {
           // Frozen, sealed, or an exotic host object. The throw is what matters.
         }
@@ -1152,16 +1161,16 @@ export class NodeAdapter implements HTTPAdapter {
         /**
          * Whether the server has already answered.
          *
-         * A body write that fails after this is not the failure worth reporting. A server is
-         * free to send a complete early response - a 413 or a 401 with `Connection: close` -
-         * while the body is still uploading, and tearing that socket down is how it says
-         * so. The writers then reject (the chunk truly was not accepted). Were the
-         * write-failure path (`onBodyWriteFailure`) to answer that with `req.destroy()` and a synthetic
-         * `status: 0, isTransportError: true`, racing the real response to `resolve`, the
-         * caller would get a fabricated transport error instead of the server's actual
-         * status, and the destroy would tear down the connection the response is still
-         * arriving on. With a response in hand the response path is the one that gets to
-         * answer.
+         * A body write that fails after this is not the failure worth reporting. A server
+         * is free to send a complete early response - a 413 or a 401 with `Connection:
+         * close` - while the body is still uploading, and tearing that socket down is how
+         * it says so. The writers then reject (the chunk truly was not accepted). Were
+         * the write-failure path (`onBodyWriteFailure`) to answer that with
+         * `req.destroy()` and a synthetic `status: 0, isTransportError: true`, racing the
+         * real response to `resolve`, the caller would get a fabricated transport error
+         * instead of the server's actual status, and the destroy would tear down the
+         * connection the response is still arriving on. With a response in hand the
+         * response path is the one that gets to answer.
          */
         let didReceiveResponse = false;
 
@@ -1643,14 +1652,15 @@ export class NodeAdapter implements HTTPAdapter {
         /**
          * Settles the request with a failure of the stream its factory started, through
          * `settle` once `teardown` has run, each under its own guard, and tells
-         * `HTTPClient` it did (see `listenForStreamFailureSettled`) - only when it is this
-         * failure that settled it, not one a timeout or a cancel had already answered, nor
-         * one the teardown caused - before the factory's signal fires, so a cleanup listener on it
-         * that cancels the request cannot stand in for the failure. Then fires it. A
-         * throw fails the request with that throw instead - or, for one already answered,
-         * is reported to the host channel, as the response task's own failures are - and
-         * the signal still fires: this runs from a socket's or a stream's own event, where
-         * a throw would be an uncaught exception, the factory's cleanup never run.
+         * `HTTPClient` it did (see `listenForStreamFailureSettled`) - only when it is
+         * this failure that settled it, not one a timeout or a cancel had already
+         * answered, nor one the teardown caused - before the factory's signal fires, so a
+         * cleanup listener on it that cancels the request cannot stand in for the
+         * failure. Then fires it. A throw fails the request with that throw instead - or,
+         * for one already answered, is reported to the host channel, as the response
+         * task's own failures are - and the signal still fires: this runs from a socket's
+         * or a stream's own event, where a throw would be an uncaught exception, the
+         * factory's cleanup never run.
          */
         const settleStreamFailure = (
           teardown: () => void,
@@ -2023,9 +2033,8 @@ export class NodeAdapter implements HTTPAdapter {
           }
         };
 
-        // Deduplication guard — Node's upload path can reach 100% from multiple
-        // sources (final drain callback and the upload-complete signal). Once
-        // 100% is reported any further calls are dropped.
+        // Once a writer has reported 100%, any further report is dropped: the caller
+        // hears of the upload's end once.
         let didFireUpload100 = false;
 
         const reportUploadProgress = (event: AdapterProgressEvent): void => {
@@ -2569,12 +2578,12 @@ export class NodeAdapter implements HTTPAdapter {
                   // Not enumerable, as `makeResponseStreamError` defines it: a parser
                   // error's `rawPacket` holds the response bytes, which a spread or
                   // `JSON.stringify` of the error would otherwise write into logs.
-                  Object.defineProperty(cause, 'cause', {
-                    value: requestErrorAfterResponse,
-                    writable: true,
-                    configurable: true,
-                    enumerable: false,
-                  });
+                  defineHiddenValue(
+                    cause,
+                    'cause',
+                    requestErrorAfterResponse,
+                    true,
+                  );
                 }
                 const isConnectionFailure =
                   streamResult.code === 'stream_response_error' &&
@@ -3497,7 +3506,8 @@ function isAnswerClosingConnection(
   const status = response.statusCode ?? 0;
   const transferEncoding: unknown = response.headers['transfer-encoding'];
   const canHaveBody =
-    hasResponseBody(method, status) || (status === 205 && method !== 'HEAD');
+    hasResponseBody(method, status) ||
+    (status === 205 && asciiUppercase(method) !== 'HEAD');
 
   if (transferEncoding === undefined) {
     if (response.headers['content-length'] === undefined && canHaveBody) {
@@ -3791,10 +3801,14 @@ async function streamResponseBody(
       }
     };
 
-    /** Whether `returned` is a promise the adapter now waits on. */
+    /**
+     * Whether `returned` is a promise the adapter now waits on. `onFulfilled` runs when it
+     * fulfils, before the adapter moves on.
+     */
     const observeSinkReturn = (
       returned: unknown,
       kind: 'write' | 'end',
+      onFulfilled: () => void = noop,
     ): boolean => {
       const pending = adoptResult(returned);
       if (pending === undefined || pending instanceof UnreadableReturn) {
@@ -3810,6 +3824,7 @@ async function streamResponseBody(
         .then(
           () => {
             pendingSinkReturns--;
+            onFulfilled();
             if (kind === 'write') {
               onWriteReturnFulfilled();
             }
@@ -3843,6 +3858,28 @@ async function streamResponseBody(
       // `onWritableDrain` must see that the pause it undoes has been asked for.
       isPaused = true;
 
+      // A chunk is written once `write`'s callback reports it, or the promise `write`
+      // returned fulfils, whichever comes first: an async sink need not call the callback.
+      let isCounted = false;
+      const countWritten = (): void => {
+        if (isCounted || isSettled) {
+          return;
+        }
+
+        isCounted = true;
+        loadedBytes += chunk.length;
+
+        // progress: -1 when Content-Length is absent — callers treat -1 as
+        // "length unknown". The 100% event is the end's, sent once the body is
+        // delivered (see below), never this chunk's: a cancel from it then finds the
+        // stream finished, not one to abort over a sink still ending.
+        const event = byteProgressEvent(loadedBytes, totalBytes);
+
+        if (event.progress !== 1) {
+          onProgress?.(event);
+        }
+      };
+
       try {
         canContinue = writable.write(chunk, (error) => {
           if (isSettled) {
@@ -3867,17 +3904,7 @@ async function streamResponseBody(
             return;
           }
 
-          loadedBytes += chunk.length;
-
-          // progress: -1 when Content-Length is absent — callers treat -1 as
-          // "length unknown". The 100% event is the end's, sent once the body is
-          // delivered (see below), never this chunk's: a cancel from it then finds the
-          // stream finished, not one to abort over a sink still ending.
-          const event = byteProgressEvent(loadedBytes, totalBytes);
-
-          if (event.progress !== 1) {
-            onProgress?.(event);
-          }
+          countWritten();
         });
       } catch (error) {
         // The throw came out of `write`, which means the stream is being torn down and
@@ -3891,7 +3918,11 @@ async function streamResponseBody(
         return;
       }
 
-      const isWriteAsync = observeSinkReturn(canContinue, 'write');
+      const isWriteAsync = observeSinkReturn(
+        canContinue,
+        'write',
+        countWritten,
+      );
 
       // `isSettled` as well as the backpressure signal. `WritableLike` allows a write to
       // fail through the callback given to `write`, and nothing obliges that callback to

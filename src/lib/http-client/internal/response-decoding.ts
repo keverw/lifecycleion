@@ -23,6 +23,7 @@ import type * as http from 'node:http';
 import { Transform, type TransformCallback } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
+import { defineHiddenValue } from '../../internal/define-entry';
 import { contentCodings } from './content-codings';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { isErrorValue } from '../../to-error';
@@ -84,14 +85,13 @@ const createZstdDecompress = (
 ).createZstdDecompress;
 
 /**
- * The body source for `res`: the response itself, or - when it carries a body encoded with
- * codings this adapter decodes - a decoded view of it, with `release` to let go of the
- * decoding on a teardown. `contentEncoding` is `undefined` for a body not to decode - an
- * answer with none (see `hasResponseBody`), or one asked for as sent - and an unknown
+ * The body source for `res`: the response itself, or - when it carries a body encoded
+ * with codings this adapter decodes - a decoded view of it, with `release` to let go of
+ * the decoding on a teardown. `contentEncoding` is `undefined` for a body not to decode -
+ * an answer with none (see `hasResponseBody`), or one asked for as sent - and an unknown
  * coding hands the body over as it came. A stacked coding (`gzip, br`, or a repeated
  * `Content-Encoding` Node joined) is decoded in reverse order, as undici and browsers
- * decode it;
- * `identity` is skipped.
+ * decode it; `identity` is skipped.
  */
 export function createResponseBodySource(
   res: http.IncomingMessage,
@@ -149,11 +149,11 @@ export function createResponseBodySource(
  *   stream error, not a success that silently lost the rest. `Z_SYNC_FLUSH` only makes
  *   what is decoded arrive promptly.
  * - `data` / `end` come from the last decoder - `end` once the response and every decoder
- *   have ended too, as gunzip ends early on zero-byte padding - and only start flowing once a `data`
- *   listener is added (or `resume()` drains it), as a paused `IncomingMessage` waits for
- *   its reader. The raw response is read ahead into the decoders from its first byte -
- *   it is what builds them - but only as far as their buffers hold, then backpressure
- *   stops it.
+ *   have ended too, as gunzip ends early on zero-byte padding - and only start flowing
+ *   once a `data` listener is added (or `resume()` drains it), as a paused
+ *   `IncomingMessage` waits for its reader. The raw response is read ahead into the
+ *   decoders from its first byte - it is what builds them - but only as far as their
+ *   buffers hold, then backpressure stops it.
  * - `aborted` comes from the response. `close` does too when the response closed short;
  *   when all of it arrived, `close` waits for the decoding to finish.
  * - `error` is the response's or a decoder's - a corrupt body fails as a stream error, and
@@ -1180,7 +1180,7 @@ function createInflater(head: Buffer): zlib.Inflate | zlib.InflateRaw {
  */
 function markDecodeError(error: Error): Error {
   try {
-    Object.defineProperty(error, RESPONSE_DECODE_ERROR_KEY, { value: true });
+    defineHiddenValue(error, RESPONSE_DECODE_ERROR_KEY, true);
   } catch {
     // Not extensible: reported untagged, as a stream error the redirect rule keeps.
   }

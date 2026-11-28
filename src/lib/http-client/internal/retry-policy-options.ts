@@ -14,6 +14,7 @@ import {
 } from '../../internal/known-fields';
 import { isNullish } from '../../internal/is-nullish';
 import { defineEntry } from '../../internal/define-entry';
+import { isRealmRootPrototype } from './plain-record';
 
 /** The field the client adds to either strategy's (see `HTTPRetryPolicyOptions`). */
 type RetryAfterField = Pick<HTTPRetryPolicyOptions, 'maxRetryAfterMS'>;
@@ -127,12 +128,17 @@ export function snapshotRetryPolicyOptions(
   const fields = retryPolicyFields(strategy);
   assertKnownFields(shape, fields, label);
 
-  // That strategy's fields, each read once, into a plain policy `RetryPolicy` reads.
+  // That strategy's fields, each read once, into a plain policy `RetryPolicy` reads. A
+  // value polluted onto `Object.prototype` is read as unset: `maxRetryAttempts: 50` there
+  // would otherwise turn every policy left at the default into a retry storm.
   const source = options as unknown as Record<string, unknown>;
   const plain: Record<string, unknown> = { strategy };
   for (const field of fields) {
     if (field !== 'strategy') {
-      plain[field] = source[field];
+      const value = source[field];
+      plain[field] = isInheritedFromRealmRoot(options, field, value)
+        ? undefined
+        : value;
     }
   }
 
@@ -157,4 +163,46 @@ export function snapshotRetryPolicyOptions(
   // copies, so inheritance can reuse them without trusting mutable caller data.
   validatedSnapshots.add(snapshot);
   return snapshot;
+}
+
+/** How deep a prototype chain {@link isInheritedFromRealmRoot} walks. */
+const MAX_PROTOTYPE_DEPTH = 100;
+
+/**
+ * Whether `value`, read from `options[field]`, came from the realm root prototype
+ * (`Object.prototype`, or another realm's): no object in the chain before it holds
+ * `field`, and the root holds it - as the value read, or through an accessor, which is not
+ * called again. A field from the caller's own class or prototype is theirs. A chain whose
+ * walk throws (a `Proxy`'s trap) or runs past {@link MAX_PROTOTYPE_DEPTH} is read as it
+ * answered.
+ */
+function isInheritedFromRealmRoot(
+  options: object,
+  field: string,
+  value: unknown,
+): boolean {
+  try {
+    let current: object | null = options;
+    for (
+      let depth = 0;
+      current !== null && depth <= MAX_PROTOTYPE_DEPTH;
+      depth++
+    ) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, field);
+      if (isRealmRootPrototype(current)) {
+        return (
+          descriptor !== undefined &&
+          (!('value' in descriptor) || Object.is(descriptor.value, value))
+        );
+      }
+      if (descriptor !== undefined) {
+        return false;
+      }
+      current = Object.getPrototypeOf(current) as object | null;
+    }
+  } catch {
+    // Read as it answered.
+  }
+
+  return false;
 }

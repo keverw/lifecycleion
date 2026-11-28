@@ -55,7 +55,7 @@ export class RequestInterceptorManager extends CallbackRegistry<
   }
 }
 
-export type InterceptorChain = (
+type InterceptorChain = (
   request: InterceptedRequest,
   phase: InterceptorPhase,
   context: RequestInterceptorContext,

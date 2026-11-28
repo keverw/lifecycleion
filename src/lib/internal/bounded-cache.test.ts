@@ -53,4 +53,11 @@ describe('getOrCompute', () => {
     expect(getOrCompute(cache, 'long', 1, compute, shouldKeep)).toBe('LONG');
     expect([...cache.keys()]).toEqual(['a']);
   });
+
+  test.each([0, -1])('a maxEntries of %p keeps nothing', (maxEntries) => {
+    const cache = new Map<string, string>();
+
+    expect(getOrCompute(cache, 'a', maxEntries, (key) => key)).toBe('a');
+    expect(cache.size).toBe(0);
+  });
 });

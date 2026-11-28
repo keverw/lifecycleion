@@ -832,6 +832,8 @@ describe('FetchAdapter', () => {
         );
 
       expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      // Named by undici's reason, not its `fetch failed`, which reads as a network failure.
+      expect(outcome?.message).toBe(`FetchAdapter request refused: ${message}`);
       expect(calls).toBe(1);
     },
   );

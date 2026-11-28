@@ -481,8 +481,8 @@ export class MockAdapter implements HTTPAdapter {
 
     // Again, as the real adapters do: a cancel from that callback ends the request before
     // the route handler runs, as it would before a real request was sent, so it carries
-    // no sent headers.
-    if (isSignalAborted(signal)) {
+    // no sent headers. Read quietly, as FetchAdapter reads it after that callback.
+    if (isSignalAbortedQuietly(signal)) {
       throwAbortError();
     }
 
@@ -906,13 +906,12 @@ export class MockAdapter implements HTTPAdapter {
     // A body past `maxResponseBytes` fails as the real adapters fail it: a stream error
     // that keeps the status and headers, the body dropped. A simulated stream error
     // already loses the body, so it stands as the route asked.
-    // By the client's own rule (see `isAnsweredBodyOverLimit`), so the mock and the
-    // client cannot disagree on which bodies the limit refuses. Under a simulated stream
-    // error the body was never serialized, so `intendedBody` is `null` and within it.
+    // Told as the body is serialized, by the client's own rule (see `serializeResponseBody`
+    // and `isAnsweredBodyOverLimit`), so the mock and the client cannot disagree on which
+    // bodies the limit refuses. Under a simulated stream error the body was never
+    // serialized, so `intendedBody` is `null` and within it.
     const intendedByteLength = intendedBody?.byteLength ?? 0;
-    const isResponseTooLarge =
-      isBodyOversized ||
-      isAnsweredBodyOverLimit(intendedBody, maxResponseBytes);
+    const isResponseTooLarge = isBodyOversized;
     const streamErrorCode: AdapterResponse['streamErrorCode'] =
       isResponseTooLarge ? 'response_too_large' : simulatedStreamErrorCode;
 

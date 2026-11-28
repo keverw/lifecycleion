@@ -7,7 +7,7 @@ import {
 } from '../internal/ascii-text';
 import { isSignalAbortedQuietly } from './internal/request-fields';
 import { isAbortError } from './internal/adapter-error';
-import { defineEntry } from '../internal/define-entry';
+import { defineEntry, defineHiddenValue } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import {
   describeNumberOrType,
@@ -1583,7 +1583,8 @@ export class BaseHTTPClient {
         //  2. Rewrites the method per HTTP spec (303 → GET; 301/302 + POST → GET)
         //  3. Strips non-safelisted headers on cross-origin redirects
         //  4. Seeds Cookie from the jar for the redirect URL (dispatch re-merges from the jar
-        //     on each attempt of that hop, so this stays in sync with Set-Cookie from prior responses)
+        //     on each attempt of that hop, so this stays in sync with Set-Cookie from prior
+        //     responses)
         //  5. Runs redirect-phase interceptors and observers
         //  6. Continues the loop with the updated request state
         const credentialScope = { url: initialRequestURL };
@@ -2304,8 +2305,8 @@ export class BaseHTTPClient {
             // `303`, or a `301`/`302` that rewrote a `POST`, left behind - or that the
             // interceptors dropped - sends none beside the upload, so it follows at once,
             // and the upload, a body the server has answered and moved on from, is torn
-            // down as the redirect is followed, as a browser's redirect ends it. Its outcome is carried onto the
-            // final response.
+            // down as the redirect is followed, as a browser's redirect ends it. Its
+            // outcome is carried onto the final response.
             const hopUpload = adapterResponse.requestBodySettled;
             const isBodyResent = uploadsRequestBody(
               sanitizedRedirectRequest.body,
@@ -2324,14 +2325,15 @@ export class BaseHTTPClient {
                 // past it the upload's fate is unknown, so the final response's outcome
                 // still settles.
                 if (latestUpload.outcome === hopUpload) {
-                  latestUpload.outcome = settleWithinAbortGrace(hopUpload).then(
-                    (failure) =>
+                  latestUpload.outcome = markGraceBounded(
+                    settleWithinAbortGrace(hopUpload).then((failure) =>
                       failure !== undefined && isAbortError(failure)
                         ? new Error(
                             'Request body upload ended: a redirect was followed',
                             { cause: failure },
                           )
                         : failure,
+                    ),
                   );
                 }
               }
@@ -2468,9 +2470,7 @@ export class BaseHTTPClient {
             redirectHistory,
             isNetworkErrorOverride: false,
           }),
-          isCancelled &&
-            latestUpload.outcome !== undefined &&
-            !settledUploadOutcomes.has(latestUpload.outcome)
+          isCancelled && latestUpload.outcome !== undefined
             ? settleWithinAbortGrace(latestUpload.outcome)
             : latestUpload.outcome,
         );
@@ -2566,9 +2566,7 @@ export class BaseHTTPClient {
       // an attempt given up on does (see `settleWithinAbortGrace`).
       response = withRequestBodySettled(
         response,
-        response.isCancelled &&
-          latestUpload.outcome !== undefined &&
-          !settledUploadOutcomes.has(latestUpload.outcome)
+        response.isCancelled && latestUpload.outcome !== undefined
           ? settleWithinAbortGrace(latestUpload.outcome)
           : latestUpload.outcome,
       );
@@ -2580,9 +2578,9 @@ export class BaseHTTPClient {
       if (response.isFailed) {
         const error = this._makeError(response, requestID, {
           isRetriesExhausted,
-          // Set for adapter_error, interceptor_error, redirect_loop, etc.; otherwise network_error.
-          // Streamed-body failures after headers also terminate here, but preserve
-          // their real HTTP status on the response object.
+          // Set for adapter_error, interceptor_error, redirect_loop, etc.; otherwise
+          // network_error. Streamed-body failures after headers also terminate here, but
+          // preserve their real HTTP status on the response object.
           codeOverride:
             errorCode ??
             (response.isStreamError ? 'stream_write_error' : undefined),
@@ -4150,7 +4148,15 @@ export class BaseHTTPClient {
         // waits for it after the timer, and the answer's `Set-Cookie` is stored as an
         // in-time one's is. Only an abandoned attempt's answer is ignored, and that one
         // never reaches here.
-        if (cookieJar) {
+        // A redirect the runtime followed itself, reported with status 0 (see below): its
+        // headers are the page it led to, whose `Set-Cookie` is not the requested URL's.
+        // A transport failure that also flags one is the transport failure, as late.
+        const isFollowedRedirectAnswer =
+          adapterResponse.wasRedirectDetected === true &&
+          adapterResponse.status === 0 &&
+          adapterResponse.isTransportError !== true;
+
+        if (cookieJar && !isFollowedRedirectAnswer) {
           didJarSeeAnswer = true;
           try {
             cookieJar.processResponseHeaders(
@@ -4193,10 +4199,7 @@ export class BaseHTTPClient {
         // Real 3xx responses (NodeAdapter, MockAdapter) do NOT reach this path
         // because their status != 0. They fall through to onAttemptEnd with
         // the correct status, and the outer redirect loop handles follow/disable.
-        if (
-          adapterResponse.wasRedirectDetected &&
-          adapterResponse.status === 0
-        ) {
+        if (isFollowedRedirectAnswer) {
           emitAttemptEnd({
             willRetry: false,
             status: 0,
@@ -4734,9 +4737,9 @@ export class BaseHTTPClient {
           !isFactoryOwnAbort &&
           (!isFlaggedAdapterFailure || isCancelOutcome())
         ) {
-          // User/parent cancellation — never retry (even if a timeout fired in the same window).
-          // Not over the factory's own decline, which came first: the adapter rejected
-          // with it before the factory's signal ran a cleanup that cancels.
+          // User/parent cancellation — never retry (even if a timeout fired in the same
+          // window). Not over the factory's own decline, which came first: the adapter
+          // rejected with it before the factory's signal ran a cleanup that cancels.
           if (isCancelOutcome() && (!isFactoryCancel || didAdapterResolve)) {
             return endCancelled(reportedSentRequest);
           }
@@ -4911,11 +4914,12 @@ export class BaseHTTPClient {
         // carries no adapter response, so delivery is unproven - and a timed-out answer
         // (one that arrived after the timer fired) proves it but is still a timeout.
         // Either way a non-idempotent method is not retried, unless that late answer was
-        // an `isTransportError` proving nothing was sent (`wasLateAnswerNotSent`). Nor is an attempt whose
-        // stream factory started a stream, or has a sink on its way: part of the body may
-        // be in the caller's sink, and a retry would open a second one for the same
-        // request. It is the cut stream, ended as one given up on is, not a plain network
-        // failure a caller would retry on. A factory that declined opened none.
+        // an `isTransportError` proving nothing was sent (`wasLateAnswerNotSent`). Nor is
+        // an attempt whose stream factory started a stream, or has a sink on its way:
+        // part of the body may be in the caller's sink, and a retry would open a second
+        // one for the same request. It is the cut stream, ended as one given up on is,
+        // not a plain network failure a caller would retry on. A factory that declined
+        // opened none.
         if (!isCancelOutcome() && didStartStream()) {
           return endAsCutStream();
         }
@@ -6919,11 +6923,7 @@ function stableUploadError(value: unknown): Error {
   );
   const name = readUnknownMember(error, 'name');
   if (typeof name === 'string') {
-    Object.defineProperty(wrapped, 'name', {
-      value: name,
-      writable: true,
-      configurable: true,
-    });
+    defineHiddenValue(wrapped, 'name', name, true);
   }
   // Wrapping is required for safe promise resolution, but the upload's diagnostic
   // fields and original stack still describe the failure better than this wrapper's
@@ -6944,11 +6944,7 @@ function stableUploadError(value: unknown): Error {
   // Not `defineEntry`: `stack` stays non-enumerable, as a native Error's own is.
   const stack = readUnknownMember(error, 'stack');
   if (typeof stack === 'string') {
-    Object.defineProperty(wrapped, 'stack', {
-      value: stack,
-      writable: true,
-      configurable: true,
-    });
+    defineHiddenValue(wrapped, 'stack', stack, true);
   }
   return wrapped;
 }
@@ -7196,27 +7192,48 @@ function lastUploadActivityAt(activity: UploadActivity): number {
 const ADAPTER_ABORT_GRACE_MS = 1000;
 
 /**
+ * The upload outcomes already bounded by {@link settleWithinAbortGrace}, or derived from
+ * one, which it hands back as they are rather than bounding again.
+ */
+const graceBoundedOutcomes = new WeakSet<Promise<Error | undefined>>();
+
+/** `outcome`, recorded as bounded by the abort grace (see {@link graceBoundedOutcomes}). */
+function markGraceBounded(
+  outcome: Promise<Error | undefined>,
+): Promise<Error | undefined> {
+  graceBoundedOutcomes.add(outcome);
+  return outcome;
+}
+
+/**
  * An aborted upload's outcome, or, when the adapter has not settled it within
  * {@link ADAPTER_ABORT_GRACE_MS}, an `Error` saying its fate is unknown (see
  * `ABANDONED_UPLOAD_MESSAGE`), as an attempt given up on reports. Never rejects: the
- * outcome passed in is already adopted.
+ * outcome passed in is already adopted. One already settled, or already bounded, is
+ * handed back as it is.
  */
 function settleWithinAbortGrace(
   outcome: Promise<Error | undefined>,
 ): Promise<Error | undefined> {
+  if (settledUploadOutcomes.has(outcome) || graceBoundedOutcomes.has(outcome)) {
+    return outcome;
+  }
+
   // The grace timer is ref'd: a caller awaiting `requestBodySettled` in an otherwise idle
   // process must see it settle, which an unref'd timer would not let happen. So the
   // process may stay up to the grace past `send()` for an adapter that ignores its abort.
-  return new Promise((resolve) => {
-    const graceID = setTimeout(() => {
-      resolve(new Error(ABANDONED_UPLOAD_MESSAGE));
-    }, ADAPTER_ABORT_GRACE_MS);
+  return markGraceBounded(
+    new Promise((resolve) => {
+      const graceID = setTimeout(() => {
+        resolve(new Error(ABANDONED_UPLOAD_MESSAGE));
+      }, ADAPTER_ABORT_GRACE_MS);
 
-    void outcome.then((failure) => {
-      clearTimeout(graceID);
-      resolve(failure);
-    });
-  });
+      void outcome.then((failure) => {
+        clearTimeout(graceID);
+        resolve(failure);
+      });
+    }),
+  );
 }
 
 /**
@@ -7724,14 +7741,14 @@ function dropsBodyHeaders(
  * number - which carries nothing to the host and only protects what is sent (see
  * `upgradedHopURL`); a downgrade, or any other change of scheme or port, is not.
  *
- * The body is the hop's own value too, not what the interceptors were handed or
- * returned, whatever they did to it - unless they removed it or left it empty, which
- * sends nothing (see `emptyRequestBody`). The hop's own body goes with the hop's own
- * headers that describe it (`BODY_DESCRIBING_HEADERS`), whether the interceptors
- * replaced it, edited a copy of it, or left it alone: theirs describe a body that is not sent. A body
- * they dropped goes with none of them, the hop's or the interceptors', as a hop
- * rewritten to `GET` drops them with its body. A hop with no body to send has nothing
- * to drop, so it goes as it was, its own headers included.
+ * The body is the hop's own value too, not what the interceptors were handed or returned,
+ * whatever they did to it - unless they removed it or left it empty, which sends nothing
+ * (see `emptyRequestBody`). The hop's own body goes with the hop's own headers that
+ * describe it (`BODY_DESCRIBING_HEADERS`), whether the interceptors replaced it, edited a
+ * copy of it, or left it alone: theirs describe a body that is not sent. A body they
+ * dropped goes with none of them, the hop's or the interceptors', as a hop rewritten to
+ * `GET` drops them with its body. A hop with no body to send has nothing to drop, so it
+ * goes as it was, its own headers included.
  */
 function withoutAddedCrossOriginCredentials(
   request: ResolvedRequest,

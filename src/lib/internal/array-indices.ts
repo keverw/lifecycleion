@@ -10,7 +10,7 @@ export const SPARSE_RUN = 65_536;
  * array's keys costs a string for every entry it holds, many times a step, so an array
  * mostly full is walked on through its holes rather than listed.
  */
-export const SPARSE_RUN_PER_ENTRY = 64;
+const SPARSE_RUN_PER_ENTRY = 64;
 
 /**
  * Whether `holes` holes met so far, with `entries` entries among them, are enough that the
@@ -51,25 +51,25 @@ export interface FillCheckpoint {
 }
 
 /**
- * Asked each time a walk of `source` by index has met enough holes to read the rest by its
- * own keys - at `start`, with `holes` and `entries` met so far, counted over the whole
- * walk - whether it goes on by index instead: the checkpoint to go on with, or `undefined`
- * to list the keys. `holesPerEntry` is how many holes the walk is worth going through for
- * each entry it reads - {@link WALKED_HOLES_PER_ENTRY} for one that tells a hole by `in`,
- * 1 for one that pays an `Object.hasOwn`, about what listing an entry costs. It goes on when the rest
- * holds more than one entry in `holesPerEntry + 1` indices (see
- * {@link isMostlyFilledFrom}), so an array with a run of holes - at its start, or between
- * full stretches - however long, is not listed and sorted a string for every entry it
- * holds; and from then on while the walk has met no more than {@link SPARSE_RUN} holes
- * since - the rest of the run the samples skipped - or more than one entry for each
- * `holesPerEntry` of them, after which the rest is sampled again. The samples fall at
- * random, so an array cannot be built to pass them and be walked its whole length: one
- * that does holds about that share of entries by every walk's own test, and is walked for about
- * `holesPerEntry` steps an entry. A `Proxy` whose traps claim every index is walked
- * as full, as it would be without the samples. Which way the rest is read can differ
- * from one walk to the next; for an array that nothing changes during the walk, and
- * whose `has`, `getOwnPropertyDescriptor` and `ownKeys` traps agree, what either way
- * visits is the same. Throws as `in` or `Object.hasOwn` throws on `source`.
+ * Asked each time a walk of `source` by index has met enough holes to read the rest by
+ * its own keys - at `start`, with `holes` and `entries` met so far, counted over the
+ * whole walk - whether it goes on by index instead: the checkpoint to go on with, or
+ * `undefined` to list the keys. `holesPerEntry` is how many holes the walk is worth going
+ * through for each entry it reads - {@link WALKED_HOLES_PER_ENTRY} for one that tells a
+ * hole by `in`, 1 for one that pays an `Object.hasOwn`, about what listing an entry
+ * costs. It goes on when the rest holds more than one entry in `holesPerEntry + 1`
+ * indices (see {@link isMostlyFilledFrom}), so an array with a run of holes - at its
+ * start, or between full stretches - however long, is not listed and sorted a string for
+ * every entry it holds; and from then on while the walk has met no more than {@link
+ * SPARSE_RUN} holes since - the rest of the run the samples skipped - or more than one
+ * entry for each `holesPerEntry` of them, after which the rest is sampled again. The
+ * samples fall at random, so an array cannot be built to pass them and be walked its
+ * whole length: one that does holds about that share of entries by every walk's own test,
+ * and is walked for about `holesPerEntry` steps an entry. A `Proxy` whose traps claim
+ * every index is walked as full, as it would be without the samples. Which way the rest
+ * is read can differ from one walk to the next; for an array that nothing changes during
+ * the walk, and whose `has`, `getOwnPropertyDescriptor` and `ownKeys` traps agree, what
+ * either way visits is the same. Throws as `in` or `Object.hasOwn` throws on `source`.
  */
 export function walksOnByIndex(
   source: object,

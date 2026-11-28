@@ -30,23 +30,21 @@ describe('RequestTracker', () => {
     expect(reads).toBe(1);
   });
 
-  describe('add / get / remove', () => {
-    test('get returns entry after add', () => {
-      const tracker = new RequestTracker();
-      const entry = makeEntry();
-      tracker.add(entry);
-      expect(tracker.get('req-1')).toBe(entry);
-    });
+  describe('add / remove', () => {
+    const listedIDs = (tracker: RequestTracker): string[] =>
+      tracker.list().requests.map((request) => request.requestID);
 
-    test('get returns undefined for unknown requestID', () => {
-      expect(new RequestTracker().get('nope')).toBeUndefined();
+    test('an added entry is listed', () => {
+      const tracker = new RequestTracker();
+      tracker.add(makeEntry());
+      expect(listedIDs(tracker)).toEqual(['req-1']);
     });
 
     test('remove deletes the entry', () => {
       const tracker = new RequestTracker();
       tracker.add(makeEntry());
       tracker.remove('req-1');
-      expect(tracker.get('req-1')).toBeUndefined();
+      expect(listedIDs(tracker)).toEqual([]);
     });
 
     test('remove is a no-op for unknown requestID', () => {

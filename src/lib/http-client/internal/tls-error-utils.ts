@@ -12,6 +12,9 @@ import { isErrorValue } from '../../to-error';
 // field rather than only on `cause`.
 import { readMember } from '../../internal/read-member';
 
+// The codes named outright. Some the patterns below match too (`CERT_HAS_EXPIRED`,
+// `ERR_TLS_CERT_ALTNAME_INVALID`); listed all the same, so the set reads as the codes the
+// classifier is known to meet, and a pattern narrowed later does not drop one.
 const CERT_ERROR_CODES = new Set([
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
   'CERT_HAS_EXPIRED',

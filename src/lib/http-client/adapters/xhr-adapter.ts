@@ -25,6 +25,7 @@ import {
 import {
   byteProgressEvent,
   completeProgressEvent,
+  isByteCount,
   knownBodyByteLength,
 } from '../internal/progress';
 import {
@@ -800,6 +801,10 @@ export class XHRAdapter implements HTTPAdapter {
 
               const reported = readProgressEvent(event);
 
+              if (reported === undefined) {
+                return;
+              }
+
               if (reported.progress === 1) {
                 didFireUpload100 = true;
               }
@@ -823,8 +828,10 @@ export class XHRAdapter implements HTTPAdapter {
               }
 
               const reported = readProgressEvent(event);
-              uploadedBytes = Math.max(uploadedBytes, reported.loaded);
-              uploadTotalBytes = Math.max(uploadTotalBytes, reported.total);
+              if (reported !== undefined) {
+                uploadedBytes = Math.max(uploadedBytes, reported.loaded);
+                uploadTotalBytes = Math.max(uploadTotalBytes, reported.total);
+              }
 
               emitFinalUpload();
             }, false),
@@ -1140,7 +1147,7 @@ export class XHRAdapter implements HTTPAdapter {
           // The one `progress: 1` is `load`'s, with the body's own size: the runtime's 100%
           // may be of an encoded `Content-Length` (Firefox, React Native count a compressed
           // body encoded), which the body itself then differs from.
-          if (reported.progress !== 1) {
+          if (reported !== undefined && reported.progress !== 1) {
             reportDownload?.(reported);
           }
         }, true),
@@ -1276,54 +1283,58 @@ export class XHRAdapter implements HTTPAdapter {
 
       // The error event fires for network-level failures (DNS failure, refused
       // connection, CORS rejection). It never fires for HTTP error status codes
-      // (4xx, 5xx) — those arrive on the load event with a real status.
-      xhr.addEventListener('error', () => {
-        // Not once `load` has started, as for `timeout` and `abort` below: it answers what
-        // it loaded. A shim can fire one from a callback `load` runs, before it settles.
-        if (didSettle || didLoad) {
-          return;
-        }
-
-        // Neither replay signal is set here, on purpose. This adapter can never
-        // prove non-delivery: upload progress is suppressed for cross-origin
-        // requests CORS does not grant access to, and those are still delivered —
-        // the browser blocks the response, not the request. The omission is what
-        // keeps a `POST` from being replayed by default.
-        //
-        // `isRetryable: false` does not stand in for it: that flag blocks every
-        // method, so it would stop retrying an idempotent `PUT` after an ordinary
-        // network error and override `retryNonIdempotentMethods`.
-        //
-        // Unless the headers had arrived: then the server answered, and what failed is the
-        // body, so it is the stream error FetchAdapter reports for one - a redirect the
-        // browser had followed reported as the redirect, as on `load`.
-        if (answeredAtHeaders !== undefined) {
-          // The upload ended with the answer already, where it was acted on as it was
-          // read: ended here as on every answered exit all the same.
-          if (!endUploadWithAnswer(answeredAtHeaders)) {
+      // (4xx, 5xx) — those arrive on the load event with a real status. Refused on a
+      // throw, as the listeners above are, as are `timeout` and `abort` below.
+      xhr.addEventListener(
+        'error',
+        refusingOnThrow(() => {
+          // Not once `load` has started, as for `timeout` and `abort` below: it answers what
+          // it loaded. A shim can fire one from a callback `load` runs, before it settles.
+          if (didSettle || didLoad) {
             return;
           }
 
-          resolve(
-            streamErrorAnswer(
-              answeringURL,
-              answeredAtHeaders.status,
-              answeredAtHeaders.headers,
-              'stream_response_error',
-              new Error('XHR network error'),
-            ),
-          );
-          return;
-        }
+          // Neither replay signal is set here, on purpose. This adapter can never
+          // prove non-delivery: upload progress is suppressed for cross-origin
+          // requests CORS does not grant access to, and those are still delivered —
+          // the browser blocks the response, not the request. The omission is what
+          // keeps a `POST` from being replayed by default.
+          //
+          // `isRetryable: false` does not stand in for it: that flag blocks every
+          // method, so it would stop retrying an idempotent `PUT` after an ordinary
+          // network error and override `retryNonIdempotentMethods`.
+          //
+          // Unless the headers had arrived: then the server answered, and what failed is the
+          // body, so it is the stream error FetchAdapter reports for one - a redirect the
+          // browser had followed reported as the redirect, as on `load`.
+          if (answeredAtHeaders !== undefined) {
+            // The upload ended with the answer already, where it was acted on as it was
+            // read: ended here as on every answered exit all the same.
+            if (!endUploadWithAnswer(answeredAtHeaders)) {
+              return;
+            }
 
-        resolve({
-          status: 0,
-          isTransportError: true,
-          headers: {},
-          body: null,
-          errorCause: new Error('XHR network error'),
-        });
-      });
+            resolve(
+              streamErrorAnswer(
+                answeringURL,
+                answeredAtHeaders.status,
+                answeredAtHeaders.headers,
+                'stream_response_error',
+                new Error('XHR network error'),
+              ),
+            );
+            return;
+          }
+
+          resolve({
+            status: 0,
+            isTransportError: true,
+            headers: {},
+            body: null,
+            errorCause: new Error('XHR network error'),
+          });
+        }, false),
+      );
 
       // Defensive fallback: fires if the browser has a hard-coded internal
       // timeout limit (xhr.timeout is 0 so we never set one ourselves). Mark
@@ -1332,21 +1343,27 @@ export class XHRAdapter implements HTTPAdapter {
       // the answer out, as a timeout from the client's own timer does (see `onAbort`).
       // Not once `load` has started, as for `abort` below: it answers what it loaded. A
       // shim can fire one from a callback `load` runs, before `load` has settled.
-      xhr.addEventListener('timeout', () => {
-        if (!didLoad) {
-          settleAborted(answeredAtHeaders, true);
-        }
-      });
+      xhr.addEventListener(
+        'timeout',
+        refusingOnThrow(() => {
+          if (!didLoad) {
+            settleAborted(answeredAtHeaders, true);
+          }
+        }, false),
+      );
 
-      xhr.addEventListener('abort', () => {
-        // Not once `load` has started: it answers whatever its callbacks then cancel, as a
-        // browser's `abort()` on a finished XHR fires no event at all. One after the send
-        // has settled - the adapter's own, after a `response_too_large` or a followed
-        // redirect - `settleAborted` ignores.
-        if (!didLoad) {
-          settleAborted(answeredAtHeaders);
-        }
-      });
+      xhr.addEventListener(
+        'abort',
+        refusingOnThrow(() => {
+          // Not once `load` has started: it answers whatever its callbacks then cancel, as a
+          // browser's `abort()` on a finished XHR fires no event at all. One after the send
+          // has settled - the adapter's own, after a `response_too_large` or a followed
+          // redirect - `settleAborted` ignores.
+          if (!didLoad) {
+            settleAborted(answeredAtHeaders);
+          }
+        }, false),
+      );
 
       /**
        * End the send on an abort, or on a timeout the runtime's XHR fired itself: over an
@@ -1448,18 +1465,23 @@ export class XHRAdapter implements HTTPAdapter {
       // throw for its own reasons; each fails the same way on every attempt, so it is
       // refused as non-retryable - unless the request was cancelled as it was handed
       // over, which stays the cancel, as FetchAdapter keeps one that lands while `fetch`
-      // dispatches.
+      // dispatches. Refused in the adapter's own words, without the runtime's error, as
+      // `open` is: an XHR outside a browser may quote the URL it was sending.
       try {
         didSend = true;
         isInsideSend = true;
         // A `string`, a `Uint8Array` (a BufferSource) and a `FormData` are all
         // `XMLHttpRequestBodyInit`: the cast is safe for the bodies the client produces.
         xhr.send(requestBody as XMLHttpRequestBodyInit | null);
-      } catch (error) {
+      } catch {
         if (isSignalAbortedQuietly(signal)) {
           reject(makeAbortError());
         } else {
-          refuse(error);
+          refuse(
+            new TypeError(
+              'XHRAdapter could not send the request: the runtime refused it',
+            ),
+          );
         }
         return;
       } finally {
@@ -1534,20 +1556,28 @@ function isKnownUncodedBody(
 }
 
 /**
- * An XHR progress event as the adapter reports it, for upload and download alike. A length
- * is known only where it is one (see `byteProgressEvent`): a shim's `lengthComputable` with
- * a total of `0` would make the progress `NaN` or `Infinity`, and a compressed response can
- * count `loaded` in decoded bytes against an encoded `Content-Length` (Chrome does), so a
- * count past the total says the total is not the body's length.
+ * An XHR progress event as the adapter reports it, for upload and download alike, or
+ * `undefined` for one whose `loaded` is no count of bytes (a shim's missing or `NaN` one),
+ * which reports nothing. A length is known only where it is one (see `byteProgressEvent`):
+ * a shim's `lengthComputable` with a total of `0`, or one that is no count of bytes, would
+ * make the progress `NaN` or `Infinity`, and a compressed response can count `loaded` in
+ * decoded bytes against an encoded `Content-Length` (Chrome does), so a count past the
+ * total says the total is not the body's length.
  */
 function readProgressEvent(event: {
   loaded: number;
   total: number;
   lengthComputable: boolean;
-}): { loaded: number; total: number; progress: number } {
+}): { loaded: number; total: number; progress: number } | undefined {
+  const { loaded, total } = event;
+
+  if (!isByteCount(loaded)) {
+    return undefined;
+  }
+
   return byteProgressEvent(
-    event.loaded,
-    event.lengthComputable ? event.total : 0,
+    loaded,
+    event.lengthComputable && isByteCount(total) ? total : 0,
   );
 }
 

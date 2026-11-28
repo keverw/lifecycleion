@@ -1604,6 +1604,32 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(events.every((e) => !('attemptNumber' in e))).toBe(true);
   });
 
+  test('the signal is read quietly after the 0% upload callback, as FetchAdapter reads it', async () => {
+    adapter.routes.get('/prog', () => ({ status: 200 }));
+    const controller = new AbortController();
+    let reads = 0;
+    // Readable on the guarded first read, throws on the one after the callback.
+    Object.defineProperty(controller.signal, 'aborted', {
+      get() {
+        reads++;
+        if (reads === 2) {
+          throw new Error('unreadable');
+        }
+        return false;
+      },
+    });
+
+    const response = await adapter.send(
+      makeAdapterRequest({
+        requestURL: '/prog',
+        signal: controller.signal,
+        onUploadProgress: () => {},
+      }),
+    );
+
+    expect(response.status).toBe(200);
+  });
+
   test('fires 0% upload then 100% upload and download', async () => {
     adapter.routes.get('/prog', () => ({ status: 200, body: { x: 1 } }));
     const upload: number[] = [];

@@ -533,18 +533,20 @@ export function matchesWildcardOrigin(
 /**
  * {@link matchesWildcardOrigin} for a whole list of patterns, each cached as `isCached`
  * says (see above): the origin is read once - when a pattern first needs it - rather than
- * for every wildcard entry.
+ * for every wildcard entry. `bareURL` is the origin's parse where the caller has read it
+ * already (see `readBareOrigin`), `null` for one that is no bare origin.
  */
 function wildcardOriginMatcher(
   origin: string,
   isCached: PatternCache,
+  bareURL?: URL | null,
 ): (pattern: string) => boolean {
   let parsed: WildcardOrigin | undefined;
   let isRead = false;
 
   return (pattern) => {
     if (!isRead) {
-      const originURL = readWildcardOrigin(origin);
+      const originURL = readWildcardOrigin(origin, bareURL);
       parsed = originURL === undefined ? undefined : { url: originURL };
       isRead = true;
     }
@@ -574,10 +576,16 @@ interface WildcardOrigin {
  * `origin` parsed as a wildcard pattern reads it: an HTTP(S) origin with nothing past its
  * host and port, or `undefined` for one no wildcard pattern matches.
  */
-function readWildcardOrigin(origin: string): URL | undefined {
-  // Read as `normalizeOrigin` reads it. Every pattern - `*` and the protocol wildcards
-  // included - needs a parsed URL.
-  const originURL = readBareOrigin(origin)?.url;
+function readWildcardOrigin(
+  origin: string,
+  bareURL?: URL | null,
+): URL | undefined {
+  // Read as `normalizeOrigin` reads it, unless the caller has. Every pattern - `*` and
+  // the protocol wildcards included - needs a parsed URL.
+  const originURL =
+    bareURL === undefined
+      ? readBareOrigin(origin)?.url
+      : (bareURL ?? undefined);
 
   // For CORS, only http/https are relevant.
   return originURL !== undefined && isHTTPScheme(originURL.protocol)
@@ -1239,6 +1247,28 @@ function isAllowedExactHostname(normalizedHostname: string): boolean {
   return !(publicSuffix && publicSuffix === normalizedHostname);
 }
 
+/** What kind of wildcard a valid entry is (see `validateConfigEntry`). */
+export type WildcardKind = 'none' | 'global' | 'protocol' | 'subdomain';
+
+export type ValidationResult = {
+  valid: boolean;
+  info?: string;
+  wildcardKind: WildcardKind;
+};
+
+/** Why an entry edged with whitespace other than spaces, tabs, CRs and LFs is refused. */
+const WHITESPACE_EDGE_INFO =
+  'whitespace other than spaces, tabs, CRs and LFs at an end (it can never match)';
+
+function isValidPortString(port: string): boolean {
+  if (!/^\d+$/.test(port)) {
+    return false;
+  }
+
+  const portNumber = Number(port);
+  return Number.isInteger(portNumber) && portNumber >= 0 && portNumber <= 65535;
+}
+
 /**
  * Validate a configuration entry for either domain or origin contexts.
  * Returns { valid, info? }, where info can carry non-fatal hints, for any entry; throws a
@@ -1262,27 +1292,6 @@ function isAllowedExactHostname(normalizedHostname: string): boolean {
  *   public suffix or pseudo-TLD (`*.internal`, `*.com`) is then valid. A tail under a
  *   Public Suffix List wildcard rule (`*.kawasaki.jp`) is refused either way.
  */
-export type WildcardKind = 'none' | 'global' | 'protocol' | 'subdomain';
-
-export type ValidationResult = {
-  valid: boolean;
-  info?: string;
-  wildcardKind: WildcardKind;
-};
-
-/** Why an entry edged with whitespace other than spaces, tabs, CRs and LFs is refused. */
-const WHITESPACE_EDGE_INFO =
-  'whitespace other than spaces, tabs, CRs and LFs at an end (it can never match)';
-
-function isValidPortString(port: string): boolean {
-  if (!/^\d+$/.test(port)) {
-    return false;
-  }
-
-  const portNumber = Number(port);
-  return Number.isInteger(portNumber) && portNumber >= 0 && portNumber <= 65535;
-}
-
 export function validateConfigEntry(
   entry: string,
   context: 'domain' | 'origin',
@@ -1841,6 +1850,8 @@ function parseExactOriginEntry(
 function parseExactOriginForMatching(entry: string): {
   normalizedOrigin: string;
   normalizedHostname: string;
+  /** Its parse (see `readBareOrigin`), `null` for the origin `null`. */
+  url: URL | null;
   /** A non-special scheme's host, which the public suffix list says nothing about. */
   isOpaqueHost: boolean;
   /** Whether the scheme is `http:` or `https:`, the only ones a bare domain matches. */
@@ -1850,6 +1861,7 @@ function parseExactOriginForMatching(entry: string): {
     return {
       normalizedOrigin: 'null',
       normalizedHostname: '',
+      url: null,
       isOpaqueHost: false,
       isHTTP: false,
     };
@@ -1867,6 +1879,7 @@ function parseExactOriginForMatching(entry: string): {
   return {
     normalizedOrigin: canonical.origin,
     normalizedHostname: canonical.hostname,
+    url,
     isOpaqueHost:
       !isSpecialScheme(asciiLowercase(url.protocol)) &&
       !url.hostname.startsWith('['),
@@ -1949,12 +1962,19 @@ function matchesExactOriginEntry(
  * Whether an origin's text carries `@`, `?` or `#` after its scheme: userinfo, a query or
  * a fragment - even an empty one, which the URL parser reports as `''` and so would slip
  * past the field checks, where `validateConfigEntry` refuses the same text. No host
- * holds any of the three.
+ * holds any of the three. Or anything after the host and port but one `/`: a path the
+ * parser reduces to `/` (`/..`, `/.`, `/%2e`), which `validateConfigEntry` refuses too.
  */
 function hasOriginExtras(text: string): boolean {
   const schemeEnd = text.indexOf('://');
+  const afterScheme = schemeEnd === -1 ? text : text.slice(schemeEnd + 3);
 
-  return /[@?#]/.test(schemeEnd === -1 ? text : text.slice(schemeEnd + 3));
+  if (/[@?#]/.test(afterScheme)) {
+    return true;
+  }
+
+  const pathStart = afterScheme.search(/[/\\]/);
+  return pathStart !== -1 && afterScheme.slice(pathStart) !== '/';
 }
 
 function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
@@ -2070,7 +2090,11 @@ export function matchesOriginList(
 
   // The list's own compiled patterns: two lists that each fit the shared cache, used
   // in turn, would evict each other there on every call (see `compiledOriginList`).
-  const matchesWildcard = wildcardOriginMatcher(origin, list.patterns);
+  const matchesWildcard = wildcardOriginMatcher(
+    origin,
+    list.patterns,
+    parsedOrigin.url,
+  );
 
   return cleaned.some((allowed, index) =>
     // A wildcard - the global `*` included - is matched against the origin as the
@@ -2124,7 +2148,11 @@ export function matchesCORSCredentialsList(
   const list = compiledOriginList(allowedOrigins, entries);
 
   // The list's own compiled patterns (see `compiledOriginList`).
-  const matchesWildcard = wildcardOriginMatcher(origin, list.patterns);
+  const matchesWildcard = wildcardOriginMatcher(
+    origin,
+    list.patterns,
+    parsedOrigin.url,
+  );
 
   return list.cleaned.some((allowed, index) => {
     if (!allowed.includes('*')) {

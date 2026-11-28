@@ -8,6 +8,7 @@ import {
 } from '../consts';
 import { isErrorValue } from '../../to-error';
 import { readUnknownMember } from '../../internal/read-member';
+import { defineHiddenValue } from '../../internal/define-entry';
 import { isUint8ArrayValue } from '../../internal/binary-view';
 import { isFormData, isMethodlessFormData } from './form-entries';
 
@@ -17,9 +18,12 @@ import { isFormData, isMethodlessFormData } from './form-entries';
  * that error on `cause` (which the client reports), rather than the flag defined on the
  * caller's object: there it would stay for good, so the same object thrown later by an
  * adapter's `send()` would read as non-retryable, and it would show up in
- * `serializeError`.
+ * `serializeError`. Its message is `message`, or else `error`'s own.
  */
-export function nonRetryableAdapterErrorFrom(error: unknown): Error {
+export function nonRetryableAdapterErrorFrom(
+  error: unknown,
+  message?: string,
+): Error {
   // Already one: a refusal raised inside a step that is itself read on a carrier goes
   // out as it is, not wrapped twice. Known by identity, not by its key: the key is a
   // registry symbol any caller can put on their own error to skip the wrapping.
@@ -27,11 +31,12 @@ export function nonRetryableAdapterErrorFrom(error: unknown): Error {
     return error;
   }
 
-  const message = readUnknownMember(error, 'message');
+  const ownMessage = readUnknownMember(error, 'message');
   const carrier = new Error(
-    typeof message === 'string' && message.length > 0
-      ? message
-      : 'Adapter failure',
+    message ??
+      (typeof ownMessage === 'string' && ownMessage.length > 0
+        ? ownMessage
+        : 'Adapter failure'),
     { cause: error },
   );
   const name = readUnknownMember(error, 'name');
@@ -44,14 +49,20 @@ export function nonRetryableAdapterErrorFrom(error: unknown): Error {
     carrier.name = name;
   }
 
-  Object.defineProperty(carrier, ADAPTER_ERROR_CARRIER_KEY, { value: true });
+  defineHiddenValue(carrier, ADAPTER_ERROR_CARRIER_KEY, true);
   markNonRetryableAdapterError(carrier);
   carriers.add(carrier);
 
   return carrier;
 }
 
-/** Every carrier {@link nonRetryableAdapterErrorFrom} has made, by identity. */
+/**
+ * Every carrier {@link nonRetryableAdapterErrorFrom} has made, by identity. One set per
+ * copy of this module - a bundle entry point carries its own - which is enough: it only
+ * keeps a copy from wrapping its own carrier twice, while the client tells a carrier from
+ * any copy by {@link ADAPTER_ERROR_CARRIER_KEY}, a `Symbol.for` key. A carrier from
+ * another copy, wrapped again, is still non-retryable, with the inner carrier on `cause`.
+ */
 const carriers = new WeakSet<Error>();
 
 /** Whether `error` is a carrier {@link nonRetryableAdapterErrorFrom} made. */
@@ -222,9 +233,11 @@ export function nonRetryableRefusal<E extends Error>(
  */
 export function markNonRetryableAdapterError(error: unknown): void {
   try {
-    Object.defineProperty(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG, {
-      value: true,
-    });
+    defineHiddenValue(
+      error as object,
+      NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+      true,
+    );
   } catch {
     // Not an object, or one that refuses the property; it is retried as any untagged
     // error is.
@@ -242,12 +255,7 @@ export function defineHiddenTags(
 ): void {
   // `Reflect.ownKeys`, not `Object.entries`: the header-carrying tags are symbols.
   for (const key of Reflect.ownKeys(tags)) {
-    Object.defineProperty(target, key, {
-      value: tags[key],
-      writable: true,
-      configurable: true,
-      enumerable: false,
-    });
+    defineHiddenValue(target, key, tags[key], true);
   }
 }
 

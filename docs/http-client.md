@@ -127,7 +127,7 @@ console.log(created.status); // 201
 ```typescript
 interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter
-  baseURL?: string; // Origin / prefix for relative paths: a string with no query or fragment. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL. In a browser a relative one (`/api`, `api`) is allowed, and one that is no plain path - a scheme, a leading `//`, or leading whitespace (tabs, CRs and LFs anywhere read as the URL parser reads them) - must be an absolute http(s):// URL too.
+  baseURL?: string; // Origin / prefix for relative paths: a string with no query or fragment. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL. In a browser a relative one (`/api`, `api`) is allowed, and one that is no plain path - a scheme, a leading `//`, or whitespace at either end (tabs, CRs and LFs anywhere read as the URL parser reads them) - must be an absolute http(s):// URL too.
   defaultHeaders?: RequestHeadersInput; // Values may be null/undefined: no header
   timeout?: number | null; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
   // NaN or a non-number throws; Infinity disables it like 0 does.
@@ -394,7 +394,7 @@ client.get('/search?page=2&sort=new').params({ page: 3 }).send();
 ```
 
 - A value of `undefined`, or an object holding only `undefined`, does not count, so the path's pairs stay: `.params({ page: options.page })` with no page keeps `?page=2`.
-- An empty array or object does count, and clears the path's pairs for its key.
+- An empty array or object does count, and clears the path's pairs for its key. So does any other value that writes nothing as `{}` does: a function, or a class instance that keeps its state on its prototype or in private fields (see below).
 - A path pair whose key starts with a bare `[]` (`?[]=1`) is always kept.
 
 **What `.params()` takes.** A plain object. `null` or `undefined` clears the params set so far, and a `URLSearchParams`, `Map` or string throws a `TypeError`. The top-level entries, and any array values, are copied when you call it (the same goes for `params` in the request options), so changing them afterwards does not change the request. Nested objects are read when the request is sent, so a change made to one before `send()` is included.
@@ -1470,7 +1470,7 @@ A `Location` with no fragment of its own takes the request's, as fetch's redirec
 | 303      | Other methods                 | GET             |
 | 307, 308 | Any                           | Unchanged       |
 
-Cross-origin redirects carry only an allow-list of headers: `accept`, `accept-encoding` (the caller's own; NodeAdapter's default one is not carried), `accept-language`, `content-encoding`, `content-language`, `content-type`, `user-agent`, `range` and the conditional headers (`if-range`, `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`). Everything else - `Authorization`, `Cookie`, and any custom header such as `X-API-Key` that might be a credential - is stripped. This is stricter than fetch, which drops `Authorization`, `Cookie` and `Proxy-Authorization` and forwards every other header, a custom credential header (`X-API-Key`) included; a redirect-phase interceptor can add a header back for a target it trusts. That holds while it keeps the server's target: one that also rewrites `requestURL` to another origin - the request's own included - has the same allow-list applied to what it returns, the headers it added among them, since the rule is read from the server's target to the one it sends to. Cookies are recomputed from the jar for the target.
+Cross-origin redirects carry only an allow-list of headers: `accept`, `accept-encoding` (the caller's own; NodeAdapter's default one is not carried), `accept-language`, `content-encoding`, `content-language`, `content-type`, `user-agent`, `range` and the conditional headers (`if-range`, `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`). Everything else - `Authorization`, `Cookie`, and any custom header such as `X-API-Key` that might be a credential - is stripped. This is stricter than fetch, which drops `Authorization`, `Cookie` and `Proxy-Authorization` and forwards every other header, a custom credential header (`X-API-Key`) included; a redirect-phase interceptor can add a header back for a target it trusts. That holds while it keeps the server's target: one that also rewrites `requestURL` to another origin - the request's own included - has the same allow-list applied to what it returns, the headers it added among them, since the rule is read from the server's target to the one it sends to. Cookies are recomputed from the jar for the target. The request-ID and attempt headers, with `includeRequestID` and `includeAttemptHeader` on, are the client's own and are added to every attempt, a cross-origin hop's included: the target sees the request's ID, as the first host does.
 
 A retry on that hop follows the same rule. The hop's request is the stripped one, plus whatever the redirect-phase interceptors added. The `retry`-phase interceptors that run on it, including a parent client's, can change the values of headers the hop already carries; a header they add off the allow-list, and their changes to the URL (but for an upgrade to `https:`, below) and the body, are discarded. All of this is silent, as the hop's own headers are dropped silently.
 
@@ -1790,7 +1790,7 @@ The adapter resolves a relative request URL as `fetch` does - against the docume
 
 **Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. A request the adapter refuses before calling `fetch` fires neither. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
 
-A `fetch` that follows a redirect itself, ignoring `redirect: 'manual'` (an XHR-based polyfill's, React Native's), answers with the page the redirect led to. The adapter tells one by the response's `redirected` flag where the response has one, as a native `Response` does: its `url` can differ with no redirect followed, as a browser's upgrade to `https:` or a service worker's answer from another URL does. A polyfill's response, which has none, is told by a `url` other than the one dispatched, as XHRAdapter tells one: the fragment aside, a browser's own upgrade to `https:` excepted, and spellings RFC 3986 makes equal read as one (a percent-escape's hex in either case, an unreserved character escaped or not; an empty query - `/a?` - is not the same as none, which the RFC keeps apart). It is reported as XHRAdapter reports a browser-followed redirect: `status: 0` with `wasRedirectDetected` and the final URL as `detectedRedirectURL`. The client refuses it as `redirect_disabled`, or with `followRedirects: true`, where there is no `Location` left to follow, as `redirect_unsupported` (`isNetworkError: false`), never retried: a retry would only follow the same redirect again. That holds for any adapter that reports a redirect with `status: 0`. The other page's headers, its `Set-Cookie` among them, are not handed over as the requested URL's.
+A `fetch` that follows a redirect itself, ignoring `redirect: 'manual'` (an XHR-based polyfill's, React Native's), answers with the page the redirect led to. The adapter tells one by the response's `redirected` flag where the response has one, as a native `Response` does: its `url` can differ with no redirect followed, as a browser's upgrade to `https:` or a service worker's answer from another URL does. A polyfill's response, which has none, is told by a `url` other than the one dispatched, as XHRAdapter tells one: the fragment aside and a browser's own upgrade to `https:` excepted. In a browser page that is the URL as the browser spelled it, since the browser reports its own spelling; with no page (React Native, a shim), where a networking layer may re-serialize the URL, spellings RFC 3986 makes equal read as one (a percent-escape's hex in either case, an unreserved character escaped or not, as is a character the parser can leave as written that the RFC does not allow, such as `|` or `[`). An empty query - `/a?` - is never the same as none. It is reported as XHRAdapter reports a browser-followed redirect: `status: 0` with `wasRedirectDetected` and the final URL as `detectedRedirectURL`. The client refuses it as `redirect_disabled`, or with `followRedirects: true`, where there is no `Location` left to follow, as `redirect_unsupported` (`isNetworkError: false`), never retried: a retry would only follow the same redirect again. That holds for any adapter that reports a redirect with `status: 0`. The other page's headers, its `Set-Cookie` among them, are not handed over as the requested URL's.
 
 **Browser constraints (enforced at client construction):**
 
@@ -2327,8 +2327,10 @@ Expectations for a custom writable:
   that listener. Either name works. A Node stream has both.
 - **An `async` `write` is backpressure.** The response is held until the promise it
   returns fulfils, as an `await` on each write would hold it, so writes reach the sink one
-  at a time and in order, and `end` is called only once the last has fulfilled. One that
-  rejects fails the download as `stream_write_error`, and `end` is not called.
+  at a time and in order, and `end` is called only once the last has fulfilled. A chunk
+  counts as written, for download progress, once its promise fulfils or `write`'s callback
+  reports it, whichever comes first. One that rejects fails the download as
+  `stream_write_error`, and `end` is not called.
 - **Call `end`'s callback when the sink is finished**, as a Node stream does, even from
   an `async` `end`: its promise fulfilling does not end the download, since such an `end`
   may hand the callback to an inner stream that is still closing. A promise `end` returns
@@ -2346,16 +2348,17 @@ Expectations for a custom writable:
   See [How long that listener stays](#how-long-that-listener-stays).
 - **Return `false` from `write` only to ask for a pause, then emit `'drain'`.** The
   adapter pauses the response for `false`, as `pipe()` does, and resumes it on `'drain'`;
-  a promise holds it too, until it fulfils (below), and any other return, `undefined`
+  a promise holds it too, until it fulfils (above), and any other return, `undefined`
   included, reads as ready for more. A sink whose
   `on('drain', ...)` throws is written to without pausing, since nothing could resume it.
 - **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
   is coming and takes the listener off at once, instead of waiting out the timers below.
-  A sink that closes with no error before the response has ended (destroyed by its owner,
-  a proxied client that went away) fails the download as `stream_write_error`. After the
-  response has ended, a `'close'` is a failure only when the sink reports
-  `writableFinished: false`, as a Node stream destroyed with writes still queued does;
-  otherwise `end`'s callback answers.
+  A sink that closes with no error before `end` has been called (destroyed by its owner,
+  a proxied client that went away) fails the download as `stream_write_error` - `end`
+  waits on a write promise still running, so that includes a close after the response has
+  ended while one is. Once `end` has been called, a `'close'` is a failure only when the
+  sink reports `writableFinished: false`, as a Node stream destroyed with writes still
+  queued does; otherwise `end`'s callback answers.
 - **Set `errored` if you can, but you need not.** A Node stream records the error it failed
   with there, and the adapter reads it as a second signal when `end`'s callback reports
   success on a stream that was destroyed underneath it. It is optional, and a sink without

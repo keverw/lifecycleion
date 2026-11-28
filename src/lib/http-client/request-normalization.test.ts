@@ -19713,6 +19713,65 @@ test('with redirects on, a redirect the adapter reports with status 0 ends once 
   expect(builder.error?.code).toBe('redirect_unsupported');
 });
 
+test.each([true, false])(
+  "a status-0 detected redirect's Set-Cookie is not stored for the requested URL, followRedirects %p",
+  async (isFollowing) => {
+    const cookieJar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'fetch',
+        send: () =>
+          Promise.resolve({
+            status: 0,
+            wasRedirectDetected: true,
+            detectedRedirectURL: 'https://other.test/x',
+            headers: { 'set-cookie': 'sid=evil; Path=/' },
+            body: null,
+          }),
+      },
+      baseURL: 'https://site.test',
+      followRedirects: isFollowing,
+      cookieJar,
+    });
+
+    const builder = client.get('/x');
+    await builder.send();
+
+    expect(builder.error?.code).toBe(
+      isFollowing ? 'redirect_unsupported' : 'redirect_disabled',
+    );
+    expect(cookieJar.getCookiesFor('https://site.test/')).toEqual([]);
+  },
+);
+
+test('a status-0 transport failure that also flags a redirect is the transport failure, retried', async () => {
+  let sends = 0;
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'fetch',
+      send: () => {
+        sends++;
+        return Promise.resolve({
+          status: 0,
+          isTransportError: true,
+          wasRedirectDetected: true,
+          headers: {},
+          body: null,
+        });
+      },
+    },
+    baseURL: 'https://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+
+  const builder = client.get('/x');
+  const response = await builder.send();
+
+  expect(sends).toBe(3);
+  expect(response.isNetworkError).toBe(true);
+  expect(builder.error?.code).toBe('network_error');
+});
+
 test('a status-0 detected redirect on a later hop, after a followed 302, ends once as redirect_unsupported', async () => {
   const sends: string[] = [];
   const client = new HTTPClient({

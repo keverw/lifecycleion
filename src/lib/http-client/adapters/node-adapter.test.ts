@@ -3507,7 +3507,10 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     },
   );
 
-  const sendToAsyncSink = async (sink: object) => {
+  const sendToAsyncSink = async (
+    sink: object,
+    onDownloadProgress?: (event: { loaded: number }) => void,
+  ) => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {
       'content-type': 'application/octet-stream',
@@ -3539,11 +3542,42 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         headers: {},
         signal: AbortSignal.timeout(2000),
         streamResponse: () => sink as never,
+        onDownloadProgress,
       });
     } finally {
       requestSpy.mockRestore();
     }
   };
+
+  test.each([
+    ['only returns a promise', false],
+    ['returns a promise and calls back', true],
+  ] as const)(
+    'a sink whose write %s reports progress once per chunk as each is written',
+    async (_label, isCallingBack) => {
+      const loaded: number[] = [];
+      const sink = Object.assign(new EventEmitter(), {
+        async write(_chunk: Uint8Array, cb?: (err?: Error | null) => void) {
+          await Promise.resolve();
+          if (isCallingBack) {
+            cb?.();
+          }
+        },
+        end(cb?: (err?: Error | null) => void) {
+          cb?.();
+        },
+        destroy() {},
+      });
+
+      const result = await sendToAsyncSink(sink, (event) => {
+        loaded.push(event.loaded);
+      });
+
+      expect(result.isStreamError).toBeUndefined();
+      // Two 5-byte chunks, then the end's 100% event.
+      expect(loaded).toEqual([5, 10, 10]);
+    },
+  );
 
   test.each([
     ['rejects', true],
@@ -5412,6 +5446,90 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       requestSpy.mockRestore();
     }
   });
+
+  test('a claimed writable error emitted again for a later request is reported', async () => {
+    // A sink that fails one request through `write`'s callback with a shared error object,
+    // then emits that same object as `'error'` after a later request has settled: no
+    // caller received it then, so it is reported, as a fresh error would be.
+    const shared = new Error('shared boom');
+    const writable = new EventEmitter() as unknown as WritableLike;
+    let shouldFail = true;
+
+    writable.write = (
+      _chunk: Uint8Array,
+      callback?: (error?: Error) => void,
+    ) => {
+      callback?.(shouldFail ? shared : undefined);
+      return true;
+    };
+    writable.end = (callback?: () => void) => {
+      callback?.();
+    };
+    writable.destroy = () => writable;
+
+    const sendOne = async () => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+          res.on('newListener', (event) => {
+            if (event === 'data') {
+              setTimeout(() => {
+                res.emit('data', Buffer.from('chunk'));
+                res.emit('end');
+              }, 0);
+            }
+          });
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        return await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => writable,
+        });
+      } finally {
+        requestSpy.mockRestore();
+      }
+    };
+
+    const first = await sendOne();
+    expect(first.errorCause).toBe(shared);
+
+    // Past the window a claim covers.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    shouldFail = false;
+    const second = await sendOne();
+    expect(second.isStreamError).toBeUndefined();
+
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+
+    try {
+      (writable as unknown as EventEmitter).emit('error', shared);
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(reports.map((report) => report.error)).toEqual([shared]);
+  }, 15000);
 
   test('a second request sharing a writable gets its own absorber window', async () => {
     // One absorber covers every request sharing the writable. Were only the request that

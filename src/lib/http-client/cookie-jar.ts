@@ -11,6 +11,7 @@ import {
   HOST_TO_ASCII_OPTIONS,
   canonicalizeBracketedIPv6Content,
   checkDNSLength,
+  isHostTooLongToNormalize,
   parseURL,
   isIPv4,
   isIPv6,
@@ -439,7 +440,8 @@ const MAX_NORMALIZED_DOMAIN_LENGTH = 512;
  * request host's names are scanned instead of all stored cookies.
  *
  * Validation applied when storing from Set-Cookie headers:
- * - Rejects Domain= values that are recognized public suffixes. Both halves of the
+ * - Rejects Domain= values that are recognized public suffixes, unless one names the
+ *   request host itself, which keeps the cookie host-only. Both halves of the
  *   Public Suffix List count: ICANN (co.uk, com) and private (github.io, herokuapp.com,
  *   s3.amazonaws.com). Callers with internal or multi-tenant domains the public list
  *   does not carry can extend or trim the list per jar - see {@link CookieJarOptions}.
@@ -1647,6 +1649,13 @@ export class CookieJar {
     // Only a leading dot actually written is dropped (RFC 6265 ignores it); one that a
     // full stop such as U+3002 maps to is left, so the check below refuses it.
     const raw = toAsciiDots(domain.startsWith('.') ? domain.slice(1) : domain);
+
+    // A name far past any domain's length is refused before IDNA reads it, as domain-utils
+    // refuses one: a caller's 5 MB `domain` would otherwise take seconds to map.
+    if (isHostTooLongToNormalize(raw)) {
+      return '';
+    }
+
     const ip = this.tryCanonicalIPLiteral(raw);
 
     if (ip !== null) {

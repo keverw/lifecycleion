@@ -336,6 +336,8 @@ describe('HTTPClient — basic HTTP methods', () => {
     'HTTPS:\\\\a.test',
     '//api.test',
     'ftp://api.test',
+    '/api ',
+    '/api\t',
   ])(
     'browser fetch holds a baseURL that is no plain path to the absolute spelling: %j',
     (baseURL) => {

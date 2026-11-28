@@ -31,10 +31,6 @@ export class RequestTracker {
     this.requests.delete(requestID);
   }
 
-  public get(requestID: string): TrackedRequest | undefined {
-    return this.requests.get(requestID);
-  }
-
   public updateState(requestID: string, state: RequestState): void {
     const entry = this.requests.get(requestID);
 
@@ -45,7 +41,7 @@ export class RequestTracker {
 
   /**
    * Cancels a single request by ID. Returns 1 if this call cancelled it, 0 if it was not
-   * found or was cancelled already.
+   * found, was cancelled already, or had already settled.
    */
   public cancel(requestID: string, reason?: string): number {
     const entry = this.requests.get(requestID);

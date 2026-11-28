@@ -210,9 +210,10 @@ const MONTH_AND_YEAR = new RegExp(
  * measure it - not from the response's `Date`, so a client clock behind or ahead of the
  * server's lengthens or shortens the wait by the difference.
  *
- * A number of seconds too large for a finite number of milliseconds is `Infinity`: longer
- * than any `maxRetryAfterMS`, which the client caps at its longest timer, so the request
- * ends as `retry_after_too_long` rather than waiting.
+ * A very large number of seconds is returned as the milliseconds it makes - `Infinity`
+ * only past about 1e305 - which is longer than any `maxRetryAfterMS`, capped at the
+ * client's longest timer, so the request ends as `retry_after_too_long` rather than
+ * waiting.
  */
 export function parseRetryAfterMS(
   value: string | undefined,

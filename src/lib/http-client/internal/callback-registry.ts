@@ -65,6 +65,12 @@ function describeUnmatchableMediaTypePattern(
   // rather than accepted into a pattern that matches nothing.
   const mediaType = trimHTTPWhitespace(entry.split(';', 1)[0]);
   const slash = mediaType.indexOf('/');
+  const refusal =
+    "is not one media type such as 'application/json', 'image/*' or '*/*'";
+  if (slash < 0) {
+    return refusal;
+  }
+
   const type = mediaType.slice(0, slash);
   const subtype = mediaType.slice(slash + 1);
   if (
@@ -73,7 +79,6 @@ function describeUnmatchableMediaTypePattern(
     splitHeaderValues(entry).length > 1 ||
     // An unclosed quote would swallow a list's later entries into the first.
     hasUnclosedQuotedString(entry) ||
-    slash < 0 ||
     // Each a token, as a valid media type's type and subtype are: a quote, a space, a
     // second `/` or a `:` makes it no media type.
     !isHTTPToken(type) ||
@@ -82,7 +87,7 @@ function describeUnmatchableMediaTypePattern(
     (subtype.includes('*') && subtype !== '*') ||
     (type.includes('*') && mediaType !== '*/*')
   ) {
-    return "is not one media type such as 'application/json', 'image/*' or '*/*'";
+    return refusal;
   }
   return undefined;
 }
@@ -91,7 +96,7 @@ function describeUnmatchableMediaTypePattern(
  * What one kind of callback's filter may hold: its list fields besides `methods` (the
  * ones `matchesFilter` has a value to test for that kind), and the phases it is reached in.
  */
-export interface FilterKind {
+interface FilterKind {
   readonly fields: readonly string[];
   readonly phases: readonly string[];
 }

@@ -8,7 +8,7 @@ import {
   materializeRequestHeaders,
   requestHeaderPairs,
 } from '../internal/header-utils';
-import { defineEntry } from '../../internal/define-entry';
+import { defineEntry, defineHiddenValue } from '../../internal/define-entry';
 import { BodyBytes } from '../internal/body-bytes';
 import {
   isSignalAborted,
@@ -214,11 +214,10 @@ export class FetchAdapter implements HTTPAdapter {
     }
 
     // Checked before it is sent, so a request fetch refuses to build fails once as the
-    // non-retryable
-    // `adapter_error` it is, rather than as a network error retried to no end. Built
-    // without the body or signal, which `fetch` below takes, so nothing is consumed. A
-    // header value or method `fetch` refuses is caught here too, rather than coming back
-    // from `fetch` as its `TypeError` and retried the same way.
+    // non-retryable `adapter_error` it is, rather than as a network error retried to no
+    // end. Built without the body or signal, which `fetch` below takes, so nothing is
+    // consumed. A header value or method `fetch` refuses is caught here too, rather than
+    // coming back from `fetch` as its `TypeError` and retried the same way.
     //
     // Only where it can be: a runtime with `Request` - a test setup that polyfills only
     // `fetch` has none. There the headers are still checked, by `Headers` where it exists,
@@ -323,8 +322,19 @@ export class FetchAdapter implements HTTPAdapter {
       // non-retryable `adapter_error` it is, as the `new Request` refusals above do,
       // rather than as a network error retried to no end with nothing sent. Told by
       // undici's error code, not by header name, so one a later Node refuses is caught.
+      // Named by undici's reason, on `cause`: its own message is `fetch failed`, which
+      // reads as a network failure.
       if (isFetchDispatchRefusal(normalizedError)) {
-        throw nonRetryableAdapterErrorFrom(normalizedError);
+        const reason = readUnknownMember(
+          readUnknownMember(normalizedError, 'cause'),
+          'message',
+        );
+        throw nonRetryableAdapterErrorFrom(
+          normalizedError,
+          typeof reason === 'string' && reason !== ''
+            ? `FetchAdapter request refused: ${reason}`
+            : undefined,
+        );
       }
 
       // A signal that is not this runtime's own AbortSignal - from a polyfill or jsdom's
@@ -1159,7 +1169,6 @@ function followedRedirectURL(
   }
 
   return parsed !== null &&
-    parsedOrNull(dispatchedURL) !== null &&
     compareResponseURL(parsed.href, dispatchedURL).kind === 'redirected'
     ? parsed.href
     : undefined;
@@ -1304,6 +1313,6 @@ function isRuntimeDecodeFailure(
  */
 function decodeFailure(error: unknown): Error {
   const reported = new Error(normalizeError(error).message, { cause: error });
-  Object.defineProperty(reported, RESPONSE_DECODE_ERROR_KEY, { value: true });
+  defineHiddenValue(reported, RESPONSE_DECODE_ERROR_KEY, true);
   return reported;
 }

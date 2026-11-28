@@ -19,8 +19,8 @@ import { asciiLowercase, withoutTrailingDot } from '../internal/ascii-text';
  * every store and every send, which means every one of them would have to survive a hook
  * that throws, returns a non-boolean, or answers differently on two calls - the jar would
  * have to fail closed on all three, and a jar that silently drops cookies because a hook
- * is inconsistent is worse than one that cannot be extended. Two frozen sets, validated
- * once in the constructor, cannot do any of that.
+ * is inconsistent is worse than one that cannot be extended. Two private read-only
+ * sets, validated once in the constructor, cannot do any of that.
  */
 export interface PublicSuffixOverrides {
   /**

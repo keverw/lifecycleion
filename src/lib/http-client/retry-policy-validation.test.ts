@@ -438,3 +438,43 @@ test("a misspelling is named ahead of a strategy getter's failure or unknown ans
     ).toThrow(/"maxRetryAttemps" field/);
   }
 });
+
+test('a strategy field polluted onto Object.prototype is read as unset', () => {
+  const unpolluted = snapshotRetryPolicyOptions({ strategy: 'fixed' });
+  const proto = Object.prototype as Record<string, unknown>;
+  proto.maxRetryAttempts = 50;
+  proto.delayMS = 1;
+
+  try {
+    const snapshot = snapshotRetryPolicyOptions({ strategy: 'fixed' });
+
+    expect(snapshot).toEqual(unpolluted);
+
+    // A caller's own class or prototype still supplies a field.
+    class Policy {
+      public get strategy(): 'fixed' {
+        return 'fixed';
+      }
+      public get maxRetryAttempts(): number {
+        return 4;
+      }
+    }
+    expect(
+      snapshotRetryPolicyOptions(new Policy() as RetryPolicyOptions)
+        .maxRetryAttempts,
+    ).toBe(4);
+    expect(
+      snapshotRetryPolicyOptions(
+        Object.create(
+          { maxRetryAttempts: 3 },
+          {
+            strategy: { value: 'fixed', enumerable: true },
+          },
+        ) as RetryPolicyOptions,
+      ).maxRetryAttempts,
+    ).toBe(3);
+  } finally {
+    delete proto.maxRetryAttempts;
+    delete proto.delayMS;
+  }
+});

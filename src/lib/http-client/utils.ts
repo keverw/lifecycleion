@@ -329,8 +329,8 @@ function wellFormedParamKey(key: string): string {
  * The top-level name of a decoded key: `filter[a]` is `filter`, and a key that opens with
  * a bracket (`[x]`) is the name inside it, as `qs` reads both. A `.params()` key goes
  * here, through {@link wellFormedParamKey} - it is a name `qs` will encode, not one to
- * decode. `undefined` for a
- * key that opens with `[]`, which has no name of its own (see below).
+ * decode. `undefined` for a key that opens with `[]`, which has no name of its own (see
+ * below).
  */
 function topLevelKeyOf(key: string): string | undefined {
   const bracket = key.indexOf('[');
@@ -343,7 +343,9 @@ function topLevelKeyOf(key: string): string | undefined {
   // `item[id]old`. One never closed is the whole key, as `qs` keeps it. One that opens
   // with `[]` has no name: `qs` numbers it by the pairs around it (`[]=1&[]=2` is `0`
   // and `1`, `[][a]=1&[]=2` both `0`), so it matches no `.params()` key, and no other key
-  // matches it - not even `[[]]`, whose name is `[]`.
+  // matches it - not even `[[]]`, whose name is `[]`. Approximate for one whose next
+  // bracket holds an index: `qs` reads `[][1]=a`, and `[]x[1]=a`, as key `1`, which a
+  // `.params()` key `1` then does not replace, so both reach the server.
   let level = 0;
   for (let index = 0; index < key.length; index++) {
     const char = key[index];
@@ -789,7 +791,7 @@ export function resolveBrowserRequestURL(url: string): string | undefined {
  * name none too, withholding same-origin credentials rather than guessing. So does a `/`
  * one with no page to resolve it against.
  */
-export function resolveBrowserInitialURL(
+function resolveBrowserInitialURL(
   initialURL: string | undefined,
 ): string | null | undefined {
   if (initialURL === undefined) {
@@ -888,7 +890,7 @@ export function resolveBrowserDispatchURL(
  * Read through guarded accessors: a runtime whose `document` or `location` getter throws
  * has no base, rather than failing every request.
  */
-export function getBrowserResolutionBase(): string | undefined {
+function getBrowserResolutionBase(): string | undefined {
   const documentBase = readUnknownMember(
     readUnknownMember(globalThis, 'document'),
     'baseURI',
@@ -1210,9 +1212,11 @@ export function assertSupportedAdapterRuntimeAndConfig(
   }
 
   // Where a relative `baseURL` is allowed (a browser's `fetch` or XHR), one that is not
-  // plainly relative - it has a scheme, starts with `//` or two backslashes, or with
-  // whitespace the parser trims - is held to the same spelling: `http:a.test` and
-  // ` https://api.test` would otherwise reach a host here and throw with NodeAdapter.
+  // plainly relative - it has a scheme, starts with `//` or two backslashes, or starts or
+  // ends with whitespace the parser trims - is held to the same spelling: `http:a.test`
+  // and ` https://api.test` would otherwise reach a host here and throw with NodeAdapter,
+  // and `/api ` would be joined as written, sending `/api%20/users`, where an absolute
+  // base ending in whitespace is refused.
   if (
     !isNullish(config.baseURL) &&
     (requiresAbsoluteBaseURL(adapterType, isBrowserRuntime) ||
@@ -1283,7 +1287,7 @@ export function assertSupportedAdapterRuntimeAndConfig(
 
 /**
  * Whether `baseURL` is no plain path: a scheme, a leading pair of slashes or backslashes
- * (`//`, `\\`, read alike), or a leading space or control character.
+ * (`//`, `\\`, read alike), or a space or control character at either end.
  */
 function isWrittenAsNonRelative(baseURL: string): boolean {
   // Read as the URL parser reads it, with every tab, CR and LF removed: `/\t/evil.test`
@@ -1292,7 +1296,9 @@ function isWrittenAsNonRelative(baseURL: string): boolean {
   return (
     /^[a-z][a-z0-9+.-]*:/i.test(text) ||
     /^[/\\]{2}/.test(text) ||
-    (baseURL.length > 0 && baseURL.charCodeAt(0) <= 0x20)
+    (baseURL.length > 0 &&
+      (baseURL.charCodeAt(0) <= 0x20 ||
+        baseURL.charCodeAt(baseURL.length - 1) <= 0x20))
   );
 }
 
@@ -1892,7 +1898,7 @@ export function derivedRedirectFields(
  * ` https://a.test`, which a request path is not read as a URL for (see
  * {@link buildURL}), and trims `https://a.test `, whose space a joined path would keep.
  */
-export function assertValidBaseURL(baseURL: string): void {
+function assertValidBaseURL(baseURL: string): void {
   if (
     !/^https?:\/\//i.test(baseURL) ||
     /\s$/.test(baseURL) ||
@@ -1984,7 +1990,7 @@ export const UNSUPPORTED_REQUEST_BODY_MESSAGE =
  * `isMethodlessFormData`): the client copies a form and reads its entries, which such a
  * form does not let it, so the refusal names the adapters that send one as it is.
  */
-export const METHODLESS_FORM_DATA_BODY_MESSAGE =
+const METHODLESS_FORM_DATA_BODY_MESSAGE =
   'Unsupported request body type: a FormData with no has() (React Native) cannot be copied or read by HTTPClient. Send it through FetchAdapter or XHRAdapter driven directly.';
 
 /** {@link UNSUPPORTED_REQUEST_BODY_MESSAGE}, or for a React Native form its own refusal. */

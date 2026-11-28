@@ -59,11 +59,16 @@ export function readPageOrigin(
  * - userinfo (omitted by `responseURL`) and hash fragments (not sent over HTTP) are
  *   stripped
  * - URL normalization makes equivalent forms equal (default ports, dot segments,
- *   encoding normalization, etc.), and so does RFC 3986's for what the parser leaves
- *   spelled apart (see `equivalentHref`): a percent-escape's hex in either case, and an
- *   unreserved character escaped or not. Any other difference stays one: `|` against
- *   `%7C`, which the RFC does not make equal, and an empty query (`/a?`) against none,
- *   which it keeps apart (section 6.2.3), as a server can redirect from one to the other
+ *   encoding normalization, etc.). In a browser page nothing else is: the browser reports
+ *   the URL its own parser spelled, so `/a~b` against `/a%7Eb` is a server's redirect from
+ *   one to the other. With no page - React Native, a shim, a polyfilled `fetch` - a
+ *   networking layer that re-serializes the URL may answer with another spelling of it,
+ *   so the spellings RFC 3986 makes equal are folded too (see `equivalentHref`): a
+ *   percent-escape's hex in either case, and an unreserved character escaped or not, as is
+ *   a character the parser can leave as written that the RFC does not allow (`|`, `[`
+ *   and `]` anywhere, and `{`, `}`, `^` and a backtick in a query, which the parser
+ *   escapes in a path). An empty query (`/a?`) against none is a difference
+ *   either way, which the RFC keeps apart (section 6.2.3)
  *
  * The same URL is `'same'`. On an `https:` page, an `http:` URL answered from its own
  * `https:` form - the scheme changed, a default port staying the default and any other
@@ -89,8 +94,10 @@ export function compareResponseURL(
   }
 
   normalizedResponse.hash = '';
+  const isFoldingSpellings = findBrowserPage() === undefined;
   const responseHref = equivalentHref(
     stripURLCredentials(normalizedResponse.href),
+    isFoldingSpellings,
   );
 
   const request = parseURL(dispatchedURL);
@@ -101,7 +108,10 @@ export function compareResponseURL(
     fragmentIndex === -1 ? '' : request.href.slice(fragmentIndex);
   request.hash = '';
 
-  if (responseHref === equivalentHref(stripURLCredentials(request.href))) {
+  if (
+    responseHref ===
+    equivalentHref(stripURLCredentials(request.href), isFoldingSpellings)
+  ) {
     return { kind: 'same' };
   }
 
@@ -115,26 +125,39 @@ export function compareResponseURL(
 
   request.protocol = 'https:';
 
-  if (responseHref !== equivalentHref(stripURLCredentials(request.href))) {
+  if (
+    responseHref !==
+    equivalentHref(stripURLCredentials(request.href), isFoldingSpellings)
+  ) {
     return { kind: 'redirected' };
   }
 
   return { kind: 'upgraded', upgradedURL: `${request.href}${fragment}` };
 }
 
-/** RFC 3986's unreserved characters (section 2.3), which escaping does not change. */
-const UNRESERVED_CHARACTER = /^[A-Za-z0-9\-._~]$/;
+/**
+ * A character a percent-escape of which reads as the character itself off a browser page:
+ * RFC 3986's unreserved characters (section 2.3), which escaping does not change, and the
+ * ones the URL parser can leave as written though the RFC does not allow them (`{`, `}`,
+ * `^` and a backtick only in a query), which a networking layer that re-serializes the
+ * URL may escape.
+ */
+const FOLDED_CHARACTER = /^[A-Za-z0-9\-._~|[\]{}^`]$/;
 
 /**
- * A serialized URL with no fragment, spelled as RFC 3986's normalization (section 6.2.2)
- * spells it where the URL parser leaves two spellings of one resource apart: each
- * percent-escape's hex in uppercase, and an escaped unreserved character as itself - the
- * spellings a networking layer that re-serializes the URL may answer with.
+ * A serialized URL with no fragment, as it is compared: as is, or with `isFolding`,
+ * spelled as RFC 3986's normalization (section 6.2.2) spells it where the URL parser
+ * leaves two spellings of one resource apart - each percent-escape's hex in uppercase,
+ * and an escape of a {@link FOLDED_CHARACTER} as the character itself.
  */
-function equivalentHref(href: string): string {
+function equivalentHref(href: string, isFolding: boolean): string {
+  if (!isFolding) {
+    return href;
+  }
+
   return href.replace(/%[0-9A-Fa-f]{2}/g, (escape) => {
     const character = String.fromCharCode(Number.parseInt(escape.slice(1), 16));
-    return UNRESERVED_CHARACTER.test(character)
+    return FOLDED_CHARACTER.test(character)
       ? character
       : asciiUppercase(escape);
   });

@@ -5,7 +5,7 @@
  * helper; the state is the caller's `cache`.
  *
  * `shouldKeep(key)`, when given, decides whether a computed value is kept at all: one it
- * refuses is answered and let go, and evicts nothing.
+ * refuses is answered and let go, and evicts nothing. A `maxEntries` below 1 keeps none.
  */
 export function getOrCompute<K, V>(
   cache: Map<K, V>,
@@ -24,7 +24,7 @@ export function getOrCompute<K, V>(
 
   const value = compute(key);
 
-  if (shouldKeep !== undefined && !shouldKeep(key)) {
+  if (maxEntries < 1 || (shouldKeep !== undefined && !shouldKeep(key))) {
     return value;
   }
 

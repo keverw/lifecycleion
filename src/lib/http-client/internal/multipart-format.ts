@@ -22,7 +22,7 @@ import { utf8ByteLength } from './utf8-length';
  * as `.pdf`; and a backslash-escaped `a\"b` would reach them as `a\\"b`.
  * With CR and LF encoded a name still cannot start a header of its own.
  */
-export function escapeDispositionValue(value: string): string {
+function escapeDispositionValue(value: string): string {
   return value.replace(/\n/g, '%0A').replace(/\r/g, '%0D').replace(/"/g, '%22');
 }
 
@@ -54,7 +54,7 @@ export function sanitizeContentType(raw: string): string {
 }
 
 /** A string part, whole - its Content-Disposition, value and trailing CRLF - as it is sent. */
-export function formatStringPart(fieldName: string, value: string): string {
+function formatStringPart(fieldName: string, value: string): string {
   return `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`;
 }
 
@@ -64,10 +64,7 @@ export function formatStringPart(fieldName: string, value: string): string {
  * getter that throws, or a `type` that is not a string, is refused with a `TypeError` the
  * callers turn into {@link sourceReadFailure}.
  */
-export function formatFilePartHeaders(
-  fieldName: string,
-  value: unknown,
-): string {
+function formatFilePartHeaders(fieldName: string, value: unknown): string {
   // A `File` named `''` is sent as `filename=""`, as browsers send it (a server reads it as
   // no file chosen); only a part with no name at all is `blob`.
   const partName = filePartNameToSend((value as File).name);

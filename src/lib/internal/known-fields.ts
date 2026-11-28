@@ -38,6 +38,12 @@ const OPTION_NAME = /^[A-Za-z_$][\w$]*$/;
  */
 const WORDS_NAME = /^[a-z]{1,13}(?:[A-Z][a-z]{1,12})*(?:[A-Z]{2,4})?$/;
 
+/**
+ * The longest key the refusal names, past every option name's length: a longer one is
+ * not quoted into a message that goes to logs, however it reads.
+ */
+const MAX_NAMED_KEY_LENGTH = 40;
+
 /** How many single-character edits away from a field a key may be and still be named. */
 const MAX_TYPO_DISTANCE = 2;
 
@@ -46,10 +52,11 @@ const MAX_TYPO_DISTANCE = 2;
  * of words ({@link WORDS_NAME}), the same name as a field in another case, or one at most
  * {@link MAX_TYPO_DISTANCE} edits from it (`folowRedirects`, `timout`). A token pasted in
  * as a key - an API key, an AWS access key ID - is an identifier too, but none of these,
- * so it is not written into the refusal.
+ * so it is not written into the refusal. Nor is a key longer than
+ * {@link MAX_NAMED_KEY_LENGTH}.
  */
 function readsAsOptionName(key: string, fields: readonly string[]): boolean {
-  if (!OPTION_NAME.test(key)) {
+  if (key.length > MAX_NAMED_KEY_LENGTH || !OPTION_NAME.test(key)) {
     return false;
   }
 
