@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { compareResponseURL } from './response-url';
+import { compareResponseURL, isRespelledURL } from './response-url';
 
 const originalLocation = Object.getOwnPropertyDescriptor(
   globalThis,
@@ -168,5 +168,41 @@ describe('compareResponseURL', () => {
     expect(
       compareResponseURL('https://localhost/a', 'http://localhost/a').kind,
     ).toBe('redirected');
+  });
+});
+
+describe('isRespelledURL', () => {
+  test.each([
+    ['an escaped pipe', 'https://h.test/a%7Cb', 'https://h.test/a|b', true],
+    ['lowercase hex', 'https://h.test/a%c3%a9', 'https://h.test/a%C3%A9', true],
+    ['an escaped slash', 'https://h.test/a%2Fb', 'https://h.test/a/b', true],
+    [
+      'the fragment and userinfo aside',
+      'https://h.test/a%7Cb',
+      'https://u:p@h.test/a|b#f',
+      true,
+    ],
+    ['the same spelling', 'https://h.test/a|b', 'https://h.test/a|b', false],
+    [
+      'the same once parsed',
+      'https://h.test/a/../a|b',
+      'https://h.test/a|b',
+      false,
+    ],
+    ['another path', 'https://h.test/landing', 'https://h.test/a|b', false],
+    ['another host', 'https://g.test/a%7Cb', 'https://h.test/a|b', false],
+    ['an empty query', 'https://h.test/a%7Cb?', 'https://h.test/a|b', false],
+    ['an unparsable URL', 'http://[', 'https://h.test/a|b', false],
+    ['a relative URL', '/a%7Cb', 'https://h.test/a|b', true],
+  ])('%s: %p against %p is %p', (_label, reported, request, isExpected) => {
+    setPage(undefined);
+    expect(isRespelledURL(reported, request)).toBe(isExpected);
+  });
+
+  test('is false in a browser page, which reports its own spelling', () => {
+    setPage('https://h.test/');
+    expect(isRespelledURL('https://h.test/a%7Cb', 'https://h.test/a|b')).toBe(
+      false,
+    );
   });
 });

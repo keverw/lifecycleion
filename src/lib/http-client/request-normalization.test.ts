@@ -19744,6 +19744,75 @@ test.each([true, false])(
   },
 );
 
+test.each([
+  ['the request URL re-encoded', true, 'https://api.test/a%21b', true],
+  ['the request URL re-encoded', false, 'https://api.test/a%21b', true],
+  ['the request URL re-encoded, relative', true, '/a%21b', true],
+  ['another URL', true, 'https://api.test/landing', false],
+  ['the request URL as sent', true, 'https://api.test/a!b', false],
+] as const)(
+  'a status-0 detected redirect to %s, followRedirects %p, says so in its message only when it is the request URL in another spelling',
+  async (_label, isFollowing, reportedURL, isRespelled) => {
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'fetch',
+        send: () =>
+          Promise.resolve({
+            status: 0,
+            wasRedirectDetected: true,
+            detectedRedirectURL: reportedURL,
+            headers: {},
+            body: null,
+          }),
+      },
+      baseURL: 'https://api.test',
+      followRedirects: isFollowing,
+    });
+
+    const builder = client.get('/a!b');
+    await builder.send();
+
+    const genericMessage = isFollowing
+      ? 'Redirect reported with no Location the client could follow (status 0)'
+      : 'Redirect encountered while redirects are disabled';
+
+    expect(builder.error?.code).toBe(
+      isFollowing ? 'redirect_unsupported' : 'redirect_disabled',
+    );
+
+    if (isRespelled) {
+      expect(builder.error?.message).toStartWith(`${genericMessage}; `);
+      expect(builder.error?.message).toContain('different percent-encoding');
+    } else {
+      expect(builder.error?.message).toBe(genericMessage);
+    }
+  },
+);
+
+test('a real 3xx to the request URL in another spelling, with redirects off, keeps the generic message: the server did redirect', async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: 'https://api.test/a%21b' },
+          body: null,
+        }),
+    },
+    baseURL: 'https://api.test',
+    followRedirects: false,
+  });
+
+  const builder = client.get('/a!b');
+  await builder.send();
+
+  expect(builder.error?.code).toBe('redirect_disabled');
+  expect(builder.error?.message).toBe(
+    'Redirect encountered while redirects are disabled',
+  );
+});
+
 test('a status-0 transport failure that also flags a redirect is the transport failure, retried', async () => {
   let sends = 0;
   const client = new HTTPClient({

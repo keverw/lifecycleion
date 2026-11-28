@@ -193,6 +193,7 @@ import {
   isForbiddenBrowserMethod,
 } from './internal/transport-refusal';
 import { isBuiltInNetworkSend } from './internal/built-in-adapter';
+import { isRespelledURL } from './internal/response-url';
 import { listenForUploadSourceWait } from './internal/upload-source-wait';
 import { markClientOwnedBody } from './internal/client-owned-body';
 import { listenForStreamFailureSettled } from './internal/stream-failure-settled';
@@ -337,6 +338,13 @@ const ERROR_CODE_MESSAGES: Readonly<Record<HTTPClientError['code'], string>> = {
   stream_setup_error: 'Stream response setup failed',
   response_too_large: 'Response body exceeded maxResponseBytes',
 };
+
+/**
+ * Added to a status-0 redirect's message when the URL reported is the request URL in
+ * another spelling (see `isRespelledURL`).
+ */
+const RESPELLED_REDIRECT_HINT =
+  '; the reported URL is the request URL with different percent-encoding, so the runtime may have re-encoded the URL rather than followed a redirect';
 
 /** The `adapter_error` message when the caller's cookie jar threw on a response. */
 const COOKIE_JAR_FAILURE_MESSAGE =
@@ -2586,7 +2594,7 @@ export class BaseHTTPClient {
             (response.isStreamError ? 'stream_write_error' : undefined),
           cause: adapterCause,
           cancelReason,
-          adapterErrorMessage: errorMessage,
+          messageOverride: errorMessage,
         });
 
         callbacks.setError(error);
@@ -2869,7 +2877,10 @@ export class BaseHTTPClient {
      * response reports this status and headers, as `onAttemptEnd` reports the status.
      */
     answeredResponse?: AnsweredResponse;
-    /** Replaces the code's generic message, for an `adapter_error` with a named source. */
+    /**
+     * Replaces the code's generic message: an `adapter_error` with a named source, or a
+     * status-0 redirect whose URL is the request's in another spelling.
+     */
     errorMessage?: string;
     cancelReason?: string;
     /**
@@ -4200,6 +4211,10 @@ export class BaseHTTPClient {
         // because their status != 0. They fall through to onAttemptEnd with
         // the correct status, and the outer redirect loop handles follow/disable.
         if (isFollowedRedirectAnswer) {
+          const redirectCode = this._config.followRedirects
+            ? 'redirect_unsupported'
+            : 'redirect_disabled';
+
           emitAttemptEnd({
             willRetry: false,
             status: 0,
@@ -4212,9 +4227,20 @@ export class BaseHTTPClient {
             wasCancelled: false,
             wasTimeout: false,
             isRetriesExhausted: false,
-            errorCode: this._config.followRedirects
-              ? 'redirect_unsupported'
-              : 'redirect_disabled',
+            errorCode: redirectCode,
+            // Said in the message where the URL reported is the request's own in
+            // another spelling with no browser page, which a networking layer that
+            // re-encodes the URL may report with no redirect at all (see
+            // `isRespelledURL`).
+            ...(typeof adapterResponse.detectedRedirectURL === 'string' &&
+            isRespelledURL(
+              adapterResponse.detectedRedirectURL,
+              sentRequest.requestURL,
+            )
+              ? {
+                  errorMessage: `${ERROR_CODE_MESSAGES[redirectCode]}${RESPELLED_REDIRECT_HINT}`,
+                }
+              : {}),
           };
         }
 
@@ -5454,8 +5480,8 @@ export class BaseHTTPClient {
       codeOverride?: HTTPClientError['code'];
       cause?: Error;
       cancelReason?: string;
-      /** Replaces the generic message of an `adapter_error`. */
-      adapterErrorMessage?: string;
+      /** Replaces the generic message of `codeOverride`. */
+      messageOverride?: string;
     } = {},
   ): HTTPClientError {
     const {
@@ -5463,7 +5489,7 @@ export class BaseHTTPClient {
       codeOverride,
       cause,
       cancelReason,
-      adapterErrorMessage,
+      messageOverride,
     } = details;
     let code: HTTPClientError['code'] = codeOverride ?? 'network_error';
 
@@ -5479,9 +5505,11 @@ export class BaseHTTPClient {
       code = 'timeout';
     }
 
+    // Only for the code it was written for: one a cancel or a timeout replaced keeps
+    // that code's message.
     const message =
-      code === 'adapter_error' && adapterErrorMessage !== undefined
-        ? adapterErrorMessage
+      messageOverride !== undefined && code === codeOverride
+        ? messageOverride
         : ERROR_CODE_MESSAGES[code];
 
     return {

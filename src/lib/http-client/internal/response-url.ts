@@ -164,6 +164,66 @@ function equivalentHref(href: string, isFolding: boolean): string {
 }
 
 /**
+ * Whether `reportedURL` names `requestURL` in another spelling, with no browser page
+ * running the request: the two differ as the URL parser serializes them, without
+ * fragment or userinfo, but match once every percent-escape in both is decoded.
+ * `reportedURL` is resolved against `requestURL`, so a custom adapter's relative one is
+ * read too. Not proof the two are one resource - `/a%2Fb` and `/a/b` match here, as do
+ * `/a%3Fb` and `/a?b`, which a server may tell apart - so it only words the message of
+ * a status-0 redirect report, whose URL a networking layer that re-encodes the request
+ * may have produced with no redirect at all. In a browser page it is always `false`:
+ * the browser reports its own spelling, so another one is a redirect (see
+ * {@link compareResponseURL}). `false` when either does not parse.
+ */
+export function isRespelledURL(
+  reportedURL: string,
+  requestURL: string,
+): boolean {
+  if (findBrowserPage() !== undefined) {
+    return false;
+  }
+
+  const request = comparableHref(requestURL);
+  const reported =
+    request === null ? null : comparableHref(reportedURL, requestURL);
+
+  return (
+    reported !== null &&
+    request !== null &&
+    reported !== request &&
+    decodedEscapes(reported) === decodedEscapes(request)
+  );
+}
+
+/**
+ * `url`, resolved against `base` when given, serialized without fragment or userinfo,
+ * or `null` when it does not parse.
+ */
+function comparableHref(url: string, base?: string): string | null {
+  let parsed: URL;
+
+  try {
+    parsed = base === undefined ? parseURL(url) : new URL(url, base);
+  } catch {
+    return null;
+  }
+
+  parsed.hash = '';
+  return stripURLCredentials(parsed.href);
+}
+
+/**
+ * `href` with each percent-escape replaced by the byte it names, as a character code:
+ * a serialized URL is ASCII, its other bytes already escaped, so two spellings of the
+ * same bytes read alike.
+ */
+function decodedEscapes(href: string): string {
+  return href.replace(/%[0-9A-Fa-f]{2}/g, (escape) =>
+    String.fromCharCode(Number.parseInt(escape.slice(1), 16)),
+  );
+}
+
+/**
  * Whether the page or worker running the request is an `https:` one, whose `http:`
  * requests a browser blocks as mixed content: its origin (see `readPageOrigin`), or - for
  * a page whose origin is `'null'`, as a sandboxed frame's is - its `location`.
