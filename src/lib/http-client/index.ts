@@ -35,7 +35,7 @@ export type {
   ErrorObserver,
   InterceptedRequest,
   RequestHeadersInput,
-  CancelResult,
+  RequestCancelResult,
   AttemptRequest,
   RequestPhase,
   RequestPhaseName,

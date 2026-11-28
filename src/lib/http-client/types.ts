@@ -1276,7 +1276,7 @@ export type ErrorObserver = (
  *   `client.cancel()`, an interceptor, the stream factory or the caller's signal.
  * - `'already_settled'`: it had already completed or failed; nothing was cancelled.
  */
-export type CancelResult =
+export type RequestCancelResult =
   'cancelled' | 'already_cancelled' | 'already_settled';
 
 export type RequestState =

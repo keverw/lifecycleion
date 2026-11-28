@@ -140,7 +140,7 @@ import type {
   InterceptorPhase,
   ResponseObserverPhase,
   ErrorObserverPhase,
-  CancelResult,
+  RequestCancelResult,
   HTTPRetryPolicyOptions,
 } from './types';
 import type {
@@ -1226,7 +1226,7 @@ export class BaseHTTPClient {
     // as it does after `client.cancel()`.
     // The builder's own state turns `cancelled` when the request settles, with its
     // response and error, as for every other outcome.
-    trackedCallbacks.setCancelFn((reason?: string): CancelResult =>
+    trackedCallbacks.setCancelFn((reason?: string): RequestCancelResult =>
       cancelTrackedRequest(trackedRequest, reason),
     );
 

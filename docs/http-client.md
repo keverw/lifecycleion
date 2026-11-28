@@ -1570,7 +1570,7 @@ const response = await builder.send();
 builder.cancel('timeout_budget_exceeded');
 ```
 
-`cancel()` returns a `CancelResult` saying what it did (a `reason` given to it, or to the client's `cancel` methods, must be a string, or the call throws a `TypeError`): `'cancelled'` when this call cancelled the request (before `send()`, or in flight), `'already_cancelled'` when something else had - an earlier `cancel()`, `client.cancel()`, an interceptor, the stream factory or the request's own signal - and `'already_settled'` when it had already completed or failed. Every result is truthy, so compare it (`request.cancel() === 'cancelled'`) rather than testing it. A `'cancelled'` holds: the request ends cancelled (`isCancelled: true`, with the reason given) even when the call lands after the last attempt has its answer - from that attempt's `onAttemptEnd`, say - or just before a failure, and that answer or failure is dropped. The signal is aborted at once and the tracked request reads `cancelled` at once; `send()` resolves, and the builder's own state turns `cancelled`, once the request has settled. A `cancel()` made while `send()` is still setting the request up - from a header value's `toString` or a `params` getter - is held and applied before anything is dispatched; it answers `'already_cancelled'` if the request's own signal has already aborted, and `'already_settled'` once setup has failed.
+`cancel()` returns a `RequestCancelResult` saying what it did (a `reason` given to it, or to the client's `cancel` methods, must be a string, or the call throws a `TypeError`): `'cancelled'` when this call cancelled the request (before `send()`, or in flight), `'already_cancelled'` when something else had - an earlier `cancel()`, `client.cancel()`, an interceptor, the stream factory or the request's own signal - and `'already_settled'` when it had already completed or failed. Every result is truthy, so compare it (`request.cancel() === 'cancelled'`) rather than testing it. A `'cancelled'` holds: the request ends cancelled (`isCancelled: true`, with the reason given) even when the call lands after the last attempt has its answer - from that attempt's `onAttemptEnd`, say - or just before a failure, and that answer or failure is dropped. The signal is aborted at once and the tracked request reads `cancelled` at once; `send()` resolves, and the builder's own state turns `cancelled`, once the request has settled. A `cancel()` made while `send()` is still setting the request up - from a header value's `toString` or a `params` getter - is held and applied before anything is dispatched; it answers `'already_cancelled'` if the request's own signal has already aborted, and `'already_settled'` once setup has failed.
 
 Calling `cancel()` before `send()` marks the builder so that `send()` rejects with a plain `Error` (not an `HTTPClientError`) at once rather than dispatching the request. In this case `builder.error` is `null`. No `HTTPClientError` is produced and `cancelReason` is not accessible programmatically (the reason string, if any, appears only in the thrown `Error` message).
 
@@ -2707,7 +2707,7 @@ HTTPRetryPolicyOptions; // The retryPolicy config and .retryPolicy() take
 RedirectHopInfo;
 
 // Tracking
-(RequestState, RequestInfo, CancelResult);
+(RequestState, RequestInfo, RequestCancelResult);
 
 // Streaming
 (WritableLike,

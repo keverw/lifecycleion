@@ -88,7 +88,7 @@ import { FetchAdapter } from './adapters/fetch-adapter';
 import { XHRAdapter } from './adapters/xhr-adapter';
 import type {
   AdapterRequest,
-  CancelResult,
+  RequestCancelResult,
   AdapterResponse,
   AdapterType,
   HTTPAdapter,
@@ -4351,7 +4351,7 @@ test('a cancel that lands after the answer but before the request settles is hon
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({ status: 200 }));
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
-  let cancelResult: CancelResult | undefined;
+  let cancelResult: RequestCancelResult | undefined;
   const builder = client.get('/x', {
     onAttemptEnd: () => {
       cancelResult = builder.cancel('late');
@@ -4399,7 +4399,7 @@ test('a late cancel on an answer that failed ends the request cancelled too', as
         }),
     },
   });
-  let cancelResult: CancelResult | undefined;
+  let cancelResult: RequestCancelResult | undefined;
   const builder = client.get('/x', {
     onAttemptEnd: () => {
       cancelResult = builder.cancel('late');
@@ -4419,7 +4419,7 @@ test("a cancel made while an interceptor's failed result is read for the report 
     adapter: new MockAdapter(),
     baseURL: 'http://api.test',
   });
-  let cancelResult: CancelResult | undefined;
+  let cancelResult: RequestCancelResult | undefined;
   // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
   let builder: ReturnType<HTTPClient['get']>;
   let reads = 0;
@@ -4475,7 +4475,7 @@ for (const phase of ['redirect', 'retry'] as const) {
     client.addErrorObserver((error, request) => {
       observed.push(`${error.code} ${request.requestURL}`);
     });
-    let cancelResult: CancelResult | undefined;
+    let cancelResult: RequestCancelResult | undefined;
     // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
     let builder: ReturnType<HTTPClient['get']>;
     let reads = 0;
@@ -4537,7 +4537,7 @@ for (const phase of ['initial', 'redirect', 'retry'] as const) {
       followRedirects: true,
       retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
     });
-    let cancelResult: CancelResult | undefined;
+    let cancelResult: RequestCancelResult | undefined;
     // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
     let builder: ReturnType<HTTPClient['get']>;
     let didThrow = false;
@@ -4636,7 +4636,7 @@ test('a cancel made before an early failure ends the request cancelled, as its t
     adapter: new MockAdapter(),
     baseURL: 'http://api.test',
   });
-  let cancelResult: CancelResult | undefined;
+  let cancelResult: RequestCancelResult | undefined;
   // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
   let builder: ReturnType<HTTPClient['get']>;
   client.addRequestInterceptor(() => {
@@ -4664,7 +4664,7 @@ test('a cancel made before an early failure ends the request cancelled, as its t
     followRedirects: true,
     cookieJar: jar,
   });
-  let jarCancelResult: CancelResult | undefined;
+  let jarCancelResult: RequestCancelResult | undefined;
   // eslint-disable-next-line prefer-const -- assigned after the observer that reads it
   let jarBuilder: ReturnType<HTTPClient['get']>;
   jarClient.addResponseObserver(
@@ -4925,7 +4925,7 @@ test('a cancel ends an interceptor chain, and an interceptor or factory cancel a
   cancelling.addRequestInterceptor(() => ({ cancel: true, reason: 'A' }), {
     phases: ['retry'],
   });
-  let lateCancelResult: CancelResult | undefined;
+  let lateCancelResult: RequestCancelResult | undefined;
   const builder: ReturnType<HTTPClient['get']> = cancelling.get('/flaky', {
     onAttemptEnd: ({ attemptNumber }) => {
       if (attemptNumber === 2) {
@@ -4970,7 +4970,7 @@ test('a cancel made while send() sets the request up is applied, not dropped', a
       },
     },
   });
-  let cancelResult: CancelResult | undefined;
+  let cancelResult: RequestCancelResult | undefined;
   const builder: ReturnType<HTTPClient['get']> = client.get('/x').headers({
     'x-a': {
       toString() {
@@ -5024,7 +5024,7 @@ test('a cancel held during setup holds against a setup throw and a caller signal
   });
 
   // A later setup value throws: send() still rejects, but the builder ends cancelled.
-  let held: CancelResult | undefined;
+  let held: RequestCancelResult | undefined;
   const throwing: ReturnType<HTTPClient['get']> = client.get('/x').headers({
     'x-a': {
       toString() {
@@ -5049,7 +5049,7 @@ test('a cancel held during setup holds against a setup throw and a caller signal
   // The caller's signal already aborted: the setup cancel answers already_cancelled.
   const controller = new AbortController();
   controller.abort('sig');
-  let answer: CancelResult | undefined;
+  let answer: RequestCancelResult | undefined;
   const signalled: ReturnType<HTTPClient['get']> = client
     .get('/x')
     .signal(controller.signal)

@@ -34,7 +34,7 @@ import type {
   AttemptStartEvent,
   AttemptEndEvent,
   RequestState,
-  CancelResult,
+  RequestCancelResult,
   HTTPClientError,
   StreamResponseFactory,
   RequestHeadersInput,
@@ -54,7 +54,7 @@ export interface BuilderCallbacks<T> {
    * answers what that did. A cancel held while `send()` set the request up is passed to
    * it as it is wired.
    */
-  setCancelFn: (fn: (reason?: string) => CancelResult) => void;
+  setCancelFn: (fn: (reason?: string) => RequestCancelResult) => void;
   /** A cancel the builder held while `send()` set the request up; see `cancel()`. */
   getSetupCancel: () => { reason: string | undefined } | null;
 }
@@ -172,7 +172,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _nextRetryAt: number | null = null;
   private _startedAt: number | null = null;
   private _completedAt: number | null = null;
-  private _cancelFn: ((reason?: string) => CancelResult) | null = null;
+  private _cancelFn: ((reason?: string) => RequestCancelResult) | null = null;
   /** A cancel made after `send()` began but before the request could be cancelled. */
   private _setupCancel: { reason: string | undefined } | null = null;
   /** Set once the client's synchronous setup has returned; see `_sendRequest`. */
@@ -542,14 +542,14 @@ export class HTTPRequestBuilder<T = unknown> {
   }
 
   /**
-   * Cancels the request, and says what that did (see {@link CancelResult}):
+   * Cancels the request, and says what that did (see {@link RequestCancelResult}):
    * `'cancelled'` when this call cancelled it, `'already_cancelled'` when something else
    * had, and `'already_settled'` when it had already completed or failed.
    *
    * Calling cancel() before send() marks the builder as cancelled so that
    * send() rejects instead of dispatching the request.
    */
-  public cancel(reason?: string): CancelResult {
+  public cancel(reason?: string): RequestCancelResult {
     assertCancelReason(reason, 'HTTPRequestBuilder.cancel()');
     if (this._state === 'completed' || this._state === 'failed') {
       return 'already_settled';

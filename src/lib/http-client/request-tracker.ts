@@ -1,7 +1,7 @@
 import { describeValue } from '../internal/describe-value';
 import { isNullish } from '../internal/is-nullish';
 import { isSignalAbortedQuietly } from './internal/request-fields';
-import type { CancelResult, RequestState } from './types';
+import type { RequestCancelResult, RequestState } from './types';
 
 export interface TrackedRequest {
   requestID: string;
@@ -189,7 +189,7 @@ export function cancelEntry(
 export function cancelTrackedRequest(
   entry: TrackedRequest,
   reason: string | undefined,
-): CancelResult {
+): RequestCancelResult {
   if (isEntrySettled(entry)) {
     return 'already_settled';
   }
