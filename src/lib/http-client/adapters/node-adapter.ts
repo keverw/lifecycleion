@@ -248,7 +248,7 @@ interface PendingWritableErrorEntry {
  * normally not attached at the same time, but nothing guarantees it, so the identity of the
  * emitted value is the check - the same shape as `NamedPipeSink.suppressedWriteErrors`.
  */
-const deliveredWritableErrors = new WeakSet<object>();
+const deliveredWritableErrors = new WeakMap<object, object>();
 
 /**
  * Mark a writable error as already handed to its caller, so the absorber stays quiet
@@ -264,14 +264,19 @@ const deliveredWritableErrors = new WeakSet<object>();
  * A claim lasts a {@link PENDING_WRITABLE_ERROR_WINDOW_MS}, the window that emit arrives
  * in. A sink that fails only through a callback never emits it, and a claim kept past
  * that would silence the same object emitted for a later request - a sink reusing one
- * error object - though no caller received it then.
+ * error object - though no caller received it then. Each claim holds a token of its own,
+ * and its timer ends only that claim: an earlier request's timer leaves a later claim on
+ * the same object its whole window.
  */
 function claimWritableError(error: unknown): void {
   try {
     if (typeof error === 'object' && error !== null) {
-      deliveredWritableErrors.add(error);
+      const claim = {};
+      deliveredWritableErrors.set(error, claim);
       setTimeout(() => {
-        deliveredWritableErrors.delete(error);
+        if (deliveredWritableErrors.get(error) === claim) {
+          deliveredWritableErrors.delete(error);
+        }
       }, PENDING_WRITABLE_ERROR_WINDOW_MS).unref?.();
     }
   } catch {

@@ -5531,6 +5531,91 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(reports.map((report) => report.error)).toEqual([shared]);
   }, 15000);
 
+  test('the timer of an earlier claim does not end a later claim on the same writable error', async () => {
+    // Two requests fail through `write`'s callback with one shared error object, the
+    // second within the first's window. When the first claim's timer fires, the second
+    // claim still has most of its own window, so the same object emitted as `'error'`
+    // then - the second caller already has it - is not reported.
+    const shared = new Error('shared boom');
+    const writable = new EventEmitter() as unknown as WritableLike;
+
+    writable.write = (
+      _chunk: Uint8Array,
+      callback?: (error?: Error) => void,
+    ) => {
+      callback?.(shared);
+      return true;
+    };
+    writable.end = (callback?: () => void) => {
+      callback?.();
+    };
+    writable.destroy = () => writable;
+
+    const sendOne = async () => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+          res.on('newListener', (event) => {
+            if (event === 'data') {
+              setTimeout(() => {
+                res.emit('data', Buffer.from('chunk'));
+                res.emit('end');
+              }, 0);
+            }
+          });
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        return await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => writable,
+        });
+      } finally {
+        requestSpy.mockRestore();
+      }
+    };
+
+    const first = await sendOne();
+    expect(first.errorCause).toBe(shared);
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const second = await sendOne();
+    expect(second.errorCause).toBe(shared);
+
+    // Past the first claim's window, within the second's.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+
+    try {
+      (writable as unknown as EventEmitter).emit('error', shared);
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(reports).toEqual([]);
+  }, 15000);
+
   test('a second request sharing a writable gets its own absorber window', async () => {
     // One absorber covers every request sharing the writable. Were only the request that
     // *attached* it to schedule the backstop that takes it off, a later request settling
