@@ -1,4 +1,11 @@
+import { isNullish } from '../internal/is-nullish';
+import { isPlainRecord } from './internal/plain-record';
+import { copyArrayValue } from '../internal/array-copy';
+import { describeValue } from '../internal/describe-value';
+import { assertKnownFields } from '../internal/known-fields';
 import { parse } from 'tldts';
+import { endsInANumber } from '../domain-utils/helpers';
+import { asciiLowercase, withoutTrailingDot } from '../internal/ascii-text';
 
 /**
  * Caller adjustments to the Public Suffix List the jar scopes cookies with.
@@ -12,8 +19,8 @@ import { parse } from 'tldts';
  * every store and every send, which means every one of them would have to survive a hook
  * that throws, returns a non-boolean, or answers differently on two calls - the jar would
  * have to fail closed on all three, and a jar that silently drops cookies because a hook
- * is inconsistent is worse than one that cannot be extended. Two frozen sets, validated
- * once in the constructor, cannot do any of that.
+ * is inconsistent is worse than one that cannot be extended. Two private read-only
+ * sets, validated once in the constructor, cannot do any of that.
  */
 export interface PublicSuffixOverrides {
   /**
@@ -33,19 +40,25 @@ export interface PublicSuffixOverrides {
   /**
    * Suffixes to stop treating as public, even when the bundled list has them.
    *
-   * Strictly widening, and the only option here that can *open* a scope: hosts under a
-   * removed suffix go back to sharing one bucket and may set cookies spanning it. The
-   * escape hatch for a private-section entry that breaks a deployment you control -
-   * removing `herokuapp.com` restores the pre-1.0 behaviour for that suffix alone.
+   * Strictly widening, and the only option here that can *open* a scope: a host whose
+   * registrable domain a removal widens - as a browser with the same list reads it - may
+   * set cookies spanning it. With `herokuapp.com` removed, `mine.herokuapp.com` may set
+   * `Domain=herokuapp.com`; with `s3.amazonaws.com` removed, a bucket may set
+   * `Domain=amazonaws.com`, which is sent to every host under `amazonaws.com`. A suffix
+   * still listed beneath a removal keeps its tenants sites of their own: with `uk`
+   * removed, `x.co.uk` may not set `Domain=uk` while `co.uk` stays listed. A name that is
+   * a suffix only through a wildcard rule is its own registrable domain once removed:
+   * with `foo.sch.uk` removed under `*.sch.uk`, its hosts may not set `Domain=sch.uk`.
+   * The escape hatch for a private-section entry that breaks a deployment you control -
+   * removing `herokuapp.com` scopes cookies under it as though the private section did
+   * not list it, for that suffix alone.
    */
   remove?: readonly string[];
 }
 
-/** A hostname label list, lowercased, with a trailing root dot dropped. */
-function toLabels(hostname: string): string[] {
-  const trimmed = hostname.endsWith('.') ? hostname.slice(0, -1) : hostname;
-
-  return trimmed.toLowerCase().split('.');
+/** A hostname lowercased in ASCII, with a trailing root dot dropped. */
+function normalizeHostname(hostname: string): string {
+  return asciiLowercase(withoutTrailingDot(hostname));
 }
 
 /**
@@ -56,63 +69,76 @@ function toLabels(hostname: string): string[] {
  * going somewhere it should not, months later. Every other refusal in this file is a
  * response to a remote server and has to keep the process running.
  */
-function normalizeSuffix(entry: unknown, listName: string): string {
+function normalizeSuffix(
+  entry: unknown,
+  listName: string,
+  index: number,
+): string {
+  // Named by its place in the list, never its text, as every entry refused here is.
+  const entryName = `publicSuffixes.${listName}[${String(index)}]`;
+
   if (typeof entry !== 'string') {
     throw new TypeError(
-      `publicSuffixes.${listName} must hold strings; received ${typeof entry}`,
+      `${entryName} must be a string (got ${describeValue(entry)})`,
     );
   }
 
   // A leading dot is how Set-Cookie writes a domain, and it is the likeliest thing a
   // caller copies in from one. Accepted and dropped, as `Domain=` itself is.
   const stripped = entry.startsWith('.') ? entry.slice(1) : entry;
-  const normalized = stripped.endsWith('.')
-    ? stripped.slice(0, -1).toLowerCase()
-    : stripped.toLowerCase();
+  // Lowercased in ASCII only, so a typo is refused below: `toLowerCase` would turn the
+  // Kelvin sign in `\u212Aorp.internal` into the `k` of a valid `korp.internal`.
+  const normalized = asciiLowercase(withoutTrailingDot(stripped));
 
   if (normalized === '') {
-    throw new TypeError(
-      `publicSuffixes.${listName} must not hold empty suffixes`,
-    );
+    throw new TypeError(`${entryName} is empty`);
   }
 
   if (normalized.includes('*')) {
     throw new TypeError(
-      `publicSuffixes.${listName} does not support wildcards; list '${entry}' as a plain suffix`,
+      `${entryName} is a wildcard, which publicSuffixes does not support; list it as a plain suffix`,
     );
   }
 
   if (normalized.length > 253) {
-    throw new TypeError(
-      `publicSuffixes.${listName} entry '${entry}' is longer than a hostname`,
-    );
+    throw new TypeError(`${entryName} is longer than a hostname`);
   }
 
   for (const label of normalized.split('.')) {
     if (label === '') {
-      throw new TypeError(
-        `publicSuffixes.${listName} entry '${entry}' has an empty label`,
-      );
+      throw new TypeError(`${entryName} has an empty label`);
     }
 
     // Overrides are hostname suffixes, not URLs or arbitrary match strings. Keeping the
     // accepted form deliberately narrow also prevents a typo such as a scheme, slash or
     // whitespace from silently installing a rule that can never match a request host.
-    if (label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)) {
-      throw new TypeError(
-        `publicSuffixes.${listName} entry '${entry}' is not a valid hostname suffix`,
-      );
+    // Narrower than the hosts the jar stores, which may hold any punctuation the URL parser
+    // allows: letters, digits, `_` and hyphens, an edge hyphen included, so a `my_net` the
+    // jar keeps cookies for can be declared a suffix to isolate its tenants.
+    if (label.length > 63 || !/^[a-z0-9_-]+$/.test(label)) {
+      throw new TypeError(`${entryName} is not a valid hostname suffix`);
     }
+  }
+
+  // A last label the URL parser reads as a number, decimal or hex (`0x1f`, `0x`): an IP
+  // address, which the jar answers before it consults any suffix rule, or a name the
+  // parser reads as one (`corp.123`), which no request host can be. Either way the entry
+  // could never take effect.
+  if (endsInANumber(normalized.split('.').at(-1) ?? '')) {
+    throw new TypeError(
+      `${entryName} ends in a number, so no request host can match it (an IP address is never a public suffix)`,
+    );
   }
 
   return normalized;
 }
 
+/** A list's suffixes normalized, index for index, so a refusal can name an entry's place. */
 function normalizeList(
   entries: readonly string[] | undefined,
   listName: string,
-): ReadonlySet<string> {
-  const result = new Set<string>();
+): string[] {
+  const result: string[] = [];
 
   if (entries === undefined) {
     return result;
@@ -122,8 +148,14 @@ function normalizeList(
     throw new TypeError(`publicSuffixes.${listName} must be an array`);
   }
 
-  for (const entry of entries) {
-    result.add(normalizeSuffix(entry, listName));
+  // Read by index, as every caller list is (see `copyArrayValue`): an `entries` or an
+  // iterator of the array's own could report suffixes it does not hold. A hole reads as
+  // `undefined` and is refused as any non-string entry is.
+  for (const [index, entry] of copyArrayValue(
+    entries,
+    `publicSuffixes.${listName}`,
+  ).entries()) {
+    result.push(normalizeSuffix(entry, listName, index));
   }
 
   return result;
@@ -146,24 +178,73 @@ function normalizeList(
  */
 export class PublicSuffixResolver {
   private readonly added: ReadonlySet<string>;
+  /** The length of the longest name in {@link added}, so longer candidates are skipped. */
+  private readonly longestAddedLength: number;
   private readonly removed: ReadonlySet<string>;
-  private readonly hasOverrides: boolean;
 
   constructor(overrides?: PublicSuffixOverrides) {
-    this.added = normalizeList(overrides?.add, 'add');
-    this.removed = normalizeList(overrides?.remove, 'remove');
+    // Shape-checked, as every entry is: `publicSuffixes: ['corp.internal']` (the list
+    // given where `{ add }` belongs) or a misspelled `{ ad: [...] }` would build a jar
+    // with no overrides at all, leaving the tenants the caller meant to isolate sharing
+    // cookies.
+    if (overrides !== undefined) {
+      // A plain object: a `Map` keeps its entries off its own properties, so it would
+      // pass the key check below with no keys and build a jar with no overrides.
+      const candidate: unknown = overrides;
+      if (!isPlainRecord(candidate)) {
+        throw new TypeError(
+          `publicSuffixes must be a plain object with 'add' and/or 'remove' lists (got ${Array.isArray(candidate) ? 'an array' : describeValue(candidate)})`,
+        );
+      }
 
-    for (const suffix of this.added) {
-      for (const removed of this.removed) {
-        if (suffix === removed || suffix.endsWith(`.${removed}`)) {
-          throw new TypeError(
-            `publicSuffixes cannot add '${suffix}' beneath removed suffix '${removed}'; shared cookies conflict with tenant isolation`,
-          );
-        }
+      assertKnownFields(overrides, ['add', 'remove'], 'publicSuffixes');
+    }
+
+    const added = normalizeList(overrides?.add, 'add');
+    const removed = normalizeList(overrides?.remove, 'remove');
+    this.added = new Set(added);
+    // A loop, not `Math.max(...)`: a list long enough passes validation and then
+    // overflows the call stack as spread arguments.
+    let longestAddedLength = 0;
+    for (const name of added) {
+      longestAddedLength = Math.max(longestAddedLength, name.length);
+    }
+    this.longestAddedLength = longestAddedLength;
+    this.removed = new Set(removed);
+
+    // Each added suffix and every name above it looked up among the removals, by the
+    // first index each removal is at: time in the lists' total length, not their product.
+    const removedIndexes = new Map<string, number>();
+    for (const [removeIndex, removedSuffix] of removed.entries()) {
+      if (!removedIndexes.has(removedSuffix)) {
+        removedIndexes.set(removedSuffix, removeIndex);
       }
     }
 
-    this.hasOverrides = this.added.size > 0 || this.removed.size > 0;
+    for (const [addIndex, suffix] of added.entries()) {
+      // The removal listed first, of all those it is or is beneath.
+      let conflict: number | undefined;
+      let start = 0;
+      while (true) {
+        const index = removedIndexes.get(suffix.slice(start));
+        if (
+          index !== undefined &&
+          (conflict === undefined || index < conflict)
+        ) {
+          conflict = index;
+        }
+        const dot = suffix.indexOf('.', start);
+        if (dot === -1) {
+          break;
+        }
+        start = dot + 1;
+      }
+      if (conflict !== undefined) {
+        throw new TypeError(
+          `publicSuffixes.add[${String(addIndex)}] is, or is beneath, publicSuffixes.remove[${String(conflict)}]; shared cookies conflict with tenant isolation`,
+        );
+      }
+    }
   }
 
   /**
@@ -175,18 +256,17 @@ export class PublicSuffixResolver {
    *
    * A bare single-label hostname is - `localhost`, `myapp`, an unqualified machine name.
    * The list carries none of them, so without this `Domain=localhost` from
-   * `https://evil.localhost/` was a suffix of the request host, passed every check, and
-   * was filed under `localhost` - where an ordinary `http://localhost/` request then sent
-   * it, and where a `Max-Age=0` from the same sibling deleted it. That is the same tossing
-   * the private section closes for `github.io`, one label shorter. A single label has no
-   * registrable name beneath it by definition, which is exactly what makes it a suffix
-   * rather than a domain. Local development is unaffected: a cookie with no `Domain=` is
-   * host-only already, and one naming the host it came from is accepted host-only by the
-   * rule above. `publicSuffixes.remove` opts a name back out.
+   * `https://evil.localhost/` would be a suffix of the request host, pass every check,
+   * and be filed under `localhost` - where an ordinary `http://localhost/` request would
+   * then send it, and where a `Max-Age=0` from the same sibling would delete it. That is
+   * the same tossing the private section closes for `github.io`, one label shorter. A
+   * single label has no registrable name beneath it by definition, which is exactly what
+   * makes it a suffix rather than a domain. Local development is unaffected: a cookie
+   * with no `Domain=` is host-only already, and one naming the host it came from is
+   * accepted host-only by the rule above. `publicSuffixes.remove` opts a name back out.
    */
   public isPublicSuffix(hostname: string): boolean {
-    const labels = toLabels(hostname);
-    const normalized = labels.join('.');
+    const normalized = normalizeHostname(hostname);
 
     if (this.added.has(normalized)) {
       return true;
@@ -196,65 +276,141 @@ export class PublicSuffixResolver {
       return false;
     }
 
-    const result = parse(normalized, { allowPrivateDomains: true });
-
-    if (result.isIp) {
-      return false;
-    }
-
-    if (labels.length === 1) {
-      return true;
-    }
-
-    // `domain === null` says no registrable name sits under this hostname, which is true
-    // both for a listed suffix and for a bare name the list has never heard of. The
-    // section flags separate them: `com` and `co.uk` are ICANN, `github.io` and
-    // `herokuapp.com` are private, and `localhost` is neither.
-    return (
-      result.domain === null &&
-      (result.isIcann === true || result.isPrivate === true)
-    );
-  }
-
-  /** Whether the caller explicitly removed this exact suffix from the bundled list. */
-  public isRemovedSuffix(hostname: string): boolean {
-    return this.removed.has(toLabels(hostname).join('.'));
+    return isBundledPublicSuffix(normalized);
   }
 
   /**
-   * The registrable domain `hostname` belongs to - the bucket key cookies are filed under.
+   * Whether `hostname` is a suffix of the bundled list that `publicSuffixes.remove` opts
+   * out - one whose removal took effect, as {@link registrableDomainFor} reads removals.
+   * A removal of a name the bundled list does not treat as a suffix changes nothing, and
+   * is not one.
+   */
+  public isRemovedSuffix(hostname: string): boolean {
+    return this.isEffectiveRemoval(normalizeHostname(hostname));
+  }
+
+  /**
+   * The registrable domain `hostname` belongs to under the jar's effective list - the
+   * bundled list with the caller's additions and removals - and so the site it is part
+   * of, which is also the bucket its cookies are filed under. A removed suffix at or
+   * directly above the listed answer is no longer a suffix, so the domain widens past it,
+   * up to the next name the effective list still treats as a suffix: with `herokuapp.com`
+   * removed, `mine.herokuapp.com` belongs to `herokuapp.com`; with `com` removed,
+   * `x.example.com` to `com`; and with `s3.amazonaws.com` removed,
+   * `bucket.s3.amazonaws.com` to `amazonaws.com`, since `amazonaws.com` is no suffix
+   * either. A suffix still listed stops the widening, as it does for a browser with the
+   * same list: with `uk` removed, `a.x.co.uk` belongs to `x.co.uk`, since `co.uk` is still
+   * a suffix, and with `com` removed, `app.blogspot.com` is still a site of its own. A
+   * removal that is a suffix through a wildcard rule is not widened at all: with
+   * `foo.sch.uk` removed, `a.foo.sch.uk` belongs to `foo.sch.uk`.
    *
    * Returns `hostname` itself when nothing sits under it: a public suffix with no
-   * registrable part (`github.io`), or a bare name (`localhost`).
+   * registrable part (`github.io`, or `co.uk` with `uk` removed), or a bare name
+   * (`localhost`).
    */
-  public apexFor(hostname: string): string {
-    const labels = toLabels(hostname);
-    const normalized = labels.join('.');
+  public registrableDomainFor(hostname: string): string {
+    const domain = this.listedRegistrableDomainFor(hostname);
 
-    if (this.hasOverrides) {
-      // A removed ancestor is the widest domain a cookie may claim, so it must also be
-      // the bucket for every host below it. Check from the shortest candidate upward:
-      // with `com` removed, a `Domain=com` cookie must still be reachable from a host
-      // below a more-specific bundled suffix such as `app.blogspot.com`. Stopping at
-      // `blogspot.com` first would admit the cookie but file the request elsewhere.
-      for (let i = labels.length - 1; i >= 0; i--) {
-        const candidate = labels.slice(i).join('.');
+    if (this.removed.size === 0) {
+      return domain;
+    }
 
-        if (this.removed.has(candidate)) {
-          return candidate;
-        }
+    if (this.isEffectiveRemoval(domain)) {
+      return this.widenPastRemoval(domain);
+    }
+
+    // Only past a removal: starting from the listed answer keeps bundled exception rules
+    // (`!city.kawasaki.jp`) in force, though `kawasaki.jp` above it is no suffix. A name
+    // the effective list still treats as a suffix is a domain of its own and is not
+    // widened: with `uk` removed, `co.uk` is not `uk`.
+    if (!domain.includes('.') || this.isPublicSuffix(domain)) {
+      return domain;
+    }
+
+    const parent = domain.slice(domain.indexOf('.') + 1);
+
+    return this.isEffectiveRemoval(parent)
+      ? this.widenPastRemoval(parent)
+      : domain;
+  }
+
+  /**
+   * The registrable domain a removed suffix belongs to under the effective list: widened
+   * one label at a time until the parent is a suffix still - `herokuapp.com` stays itself
+   * below `com`, and `s3.amazonaws.com` becomes `amazonaws.com`.
+   *
+   * A removed name that is a suffix through a wildcard rule is not widened: with
+   * `foo.sch.uk` removed under `*.sch.uk`, `foo.sch.uk` is the registrable domain, as an
+   * exception rule `!foo.sch.uk` would make it. The wildcard's base (`sch.uk`) is no
+   * listed suffix, so widening would stop only at `uk` and join `foo.sch.uk` to every
+   * other registrant under `sch.uk`.
+   */
+  private widenPastRemoval(removed: string): string {
+    if (isWildcardSuffix(removed)) {
+      return removed;
+    }
+
+    let domain = removed;
+
+    while (domain.includes('.')) {
+      const parent = domain.slice(domain.indexOf('.') + 1);
+
+      if (this.isPublicSuffix(parent)) {
+        break;
       }
 
-      // Parse the whole hostname so bundled wildcard exceptions remain in force.
-      // Only caller additions may narrow that result; probing bundled suffixes
-      // individually loses the exception context (e.g. city.kawasaki.jp).
-      const bundled = parse(normalized, { allowPrivateDomains: true });
-      const bundledLength = bundled.publicSuffix?.split('.').length ?? 0;
-      for (let i = 0; i < labels.length; i++) {
-        const candidate = labels.slice(i).join('.');
-        if (this.added.has(candidate) && labels.length - i >= bundledLength) {
-          return i === 0 ? normalized : labels.slice(i - 1).join('.');
+      domain = parent;
+    }
+
+    return domain;
+  }
+
+  /** {@link isRemovedSuffix} for a name already normalized: one place for the rule. */
+  private isEffectiveRemoval(normalized: string): boolean {
+    return this.removed.has(normalized) && isBundledPublicSuffix(normalized);
+  }
+
+  /**
+   * The registrable domain `hostname` belongs to under the bundled list and the caller's
+   * additions, removals not applied. Returns `hostname` itself when nothing sits under it.
+   */
+  private listedRegistrableDomainFor(hostname: string): string {
+    const normalized = normalizeHostname(hostname);
+    // The whole hostname, so bundled wildcard exceptions remain in force: probing
+    // bundled suffixes one by one loses the exception context (e.g. city.kawasaki.jp).
+    // Read without tldts's hostname check (see the fall-through below).
+    const bundled = parse(normalized, {
+      allowPrivateDomains: true,
+      validateHostname: false,
+    });
+
+    if (this.added.size > 0) {
+      // Only caller additions may narrow the bundled result. The hostname check would
+      // find no suffix at all for an edge-hyphen host, and an added suffix above a
+      // longer bundled one would then win.
+      // Walked by offset, and a candidate looked up only once it is no longer than the
+      // longest added suffix, so a host of many labels costs time in its length, not its
+      // length squared.
+      const bundledLength = isNullish(bundled.publicSuffix)
+        ? 0
+        : labelCountOf(bundled.publicSuffix);
+      let labelCount = labelCountOf(normalized);
+      let previous = -1;
+      let start = 0;
+      while (labelCount >= bundledLength) {
+        if (
+          normalized.length - start <= this.longestAddedLength &&
+          this.added.has(normalized.slice(start))
+        ) {
+          return previous === -1 ? normalized : normalized.slice(previous);
         }
+        const dot = normalized.indexOf('.', start);
+        if (dot === -1) {
+          break;
+        }
+        previous = start;
+        start = dot + 1;
+        labelCount--;
       }
     }
 
@@ -264,10 +420,82 @@ export class PublicSuffixResolver {
     // still reads the last two labels as its registrable domain. Falling through to it
     // rather than returning the whole hostname is what keeps an override on one suffix
     // from quietly re-bucketing every unrelated internal name in the jar: the walk would
-    // have filed `host.notcorp.acme` under itself and `notcorp.acme` under a second
-    // bucket, so a cookie stored from one was invisible to the other.
-    return (
-      parse(normalized, { allowPrivateDomains: true }).domain ?? normalized
-    );
+    // file `host.notcorp.acme` under itself and `notcorp.acme` under a second bucket, so
+    // a cookie stored from one would be invisible to the other.
+    //
+    // The parse above skips tldts's hostname check. The check only refuses a host - the
+    // suffix lookup is the same either way - and it refuses one with a hyphen at a
+    // label's edge (`-edge.example.com`), which the URL parser accepts and the jar keeps.
+    // Such a host is under `example.com`, not a site of its own: its `Domain=example.com`
+    // cookies are kept and a domain clear of `example.com` reaches it.
+    return bundled.domain ?? normalized;
   }
+}
+
+/** How many labels `name` has, by its dots, without an array of them. */
+function labelCountOf(name: string): number {
+  let count = 1;
+  for (
+    let dot = name.indexOf('.');
+    dot !== -1;
+    dot = name.indexOf('.', dot + 1)
+  ) {
+    count++;
+  }
+  return count;
+}
+
+/**
+ * A label no Public Suffix List rule names: every rule is a hostname, and `_` is not a
+ * hostname label. Only a wildcard rule can make a name that starts with it a suffix.
+ */
+const WILDCARD_PROBE_LABEL = '_';
+
+/**
+ * Whether the bundled list reads the siblings of `normalized` as public suffixes through
+ * a wildcard rule over its parent - `foo.sch.uk` under `*.sch.uk`, `foo.kawasaki.jp`
+ * under `*.kawasaki.jp`. tldts answers lookups only, not the rule that matched, so the
+ * parent is probed with a label no rule can name.
+ */
+function isWildcardSuffix(normalized: string): boolean {
+  const dot = normalized.indexOf('.');
+
+  return (
+    dot !== -1 &&
+    isBundledPublicSuffix(`${WILDCARD_PROBE_LABEL}${normalized.slice(dot)}`)
+  );
+}
+
+/**
+ * Whether the bundled list, without the caller's overrides, reads `normalized` as a
+ * public suffix.
+ */
+function isBundledPublicSuffix(normalized: string): boolean {
+  const labels = normalized.split('.');
+
+  // Without tldts's hostname check, as `listedRegistrableDomainFor` reads it: with the
+  // check, a label starting or ending with a hyphen (`x-.ck` under `*.ck`) would be read
+  // as no suffix at all, so a `Domain=x-.ck` cookie would be stored for every tenant
+  // under it.
+  const result = parse(normalized, {
+    allowPrivateDomains: true,
+    validateHostname: false,
+  });
+
+  if (result.isIp) {
+    return false;
+  }
+
+  if (labels.length === 1) {
+    return true;
+  }
+
+  // `domain === null` says no registrable name sits under this hostname, which is true
+  // both for a listed suffix and for a bare name the list has never heard of. The
+  // section flags separate them: `com` and `co.uk` are ICANN, `github.io` and
+  // `herokuapp.com` are private, and `localhost` is neither.
+  return (
+    result.domain === null &&
+    (result.isIcann === true || result.isPrivate === true)
+  );
 }

@@ -1,13 +1,93 @@
+import { framingRefusedHeaderMessage } from '../internal/transport-refusal';
+import { asciiUppercase, trimSpacesAndTabs } from '../../internal/ascii-text';
+import { isNullish } from '../../internal/is-nullish';
+import {
+  isHeaderSafeCookieText,
+  isWritableCookieName,
+  isWritableCookieValue,
+} from '../internal/cookie-text';
+import { formEntries, isFormData } from '../internal/form-entries';
+import {
+  formatFieldName,
+  measureMultipartEntries,
+  normalizeLinefeeds,
+} from '../internal/multipart-format';
+import { utf8ByteLength } from '../internal/utf8-length';
+
+import {
+  assertKnownFields,
+  assertOptionsObject,
+  fieldNames,
+} from '../../internal/known-fields';
+import {
+  assertOptionalHeaderRecord,
+  isPlainRecord,
+} from '../internal/plain-record';
+import {
+  describeNumberOrType,
+  describeValue,
+} from '../../internal/describe-value';
+import {
+  connectRefusal,
+  defineHiddenTags,
+  makeAbortError,
+  markNonRetryableAdapterError,
+  markResponseStreamAbort,
+  nonRetryableAdapterErrorFrom,
+  nonRetryableRefusal,
+  unsendableBodyRefusal,
+} from '../internal/adapter-error';
+import {
+  isSignalAborted,
+  isSignalAbortedQuietly,
+  readAdapterRequestFields,
+} from '../internal/request-fields';
+import { defineEntry } from '../../internal/define-entry';
+import { copyArrayValue } from '../../internal/array-copy';
+import {
+  arrayBufferKindOf,
+  assertTypedArrayInBounds,
+  plainBytesView,
+  readBinaryByteLength,
+  typedArrayNameOf,
+} from '../../internal/binary-view';
+import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
-import { guardProgressCallback } from '../internal/progress';
+import type { HTTPMethod as RouterHTTPMethod } from 'find-my-way';
+import {
+  knownBodyByteLength,
+  completeProgressEvent,
+} from '../internal/progress';
+import {
+  describeRefusedHeader,
+  isBodilessContentLengthSent,
+  lowerCaseHeaderName,
+  materializeRequestHeaders,
+  presentHeaderValue,
+} from '../internal/header-utils';
+import {
+  hasResponseBody,
+  isAnsweredBodyOverLimit,
+  makeResponseTooLargeError,
+} from '../internal/response-limit';
 import qs from 'qs';
 import { sleep } from '../../sleep';
-import { REDIRECT_STATUS_CODES } from '../consts';
 import {
-  isPlainJSONBodyObject,
+  adoptPromise,
+  type PromiseResultBox,
+} from '../../internal/adopt-promise';
+import {
+  EFFECTIVE_REQUEST_HEADERS_KEY,
+  MAX_COOKIE_LIFETIME_SECONDS,
+  MOCK_ADAPTER_DEFAULT_BASE_URL,
+} from '../consts';
+import {
+  derivedRedirectFields,
+  isAdapterHeaderValue,
+  isRequestBodyBytes,
+  mergeObservedHeaders,
   normalizeAdapterResponseHeaders,
   parseContentType,
-  resolveDetectedRedirectURL,
 } from '../utils';
 import type {
   HTTPAdapter,
@@ -17,18 +97,32 @@ import type {
   ContentType,
   QueryObject,
 } from '../types';
-// Shared error normalization preserves Error instances and wraps other thrown values.
-// Non-Error values receive a "Non-error value thrown: <description>" message, with the
-// original value retained on cause for consumers of the normalized error.
-import { isErrorValue, toError as normalizeError } from '../../to-error';
+import { isErrorValue } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
-import { readUnknownMember as readObjectMember } from '../../internal/read-member';
+import { readUnknownMember } from '../../internal/read-member';
+import { isAdapterStatus, isStatusCode } from '../internal/status-code';
+import {
+  isTimeoutValidationError,
+  resolveTimeoutMS,
+} from '../../internal/timer-limits';
+import { parseURL } from '../../domain-utils/helpers';
 
+/**
+ * A form body as a server reads it off the wire NodeAdapter and `fetch` write: field
+ * names with line breaks as CRLF and `"`, CR and LF percent-encoded (`a%0D%0Ab%22`), and
+ * string values with line breaks as CRLF. Each file is the form's own `File`, under the
+ * name it holds, not the filename it is sent by (escaped the same way, a nameless one as
+ * `blob`).
+ */
 export interface MockFormData {
-  /** String fields from the multipart body */
+  /** String fields from the multipart body - the last value of a repeated name */
   fields: Record<string, string>;
-  /** File fields from the multipart body */
+  /** File fields from the multipart body - the last file of a repeated name */
   files: Record<string, File>;
+  /** Every value of each string field, in order, as a server receives a repeated one */
+  allFields: Record<string, string[]>;
+  /** Every file of each file field, in order (`<input type="file" multiple>`) */
+  allFiles: Record<string, File[]>;
 }
 
 export interface MockRequest {
@@ -44,7 +138,7 @@ export interface MockRequest {
   cookies: Record<string, string>;
   /**
    * Parsed request body for mock handlers.
-   * JSON bodies are parsed, text bodies stay strings, binary bodies stay as
+   * JSON bodies are parsed, text bodies stay strings, binary bodies arrive as a copy in a
    * `Uint8Array`, and multipart/form-data bodies become `MockFormData`.
    */
   body?: unknown;
@@ -53,12 +147,20 @@ export interface MockRequest {
 /** Cookie attributes for the `MockResponse.cookies` shorthand. */
 export interface MockCookieOptions {
   value: string;
-  /** Seconds until the cookie expires. Use `0` or a negative value to expire it immediately. */
+  /**
+   * Seconds until the cookie expires. Use `0` or a negative value to expire it
+   * immediately. Written as a whole number: a positive fraction is rounded up (`0.5` is
+   * `Max-Age=1`), other values truncated toward zero, and the result held between `-1`
+   * and 400 days (`MAX_COOKIE_LIFETIME_SECONDS`), as browsers cap a cookie's lifetime.
+   */
   maxAge?: number;
   httpOnly?: boolean;
   secure?: boolean;
   sameSite?: 'Strict' | 'Lax' | 'None';
-  /** Defaults to `'/'` when omitted. */
+  /**
+   * Defaults to `'/'` when omitted or empty. Any other path must start with `/`, or the
+   * request fails as a route mistake.
+   */
   path?: string;
   domain?: string;
 }
@@ -74,8 +176,9 @@ export interface MockResponse {
    * - `undefined` or omitted — no body
    * - `null` — no body
    * - `string` — UTF-8 bytes
-   * - `Uint8Array` — raw bytes unchanged
-   * - `ArrayBuffer` — copied to a `Uint8Array`
+   * - `Uint8Array` — its bytes, copied as the route answers, from any realm (such as
+   *   jsdom or a `vm` context)
+   * - `ArrayBuffer` — its bytes, copied as a `Uint8Array`, from any realm
    * - plain object (`Object.prototype` or `null` prototype) — JSON
    * - array — JSON
    */
@@ -86,7 +189,8 @@ export interface MockResponse {
    */
   headers?: Record<string, string | string[]>;
   contentType?: ContentType;
-  delay?: number;
+  /** Null or undefined uses the adapter default delay. */
+  delay?: number | null;
   /**
    * Shorthand for setting / deleting cookies without writing raw Set-Cookie
    * strings. Merged with any `set-cookie` entries already in `headers`.
@@ -107,7 +211,10 @@ export interface MockResponse {
    * `null` whatever the handler set and the response carries
    * `isStreamError: true`, which `HTTPClient` treats as terminal.
    *
-   * Pass `true` for the default `'stream_response_error'`, or name the code.
+   * Pass `true` for the default `'stream_response_error'`, or name the code. An answer
+   * that carries no body - to a `HEAD`, or a `1xx`, `204`, `205` or `304` - has none to
+   * fail, as no real adapter reads one there, so it is delivered as though `streamError`
+   * were unset.
    */
   streamError?: boolean | 'stream_write_error' | 'stream_response_error';
   /**
@@ -154,9 +261,12 @@ export type MockRouteHandler = (
 ) => MockResponse | Promise<MockResponse>;
 
 export interface MockAdapterConfig {
-  defaultDelay?: number;
+  /** Default latency in milliseconds; null or undefined uses zero. */
+  defaultDelay?: number | null;
   /**
-   * Called when a route handler throws. Return a `MockResponse` to customize
+   * Called when a route handler throws or rejects. The original rejection reason
+   * is preserved, including non-Error values, with or without an AbortSignal.
+   * Return a `MockResponse` to customize
    * the error response — similar to Fastify's `setErrorHandler`. Falls back to
    * the default `{ status: 500, body: { message: 'Internal Server Error' } }`
    * if this handler is not set or if it also throws.
@@ -173,6 +283,43 @@ export interface MockAdapterConfig {
     error: unknown,
   ) => MockResponse | Promise<MockResponse>;
 }
+
+export interface MockAdapterRoutes {
+  get(path: string, handler: MockRouteHandler): void;
+  post(path: string, handler: MockRouteHandler): void;
+  put(path: string, handler: MockRouteHandler): void;
+  patch(path: string, handler: MockRouteHandler): void;
+  delete(path: string, handler: MockRouteHandler): void;
+  head(path: string, handler: MockRouteHandler): void;
+  options(path: string, handler: MockRouteHandler): void;
+  /**
+   * Register a route for any method Node's `http` knows - `TRACE`, WebDAV's `PROPFIND` or
+   * `LOCK`, `PURGE` - in any case. A request's method is matched uppercased, as a real
+   * server receives it from Node's `http`. Throws for a method name the router does not
+   * know.
+   */
+  on(method: string, path: string, handler: MockRouteHandler): void;
+  /** Remove all registered routes. */
+  clear(): void;
+}
+
+// find-my-way requires a handler function; the actual MockRouteHandler lives in store,
+// beside the pattern it was registered under.
+interface MockRouteEntry {
+  handler: MockRouteHandler;
+  pattern: string;
+}
+
+const noop: Router.Handler<Router.HTTPVersion.V1> = () => {};
+
+/**
+ * The longest path parameter a route matches, in characters once decoded: 16 KiB, the
+ * whole request head Node's `http` server takes by default (`--max-http-header-size`),
+ * so a token or JWT a real server would take as a parameter matches here too. One longer
+ * does not match its route, and falls to a `/*` route or the default 404 (find-my-way's
+ * `maxParamLength`, 100 by default).
+ */
+const MAX_ROUTE_PARAM_LENGTH = 16 * 1024;
 
 /**
  * Routes match on **path only** — the domain/host in the request URL is
@@ -196,33 +343,28 @@ export interface MockAdapterConfig {
  * For separate-adapter setups, register the redirect target path on the
  * originating adapter as well.
  */
-
-export interface MockAdapterRoutes {
-  get(path: string, handler: MockRouteHandler): void;
-  post(path: string, handler: MockRouteHandler): void;
-  put(path: string, handler: MockRouteHandler): void;
-  patch(path: string, handler: MockRouteHandler): void;
-  delete(path: string, handler: MockRouteHandler): void;
-  head(path: string, handler: MockRouteHandler): void;
-  /** Remove all registered routes. */
-  clear(): void;
-}
-
-// find-my-way requires a handler function; the actual MockRouteHandler lives in store.
-const noop: Router.Handler<Router.HTTPVersion.V1> = () => {};
-
 export class MockAdapter implements HTTPAdapter {
   public readonly routes: MockAdapterRoutes;
   private readonly router: Router.Instance<Router.HTTPVersion.V1>;
   private readonly config: MockAdapterConfig;
 
   constructor(config?: MockAdapterConfig) {
+    // Preserve inherited handlers, their receiver, and live config updates.
+    // Validate now and again when a response selects the current default delay.
+    assertOptionsObject(config, 'MockAdapter config', true);
     this.config = config ?? {};
+    // A function or nothing: anything else would fail each route error as a reported
+    // `onHandlerError` failure and a 500, rather than once, here. An own data value only,
+    // read by descriptor: a getter is read when a route fails, as the config is live.
+    assertOnHandlerError(
+      Object.getOwnPropertyDescriptor(this.config, 'onHandlerError')?.value,
+    );
+    resolveTimeoutMS(this.config.defaultDelay, 0, 'MockAdapter defaultDelay');
 
     this.router = Router({
       ignoreTrailingSlash: true,
       ignoreDuplicateSlashes: false,
-      maxParamLength: 100,
+      maxParamLength: MAX_ROUTE_PARAM_LENGTH,
     });
 
     this.routes = buildRoutes(this.router);
@@ -233,80 +375,157 @@ export class MockAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    // Guarded once, at the boundary, so every call site below is covered - including the
-    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
-    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
-    // change whether a request succeeded; a throwing callback used to propagate out and be
-    // classified as a transport failure. See `guardProgressCallback`.
-    const guardedUploadProgress = guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    );
-    const guardedDownloadProgress = guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    );
+    // Read before the route runs, so a limit refused as unusable refuses the request
+    // without running it.
+    const {
+      guardedUploadProgress,
+      guardedDownloadProgress,
+      requestURL,
+      headers,
+      body,
+      signal,
+      method,
+      maxResponseBytes,
+    } = readAdapterRequestFields(request);
+    // A body no adapter writes - an `ArrayBuffer`, a `Blob`, a plain object, a `Proxy` over
+    // a form - refused as every adapter refuses it, rather than reaching the route as it
+    // is: a test driving the adapter directly would otherwise pass here and fail against
+    // a server.
+    const bodyRefusal = unsendableBodyRefusal('MockAdapter', body);
+    if (bodyRefusal !== undefined) {
+      throw bodyRefusal;
+    }
+    // Names lowercased, as a Node server receives them, so a request driven straight at
+    // the adapter with `Content-Type` is read like one the client sent.
+    const materializedHeaders = materializeRequestHeaders(headers, {
+      isLowercasingNames: true,
+    });
+    // Headers every real server receives and the client does not set itself: `host`, a
+    // FormData body's multipart `content-type` (the boundary is the mock's own), and the
+    // body's `content-length`. The URL is read once, by `parseMockURL`: a path-only one is
+    // `localhost`'s, and one that does not parse has no host and is routed as written.
+    const parsedURL = parseMockURL(requestURL);
+    if (!Object.hasOwn(materializedHeaders, 'host') && parsedURL !== null) {
+      defineEntry(materializedHeaders, 'host', parsedURL.host);
+    }
+    const isFormBody = isFormData(body);
+    // A form's own, replacing a caller's, as NodeAdapter writes the boundary it sends: a
+    // caller's `multipart/form-data` names none.
+    if (isFormBody) {
+      defineEntry(
+        materializedHeaders,
+        'content-type',
+        `multipart/form-data; boundary=${MOCK_FORM_BOUNDARY}`,
+      );
+    }
 
-    const { requestURL, method, headers, body } = request;
-    const materializedHeaders = materializeMockRequestHeaders(headers);
+    // Refused as NodeAdapter refuses them, so a test that passes here does not fail
+    // against a server: the mock frames the body itself, by the `content-length` below -
+    // a request framed both ways is one RFC 9112 forbids - and answers no protocol switch
+    // or `100 Continue`.
+    const refusalMessage = framingRefusedHeaderMessage(
+      'MockAdapter',
+      Object.keys(materializedHeaders),
+    );
+    if (refusalMessage !== undefined) {
+      throw nonRetryableRefusal(TypeError, refusalMessage);
+    }
+
+    // Matched uppercased, as a real server sees it: Node's `http` sends any method it
+    // knows uppercase, so `lock` arrives as `LOCK`.
+    const routeMethod = asciiUppercase(method);
+    if (routeMethod === 'CONNECT') {
+      throw connectRefusal('MockAdapter');
+    }
 
     // --- 1. Pre-flight abort check ---
     // Throw immediately if the signal was already cancelled before we even start.
-    if (request.signal?.aborted) {
+    if (isSignalAborted(signal)) {
       throwAbortError();
     }
+
+    // The body's own length, as NodeAdapter frames every body with one - a caller's is
+    // replaced - and `0` for a bodiless request whose method Node sends one for (see
+    // `requestBodyLength`). A form's entries are read once, here, once the request is known
+    // to go ahead - so a part's getters are not read for one refused or cancelled - and
+    // both the `content-length` and what the route is handed are made from that read.
+    const formParts = isFormBody ? [...formEntries(body)] : undefined;
+    // Bytes copied once, here, the same way: the `content-length` and what the route is
+    // handed are both this copy, so a buffer the caller resizes or changes afterwards -
+    // from the upload callback below, say - changes neither, as bytes on the wire would
+    // not change. Copied through the internal slots, so another realm's `Uint8Array` is
+    // copied as well, and a route that changes the bytes it is handed changes only its own.
+    // One over a detached buffer, or past the end of a shrunk resizable one, is sent as
+    // no bytes, as NodeAdapter and `fetch` send it, rather than refused by the copy.
+    const sentBody = isRequestBodyBytes(body)
+      ? readBinaryByteLength(body) === 0
+        ? new Uint8Array(0)
+        : new Uint8Array(body)
+      : body;
+    delete materializedHeaders['content-length'];
+    const bodyLength = requestBodyLength(sentBody, routeMethod, formParts);
+    if (bodyLength !== undefined) {
+      defineEntry(materializedHeaders, 'content-length', String(bodyLength));
+    }
+
+    // The headers sent, as observers are to see them: exactly what the route receives -
+    // repeated values joined as a server receives them, `Cookie` with `; `, an empty one
+    // left out, and the mock's own `host`, form `content-type` and `content-length` in
+    // place of the caller's. A copy, taken before the route runs, so one that changes
+    // `req.headers` changes what it was handed, not what was sent.
+    const effectiveRequestHeaders = mergeObservedHeaders(materializedHeaders);
 
     // Signal 0% upload — upload is instant for mock, but we fire the event so
     // progress listeners see the same shape they would from FetchAdapter.
     guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
+    // Again, as the real adapters do: a cancel from that callback ends the request before
+    // the route handler runs, as it would before a real request was sent, so it carries
+    // no sent headers. Read quietly, as FetchAdapter reads it after that callback.
+    if (isSignalAbortedQuietly(signal)) {
+      throwAbortError();
+    }
+
     // --- 2. Parse URL ---
     // Strip host so routes match on path only — same behavior regardless of
     // whether the client passed an absolute URL (https://api.test/users) or a
-    // path-only URL (/users). Falls back to manual splitting for path-only URLs
-    // that `new URL()` would reject.
+    // path-only URL (/users). A URL that does not parse even against the mock's base
+    // (`http://[`) is split by hand, and matches no route a URL could name.
     let path: string;
     let queryString: string;
 
-    try {
-      const url = new URL(requestURL);
-      path = url.pathname;
-      queryString = url.search.slice(1);
-    } catch {
-      const qIdx = requestURL.indexOf('?');
+    // Routed as normalized (`/a/../b` is `/b`, `/café` is `/caf%C3%A9`), as the client
+    // normalizes the URL it sends.
+    if (parsedURL !== null) {
+      path = parsedURL.pathname;
+      queryString = parsedURL.search.slice(1);
+    } else {
+      // Without its fragment, as `URL` drops it from `pathname` and `search`.
+      const hashIdx = requestURL.indexOf('#');
+      const withoutHash =
+        hashIdx >= 0 ? requestURL.slice(0, hashIdx) : requestURL;
+      const qIdx = withoutHash.indexOf('?');
 
       if (qIdx >= 0) {
-        path = requestURL.slice(0, qIdx);
-        queryString = requestURL.slice(qIdx + 1);
+        path = withoutHash.slice(0, qIdx);
+        queryString = withoutHash.slice(qIdx + 1);
       } else {
-        path = requestURL;
+        path = withoutHash;
         queryString = '';
       }
     }
 
-    // --- 3. Route match & build MockRequest ---
-    // qs handles nested bracket notation (e.g. ?where[active]=true).
-    // cookies are pre-parsed from the `cookie` header for convenience —
-    // the raw header is still available on req.headers.cookie.
-    const query = qs.parse(queryString) as QueryObject;
-    const cookies = parseCookieHeader(materializedHeaders['cookie']);
-    const match = this.router.find(method, path);
-    const params = (match?.params ?? {}) as Record<string, string>;
-
-    const mockRequest: MockRequest = {
-      method,
-      path,
-      params,
-      query,
-      headers: materializedHeaders,
-      cookies,
-      body:
-        body instanceof FormData
-          ? extractFormData(body)
-          : parseRequestBody(body, materializedHeaders['content-type']),
-    };
-
-    // --- 4. Invoke handler ---
+    // --- 3. Route match ---
+    // A path whose percent-encoding does not decode (`/%E0%A4%A`) is answered `400`, as
+    // Fastify, on the same router, answers one: not routed, so no `/*` route sees it.
+    const isMalformedPath = !isDecodablePath(path);
+    // The router's own method type is a fixed list; a method it does not know finds no
+    // route, as an unregistered path does.
+    const match = isMalformedPath
+      ? null
+      : this.router.find(routeMethod as RouterHTTPMethod, path);
+    // --- 4. Build MockRequest & invoke handler ---
+    // A malformed path → default 400 (see `isMalformedPath`).
     // No registered route → default 404.
     // To customize the 404 body, register a wildcard route:
     //   adapter.routes.get('/*', (req) => ({ status: 404, body: { error: '...' } }))
@@ -315,40 +534,116 @@ export class MockAdapter implements HTTPAdapter {
     // then falls back to default 500 if onHandlerError is unset or also throws.
 
     let mockResponse: MockResponse;
+    // Which callback produced `mockResponse`, so a missing one names the right culprit.
+    let responseSource: 'route' | 'onHandlerError' = 'route';
+    // The pattern the route was registered under, never the request's own path: the
+    // path can carry a secret (`/password-reset/<token>`) the pattern only names.
+    let routePattern = '';
+    // The refusals this send's own waits raise (see `awaitAbortable`), known by identity.
+    const waitRefusals = new WeakSet<object>();
 
-    if (match === null) {
+    if (isMalformedPath) {
+      mockResponse = { status: 400, body: { message: 'Bad Request' } };
+    } else if (match === null) {
       mockResponse = { status: 404, body: { message: 'Not Found' } };
     } else {
-      const handler = match.store as MockRouteHandler;
+      const { handler, pattern } = match.store as MockRouteEntry;
+      routePattern = pattern;
+
+      // Built only for a route that runs: the default 400 and 404 read none of it.
+      // qs handles nested bracket notation (e.g. ?where[active]=true), as Express's
+      // extended query parser reads it - `qs.parse(query, { allowPrototypes: true })`, the
+      // Express 4 default: a key named like an `Object.prototype` member (`constructor`)
+      // is kept, `__proto__` is still dropped, and qs's own limits apply as they do in
+      // production, so an array with more than 20 indices arrives as an object there and
+      // here alike. Cookies are pre-parsed from the `cookie` header for convenience - the
+      // raw header is still available on req.headers.cookie.
+      const mockRequest: MockRequest = {
+        method: routeMethod,
+        path,
+        // Copied into a plain object: the router's own is a null-prototype `NullObject`,
+        // which a route echoing `req.params` as its body would refuse as an unsupported
+        // type.
+        params: { ...match.params } as Record<string, string>,
+        query: qs.parse(queryString, { allowPrototypes: true }),
+        headers: materializedHeaders,
+        cookies: parseCookieHeader(materializedHeaders['cookie']),
+        // `formParts` is read exactly when the body is a form.
+        body: formParts
+          ? extractFormData(formParts)
+          : parseRequestBody(
+              sentBody as Exclude<typeof sentBody, FormData>,
+              materializedHeaders['content-type'],
+            ),
+      };
 
       try {
         // Match real network semantics more closely: once the caller aborts,
         // stop waiting on an async mock handler and reject immediately.
-        mockResponse = await awaitAbortable(
-          handler(mockRequest),
-          request.signal,
-        );
+        mockResponse = (
+          await awaitAbortable(handler(mockRequest), signal, waitRefusals)
+        ).value;
       } catch (handlerError) {
         if (isInternalAbortError(handlerError)) {
-          throwAbortError();
+          throwAbortError(effectiveRequestHeaders);
         }
 
-        if (this.config.onHandlerError) {
+        // The wait's own refusal - a signal whose `aborted` throws, read while the route
+        // ran - is this adapter's, not something the route threw: it goes out as it is.
+        // Known by identity, and only this send's, so a refusal from another adapter the
+        // route called - or this one, called again - is still the route's failure, for
+        // `onHandlerError` or the 500.
+        if (waitRefusals.has(handlerError as object)) {
+          throw handlerError;
+        }
+
+        // Read now, as the config is live, and held to the rule the constructor holds an
+        // own value to: a getter that throws, or a value that is no function, is a setup
+        // mistake, refused rather than retried as the adapter's own failure.
+        // The route's own failure kept on the refusal, so it is not lost to it: as its
+        // `cause`, or beside the getter's error when the read throws.
+        const onHandlerError = asRouteMistake(() => {
+          let value: unknown;
+
           try {
-            mockResponse = await awaitAbortable(
-              this.config.onHandlerError(mockRequest, handlerError),
-              request.signal,
+            value = this.config.onHandlerError;
+          } catch (readError) {
+            throw new AggregateError(
+              [readError, handlerError],
+              'MockAdapter onHandlerError could not be read',
             );
+          }
+
+          return assertOnHandlerError(value, handlerError);
+        });
+        if (onHandlerError) {
+          responseSource = 'onHandlerError';
+          try {
+            mockResponse = (
+              await awaitAbortable(
+                Reflect.apply(onHandlerError, this.config, [
+                  mockRequest,
+                  handlerError,
+                ]),
+                signal,
+                waitRefusals,
+              )
+            ).value;
           } catch (error) {
             if (isInternalAbortError(error)) {
-              throwAbortError();
+              throwAbortError(effectiveRequestHeaders);
+            }
+
+            if (waitRefusals.has(error as object)) {
+              throw error;
             }
 
             // Said, not swallowed. The 500 is the right recovery - it mirrors what a real
             // server does when its own error handler fails - but it is also exactly what a
-            // caller who configured no `onHandlerError` at all gets, so a broken `onHandlerError` was
-            // indistinguishable from an absent one. In a test suite, which is the only
-            // place this adapter runs, that is precisely the thing you want to be told.
+            // caller who configured no `onHandlerError` at all gets, so unreported, a
+            // broken `onHandlerError` would be indistinguishable from an absent one. In a
+            // test suite, which is the only place this adapter runs, that is precisely the
+            // thing you want to be told.
             reportCallbackError('MockAdapter onHandlerError', error);
 
             mockResponse = {
@@ -365,17 +660,178 @@ export class MockAdapter implements HTTPAdapter {
       }
     }
 
+    // The route has run: a handler that returned no response (a forgotten `return`) is a
+    // mistake in the test's own setup, so it is not retried - a retry would only run the
+    // route, and its side effects, again.
+    // An array is no MockResponse either: read as one, `[]` would be refused for its
+    // status and `[{ status: 200 }]` for a field named `0`.
+    if (
+      typeof mockResponse !== 'object' ||
+      mockResponse === null ||
+      Array.isArray(mockResponse)
+    ) {
+      throw nonRetryableRefusal(
+        TypeError,
+        `MockAdapter ${responseSource} for ${routeMethod} ${routePattern} returned no MockResponse (got ${Array.isArray(mockResponse) ? 'an array' : describeValue(mockResponse)})`,
+      );
+    }
+
+    // Every field read once, here, into the answer every check and use below reads:
+    // otherwise a getter that answers `200` to the status check and `0` to the response
+    // would pass one and send another. A getter that throws is the route's mistake, as
+    // one on its `transportError` or `cookies` is: the route has run, and a retry would
+    // only run it, and its side effects, again.
+    // A misspelled field (`header`, `statusCode`) is the route's mistake too: read as
+    // absent, the response would go out without what the test meant it to carry. A
+    // `then` is let through: an async handler's answer is adopted once, and one carrying
+    // a `then` of its own is still the answer, not a promise to adopt again.
+    // On a carrier, as every route mistake is: the throw may be the route's own, from a
+    // `Proxy` over the answer.
+    const answered = mockResponse;
+    asRouteMistake(() =>
+      assertKnownFields(
+        answered,
+        MOCK_RESPONSE_FIELDS,
+        `MockAdapter ${responseSource} response`,
+        ['then'],
+      ),
+    );
+    mockResponse = asRouteMistake(() => snapshotMockResponse(answered));
+
+    // What the server would have put on the wire, fixed as the adapter takes the route's
+    // answer: serialized now, before the delay, so a body the test changes while the
+    // response is delayed is not delivered changed. Now is a few microtasks after the
+    // handler returns, even a synchronous one, as its answer is awaited: a test driving
+    // `send()` directly that changes the body on the next line, before awaiting the
+    // response, is delivered the change. HEAD / 204 / 205 / 304 never expose a body to
+    // consumers, even if the handler returned one, keeping the mock transport aligned
+    // with real HTTP.
+    // Not serialized at all under a simulated transport or stream error, which loses it:
+    // otherwise a body the mock cannot serialize (a `Map`) would fail the route as an
+    // `adapter_error` instead. A body that cannot be serialized is held, and refused
+    // below, after the delay and the checks ahead of it.
+    // The simulated stream error's code is read now too, and a mistake in it refused after
+    // the delay, as one in the headers or `transportError` is.
+    const routeStreamErrorCode = captureRead(() =>
+      resolveMockStreamErrorCode(mockResponse.streamError),
+    );
+    // A simulated transport failure: anything but `undefined`, `null` or `false` - `true`,
+    // its options, or a value refused after the delay (see `transportFailure`).
+    const routeTransportError = mockResponse.transportError;
+    const hasTransportError =
+      routeTransportError !== undefined &&
+      routeTransportError !== null &&
+      routeTransportError !== false;
+    let serializedBody:
+      | { bytes: Uint8Array | null | typeof OVERSIZED_BODY }
+      | { error: unknown } = {
+      bytes: null,
+    };
+    if (
+      !hasTransportError &&
+      'value' in routeStreamErrorCode &&
+      routeStreamErrorCode.value === undefined &&
+      // A status that is no integer is refused below, before the body is used; compared
+      // as one here, an object's `valueOf` would run.
+      Number.isInteger(mockResponse.status) &&
+      hasResponseBody(method, mockResponse.status)
+    ) {
+      try {
+        serializedBody = {
+          bytes: serializeResponseBody(mockResponse, maxResponseBytes),
+        };
+      } catch (error) {
+        serializedBody = { error };
+      }
+    }
+
+    // The headers and cookies too, as the route answered: copied now, so a fixture the
+    // test changes during the delay is not delivered changed, and a copy that cannot be
+    // made refused below, where the body's refusal is.
+    // Read once: the value copied is the value checked. Its arrays copied too (see
+    // `copyArrayValue`), so nothing after - the `cookies` merge - reads the route's.
+    const routeHeaders = captureRead(() => {
+      const headers: unknown = mockResponse.headers;
+      assertOptionalHeaderRecord(headers, 'MockAdapter route response headers');
+      const copy = { ...(headers as AdapterResponse['headers'] | undefined) };
+      for (const [name, value] of Object.entries(copy)) {
+        const copied = copyArrayValue(value, ROUTE_HEADER_VALUE_LABEL);
+        assertRouteHeaderValue(name, copied);
+        defineEntry(copy, name, copied);
+      }
+      return copy;
+    });
+    // Read once, as the headers are: the value used is the value checked.
+    const routeCookieEntries = captureRead((): string[] => {
+      const routeCookies: unknown = mockResponse.cookies;
+      if (routeCookies === undefined || routeCookies === null) {
+        return [];
+      }
+      // A plain object, as the headers are: a `Map` read through `Object.entries` would
+      // set no cookies at all.
+      if (!isPlainRecord(routeCookies)) {
+        throw new TypeError(
+          `MockAdapter route cookies must be a plain object of cookie names to values (got ${Array.isArray(routeCookies) ? 'an array' : describeValue(routeCookies)})`,
+        );
+      }
+      return cookiesToSetCookieHeaders(
+        routeCookies as Parameters<typeof cookiesToSetCookieHeaders>[0],
+      );
+    });
+
+    // A simulated transport failure's options, read as the route answered, as the body
+    // and headers are: a fixture the test changes during the delay does not change the
+    // flags that go out. A mistake in them is refused after the delay, where the body's
+    // is.
+    const transportFailure = hasTransportError
+      ? captureRead(() =>
+          asRouteMistake(() => readMockTransportError(routeTransportError)),
+        )
+      : undefined;
+
     // --- 5. Delay ---
     // Simulates network latency. Per-response delay takes priority over the
     // adapter default. When a signal is present, the sleep is abort-aware and
     // throws AbortError immediately instead of waiting out the full duration.
-    const delay = mockResponse.delay ?? this.config.defaultDelay ?? 0;
+    const requestedDelay = mockResponse.delay;
+    // Name the setting that was actually used, so a bad live `defaultDelay` update
+    // is not blamed on a route that never set a delay.
+    const isDefaultDelay =
+      requestedDelay === undefined || requestedDelay === null;
+    let delay: number;
+    try {
+      delay = resolveTimeoutMS(
+        isDefaultDelay ? this.config.defaultDelay : requestedDelay,
+        0,
+        isDefaultDelay
+          ? 'MockAdapter defaultDelay'
+          : 'MockAdapter response delay',
+      );
+    } catch (error) {
+      // The route has already run. Retrying a bad delay - or a delay getter that throws -
+      // would repeat its side effects without repairing the configuration.
+      if (isTimeoutValidationError(error)) {
+        markNonRetryableAdapterError(error);
+        throw error;
+      }
+      throw nonRetryableAdapterErrorFrom(error);
+    }
 
     if (delay > 0) {
       // Use abort-aware sleep when a signal is present so cancellation throws
       // immediately rather than waiting for the full delay to elapse.
-      if (request.signal) {
-        await sleepAbortable(delay, request.signal);
+      if (signal) {
+        try {
+          await sleepAbortable(delay, signal);
+        } catch (error) {
+          // The sleep's own abort, rejected as every other abort here is rather than as
+          // the internal error class.
+          if (isInternalAbortError(error)) {
+            throwAbortError(effectiveRequestHeaders);
+          }
+
+          throw error;
+        }
       } else {
         await sleep(delay);
       }
@@ -383,99 +839,171 @@ export class MockAdapter implements HTTPAdapter {
 
     // --- 6. Post-delay abort check ---
     // Catches cancellation when there was no delay (or delay was 0).
-    if (request.signal?.aborted) {
-      throwAbortError();
+    if (isSignalAborted(signal)) {
+      throwAbortError(effectiveRequestHeaders);
     }
+
+    // A `streamError` the mock does not know (see above), refused whatever else the route
+    // answered.
+    const routeStreamError = asRouteMistake(() =>
+      unwrapCaptured(routeStreamErrorCode),
+    );
 
     // A simulated transport failure never produced a response, so it returns
     // before any of the response-shaped work below — no body, no headers, no
     // cookies, and no terminal progress, exactly as a real one delivers none.
-    if (mockResponse.transportError) {
-      const options: MockTransportErrorOptions =
-        mockResponse.transportError === true ? {} : mockResponse.transportError;
+    if (transportFailure !== undefined) {
+      const { status, isRetryable, wasDefinitelyNotSent, message } =
+        unwrapCaptured(transportFailure);
 
       return {
-        status: options.status ?? 0,
+        status: status ?? 0,
         isTransportError: true,
-        ...(options.isRetryable !== undefined
-          ? { isRetryable: options.isRetryable }
-          : {}),
-        ...(options.wasDefinitelyNotSent !== undefined
-          ? { wasDefinitelyNotSent: options.wasDefinitelyNotSent }
-          : {}),
+        effectiveRequestHeaders,
+        ...(isRetryable !== undefined ? { isRetryable } : {}),
+        ...(wasDefinitelyNotSent !== undefined ? { wasDefinitelyNotSent } : {}),
         headers: {},
         body: null,
         errorCause: new Error(
-          options.message ??
-            'Mock transport error (MockResponse.transportError)',
+          message ?? 'Mock transport error (MockResponse.transportError)',
         ),
       };
     }
 
-    // A simulated post-header body failure loses the body the same way a real
-    // one does, so the handler's body is never serialized.
-    const streamErrorCode = resolveMockStreamErrorCode(
-      mockResponse.streamError,
-    );
+    // A status no server can send - Node's `writeHead` refuses one under 100 or past
+    // 999 - is the route's mistake, not retried. `0` is not a status: use
+    // `transportError` for a network failure.
+    asRouteMistake(() => {
+      // Read as `unknown`: a route's answer is the caller's, typed or not, and the check
+      // narrows what it refuses.
+      const status: unknown = mockResponse.status;
+      if (!isStatusCode(status)) {
+        throw new TypeError(
+          `MockAdapter route returned status ${describeNumberOrType(status)}; a response status is an integer from 100 to 999 (use transportError for a network failure)`,
+        );
+      }
+    });
 
-    // What the server would have put on the wire. HEAD / 204 / 304 never expose
-    // a body to consumers, even if the handler returned one. This keeps the mock
-    // transport aligned with real HTTP.
-    const intendedBody = shouldOmitResponseBody(method, mockResponse.status)
-      ? null
-      : serializeResponseBody(mockResponse);
+    // A simulated stream error strikes the body, so an answer that carries none - a HEAD's,
+    // a `1xx`, `204`, `205` or `304` - is delivered whole, as no real adapter reads a body
+    // there to fail: the route's `streamError` is set aside, as its body is.
+    const simulatedStreamErrorCode = hasResponseBody(
+      method,
+      mockResponse.status,
+    )
+      ? routeStreamError
+      : undefined;
+
+    // A body the mock cannot serialize (see above) is the route's mistake, after it has
+    // run; not retried, for the reason a bad delay is not.
+    if ('error' in serializedBody) {
+      throw nonRetryableAdapterErrorFrom(serializedBody.error);
+    }
+    const isBodyOversized = serializedBody.bytes === OVERSIZED_BODY;
+    const intendedBody =
+      serializedBody.bytes === OVERSIZED_BODY ? null : serializedBody.bytes;
+
+    // A body past `maxResponseBytes` fails as the real adapters fail it: a stream error
+    // that keeps the status and headers, the body dropped. A simulated stream error
+    // already loses the body, so it stands as the route asked.
+    // Told as the body is serialized, by the client's own rule (see `serializeResponseBody`
+    // and `isAnsweredBodyOverLimit`), so the mock and the client cannot disagree on which
+    // bodies the limit refuses. Under a simulated stream error the body was never
+    // serialized, so `intendedBody` is `null` and within it.
+    const intendedByteLength = intendedBody?.byteLength ?? 0;
+    const isResponseTooLarge = isBodyOversized;
+    const streamErrorCode: AdapterResponse['streamErrorCode'] =
+      isResponseTooLarge ? 'response_too_large' : simulatedStreamErrorCode;
 
     // A simulated stream error loses the body, but it strikes after headers
-    // arrived, so the headers still stand — Content-Type included. Header
-    // inference below reads `intendedBody` for that reason.
+    // arrived, so the headers still stand — Content-Type included, inferred below from
+    // the route's body as it would have been sent.
     const responseBody = streamErrorCode !== undefined ? null : intendedBody;
 
-    // Signal upload complete, then report download size based on serialised body.
-    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
-
-    // A simulated stream error reports no terminal download progress: real
-    // adapters fail the body read before that point, so `progress: 1` here would
-    // signal a completed download for a body that never arrived.
-    if (streamErrorCode === undefined) {
-      guardedDownloadProgress?.({
-        loaded: responseBody?.length ?? 0,
-        total: responseBody?.length ?? 0,
-        progress: 1,
-      });
-    }
-
     // --- 7. Build response headers ---
-    const responseHeaders: AdapterResponse['headers'] = {
-      ...(mockResponse.headers ?? {}),
-    };
+    // A plain object, as every other header record: a `Headers` or `Map` would spread to
+    // `{}`, and then pass every check downstream with every header - `set-cookie` too -
+    // lost. Copied before the delay (see `routeHeaders`).
+    const responseHeaders: AdapterResponse['headers'] = asRouteMistake(() =>
+      unwrapCaptured(routeHeaders),
+    );
 
     // Merge cookies shorthand into set-cookie headers.
     // Entries from `cookies` are APPENDED after any existing `headers['set-cookie']`
     // entries — they are not overwritten. If both set the same cookie name, the
     // shorthand entry wins because it appears last (last Set-Cookie header for a
     // given name takes precedence in browsers and CookieJar).
-    if (mockResponse.cookies) {
-      const setCookieEntries = cookiesToSetCookieHeaders(mockResponse.cookies);
+    const setCookieEntries = asRouteMistake(() =>
+      unwrapCaptured(routeCookieEntries),
+    );
 
-      if (setCookieEntries.length > 0) {
-        const existing = responseHeaders['set-cookie'];
-        const existingArr =
-          existing === undefined
-            ? []
-            : Array.isArray(existing)
-              ? existing
-              : [existing];
-        responseHeaders['set-cookie'] = [...existingArr, ...setCookieEntries];
+    // Every spelling of the route's own `Set-Cookie` is gathered first, in key order as the
+    // normalizer joins them: one left under `Set-Cookie` would be joined after the
+    // shorthand and win over it.
+    if (setCookieEntries.length > 0) {
+      const existingArr: string[] = [];
+      for (const key of Object.keys(responseHeaders)) {
+        if (lowerCaseHeaderName(key) !== 'set-cookie') {
+          continue;
+        }
+        const existing = responseHeaders[key];
+        delete responseHeaders[key];
+        if (Array.isArray(existing)) {
+          // One at a time, not spread into `push`: a long list would pass the call's
+          // argument limit. The headers are this adapter's own copy, so iterating is safe.
+          for (const entry of existing) {
+            existingArr.push(entry);
+          }
+        } else if (existing !== undefined) {
+          existingArr.push(existing);
+        }
       }
+      for (const entry of setCookieEntries) {
+        existingArr.push(entry);
+      }
+      responseHeaders['set-cookie'] = existingArr;
     }
 
     // Auto-set content-type when handler didn't provide one.
     // Binary responses are intentionally skipped — content-type for binary is
     // format-specific (image/png, application/pdf, etc.) so the handler is
     // responsible for setting it via `headers` when it matters.
-    if (!hasHeader(responseHeaders, 'content-type') && intendedBody !== null) {
+    // A HEAD response carries the content-type its GET would, body or no body: none for
+    // a status a GET answers with no body (a `204`, a `304`).
+    const routeContentType: unknown = mockResponse.contentType;
+    if (
+      routeContentType !== undefined &&
+      routeContentType !== null &&
+      routeContentType !== 'json' &&
+      routeContentType !== 'text' &&
+      routeContentType !== 'binary'
+    ) {
+      asRouteMistake(() => {
+        throw new TypeError(
+          `MockAdapter route returned an unknown contentType (got ${describeValue(routeContentType)}); it is 'json', 'text' or 'binary'`,
+        );
+      });
+    }
+
+    // A body never serialized - a HEAD route's, or one under a simulated stream error - is
+    // labelled as the GET, or the answer without the error, would have sent it.
+    const isRouteBodyUnserialized =
+      routeMethod === 'HEAD' || simulatedStreamErrorCode !== undefined;
+    const hasRouteBody =
+      intendedBody !== null ||
+      isBodyOversized ||
+      (isRouteBodyUnserialized &&
+        hasResponseBody(
+          routeMethod === 'HEAD' ? 'GET' : routeMethod,
+          mockResponse.status,
+        ) &&
+        mockResponse.body !== undefined &&
+        mockResponse.body !== null);
+    if (!hasHeader(responseHeaders, 'content-type') && hasRouteBody) {
+      // The value checked above, not a second read.
       const ct =
-        mockResponse.contentType ?? inferContentType(mockResponse.body);
+        (routeContentType as ContentType | null | undefined) ??
+        inferContentType(mockResponse.body);
 
       if (ct === 'json') {
         responseHeaders['content-type'] = 'application/json';
@@ -484,28 +1012,64 @@ export class MockAdapter implements HTTPAdapter {
       }
     }
 
-    const normalizedResponseHeaders =
-      normalizeAdapterResponseHeaders(responseHeaders);
-
-    const detectedRedirectURL = resolveDetectedRedirectURL(
-      request.requestURL,
-      mockResponse.status,
-      normalizedResponseHeaders,
+    const normalizedResponseHeaders = asRouteMistake(() =>
+      normalizeAdapterResponseHeaders(responseHeaders),
     );
+
+    // After the headers are built and checked, as a real adapter has the headers before
+    // any body progress: a route mistake found there does not follow a completed download.
+    // Signal upload complete - by the `content-length` sent, a form's included, as
+    // NodeAdapter reports the bytes it wrote - then report download size based on
+    // serialised body.
+    guardedUploadProgress?.(
+      completeProgressEvent(bodyLength ?? knownBodyByteLength(sentBody)),
+    );
+
+    // A cancel from that callback ends the request as a cancel over the answer, its status
+    // and headers carried out, as the network adapters end one, rather than resolving it
+    // with no download. Read quietly, as once an answer is in hand they read it: a signal
+    // that throws now does not replace the answer with a refusal.
+    if (isSignalAbortedQuietly(signal)) {
+      const abortError = markResponseStreamAbort(
+        makeAbortError(MOCK_ABORT_MESSAGE),
+        mockResponse.status,
+        normalizedResponseHeaders,
+      );
+      defineHiddenTags(abortError, {
+        [EFFECTIVE_REQUEST_HEADERS_KEY]: effectiveRequestHeaders,
+      });
+      throw abortError;
+    }
+
+    // A simulated stream error reports no terminal download progress: real
+    // adapters fail the body read before that point, so `progress: 1` here would
+    // signal a completed download for a body that never arrived.
+    if (streamErrorCode === undefined) {
+      guardedDownloadProgress?.(completeProgressEvent(intendedByteLength));
+    }
 
     return {
       status: mockResponse.status,
-      wasRedirectDetected: REDIRECT_STATUS_CODES.has(mockResponse.status),
-      ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+      // A `Location` resolves against the request URL as read against the mock's default
+      // base, as the client reads a mock request with no `baseURL`: driven straight at the
+      // adapter, `/start` answered with `Location: /next` reports `http://localhost/next`.
+      ...derivedRedirectFields(
+        parsedURL?.href ?? requestURL,
+        mockResponse.status,
+        normalizedResponseHeaders,
+      ),
       headers: normalizedResponseHeaders,
       body: responseBody,
+      effectiveRequestHeaders,
       ...(streamErrorCode !== undefined
         ? {
             isStreamError: true,
             streamErrorCode,
-            errorCause: new Error(
-              'Mock response stream error (MockResponse.streamError)',
-            ),
+            errorCause: isResponseTooLarge
+              ? makeResponseTooLargeError(maxResponseBytes, false)
+              : new Error(
+                  'Mock response stream error (MockResponse.streamError)',
+                ),
           }
         : {}),
     };
@@ -513,6 +1077,118 @@ export class MockAdapter implements HTTPAdapter {
 }
 
 // --- Helpers ---
+/** The boundary a form's multipart `content-type` names in a route's request. */
+const MOCK_FORM_BOUNDARY = '----lifecycleion-mock-boundary';
+
+/**
+ * `requestURL` parsed against the mock's default base, as the client reads a mock request
+ * with no `baseURL`: a path-only URL is that base's, and a protocol-relative one
+ * (`//api.test/users`) takes its scheme, so its host is read as a host. `null` for a URL
+ * that does not parse.
+ */
+function parseMockURL(requestURL: string): URL | null {
+  try {
+    return parseURL(requestURL, MOCK_ADAPTER_DEFAULT_BASE_URL);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `path`'s percent-encoding decodes, as the router decodes a path: through
+ * `decodeURI`, which refuses a `%` without two hex digits after it and escapes that are
+ * not UTF-8.
+ */
+function isDecodablePath(path: string): boolean {
+  if (!path.includes('%')) {
+    return true;
+  }
+
+  try {
+    decodeURI(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A route's `transportError` - `true` or its options - read into the fields the failure
+ * goes out with. Each field read once, as the answer's own are (see
+ * `snapshotMockResponse`): otherwise a `status` getter that answers `495` to the check and
+ * `1000` to the response would pass one and send another. Each is held to its type here,
+ * as the route's mistake, so a getter that throws or a value of the wrong type is refused
+ * once rather than retried as the adapter's own failure.
+ */
+function readMockTransportError(transportError: unknown): {
+  status: number | undefined;
+  isRetryable: boolean | undefined;
+  wasDefinitelyNotSent: boolean | undefined;
+  message: string | undefined;
+} {
+  // A boolean or its options: `'yes'` would be read as `true`, and `0` as none.
+  if (
+    transportError !== true &&
+    (typeof transportError !== 'object' ||
+      transportError === null ||
+      Array.isArray(transportError))
+  ) {
+    throw new TypeError(
+      `MockAdapter route returned an unknown transportError (got ${describeValue(transportError)}); it is a boolean or its options`,
+    );
+  }
+
+  const options: MockTransportErrorOptions =
+    transportError === true ? {} : transportError;
+  assertKnownFields(
+    options,
+    fieldNames<MockTransportErrorOptions>({
+      status: true,
+      wasDefinitelyNotSent: true,
+      isRetryable: true,
+      message: true,
+    }),
+    'MockAdapter route transportError',
+  );
+
+  // Held here to the rule the client holds an adapter's status to - 0, or an integer from
+  // 100 to 999 - as the route's mistake: unchecked, it would be refused later as the
+  // adapter's.
+  const status: unknown = options.status;
+  if (status !== undefined && !isAdapterStatus(status)) {
+    throw new TypeError(
+      `MockAdapter route returned transportError status ${describeNumberOrType(status)}; it is 0, or an integer from 100 to 999`,
+    );
+  }
+
+  // The flags too: the client reads anything but a boolean as unset, so a `'false'` would
+  // retry what the route said not to.
+  const isRetryable: unknown = options.isRetryable;
+  const wasDefinitelyNotSent: unknown = options.wasDefinitelyNotSent;
+  const message: unknown = options.message;
+  for (const [name, flag] of [
+    ['isRetryable', isRetryable],
+    ['wasDefinitelyNotSent', wasDefinitelyNotSent],
+  ] as const) {
+    if (flag !== undefined && typeof flag !== 'boolean') {
+      throw new TypeError(
+        `MockAdapter route returned transportError ${name} ${describeValue(flag)}; it is a boolean`,
+      );
+    }
+  }
+  if (message !== undefined && typeof message !== 'string') {
+    throw new TypeError(
+      `MockAdapter route returned transportError message ${describeValue(message)}; it is a string`,
+    );
+  }
+
+  return {
+    status,
+    isRetryable: isRetryable as boolean | undefined,
+    wasDefinitelyNotSent: wasDefinitelyNotSent as boolean | undefined,
+    message,
+  };
+}
 
 /**
  * Normalizes `MockResponse.streamError` to a `streamErrorCode`, or `undefined`
@@ -521,11 +1197,26 @@ export class MockAdapter implements HTTPAdapter {
 function resolveMockStreamErrorCode(
   streamError: MockResponse['streamError'],
 ): AdapterResponse['streamErrorCode'] {
-  if (streamError === undefined || streamError === false) {
+  // Nullish too, as a route computing `failed ? 'stream_write_error' : null` writes "none".
+  const candidate: unknown = streamError;
+  if (isNullish(candidate) || candidate === false) {
     return undefined;
   }
 
-  return streamError === true ? 'stream_response_error' : streamError;
+  if (candidate === true) {
+    return 'stream_response_error';
+  }
+
+  if (
+    candidate !== 'stream_write_error' &&
+    candidate !== 'stream_response_error'
+  ) {
+    throw new TypeError(
+      `MockAdapter route returned an unknown streamError (got ${typeof candidate === 'string' ? 'an unknown code' : describeValue(candidate)}); it is a boolean, 'stream_write_error' or 'stream_response_error'`,
+    );
+  }
+
+  return candidate;
 }
 
 function buildRoutes(
@@ -536,8 +1227,27 @@ function buildRoutes(
     path: string,
     handler: MockRouteHandler,
   ): void {
+    // A path that is no string is refused in this adapter's words, not the router's
+    // assertion.
+    const pathCandidate: unknown = path;
+    if (typeof pathCandidate !== 'string') {
+      throw new TypeError(
+        `MockAdapter route path must be a string (got ${describeValue(pathCandidate)})`,
+      );
+    }
+
+    // Refused here, once: registered, a handler that is no function (a mistyped import)
+    // would fail every request to the route as a 500, with nothing saying why.
+    const candidate: unknown = handler;
+    if (typeof candidate !== 'function') {
+      throw new TypeError(
+        `MockAdapter route handler for ${method} ${typeof path === 'string' ? path : describeValue(path)} must be a function (got ${describeValue(candidate)})`,
+      );
+    }
+
     try {
-      router.on(method, path, noop, handler);
+      const entry: MockRouteEntry = { handler, pattern: path };
+      router.on(method, path, noop, entry);
     } catch (error) {
       if (isDuplicateRouteRegistrationError(error)) {
         throw duplicateRouteRegistrationError(method, path, error);
@@ -554,12 +1264,23 @@ function buildRoutes(
     patch: (path, handler) => on('PATCH', path, handler),
     delete: (path, handler) => on('DELETE', path, handler),
     head: (path, handler) => on('HEAD', path, handler),
+    options: (path, handler) => on('OPTIONS', path, handler),
+    on: (method, path, handler) => {
+      const methodCandidate: unknown = method;
+      if (typeof methodCandidate !== 'string') {
+        throw new TypeError(
+          `MockAdapter routes.on method must be a string (got ${describeValue(methodCandidate)})`,
+        );
+      }
+
+      on(asciiUppercase(method) as Router.HTTPMethod, path, handler);
+    },
     clear: () => router.reset(),
   };
 }
 
 function isDuplicateRouteRegistrationError(error: unknown): error is Error {
-  const message = readObjectMember(error, 'message');
+  const message = readUnknownMember(error, 'message');
 
   return (
     isErrorValue(error) &&
@@ -596,50 +1317,171 @@ function parseCookieHeader(
       continue;
     }
 
-    const name = part.slice(0, eqIdx).trim();
-    const value = part.slice(eqIdx + 1).trim();
+    // Trimmed of spaces and tabs only, as the cookie jar trims: `trim()` would also take a
+    // trailing U+00A0 - the last byte of a UTF-8 `à` read as latin1 - from a jar value.
+    const name = trimSpacesAndTabs(part.slice(0, eqIdx));
+    const value = decodeCookieValue(trimSpacesAndTabs(part.slice(eqIdx + 1)));
 
-    if (name) {
-      cookies[name] = value;
+    // The first of a repeated name wins, as common server parsers (the `cookie` package
+    // behind Express and Fastify) read it: the client sends the most specific path first.
+    if (name && !Object.hasOwn(cookies, name)) {
+      // Defined, not assigned: a `__proto__` cookie would otherwise vanish.
+      defineEntry(cookies, name, value);
     }
   }
 
   return cookies;
 }
 
-function materializeMockRequestHeaders(
-  headers: Record<string, string | string[]>,
-): Record<string, string> {
-  const result: Record<string, string> = {};
-
-  for (const [key, value] of Object.entries(headers)) {
-    result[key] = Array.isArray(value)
-      ? key.toLowerCase() === 'cookie'
-        ? value.join('; ')
-        : value.join(', ')
-      : value;
-  }
-
-  return result;
-}
-
 function cookiesToSetCookieHeaders(
   cookies: Record<string, string | MockCookieOptions | null>,
 ): string[] {
-  return Object.entries(cookies).map(([name, value]) => {
-    // null pairs with the string shorthand above: both use Path=/.
+  return Object.entries(cookies).map(([name, entry], index) => {
+    // A `;` or `=` in a name, or a `;` in a value or attribute, would rewrite the line -
+    // `abc; Domain=other.test` sets a Domain the route never asked for. A route mistake.
+    // A refusal names the cookie by its position, never its text: a name or value may
+    // itself be the text pasted wrong - a secret included.
+    assertCookieText(name, `at position ${String(index)} name`, true);
+    // null pairs with the string shorthand below: both use Path=/.
     // Scoped deletes need explicit path/domain so the cookie identity matches.
-    if (value === null) {
+    if (entry === null) {
       return `${name}=; Path=/; Max-Age=0`;
     }
 
     // string → session cookie: no expiry, defaults to Path=/.
-    if (typeof value === 'string') {
-      return `${name}=${value}; Path=/`;
+    if (typeof entry === 'string') {
+      assertCookieText(entry, `at position ${String(index)} value`);
+      return `${name}=${entry}; Path=/`;
     }
 
-    return serializeMockCookieOptions(name, value);
+    return serializeMockCookieOptions(
+      name,
+      readMockCookieOptions(name, entry, index),
+    );
   });
+}
+
+/**
+ * A route's `MockCookieOptions`, every field read once and held to its type - the copy
+ * checked is the copy written. A field of the wrong type is a route mistake, not a value
+ * to coerce: a `value` of `undefined` would be written as `undefined`, and
+ * `httpOnly: 'false'` would set HttpOnly. It is named by the cookie's position, as a
+ * refused name is, and so is text of the right type that cannot be written.
+ */
+function readMockCookieOptions(
+  name: string,
+  entry: unknown,
+  index: number,
+): MockCookieOptions {
+  const position = `at position ${String(index)}`;
+  // An array is an object to `typeof`, and read as options it would be refused for its
+  // missing `value` - a message about a field the route never wrote.
+  if (Array.isArray(entry)) {
+    throw new TypeError(
+      `MockAdapter cookie ${position} must be a string, null or a MockCookieOptions object (got an array)`,
+    );
+  }
+  if (typeof entry !== 'object' || entry === null) {
+    throw new TypeError(
+      `MockAdapter cookie ${position} must be a string, null or a MockCookieOptions object (got ${describeValue(entry)})`,
+    );
+  }
+
+  // A misspelled field (`maxage`, `httponly`) would set a cookie the route never asked
+  // for - a session cookie, or one without its flag.
+  assertKnownFields(
+    entry,
+    fieldNames<MockCookieOptions>({
+      value: true,
+      path: true,
+      domain: true,
+      maxAge: true,
+      httpOnly: true,
+      secure: true,
+      sameSite: true,
+    }),
+    `MockAdapter cookie ${position}`,
+  );
+  const options = entry as Record<keyof MockCookieOptions, unknown>;
+  const value = options.value;
+  const path = options.path;
+  const domain = options.domain;
+  const maxAge = options.maxAge;
+  const httpOnly = options.httpOnly;
+  const secure = options.secure;
+  const sameSite = options.sameSite;
+
+  if (typeof value !== 'string') {
+    throw new TypeError(
+      `MockAdapter cookie ${position} value must be a string (got ${describeValue(value)})`,
+    );
+  }
+  assertCookieText(value, `${position} value`);
+  for (const [attribute, text] of [
+    ['path', path],
+    ['domain', domain],
+  ] as const) {
+    if (text === undefined) {
+      continue;
+    }
+    if (typeof text !== 'string') {
+      throw new TypeError(
+        `MockAdapter cookie ${position} ${attribute} must be a string (got ${describeValue(text)})`,
+      );
+    }
+    assertCookieText(text, `${position} ${attribute}`);
+  }
+  // A `Path` that does not start with `/` is ignored by a cookie jar (RFC 6265 §5.2.4),
+  // which stores the cookie at the request's default path instead: a route mistake, as
+  // every other attribute's is. An empty one is no path, as an empty `domain` is no
+  // domain, and is written as `Path=/`.
+  if (typeof path === 'string' && path !== '' && !path.startsWith('/')) {
+    throw new TypeError(
+      `MockAdapter cookie ${position} path must start with '/'`,
+    );
+  }
+  // The typed attributes, held to their types: a string in `sameSite` or `maxAge` would
+  // be written into the line as it is, and either flag would be read by truthiness.
+  if (
+    sameSite !== undefined &&
+    sameSite !== 'Strict' &&
+    sameSite !== 'Lax' &&
+    sameSite !== 'None'
+  ) {
+    throw new TypeError(
+      `MockAdapter cookie ${position} sameSite must be 'Strict', 'Lax' or 'None'`,
+    );
+  }
+  if (maxAge !== undefined && typeof maxAge !== 'number') {
+    throw new TypeError(
+      `MockAdapter cookie ${position} maxAge must be a number (got ${describeValue(maxAge)})`,
+    );
+  }
+  // `NaN` would print as `Max-Age=NaN`, which the jar ignores, leaving a session cookie
+  // the route never asked for.
+  if (typeof maxAge === 'number' && Number.isNaN(maxAge)) {
+    throw new TypeError(`MockAdapter cookie ${position} maxAge is NaN`);
+  }
+  for (const [flag, isSet] of [
+    ['httpOnly', httpOnly],
+    ['secure', secure],
+  ] as const) {
+    if (isSet !== undefined && typeof isSet !== 'boolean') {
+      throw new TypeError(
+        `MockAdapter cookie ${position} ${flag} must be a boolean (got ${describeValue(isSet)})`,
+      );
+    }
+  }
+
+  return {
+    value,
+    path: path as string | undefined,
+    domain: domain as string | undefined,
+    maxAge,
+    httpOnly: httpOnly as boolean | undefined,
+    secure: secure as boolean | undefined,
+    sameSite,
+  };
 }
 
 function serializeMockCookieOptions(
@@ -648,10 +1490,30 @@ function serializeMockCookieOptions(
 ): string {
   const parts: string[] = [
     `${name}=${cookie.value}`,
-    `Path=${cookie.path ?? '/'}`,
+    `Path=${cookie.path || '/'}`,
   ];
 
-  appendCookieAttribute(parts, 'Max-Age', cookie.maxAge);
+  // Whole seconds within the cookie lifetime cap (400 days, RFC 6265bis), as `Max-Age`
+  // is read: a fraction, or a number too large to print as digits, would make the
+  // cookie jar ignore the attribute, so `0.01` would never expire, `-0.5` would not
+  // delete the cookie, and `Infinity` would leave a session cookie.
+  // `NaN` is refused by `readMockCookieOptions`.
+  const maxAge = cookie.maxAge;
+  appendCookieAttribute(
+    parts,
+    'Max-Age',
+    typeof maxAge === 'number'
+      ? Math.max(
+          -1,
+          // Up for a positive fraction, so `0.5` is the short-lived cookie it asks for
+          // rather than `Max-Age=0`, which deletes it; toward zero otherwise.
+          Math.min(
+            maxAge > 0 ? Math.ceil(maxAge) : Math.trunc(maxAge),
+            MAX_COOKIE_LIFETIME_SECONDS,
+          ),
+        )
+      : maxAge,
+  );
   appendCookieAttribute(parts, 'Domain', cookie.domain);
 
   if (cookie.httpOnly) {
@@ -677,19 +1539,86 @@ function appendCookieAttribute(
   }
 }
 
-function extractFormData(fd: FormData): MockFormData {
+/**
+ * A form as a server reads it off the wire NodeAdapter and `fetch` write (see
+ * `multipart-format.ts`): field names with line breaks as CRLF and `"`, CR and LF
+ * percent-encoded, and string values with line breaks as CRLF. Each file is the form's
+ * own, under the name it holds: renaming one means a new `File`, and on Bun a `File` made
+ * from a form's renames the form's own too.
+ */
+function extractFormData(
+  parts: ReadonlyArray<[string, FormDataEntryValue]>,
+): MockFormData {
   const fields: Record<string, string> = {};
   const files: Record<string, File> = {};
+  const allFields: Record<string, string[]> = {};
+  const allFiles: Record<string, File[]> = {};
 
-  for (const [key, value] of fd.entries()) {
-    if (typeof value === 'string') {
-      fields[key] = value;
+  for (const [rawKey, rawValue] of parts) {
+    const key = formatFieldName(rawKey);
+    // Defined, not assigned: a `__proto__` field would otherwise vanish, and a
+    // `__proto__` file would become the record's prototype.
+    if (typeof rawValue === 'string') {
+      const value = normalizeLinefeeds(rawValue);
+      defineEntry(fields, key, value);
+      appendEntry(allFields, key, value);
     } else {
-      files[key] = value;
+      defineEntry(files, key, rawValue);
+      appendEntry(allFiles, key, rawValue);
     }
   }
 
-  return { fields, files };
+  return { fields, files, allFields, allFiles };
+}
+
+/**
+ * The `content-length` a body is sent with, as NodeAdapter frames it: a string's UTF-8
+ * bytes, bytes' own length, a form's multipart encoding under the mock's boundary. With
+ * no body, `0` for a method Node frames a body for by default - any but `GET`, `HEAD`,
+ * `DELETE`, `OPTIONS`, `TRACE` and `CONNECT` - as Node's `http` sends a bodiless `POST`,
+ * and `undefined` for those. A form part the encoding cannot size (a `size` or `name`
+ * getter that throws) is refused, as NodeAdapter refuses it.
+ */
+function requestBodyLength(
+  body: unknown,
+  upperMethod: string,
+  formParts: ReadonlyArray<[string, FormDataEntryValue]> | undefined,
+): number | undefined {
+  if (typeof body === 'string') {
+    return utf8ByteLength(body);
+  }
+
+  if (formParts !== undefined) {
+    // The caller's form, not the route's mistake - the route has not run - but refused
+    // the same way, as NodeAdapter refuses a part it cannot size: a retry reads it again.
+    try {
+      return measureMultipartEntries(formParts, MOCK_FORM_BOUNDARY).totalSize;
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+  }
+
+  if (isRequestBodyBytes(body)) {
+    return readBinaryByteLength(body) ?? undefined;
+  }
+
+  return isBodilessContentLengthSent(upperMethod) ? 0 : undefined;
+}
+
+/**
+ * Add `value` to the list under `key`, made once per key and defined as `defineEntry`
+ * defines it.
+ */
+function appendEntry<T>(
+  record: Record<string, T[]>,
+  key: string,
+  value: T,
+): void {
+  if (Object.hasOwn(record, key)) {
+    record[key].push(value);
+  } else {
+    defineEntry(record, key, [value]);
+  }
 }
 
 function parseRequestBody(
@@ -702,10 +1631,11 @@ function parseRequestBody(
 
   const parsedContentType = parseContentType(contentType);
 
-  if (body instanceof Uint8Array) {
+  if (isRequestBodyBytes(body)) {
     // Keep opaque bytes intact so mock handlers can inspect binary payloads
     // like uploads or octet-stream requests without lossy text decoding.
     if (parsedContentType === 'binary') {
+      // The send's own copy (see `sentBody`), as a server receives its own off the wire.
       return body;
     } else if (parsedContentType === 'json') {
       // JSON requests arrive as bytes from the adapter layer, so decode first
@@ -735,20 +1665,106 @@ function parseRequestBody(
   return body;
 }
 
-function serializeResponseBody(response: MockResponse): Uint8Array | null {
+/** The fields a {@link MockResponse} takes; any other is refused as misspelled. */
+const MOCK_RESPONSE_FIELDS = fieldNames<MockResponse>({
+  status: true,
+  body: true,
+  headers: true,
+  contentType: true,
+  delay: true,
+  cookies: true,
+  streamError: true,
+  transportError: true,
+});
+
+/** A value read, or the error reading it threw, to be answered later. */
+type CapturedRead<T> = { value: T } | { error: unknown };
+
+function captureRead<T>(read: () => T): CapturedRead<T> {
+  try {
+    return { value: read() };
+  } catch (error) {
+    return { error };
+  }
+}
+
+/** The value {@link captureRead} read, or its error thrown now. */
+function unwrapCaptured<T>(captured: CapturedRead<T>): T {
+  if ('error' in captured) {
+    throw captured.error;
+  }
+
+  return captured.value;
+}
+
+/**
+ * The route's answer with each field read once, into a plain object: only the fields it
+ * has, so an absent one stays absent.
+ */
+function snapshotMockResponse(response: MockResponse): MockResponse {
+  const snapshot: Record<string, unknown> = {};
+
+  // Every field the answer is checked against (see `MOCK_RESPONSE_FIELDS`), so a field
+  // that passes the check is one the snapshot keeps.
+  for (const field of MOCK_RESPONSE_FIELDS) {
+    const value: unknown = response[field as keyof MockResponse];
+    if (value !== undefined) {
+      defineEntry(snapshot, field, value);
+    }
+  }
+
+  return snapshot as unknown as MockResponse;
+}
+
+/**
+ * A route's binary body past `maxResponseBytes`, left uncopied (see
+ * `serializeResponseBody`).
+ */
+const OVERSIZED_BODY: unique symbol = Symbol('oversized body');
+
+function serializeResponseBody(
+  response: MockResponse,
+  maxResponseBytes: number,
+): Uint8Array | null | typeof OVERSIZED_BODY {
   const { body } = response;
 
   if (body === undefined || body === null) {
     return null;
-  } else if (body instanceof Uint8Array) {
-    // Avoid JSON.stringify indexing the buffer into {"0":…,"1":…}.
-    return body;
-  } else if (body instanceof ArrayBuffer) {
-    return new Uint8Array(body);
+  } else if (isRouteBinaryBody(body)) {
+    // Past the limit, it is refused as too large whatever its bytes: measured by its slot
+    // and not copied, so a large fixture under a small limit is not held twice through
+    // the delay.
+    const byteLength = readBinaryByteLength(body) ?? 0;
+    if (byteLength > maxResponseBytes) {
+      return OVERSIZED_BODY;
+    }
+
+    // Avoid JSON.stringify indexing the buffer into {"0":…,"1":…}. Delivered as this
+    // realm's `Uint8Array` holding a copy of the route's bytes, so a caller that changes
+    // the body it was handed does not change the route's fixture for the requests after
+    // it. Copied through the internal slots, calling none of the body's own methods, and
+    // no more than the bytes measured: a `Uint8Array` over a growable
+    // `SharedArrayBuffer` another thread grew since then spans more.
+    // A `Uint8Array` past the end of a shrunk resizable buffer fails, as copying it whole
+    // does, rather than being delivered as an empty body.
+    let bytes: Uint8Array;
+    if (typedArrayNameOf(body) === 'Uint8Array') {
+      assertTypedArrayInBounds(body as Uint8Array);
+      bytes = plainBytesView(body as Uint8Array);
+    } else {
+      bytes = new Uint8Array(body);
+    }
+    return bytes.slice(0, byteLength);
   } else if (typeof body === 'string') {
-    return new TextEncoder().encode(body);
-  } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
-    return new TextEncoder().encode(JSON.stringify(body));
+    return encodedWithin(body, maxResponseBytes);
+  } else if (Array.isArray(body) || isPlainRecord(body)) {
+    // `JSON.stringify` answers `undefined` for a top-level `toJSON` that does: nothing is
+    // sent, so nothing is typed as JSON either, as the client sends such a request body.
+    const serialized = JSON.stringify(body) as string | undefined;
+
+    return serialized === undefined
+      ? null
+      : encodedWithin(serialized, maxResponseBytes);
   }
 
   throw new Error(
@@ -756,13 +1772,52 @@ function serializeResponseBody(response: MockResponse): Uint8Array | null {
   );
 }
 
+/**
+ * `text` as UTF-8, or {@link OVERSIZED_BODY} where that is past `maxResponseBytes`: told
+ * from the text before it is encoded (see `isAnsweredBodyOverLimit`), so a large fixture
+ * under a small limit is not encoded and held through the delay only to be refused.
+ */
+function encodedWithin(
+  text: string,
+  maxResponseBytes: number,
+): Uint8Array | typeof OVERSIZED_BODY {
+  return isAnsweredBodyOverLimit(text, maxResponseBytes)
+    ? OVERSIZED_BODY
+    : new TextEncoder().encode(text);
+}
+
+/**
+ * Whether a route's body is bytes the mock sends as a copy: a `Uint8Array` or an
+ * `ArrayBuffer`, from any realm (jsdom, a `vm` context), told by its internal slot, as the
+ * size check measures it. A `Proxy` over either, or a fake view on a borrowed prototype,
+ * has no slot - its `length`, iteration and copying all throw - so it is refused as an
+ * unsupported body rather than delivered as something the size check cannot measure.
+ */
+function isRouteBinaryBody(body: unknown): body is Uint8Array | ArrayBuffer {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    (typedArrayNameOf(body) === 'Uint8Array' ||
+      arrayBufferKindOf(body) === 'ArrayBuffer')
+  );
+}
+
+/**
+ * The type a route body is labelled with when the route sets none: `text` for a string,
+ * `json` for an array or a plain object, and `binary` for anything else - bytes, and a
+ * body it refuses (a `Proxy` over an `ArrayBuffer` or a `Uint8Array`, a `Map`). The caller sets no
+ * `content-type` for `binary`, so those are labelled nothing - a HEAD route or a
+ * simulated stream error never serializes the body, and those must not call it JSON
+ * either. `toJSON` is not called here, so an object whose top-level `toJSON` answers
+ * `undefined` is still labelled `json`, though nothing is then sent.
+ */
 function inferContentType(body: unknown): ContentType {
   if (typeof body === 'string') {
     return 'text';
-  } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
-    return 'binary';
-  } else {
+  } else if (Array.isArray(body) || isPlainRecord(body)) {
     return 'json';
+  } else {
+    return 'binary';
   }
 }
 
@@ -770,66 +1825,168 @@ function hasHeader(
   headers: Record<string, string | string[]>,
   name: string,
 ): boolean {
+  const lowerName = lowerCaseHeaderName(name);
+  // Set, as every header normalizer reads a value: a `null` or `undefined` one, or a list
+  // holding nothing else, is no header. The values are the route's, checked already (see
+  // `assertRouteHeaderValue`), so converting them runs none of their code.
   return Object.keys(headers).some(
-    (k) => k.toLowerCase() === name.toLowerCase(),
+    (key) =>
+      lowerCaseHeaderName(key) === lowerName &&
+      presentHeaderValue(headers[key], ROUTE_HEADER_VALUE_LABEL) !== undefined,
   );
 }
 
+/** What a route's header value is named as where its list is refused. */
+const ROUTE_HEADER_VALUE_LABEL = 'MockAdapter route response header value';
+
+/**
+ * Throw when a route's header value is not one a response carries: a string or a finite
+ * number, or a list of them - strings only for `set-cookie`, each item one line. A `null`
+ * or `undefined` value or item is no header, as the client reads one. Refused in the
+ * mock's own words, as every other route mistake is, before the client's normalizer
+ * would refuse it as the adapter's answer.
+ */
+function assertRouteHeaderValue(name: string, value: unknown): void {
+  const lowerName = lowerCaseHeaderName(name);
+  const isSetCookie = lowerName === 'set-cookie';
+  const items: unknown[] = Array.isArray(value) ? value : [value];
+
+  if (
+    items.some(
+      (item) =>
+        !isNullish(item) &&
+        (isSetCookie ? typeof item !== 'string' : !isAdapterHeaderValue(item)),
+    )
+  ) {
+    // Named only when the name is a token: a route that put a whole header line in the
+    // key (`Authorization: Bearer ...`) would otherwise write its credential here.
+    throw new TypeError(
+      `MockAdapter route returned ${describeRefusedHeader(lowerName, 'header')} whose value is not ${isSetCookie ? 'a string' : 'a string or finite number'}`,
+    );
+  }
+}
+
+/** The message of every abort MockAdapter throws. */
+const MOCK_ABORT_MESSAGE = 'The operation was aborted.';
+
 class InternalMockAbortError extends Error {
   constructor() {
-    super('The operation was aborted.');
+    super(MOCK_ABORT_MESSAGE);
     this.name = 'AbortError';
   }
 }
 
 function isInternalAbortError(error: unknown): error is InternalMockAbortError {
-  return error instanceof InternalMockAbortError;
+  try {
+    return error instanceof InternalMockAbortError;
+  } catch {
+    // Rejection reasons can be proxies whose prototype inspection throws.
+    return false;
+  }
 }
 
-function throwAbortError(): never {
-  const err = new Error('The operation was aborted.');
-  err.name = 'AbortError';
-  throw err;
+/**
+ * The mock's `AbortError`, carrying the headers the request was sent with once they are
+ * known, as NodeAdapter's aborts do, so observers of a cancel or timeout see them.
+ * Hidden, as every such tag is: the headers carry the request's credentials.
+ */
+function throwAbortError(
+  effectiveRequestHeaders?: Record<string, string | string[]>,
+): never {
+  const error = makeAbortError(MOCK_ABORT_MESSAGE);
+  if (effectiveRequestHeaders !== undefined) {
+    defineHiddenTags(error, {
+      [EFFECTIVE_REQUEST_HEADERS_KEY]: effectiveRequestHeaders,
+    });
+  }
+  throw error;
 }
 
-function shouldOmitResponseBody(method: string, status: number): boolean {
-  return method === 'HEAD' || status === 204 || status === 304;
-}
-
+/**
+ * `value` adopted, or the caller's cancel, whichever comes first. A refusal of the caller's
+ * signal raised here - one whose `addEventListener` or `aborted` throws - is added to
+ * `refusals`, so the send that waits can tell it from a failure the route threw.
+ */
 function awaitAbortable<T>(
   value: T | Promise<T>,
   signal: AbortSignal | undefined,
-): Promise<T> {
+  refusals: WeakSet<object>,
+): Promise<PromiseResultBox<Awaited<T>>> {
+  // `adoptPromise()`, not `Promise.resolve()`, for a handler's promise here and below:
+  // `Promise.resolve()` hands a native promise back with its own `then`, and a no-op one
+  // would hang the request.
+  const adopted = adoptPromise(value);
   if (!signal) {
-    return Promise.resolve(value);
+    return adopted;
   }
 
-  if (signal.aborted) {
-    throw new InternalMockAbortError();
-  }
+  return new Promise<PromiseResultBox<Awaited<T>>>((resolve, reject) => {
+    // Guarded: a signal that is not a native `AbortSignal` may refuse the removal, and
+    // a throw from the reactions below would reject their derived promise - unhandled
+    // - and leave this wait settled by nothing.
+    const detach = (): void => {
+      try {
+        signal.removeEventListener('abort', onAbort);
+      } catch {
+        // The listener stays, and is inert: the wait it ends has already settled.
+      }
+    };
 
-  return new Promise<T>((resolve, reject) => {
     // Cancellation should reject immediately with AbortError, even if the
     // wrapped handler/onHandlerError promise is still pending.
     const onAbort = () => {
-      signal.removeEventListener('abort', onAbort);
+      detach();
       reject(new InternalMockAbortError());
     };
 
-    signal.addEventListener('abort', onAbort, { once: true });
-
-    Promise.resolve(value).then(
-      (result) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(result);
-      },
-      (error) => {
-        signal.removeEventListener('abort', onAbort);
-        // Preserve real handler failures, only normalize non-Error rejections
-        // so promise rejection values stay lint-safe and predictable.
-        reject(normalizeError(error));
-      },
+    // Observed before anything else here can throw. A signal whose
+    // `addEventListener` throws rejects this wait from the executor, and the
+    // handler's promise, not yet observed, would then be an unhandled rejection.
+    observeRejection(
+      adopted.then(
+        (result) => {
+          detach();
+          // Cancellation changes the wait, not adoption of the handler's data, which
+          // stays boxed.
+          resolve(result);
+        },
+        (error: unknown) => {
+          detach();
+          // onHandlerError receives the original reason with or without a signal.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          reject(error);
+        },
+      ),
+      () => undefined,
     );
+
+    // The caller's signal: a throw is this wait's refusal of it, as an unreadable
+    // `aborted` is below - not the route's failure, for `onHandlerError` or a 500.
+    try {
+      signal.addEventListener('abort', onAbort, { once: true });
+    } catch (error) {
+      const refusal = nonRetryableAdapterErrorFrom(error);
+      refusals.add(refusal);
+      throw refusal;
+    }
+
+    // A handler can abort synchronously before returning its promise. Observe
+    // that promise before ending the wait so its rejection is still consumed.
+    let isAborted: boolean;
+
+    try {
+      isAborted = isSignalAborted(signal);
+    } catch (error) {
+      // The executor rejects with this, and nothing will settle the wait again, so the
+      // listener just attached is removed rather than left on the signal for good.
+      detach();
+      refusals.add(error as object);
+      throw error;
+    }
+
+    if (isAborted) {
+      onAbort();
+    }
   });
 }
 
@@ -839,7 +1996,7 @@ function awaitAbortable<T>(
  * both the timer and the abort listener to avoid leaks.
  */
 function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
+  if (isSignalAborted(signal)) {
     throw new InternalMockAbortError();
   }
 
@@ -850,10 +2007,97 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
     };
 
     const id = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
+      // Resolved first and the removal guarded: this runs from a timer, where a throw
+      // from a non-native signal's `removeEventListener` is an uncaught exception.
       resolve();
+      try {
+        signal.removeEventListener('abort', onAbort);
+      } catch {
+        // The listener stays, and is inert: the sleep has already ended.
+      }
     }, ms);
 
-    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      signal.addEventListener('abort', onAbort, { once: true });
+    } catch (error) {
+      // The executor rejects with this - the caller's signal refused, non-retryable,
+      // as its unreadable `aborted` is - and the timer has nothing left to end.
+      clearTimeout(id);
+      throw nonRetryableAdapterErrorFrom(error);
+    }
   });
+}
+
+/**
+ * `value` as an `onHandlerError` setting: a function or nothing, else a `TypeError` - with
+ * `cause`, when there is one: the route failure it was read for.
+ */
+function assertOnHandlerError(
+  value: unknown,
+  ...cause: [unknown?]
+): MockAdapterConfig['onHandlerError'] | null | undefined {
+  if (!isNullish(value) && typeof value !== 'function') {
+    throw new TypeError(
+      `MockAdapter onHandlerError must be a function (got ${describeValue(value)})`,
+      cause.length > 0 ? { cause: cause[0] } : undefined,
+    );
+  }
+
+  return value as MockAdapterConfig['onHandlerError'] | null | undefined;
+}
+
+/**
+ * Run a step that reads what the route returned, failing it as the route's mistake -
+ * non-retryable, as a missing response is - so a retry does not run the route again.
+ */
+function asRouteMistake<R>(step: () => R): R {
+  try {
+    return step();
+  } catch (error) {
+    throw nonRetryableAdapterErrorFrom(error);
+  }
+}
+
+/**
+ * Throw when `text` fails the jar's own rule for cookie text: a `;` or control character
+ * that would change a `Set-Cookie` line's framing, a character above U+00FF, which a real
+ * server's `setHeader` refuses and the jar drops, or a space or tab at its edges, which
+ * the jar would trim off what it stores. A tab inside it passes, as it does in a raw
+ * `set-cookie` the jar reads. A name (`isName`) is held to the jar's rule for one too -
+ * no `=` - and is not empty: a nameless cookie is written as a raw `set-cookie`.
+ */
+function assertCookieText(text: string, part: string, isName = false): void {
+  const isWritable = isName
+    ? text !== '' && isWritableCookieName(text)
+    : isWritableCookieValue(text);
+
+  if (!isWritable) {
+    // The jar's rule decides; only the reason given is told apart here. Edge whitespace is
+    // named only when it is all that is wrong: text that also holds a `;`, a control
+    // character or one above U+00FF is refused for that, which trimming would not cure.
+    const isOnlyPadded =
+      trimSpacesAndTabs(text) !== text &&
+      isHeaderSafeCookieText(text, isName ? '=' : '');
+    throw new TypeError(
+      isOnlyPadded
+        ? `MockAdapter cookie ${part} has a space or tab at an edge, which the cookie jar would trim off`
+        : `MockAdapter cookie ${part} cannot be written into a Set-Cookie line`,
+    );
+  }
+}
+
+/** A cookie value as the `cookie` package reads it: unquoted, then percent-decoded. */
+function decodeCookieValue(raw: string): string {
+  const unquoted =
+    raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')
+      ? raw.slice(1, -1)
+      : raw;
+  if (!unquoted.includes('%')) {
+    return unquoted;
+  }
+  try {
+    return decodeURIComponent(unquoted);
+  } catch {
+    return unquoted;
+  }
 }

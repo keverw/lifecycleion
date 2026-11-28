@@ -7,11 +7,58 @@ import importPlugin from 'eslint-plugin-import';
 import unicorn from 'eslint-plugin-unicorn';
 import checkFile from 'eslint-plugin-check-file';
 
+/**
+ * `no-restricted-syntax` entries refusing each method in `methods` (a regex alternation)
+ * however it is named: `x.trim`, `x['trim']`, ``x[`trim`]``, and destructured as
+ * `const { trim } = x`, `const { 'trim': t } = x`, `const { ['trim']: t } = x` or
+ * ``const { [`trim`]: t } = x``.
+ */
+function restrictedMembers(methods, message) {
+  const names = `/^(${methods})$/`;
+
+  return [
+    `MemberExpression[computed=false][property.name=${names}]`,
+    `MemberExpression[computed=true][property.type='Literal'][property.value=${names}]`,
+    `MemberExpression[computed=true][property.type='TemplateLiteral'][property.expressions.length=0][property.quasis.0.value.cooked=${names}]`,
+    `ObjectPattern > Property[computed=false][key.name=${names}]`,
+    `ObjectPattern > Property[key.type='Literal'][key.value=${names}]`,
+    `ObjectPattern > Property[computed=true][key.type='TemplateLiteral'][key.expressions.length=0][key.quasis.0.value.cooked=${names}]`,
+  ].map((selector) => ({ selector, message }));
+}
+
+/**
+ * A regex lookbehind (`(?<=`, `(?<!`) fails to parse in Safari before 16.4, so a module
+ * holding one fails to load there: refused in shipped source, as a regex literal or as
+ * any string or template text that holds one, however the `RegExp` is then built.
+ */
+const NO_REGEX_LOOKBEHIND = [
+  'Literal[regex.pattern=/\\(\\?<[=!]/]',
+  // Any string or template text that holds one whole: a pattern built from constants or
+  // through `globalThis.RegExp` takes it from a literal somewhere. One split across two
+  // literals (`'(?' + '<=x)'`) is not caught.
+  'Literal[value=/\\(\\?<[=!]/]',
+  'TemplateElement[value.raw=/\\(\\?<[=!]/]',
+].map((selector) => ({
+  selector,
+  message:
+    'A regex lookbehind does not parse in Safari before 16.4, which then fails to load the module. Match without one.',
+}));
+
+/** Shipped source: tests and test support may use what the test runtime parses. */
+const SHIPPED_SOURCE_IGNORES = [
+  '**/*.test.ts',
+  '**/*.browser-script.ts',
+  '**/*test-utils.ts',
+  '**/test-helpers/**',
+];
+
 export default [
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
     ignores: [
+      // Worktrees the Claude desktop app creates inside the repo, each a full checkout
+      '.claude/worktrees/**',
       // Build outputs
       '**/dist/**',
       '**/coverage/**',
@@ -416,6 +463,37 @@ export default [
       ...reactHooks.configs.recommended.rules,
       // JSX Accessibility rules
       ...jsxA11y.flatConfigs.recommended.rules,
+    },
+  },
+  {
+    files: ['src/**/*.ts'],
+    ignores: SHIPPED_SOURCE_IGNORES,
+    rules: {
+      'no-restricted-syntax': ['error', ...NO_REGEX_LOOKBEHIND],
+    },
+  },
+  {
+    // Wire and config text in the HTTP client and domain utilities is read by ASCII and
+    // HTTP rules, never the Unicode-aware built-ins: `toLowerCase` turns the Kelvin sign
+    // into `k`, and `trim()` takes a no-break space (the last byte of a UTF-8 `à` read as
+    // latin1). The member itself is matched, not only a call through it, so a computed
+    // key (`x['trim']`), `.call` / `.apply`, an alias (assigned or destructured) and
+    // `Reflect.apply` are caught too. Tests and test support are left alone.
+    files: ['src/lib/http-client/**/*.ts', 'src/lib/domain-utils/**/*.ts'],
+    ignores: SHIPPED_SOURCE_IGNORES,
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...NO_REGEX_LOOKBEHIND,
+        ...restrictedMembers(
+          'trim|trimStart|trimEnd|trimLeft|trimRight',
+          'Unicode-aware trim also takes a no-break space. Use trimHTTPWhitespace or trimSpacesAndTabs (src/lib/internal/ascii-text.ts), or isBlankText / hasWhitespaceEdge where any whitespace is meant.',
+        ),
+        ...restrictedMembers(
+          'toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase',
+          'Unicode case mapping folds look-alikes into ASCII (the Kelvin sign into k). Use asciiLowercase or asciiUppercase (src/lib/internal/ascii-text.ts).',
+        ),
+      ],
     },
   },
   {

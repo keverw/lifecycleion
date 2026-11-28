@@ -1,14 +1,17 @@
 export { HTTPClient } from './http-client';
 export type { HTTPSubClient } from './http-client';
-export { HTTPRequestBuilder } from './http-request-builder';
+// Made by the client's request methods: exported to annotate with, not to construct.
+export type { HTTPRequestBuilder } from './http-request-builder';
 export { CookieJar } from './cookie-jar';
 export { FetchAdapter } from './adapters/fetch-adapter';
 
 export type {
+  HTTPRetryPolicyOptions,
   HTTPAdapter,
   AdapterType,
   AdapterRequest,
   AdapterResponse,
+  AdapterProgressEvent,
   HTTPMethod,
   ContentType,
   QueryValue,
@@ -31,6 +34,8 @@ export type {
   ResponseObserver,
   ErrorObserver,
   InterceptedRequest,
+  RequestHeadersInput,
+  RequestCancelResult,
   AttemptRequest,
   RequestPhase,
   RequestPhaseName,
@@ -62,6 +67,7 @@ export type { RequestInfo } from './request-tracker';
 export {
   RETRYABLE_STATUS_CODES,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_MAX_RESPONSE_BYTES,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,

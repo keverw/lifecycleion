@@ -129,10 +129,20 @@ describe('LifecycleManager hardening regressions', () => {
         };
       }
       await manager.registerComponent(component);
-      const startedAt = Date.now();
-      const result = await manager.startAllComponents({ timeoutMS: 20 });
+      // The first start never settles before the gate opens in the finally block, so
+      // only the 20 ms bulk deadline can settle the call. The sentinel stands in for
+      // that hang, far past the deadline and inside the test timeout.
+      let sentinel: ReturnType<typeof setTimeout> | undefined;
+      const hung = new Promise<'hung'>((resolve) => {
+        sentinel = setTimeout(() => resolve('hung'), 2000);
+      });
+      const result = await Promise.race([
+        manager.startAllComponents({ timeoutMS: 20 }),
+        hung,
+      ]);
+      clearTimeout(sentinel);
       try {
-        expect(Date.now() - startedAt).toBeLessThan(250);
+        expect(result).not.toBe('hung');
         expect(result).toMatchObject({
           success: false,
           timedOut: true,

@@ -631,10 +631,27 @@ describe('redactMatchedPaths - shape of a masked container', () => {
     // an own index key past the end - so a claim in the tens of millions passed every
     // test and was then materialized, element by element, before anything could refuse
     // it. Answered without allocating for it, and fail-closed as every refusal here is.
-    const start = Date.now();
-
     expect(parseRedactPaths(new Array(50_000_000))).toBeNull();
-    expect(Date.now() - start).toBeLessThan(1_000);
+
+    // Refused on its claimed length alone: no element read and no keys listed.
+    const touched: PropertyKey[] = [];
+    const claiming = new Proxy(['password'], {
+      get: (_target, key) => {
+        if (key === 'length') {
+          return 50_000_000;
+        }
+        touched.push(key);
+        // Thrown, so a list that is read stops at its first element.
+        throw new Error(`read ${String(key)}`);
+      },
+      ownKeys: (target) => {
+        touched.push('ownKeys');
+        return Reflect.ownKeys(target);
+      },
+    });
+
+    expect(parseRedactPaths(claiming)).toBeNull();
+    expect(touched).toEqual([]);
 
     // Nothing a real configuration would hit.
     expect(parseRedactPaths(['password', 'token'])).toHaveLength(2);
@@ -875,7 +892,18 @@ describe('redactMatchedPaths - the depth cap', () => {
     // list actually addresses: 20 shared objects under a wildcard path spent seconds
     // inside one pass and then exhausted the entry budget, blanking an unrelated sibling
     // with the failure marker.
-    const leaf: Record<string, unknown> = { card: '4111', note: 'keep-me' };
+    // Counts each time the walk lists the leaf's keys. Every route reaches the leaf at
+    // the same depth, under the same path, so they all share one position.
+    let leafWalks = 0;
+    const leaf = new Proxy<Record<string, unknown>>(
+      { card: '4111', note: 'keep-me' },
+      {
+        ownKeys: (target) => {
+          leafWalks++;
+          return Reflect.ownKeys(target);
+        },
+      },
+    );
     let node: Record<string, unknown> = leaf;
     const parts = ['order'];
 
@@ -888,16 +916,14 @@ describe('redactMatchedPaths - the depth cap', () => {
 
     parts.push('card');
 
-    const started = Date.now();
     const result = redactMatchedPaths(
       { order: node, note: 'sibling' },
       paths(parts.join('.')),
       undefined,
     ) as Record<string, unknown>;
 
-    // Route by route this is 2^20 walks. The bound being tested is the shape of the work,
-    // so the assertion is generous rather than a benchmark.
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // Walked once per position; route by route, up to 2^20 times.
+    expect(leafWalks).toBe(1);
 
     // And the sibling the exhausted budget used to blank.
     expect(result.note).toBe('sibling');
@@ -937,28 +963,39 @@ describe('redactMatchedPaths - the masking budget', () => {
     // `logger.info()`.
     const payload: Record<string, unknown> = {};
     const keys: string[] = [];
+    // Each array's first element counts its reads, so this is how many arrays a mask
+    // began to walk.
+    let arraysRead = 0;
 
     for (let index = 0; index < 40; index++) {
       const key = `k${index}`;
+      const array = Array.from({ length: 400_000 }, () => 'x');
 
+      Object.defineProperty(array, 0, {
+        enumerable: true,
+        get: () => {
+          arraysRead++;
+          return 'x';
+        },
+      });
       keys.push(key);
-      payload[key] = Array.from({ length: 400_000 }, () => 'x');
+      payload[key] = array;
     }
 
-    const started = Date.now();
     const redacted = redactMatchedPaths(
       payload,
       paths(...keys),
       undefined,
     ) as Record<string, unknown>;
-    const elapsedMS = Date.now() - started;
 
     // Past the pass's allowance a mask yields the placeholder rather than the original, so
     // the later keys over-mask - which is the safe direction - and the pass stays bounded.
     const masked = keys.filter((key) => Array.isArray(redacted[key])).length;
 
+    // One allowance of a million, each element charged at least one, reaches into at most
+    // three of these arrays; an allowance per match reaches into all forty.
+    expect(arraysRead).toBeLessThanOrEqual(3);
     expect(masked).toBeLessThan(40);
-    expect(elapsedMS).toBeLessThan(4_000);
 
     for (const key of keys) {
       expect(redacted[key]).not.toBe(payload[key]);

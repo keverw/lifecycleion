@@ -18,6 +18,10 @@ import {
 import { markDiagnosticEntry } from '../internal/sink-failure-routing';
 import { reportToConsole } from '../../internal/report-to-console';
 import { setOpenRetryBackoffForTesting } from './internal/reopen-backoff';
+import {
+  CLOSE_REOPEN_GRACE_MS,
+  CLOSE_REOPEN_POLL_MS,
+} from './internal/delivery-engine';
 
 /**
  * Open retries spaced in milliseconds rather than seconds, for tests that wait for the
@@ -173,6 +177,8 @@ async function waitForReaderData(
 interface EngineSeam {
   /** The most recent open attempt, settled. Never rejects. */
   readonly openSettled: Promise<void>;
+  /** How many open attempts have started. */
+  readonly openAttemptsStarted: number;
   slots: Array<Record<string, unknown>>;
   inFlightCount: number;
   closing: boolean;
@@ -4900,7 +4906,7 @@ describe('NamedPipeSink', () => {
       message: 'nobody is listening',
     });
 
-    const startedAt = Date.now();
+    const attemptsBefore = engineOf(sink).openAttemptsStarted;
 
     // No `onError`, so the abandoned entry is reported on the console.
     const captured = muteConsoleError();
@@ -4911,14 +4917,17 @@ describe('NamedPipeSink', () => {
       restoreConsoleError();
     }
 
-    const elapsed = Date.now() - startedAt;
-
     expect(captured).toHaveLength(1);
     expect(captured[0]).toContain('Closed with 1 entry still queued');
 
-    // Comfortably inside `closeTimeoutMS`, which is what the grace window exists to stay
-    // clear of; the upper bound is loose so a slow machine does not make this flake.
-    expect(elapsed).toBeLessThan(3000);
+    // One attempt per poll across the grace window, and no more: retrying for
+    // `closeTimeoutMS` would have made well over a hundred.
+    const closeAttempts = engineOf(sink).openAttemptsStarted - attemptsBefore;
+
+    expect(closeAttempts).toBeGreaterThan(0);
+    expect(closeAttempts).toBeLessThanOrEqual(
+      CLOSE_REOPEN_GRACE_MS / CLOSE_REOPEN_POLL_MS + 1,
+    );
     expect(sink.getHealth().droppedEntries).toBe(1);
   }, 15000);
 });
@@ -5449,7 +5458,7 @@ describe('NamedPipeSink - flush()', () => {
     try {
       sink.write(makeEntry('held'));
 
-      const startedAt = Date.now();
+      const attemptsBefore = engineOf(sink).openAttemptsStarted;
 
       expect(await sink.flush(5000)).toEqual({
         success: false,
@@ -5458,8 +5467,8 @@ describe('NamedPipeSink - flush()', () => {
         timedOut: false,
         entriesQueued: 1,
       });
-      // The next attempt, not the deadline.
-      expect(Date.now() - startedAt).toBeLessThan(1000);
+      // The next attempt, not a later one or the deadline.
+      expect(engineOf(sink).openAttemptsStarted - attemptsBefore).toBe(1);
       expect(sink.getHealth().queueSize).toBe(1);
     } finally {
       await sink.close();

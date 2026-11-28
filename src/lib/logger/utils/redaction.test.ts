@@ -11,6 +11,7 @@ import {
   REDACTION_FAILED_MARKER,
 } from './redaction';
 import type { RedactFunction } from '../types';
+import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 
 test('preserves an opaque value with a harmless own getter', () => {
   const ctx = new (class Context {})();
@@ -918,15 +919,29 @@ describe('applyRedaction - non-identifier key names', () => {
     // 76 seconds synchronously inside `logger.info()`, on a payload of a few hundred
     // kilobytes and a budget barely touched. The frames are deduplicated on
     // `(container, node)` now, which is why this is flat in the number of aliases.
-    const items = new Array(100_000).fill(0);
-    const orders = Array.from({ length: 4_000 }, () => ({ items }));
+    const elementReadsWith = (aliasCount: number): number => {
+      let reads = 0;
+      const items = new Proxy(new Array(10_000).fill(0), {
+        get: (target, key, receiver) => {
+          if (typeof key === 'string' && /^\d+$/.test(key)) {
+            reads++;
+          }
 
-    const started = Date.now();
+          return Reflect.get(target, key, receiver) as unknown;
+        },
+      });
+      const orders = Array.from({ length: aliasCount }, () => ({ items }));
 
-    applyRedaction({ orders }, ['orders[*].items[*].card']);
+      applyRedaction({ orders }, ['orders[*].items[*].card']);
 
-    // Deliberately loose: it fails only on a return to the per-alias rescan.
-    expect(Date.now() - started).toBeLessThan(15_000);
+      return reads;
+    };
+
+    const withFewer = elementReadsWith(1_000);
+
+    // Four times the aliases, and the shared array's elements read exactly as often.
+    expect(withFewer).toBeGreaterThan(0);
+    expect(elementReadsWith(4_000)).toBe(withFewer);
   });
 
   test('repoints every parent holding an alias, not just the one descended', () => {
@@ -1987,15 +2002,26 @@ describe('the redaction walk is bounded by entries, not by a reported length', (
     // writable property a `get` trap may answer with any number. A proxy reporting five
     // million spun `applyRedaction` synchronously inside `logger.info()` for well over a
     // second; `2 ** 32 - 1` is about twenty minutes of it.
+    let elementReads = 0;
     const lying = new Proxy([1, 2, 3], {
-      get: (target, key) =>
-        key === 'length' ? 2 ** 32 - 1 : Reflect.get(target, key),
+      get: (target, key) => {
+        if (key === 'length') {
+          return 2 ** 32 - 1;
+        }
+
+        if (typeof key === 'string' && /^\d+$/.test(key)) {
+          elementReads++;
+        }
+
+        return Reflect.get(target, key) as unknown;
+      },
     });
 
-    const startedAt = Date.now();
     const redacted = applyRedaction({ lying, password: SECRET }, ['password']);
 
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    // The scan and the walk each stop at the pass's entry budget, whatever `length` says.
+    expect(elementReads).toBeGreaterThan(0);
+    expect(elementReads).toBeLessThanOrEqual(2 * MAX_REDACTION_ENTRIES);
     expect(redacted.password).not.toBe(SECRET);
   });
 
@@ -2004,12 +2030,18 @@ describe('the redaction walk is bounded by entries, not by a reported length', (
     // string: on a dense five-million-element array that is seconds and hundreds of
     // megabytes, synchronously inside `logger.info()` - the exact stall the budget exists
     // to bound, run unconditionally right after the index loop had already stopped for it.
-    const arr = new Array<number>(5_000_000).fill(1);
+    const listings: string[] = [];
+    const arr = new Proxy(new Array<number>(5_000_000).fill(1), {
+      ownKeys: (target) => {
+        listings.push('ownKeys');
+        return Reflect.ownKeys(target);
+      },
+    });
 
-    const startedAt = Date.now();
     const redacted = applyRedaction({ arr, password: SECRET }, ['password']);
 
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    // Its keys are never listed: the budget ran out in the index loop, before a listing.
+    expect(listings).toEqual([]);
     // Fails closed rather than leaking: the budget ran out before the key was reached.
     expect(redacted.password).not.toBe(SECRET);
   });
@@ -2025,19 +2057,38 @@ describe('the redaction walk is bounded by entries, not by a reported length', (
       (_unused, index) => `note${String(index)}`,
     );
 
+    // Each question asked about an invented key: its descriptor, or its value.
+    let inventedReads = 0;
+    const isInvented = (key: string | symbol): boolean =>
+      typeof key === 'string' && key.startsWith('note');
     const wide = new Proxy([] as unknown[], {
-      ownKeys: () => invented,
-      getOwnPropertyDescriptor: () => ({
-        value: 1,
-        enumerable: true,
-        configurable: true,
-      }),
+      // The target's own `length` is listed too: a `Proxy` over an array that leaves it
+      // out breaks an invariant, and every listing of it throws before any key is seen.
+      ownKeys: (target) => [...invented, ...Reflect.ownKeys(target)],
+      getOwnPropertyDescriptor: (target, key) => {
+        if (!isInvented(key)) {
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        }
+
+        inventedReads++;
+
+        return { value: 1, enumerable: true, configurable: true };
+      },
+      get: (target, key) => {
+        if (!isInvented(key)) {
+          return Reflect.get(target, key) as unknown;
+        }
+
+        inventedReads++;
+
+        return 1;
+      },
     });
 
-    const startedAt = Date.now();
     const redacted = applyRedaction({ wide, password: SECRET }, ['password']);
 
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    // No more of the invented keys is asked about than one pass's entry budget.
+    expect(inventedReads).toBeLessThanOrEqual(MAX_REDACTION_ENTRIES);
     expect(redacted.password).not.toBe(SECRET);
   });
 

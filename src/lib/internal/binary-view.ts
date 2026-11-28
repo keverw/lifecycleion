@@ -1,3 +1,4 @@
+import { MAX_PROTOTYPE_DEPTH } from './prototype-depth';
 import { readUnknownMember } from './read-member';
 
 /**
@@ -55,14 +56,39 @@ const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   'byteLength',
 )?.get;
 
+const TYPED_ARRAY_BUFFER = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  'buffer',
+)?.get;
+
+const TYPED_ARRAY_BYTE_OFFSET = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  'byteOffset',
+)?.get;
+
 const TYPED_ARRAY_LENGTH = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype) as object,
   'length',
 )?.get;
 
+const TYPED_ARRAY_TO_STRING_TAG = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  Symbol.toStringTag,
+)?.get;
+
 const DATA_VIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   DataView.prototype,
   'byteLength',
+)?.get;
+
+const DATA_VIEW_BUFFER = Object.getOwnPropertyDescriptor(
+  DataView.prototype,
+  'buffer',
+)?.get;
+
+const DATA_VIEW_BYTE_OFFSET = Object.getOwnPropertyDescriptor(
+  DataView.prototype,
+  'byteOffset',
 )?.get;
 
 const ARRAY_BUFFER_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
@@ -76,6 +102,129 @@ const SHARED_ARRAY_BUFFER_BYTE_LENGTH =
         ?.get
     : undefined;
 /* eslint-enable @typescript-eslint/unbound-method */
+
+/**
+ * A typed array's `buffer`, read through the intrinsic getter rather than the value's own,
+ * which a subclass or an own property can override. Throws, as the getter does, for a
+ * value that is not a typed array.
+ */
+export function readTypedArrayBuffer(view: ArrayBufferView): ArrayBufferLike {
+  return Reflect.apply(
+    TYPED_ARRAY_BUFFER as () => unknown,
+    view,
+    [],
+  ) as ArrayBufferLike;
+}
+
+/** A typed array's `byteOffset`, read as {@link readTypedArrayBuffer} reads its buffer. */
+export function readTypedArrayByteOffset(view: ArrayBufferView): number {
+  return Reflect.apply(
+    TYPED_ARRAY_BYTE_OFFSET as () => unknown,
+    view,
+    [],
+  ) as number;
+}
+
+/**
+ * The buffer a typed array or `DataView` is over, read through the intrinsic getters as
+ * {@link plainBytesView} reads it. Throws for a value that is neither.
+ */
+export function readViewBuffer(view: ArrayBufferView): ArrayBufferLike {
+  if (isDataViewBrand(view)) {
+    return Reflect.apply(
+      DATA_VIEW_BUFFER as () => unknown,
+      view,
+      [],
+    ) as ArrayBufferLike;
+  }
+
+  return readTypedArrayBuffer(view);
+}
+
+/**
+ * Whether `buffer` is this realm's own `ArrayBuffer`, with nothing of its own - a
+ * `byteLength` getter, say - to report another length than it holds.
+ */
+export function isPlainArrayBuffer(buffer: object): boolean {
+  return (
+    Object.getPrototypeOf(buffer) === ArrayBuffer.prototype &&
+    Reflect.ownKeys(buffer).length === 0
+  );
+}
+
+/**
+ * `buffer`'s byte length where it is a fixed-length, unshared `ArrayBuffer` from any realm
+ * - memory no other thread writes and that cannot change size, so bytes over it may be
+ * kept as they are - read once through the intrinsic getters; `null` for anything else, a
+ * resizable `ArrayBuffer` and any `SharedArrayBuffer` included, whose bytes are copied by
+ * whatever keeps them.
+ */
+export function fixedUnsharedByteLength(buffer: object): number | null {
+  const byteLength = callByteLengthGetter(ARRAY_BUFFER_BYTE_LENGTH, buffer);
+
+  return byteLength === null || isResizableBuffer(buffer, 'ArrayBuffer')
+    ? null
+    : byteLength;
+}
+
+/**
+ * Whether `buffer` can change size - a resizable `ArrayBuffer` or a growable
+ * `SharedArrayBuffer`, from any realm - told through the intrinsic getters. `false` for a
+ * fixed buffer, for anything that is not one, and on a runtime with no resizable buffers,
+ * whose getters are missing. `kind` is the buffer's, where the caller has told it already.
+ */
+export function isResizableBuffer(
+  buffer: object,
+  kind = arrayBufferKindOf(buffer),
+): boolean {
+  if (kind === 'ArrayBuffer') {
+    return Reflect.get(ArrayBuffer.prototype, 'resizable', buffer) === true;
+  }
+
+  return (
+    kind === 'SharedArrayBuffer' &&
+    Reflect.get(SharedArrayBuffer.prototype, 'growable', buffer) === true
+  );
+}
+
+/**
+ * `view` as a plain `Uint8Array` over the same bytes - a view, not a copy - built from the
+ * intrinsic `buffer`, `byteOffset` and `byteLength` getters rather than the view's own,
+ * which a subclass or an own property can override: a typed array's, or for a `DataView`,
+ * the ones `DataView` declares. Throws for a value that is neither, as those getters do,
+ * and for one over a detached buffer, as a `DataView`'s getters and the `Uint8Array`
+ * constructor do.
+ */
+export function plainBytesView(view: ArrayBufferView): Uint8Array {
+  const buffer = readViewBuffer(view);
+
+  if (isDataViewBrand(view)) {
+    return new Uint8Array(
+      buffer,
+      Reflect.apply(DATA_VIEW_BYTE_OFFSET as () => unknown, view, []) as number,
+      Reflect.apply(DATA_VIEW_BYTE_LENGTH as () => unknown, view, []) as number,
+    );
+  }
+
+  return new Uint8Array(
+    buffer,
+    readTypedArrayByteOffset(view),
+    Reflect.apply(TYPED_ARRAY_BYTE_LENGTH as () => unknown, view, []) as number,
+  );
+}
+
+/**
+ * Throws a `TypeError`, as `slice` and the other typed array methods do, for a typed array
+ * over a detached buffer or past the end of a shrunk resizable one - which its getters, and
+ * so {@link plainBytesView}, read as empty. Checked by the intrinsic `keys`, which reads
+ * no element and runs none of the view's own code.
+ */
+export function assertTypedArrayInBounds(view: ArrayBufferView): void {
+  const prototype = Object.getPrototypeOf(Uint8Array.prototype) as {
+    keys: () => unknown;
+  };
+  Reflect.apply(prototype.keys, view, []);
+}
 
 /** Binary template lookup exposes numeric elements and intrinsic length, not expandos. */
 export function readBinaryTemplateMember(value: object, key: string): unknown {
@@ -97,6 +246,14 @@ export function readBinaryTemplateMember(value: object, key: string): unknown {
   }
   return (value as Record<string, unknown>)[key];
 }
+
+/** The `byteLength` getters {@link readBinaryByteLength} tries, in order. */
+const BYTE_LENGTH_GETTERS = [
+  TYPED_ARRAY_BYTE_LENGTH,
+  DATA_VIEW_BYTE_LENGTH,
+  ARRAY_BUFFER_BYTE_LENGTH,
+  SHARED_ARRAY_BUFFER_BYTE_LENGTH,
+] as const;
 
 /** One intrinsic getter's answer for `value`, or `null` when it is not that kind. */
 function callByteLengthGetter(
@@ -125,20 +282,160 @@ function callByteLengthGetter(
 }
 
 /**
+ * Which kind of typed array `value` is - `'Uint8Array'`, `'Int16Array'` and so on - read
+ * from its internal slot through the intrinsic `Symbol.toStringTag` getter, so from any
+ * realm (a `vm` context's or an iframe's, which `instanceof` misses), and not from a tag
+ * the value or its prototype declares; `undefined` for anything else, a `Proxy` over a
+ * typed array included. A `Buffer` is a `'Uint8Array'`.
+ */
+export function typedArrayNameOf(value: object): string | undefined {
+  if (TYPED_ARRAY_TO_STRING_TAG === undefined) {
+    return undefined;
+  }
+
+  try {
+    const name: unknown = TYPED_ARRAY_TO_STRING_TAG.call(value);
+    return typeof name === 'string' ? name : undefined;
+  } catch {
+    // The getter answers `undefined` rather than throwing for a value that is not one; a
+    // host whose getter throws is read the same way.
+    return undefined;
+  }
+}
+
+/** Whether `value` is a `Uint8Array`, told by its internal slot, so from any realm. */
+export function isUint8ArrayValue(value: unknown): value is Uint8Array {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typedArrayNameOf(value) === 'Uint8Array'
+  );
+}
+
+/**
  * Whether `value` is an `ArrayBuffer` or `SharedArrayBuffer` - the backing store itself
  * rather than a view over one.
  *
- * `ArrayBuffer.isView` is deliberately false for these, and without this they fell through
- * to the generic object naming and rendered as `[ArrayBuffer]`: correct, cheap, and silent
- * about the one thing worth knowing. There is no decode to avoid here - a buffer has no
- * useful string form at any size - so unlike a view this needs no budget test. It is purely
- * that forty megabytes and two bytes should not read the same.
+ * `ArrayBuffer.isView` is deliberately false for these, and without this they would fall
+ * through to the generic object naming and render as `[ArrayBuffer]`: correct, cheap, and
+ * silent about the one thing worth knowing. There is no decode to avoid here - a buffer
+ * has no useful string form at any size - so unlike a view this needs no budget test. It
+ * is purely that forty megabytes and two bytes should not read the same.
  */
 export function isArrayBufferLike(value: object): boolean {
-  return (
-    callByteLengthGetter(ARRAY_BUFFER_BYTE_LENGTH, value) !== null ||
-    callByteLengthGetter(SHARED_ARRAY_BUFFER_BYTE_LENGTH, value) !== null
+  return arrayBufferKindOf(value) !== undefined;
+}
+
+/**
+ * Which kind of buffer `value` is - `ArrayBuffer` or `SharedArrayBuffer` - told by its
+ * internal slot through the intrinsic getters, so from any realm; `undefined` for
+ * anything else. A detached `ArrayBuffer` is still one (its `byteLength` reads `0`).
+ */
+export function arrayBufferKindOf(
+  value: object,
+): 'ArrayBuffer' | 'SharedArrayBuffer' | undefined {
+  if (callByteLengthGetter(ARRAY_BUFFER_BYTE_LENGTH, value) !== null) {
+    return 'ArrayBuffer';
+  }
+
+  if (callByteLengthGetter(SHARED_ARRAY_BUFFER_BYTE_LENGTH, value) !== null) {
+    return 'SharedArrayBuffer';
+  }
+
+  return undefined;
+}
+
+/**
+ * Whether `value`'s prototype chain holds a buffer's own prototype - an `ArrayBuffer` or
+ * `SharedArrayBuffer`, from any realm - told by its `Symbol.toStringTag`, read off the
+ * prototypes so a `Proxy`'s `get` trap is not run. A chain that throws answers no.
+ */
+export function hasBufferTagInChain(value: object): boolean {
+  return someInPrototypeChain(value, (prototype) =>
+    isBufferTag(ownToStringTag(prototype)),
   );
+}
+
+/**
+ * Whether `value`'s prototype chain holds a prototype whose own `Symbol.toStringTag` is
+ * `tag` - a built-in's, from any realm, under a subclass with a tag of its own - read off
+ * the prototypes as plain values, so no getter runs (a `Proxy`'s `getPrototypeOf` and
+ * `getOwnPropertyDescriptor` traps do). A chain that throws answers no.
+ */
+export function hasOwnToStringTagInChain(value: object, tag: string): boolean {
+  return someInPrototypeChain(
+    value,
+    (prototype) => ownToStringTag(prototype) === tag,
+  );
+}
+
+/**
+ * Whether the chain from `prototype` - itself, then its prototypes - holds a buffer's own
+ * prototype, told as `hasBufferTagInChain` tells it; `null` for a chain that throws or
+ * runs past {@link MAX_PROTOTYPE_DEPTH} links, so a caller can tell an answer from a
+ * failure to give one.
+ */
+export function hasBufferTagInChainFrom(prototype: object): boolean | null {
+  return matchInChainFrom(prototype, (link) =>
+    isBufferTag(ownToStringTag(link)),
+  );
+}
+
+/**
+ * Whether `matches` holds for some prototype in `value`'s chain, up to
+ * {@link MAX_PROTOTYPE_DEPTH} of them; `false` if it throws.
+ */
+function someInPrototypeChain(
+  value: object,
+  matches: (prototype: object) => boolean,
+): boolean {
+  let prototype: object | null;
+  try {
+    prototype = Object.getPrototypeOf(value) as object | null;
+  } catch {
+    // A hostile chain: not bytes as far as can be told.
+    return false;
+  }
+
+  return matchInChainFrom(prototype, matches) === true;
+}
+
+/**
+ * Whether `matches` holds for `prototype` or one of its prototypes, up to
+ * {@link MAX_PROTOTYPE_DEPTH} links in all; `null` if the chain throws or goes on past
+ * them, neither being an answer about the whole chain.
+ */
+function matchInChainFrom(
+  prototype: object | null,
+  matches: (prototype: object) => boolean,
+): boolean | null {
+  try {
+    for (let depth = 1; prototype !== null; depth++) {
+      if (matches(prototype)) {
+        return true;
+      }
+
+      prototype = Object.getPrototypeOf(prototype) as object | null;
+
+      if (depth === MAX_PROTOTYPE_DEPTH && prototype !== null) {
+        return null;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return false;
+}
+
+/** A prototype's own `Symbol.toStringTag`, as a plain value; getters are not run. */
+function ownToStringTag(prototype: object): unknown {
+  return Object.getOwnPropertyDescriptor(prototype, Symbol.toStringTag)?.value;
+}
+
+/** A buffer's tag: an `ArrayBuffer`'s or a `SharedArrayBuffer`'s. */
+function isBufferTag(tag: unknown): boolean {
+  return tag === 'ArrayBuffer' || tag === 'SharedArrayBuffer';
 }
 
 /**
@@ -150,18 +447,15 @@ export function isArrayBufferLike(value: object): boolean {
  * nothing. A subclass that under-reports would otherwise be handed the slow path it just
  * claimed not to need - which is the one case a size check exists to catch.
  *
- * `null` - a foreign-realm view neither getter recognizes, a detached buffer, a host
- * without one of the intrinsics - means "no usable measurement", and every caller reads
- * that as "assume it does not fit", the way every other bound here fails closed on a
- * measurement it could not take.
+ * `null` - a value no getter recognizes (a `Proxy`, which has no internal slots), a host
+ * without one of the intrinsics - means "no usable measurement", and every caller fails
+ * closed on it, the way every other bound here does on a measurement it could not take:
+ * as "assume it does not fit", or, for an HTTP adapter's body, as no body at all. A
+ * detached buffer, or a view over one, measures `0`: the getters read it as empty, which
+ * is what it holds.
  */
 export function readBinaryByteLength(value: object): number | null {
-  for (const getter of [
-    TYPED_ARRAY_BYTE_LENGTH,
-    DATA_VIEW_BYTE_LENGTH,
-    ARRAY_BUFFER_BYTE_LENGTH,
-    SHARED_ARRAY_BUFFER_BYTE_LENGTH,
-  ]) {
+  for (const getter of BYTE_LENGTH_GETTERS) {
     const byteLength = callByteLengthGetter(getter, value);
 
     if (byteLength !== null) {
@@ -169,5 +463,26 @@ export function readBinaryByteLength(value: object): number | null {
     }
   }
 
+  // A `DataView` over a detached buffer, or one a resizable buffer shrank out from under:
+  // its `byteLength` getter throws where a typed array's reads `0`, so it is told by its
+  // `buffer` getter, which does not, and measures `0` as such a typed array does.
+  if (isDataViewBrand(value)) {
+    return 0;
+  }
+
   return null;
+}
+
+/** Whether `value` is a `DataView`, told by an intrinsic getter that never throws for one. */
+function isDataViewBrand(value: object): boolean {
+  if (DATA_VIEW_BUFFER === undefined) {
+    return false;
+  }
+
+  try {
+    DATA_VIEW_BUFFER.call(value);
+    return true;
+  } catch {
+    return false;
+  }
 }

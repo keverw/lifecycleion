@@ -1,6 +1,63 @@
+import { captureErrorReports } from './test-helpers/capture-error-reports';
+import {
+  THROWING_FILTER_HOST,
+  makeMarkedFiltersThrow,
+} from './test-helpers/throwing-filter';
 import { describe, test, expect } from 'bun:test';
-import { ResponseObserverManager, ErrorObserverManager } from './observers';
-import type { AttemptRequest, HTTPResponse, HTTPClientError } from './types';
+import {
+  ResponseObserverManager,
+  ErrorObserverManager,
+  runParentThenOwnErrorObservers,
+  runParentThenOwnResponseObservers,
+} from './observers';
+import type {
+  AttemptRequest,
+  ErrorObserverPhase,
+  HTTPResponse,
+  HTTPClientError,
+  ResponseObserverPhase,
+} from './types';
+
+/** Run one manager's observers as a client with no parent runs them. */
+function runChain(
+  manager: ResponseObserverManager,
+  response: HTTPResponse,
+  request: AttemptRequest,
+  phase: ResponseObserverPhase,
+  cancelSignal?: AbortSignal,
+): Promise<void>;
+function runChain(
+  manager: ErrorObserverManager,
+  error: HTTPClientError,
+  request: AttemptRequest,
+  phase: ErrorObserverPhase,
+  cancelSignal?: AbortSignal,
+): Promise<void>;
+function runChain(
+  manager: ResponseObserverManager | ErrorObserverManager,
+  target: HTTPResponse | HTTPClientError,
+  request: AttemptRequest,
+  phase: ResponseObserverPhase | ErrorObserverPhase,
+  cancelSignal?: AbortSignal,
+): Promise<void> {
+  return manager instanceof ResponseObserverManager
+    ? runParentThenOwnResponseObservers(
+        undefined,
+        manager,
+        target as HTTPResponse,
+        request,
+        phase,
+        cancelSignal,
+      )
+    : runParentThenOwnErrorObservers(
+        undefined,
+        manager,
+        target as HTTPClientError,
+        request,
+        phase as ErrorObserverPhase,
+        cancelSignal,
+      );
+}
 
 function makeRequest(overrides: Partial<AttemptRequest> = {}): AttemptRequest {
   return {
@@ -63,7 +120,94 @@ function makeError(overrides: Partial<HTTPClientError> = {}): HTTPClientError {
   };
 }
 
+test.each(['response', 'error'] as const)(
+  '%s observer changes during an awaited callback apply to the next snapshot',
+  async (kind) => {
+    const responseManager = new ResponseObserverManager();
+    const errorManager = new ErrorObserverManager();
+    const mgr = kind === 'response' ? responseManager : errorManager;
+    const dispatch = () =>
+      kind === 'response'
+        ? runChain(responseManager, makeResponse(), makeRequest(), {
+            type: 'final',
+          })
+        : runChain(errorManager, makeError(), makeRequest(), {
+            type: 'final',
+          });
+    const calls: number[] = [];
+    const remove = mgr.add(async () => {
+      calls.push(1);
+      await Promise.resolve();
+      remove();
+      mgr.add(() => {
+        calls.push(3);
+      });
+    });
+    mgr.add(() => {
+      calls.push(2);
+    });
+    await dispatch();
+    expect(calls).toEqual([1, 2]);
+    calls.length = 0;
+    await dispatch();
+    expect(calls).toEqual([2, 3]);
+  },
+);
+
 describe('ResponseObserverManager', () => {
+  test('a throwing filter-context getter is reported without rejecting the chain', async () => {
+    const mgr = new ResponseObserverManager();
+    const failure = new Error('status read failed');
+    mgr.add(() => {});
+    const response = makeResponse();
+    Object.defineProperty(response, 'status', {
+      get() {
+        throw failure;
+      },
+    });
+    const { reports, release } = captureErrorReports();
+    try {
+      expect(
+        await runChain(mgr, response, makeRequest(), { type: 'final' }),
+      ).toBeUndefined();
+      expect(reports.length).toBeGreaterThan(0);
+    } finally {
+      release();
+    }
+  });
+
+  test('a cancel made while a filter reads the response runs no later observer', async () => {
+    const controller = new AbortController();
+    const mgr = new ResponseObserverManager();
+    const calls: string[] = [];
+    mgr.add(
+      () => {
+        calls.push('guarded');
+      },
+      { bodyContainsKeys: ['token'] },
+    );
+    mgr.add(() => {
+      calls.push('after');
+    });
+
+    await runChain(
+      mgr,
+      makeResponse({
+        body: {
+          get token() {
+            controller.abort();
+            return 'x';
+          },
+        },
+      }),
+      makeRequest(),
+      { type: 'final' },
+      controller.signal,
+    );
+
+    expect(calls).toEqual([]);
+  });
+
   test('calls observers in order', async () => {
     const mgr = new ResponseObserverManager();
     const order: number[] = [];
@@ -75,7 +219,7 @@ describe('ResponseObserverManager', () => {
       order.push(2);
     });
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeResponse(), makeRequest(), { type: 'final' });
     expect(order).toEqual([1, 2]);
   });
 
@@ -88,7 +232,7 @@ describe('ResponseObserverManager', () => {
       calls.push('done');
     });
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeResponse(), makeRequest(), { type: 'final' });
     expect(calls).toEqual(['done']);
   });
 
@@ -99,11 +243,11 @@ describe('ResponseObserverManager', () => {
       calls.push(1);
     });
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeResponse(), makeRequest(), { type: 'final' });
     expect(calls).toHaveLength(1);
 
     remove();
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeResponse(), makeRequest(), { type: 'final' });
     expect(calls).toHaveLength(1);
   });
 
@@ -118,13 +262,13 @@ describe('ResponseObserverManager', () => {
       { statusCodes: [401] },
     );
 
-    await mgr.run(makeResponse({ status: 200 }), makeRequest(), {
+    await runChain(mgr, makeResponse({ status: 200 }), makeRequest(), {
       type: 'final',
     });
 
     expect(statuses).toHaveLength(0);
 
-    await mgr.run(makeResponse({ status: 401 }), makeRequest(), {
+    await runChain(mgr, makeResponse({ status: 401 }), makeRequest(), {
       type: 'final',
     });
 
@@ -142,13 +286,13 @@ describe('ResponseObserverManager', () => {
       { methods: ['POST'] },
     );
 
-    await mgr.run(makeResponse(), makeRequest({ method: 'GET' }), {
+    await runChain(mgr, makeResponse(), makeRequest({ method: 'GET' }), {
       type: 'final',
     });
 
     expect(calls).toHaveLength(0);
 
-    await mgr.run(makeResponse(), makeRequest({ method: 'POST' }), {
+    await runChain(mgr, makeResponse(), makeRequest({ method: 'POST' }), {
       type: 'final',
     });
 
@@ -166,7 +310,8 @@ describe('ResponseObserverManager', () => {
       { contentTypes: ['json'] },
     );
 
-    await mgr.run(
+    await runChain(
+      mgr,
       makeResponse({
         contentType: 'text',
         isJSON: false,
@@ -178,7 +323,8 @@ describe('ResponseObserverManager', () => {
       { type: 'final' },
     );
 
-    await mgr.run(
+    await runChain(
+      mgr,
       makeResponse({
         contentType: 'json',
         isJSON: true,
@@ -203,7 +349,8 @@ describe('ResponseObserverManager', () => {
       { contentTypeHeaders: ['image/*'] },
     );
 
-    await mgr.run(
+    await runChain(
+      mgr,
       makeResponse({
         status: 200,
         contentType: 'binary',
@@ -214,7 +361,8 @@ describe('ResponseObserverManager', () => {
       { type: 'final' },
     );
 
-    await mgr.run(
+    await runChain(
+      mgr,
       makeResponse({
         status: 201,
         contentType: 'binary',
@@ -236,19 +384,19 @@ describe('ResponseObserverManager', () => {
       phases.push(phase.type);
     });
 
-    await mgr.run(makeResponse(), makeRequest(), {
+    await runChain(mgr, makeResponse(), makeRequest(), {
       type: 'redirect',
       hop: 1,
       from: 'a',
       to: 'b',
       statusCode: 301,
     });
-    await mgr.run(makeResponse(), makeRequest(), {
+    await runChain(mgr, makeResponse(), makeRequest(), {
       type: 'retry',
       attempt: 2,
       maxAttempts: 3,
     });
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeResponse(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['final']);
   });
@@ -264,53 +412,54 @@ describe('ResponseObserverManager', () => {
       { phases: ['final', 'redirect'] },
     );
 
-    await mgr.run(makeResponse(), makeRequest(), {
+    await runChain(mgr, makeResponse(), makeRequest(), {
       type: 'retry',
       attempt: 1,
       maxAttempts: 3,
     });
-    await mgr.run(makeResponse(), makeRequest(), {
+    await runChain(mgr, makeResponse(), makeRequest(), {
       type: 'redirect',
       hop: 1,
       from: 'a',
       to: 'b',
       statusCode: 301,
     });
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeResponse(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['redirect', 'final']);
   });
 
-  test('empty phases filter — does not restrict matching', async () => {
+  test('an empty phases filter is refused, not read as every phase', () => {
     const mgr = new ResponseObserverManager();
-    const phases: string[] = [];
 
-    mgr.add(
-      (_, _req, phase) => {
-        phases.push(phase.type);
-      },
-      { phases: [] },
+    expect(() => mgr.add(() => {}, { phases: [] })).toThrow(
+      "HTTPClient response observer filter phases is empty; omit it for the default phases ('final'), or list each of 'retry', 'redirect', 'final' to match every phase",
     );
-
-    await mgr.run(makeResponse(), makeRequest(), {
-      type: 'retry',
-      attempt: 1,
-      maxAttempts: 3,
-    });
-    await mgr.run(makeResponse(), makeRequest(), {
-      type: 'redirect',
-      hop: 1,
-      from: 'a',
-      to: 'b',
-      statusCode: 301,
-    });
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
-
-    expect(phases).toEqual(['retry', 'redirect', 'final']);
   });
 });
 
 describe('ErrorObserverManager', () => {
+  test('a throwing filter-context getter is reported without rejecting the chain', async () => {
+    const mgr = new ErrorObserverManager();
+    const failure = new Error('method read failed');
+    mgr.add(() => {});
+    const request = makeRequest();
+    Object.defineProperty(request, 'method', {
+      get() {
+        throw failure;
+      },
+    });
+    const { reports, release } = captureErrorReports();
+    try {
+      expect(
+        await runChain(mgr, makeError(), request, { type: 'final' }),
+      ).toBeUndefined();
+      expect(reports.length).toBeGreaterThan(0);
+    } finally {
+      release();
+    }
+  });
+
   test('calls observers in order', async () => {
     const mgr = new ErrorObserverManager();
     const order: number[] = [];
@@ -322,7 +471,7 @@ describe('ErrorObserverManager', () => {
       order.push(2);
     });
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeError(), makeRequest(), { type: 'final' });
     expect(order).toEqual([1, 2]);
   });
 
@@ -335,7 +484,7 @@ describe('ErrorObserverManager', () => {
       calls.push('done');
     });
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeError(), makeRequest(), { type: 'final' });
     expect(calls).toEqual(['done']);
   });
 
@@ -346,11 +495,11 @@ describe('ErrorObserverManager', () => {
       calls.push(1);
     });
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeError(), makeRequest(), { type: 'final' });
     expect(calls).toHaveLength(1);
 
     remove();
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeError(), makeRequest(), { type: 'final' });
     expect(calls).toHaveLength(1);
   });
 
@@ -365,12 +514,12 @@ describe('ErrorObserverManager', () => {
       { methods: ['POST'] },
     );
 
-    await mgr.run(makeError(), makeRequest({ method: 'GET' }), {
+    await runChain(mgr, makeError(), makeRequest({ method: 'GET' }), {
       type: 'final',
     });
     expect(calls).toHaveLength(0);
 
-    await mgr.run(makeError(), makeRequest({ method: 'POST' }), {
+    await runChain(mgr, makeError(), makeRequest({ method: 'POST' }), {
       type: 'final',
     });
     expect(calls).toHaveLength(1);
@@ -384,17 +533,17 @@ describe('ErrorObserverManager', () => {
       phases.push(phase.type);
     });
 
-    await mgr.run(makeError(), makeRequest(), {
+    await runChain(mgr, makeError(), makeRequest(), {
       type: 'retry',
       attempt: 1,
       maxAttempts: 3,
     });
-    await mgr.run(makeError(), makeRequest(), {
+    await runChain(mgr, makeError(), makeRequest(), {
       type: 'retry',
       attempt: 2,
       maxAttempts: 3,
     });
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeError(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['final']);
   });
@@ -410,36 +559,59 @@ describe('ErrorObserverManager', () => {
       { phases: ['final', 'retry'] },
     );
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
-    await mgr.run(makeError(), makeRequest(), {
+    await runChain(mgr, makeError(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeError(), makeRequest(), {
       type: 'retry',
       attempt: 2,
       maxAttempts: 3,
     });
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await runChain(mgr, makeError(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['final', 'retry', 'final']);
   });
 
-  test('empty phases filter — does not restrict matching', async () => {
+  test('an empty phases filter is refused, not read as every phase', () => {
     const mgr = new ErrorObserverManager();
-    const phases: string[] = [];
 
-    mgr.add(
-      (_, _req, phase) => {
-        phases.push(phase.type);
-      },
-      { phases: [] },
+    expect(() => mgr.add(() => {}, { phases: [] })).toThrow(
+      "HTTPClient error observer filter phases is empty; omit it for the default phases ('final'), or list each of 'retry', 'final' to match every phase",
     );
-
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
-    await mgr.run(makeError(), makeRequest(), {
-      type: 'retry',
-      attempt: 2,
-      maxAttempts: 3,
-    });
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
-
-    expect(phases).toEqual(['final', 'retry', 'final']);
   });
 });
+
+test.each(['final', 'retry'] as const)(
+  'a response observer filter that throws cannot block %s delivery',
+  async (phase) => {
+    const manager = new ResponseObserverManager();
+    let calls = 0;
+    manager.add(
+      () => {
+        throw new Error('must not run');
+      },
+      { phases: ['final', 'retry'], hosts: [THROWING_FILTER_HOST] },
+    );
+    manager.add(
+      () => {
+        calls++;
+      },
+      { phases: ['final', 'retry'] },
+    );
+    const { reports, release } = captureErrorReports();
+    const filterSpy = makeMarkedFiltersThrow();
+    try {
+      await runChain(
+        manager,
+        makeResponse(),
+        makeRequest(),
+        phase === 'final'
+          ? { type: 'final' }
+          : { type: 'retry', attempt: 1, maxAttempts: 2 },
+      );
+      expect(calls).toBe(1);
+      expect(reports.length).toBeGreaterThan(0);
+    } finally {
+      filterSpy.mockRestore();
+      release();
+    }
+  },
+);

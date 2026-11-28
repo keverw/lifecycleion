@@ -325,6 +325,39 @@ describe('RetryPolicy - durations that are not finite', () => {
 });
 
 describe('RetryPolicy', () => {
+  test("shouldRetry's baseDelayMS is the delay without its jitter", () => {
+    const exponential = new RetryPolicy({
+      strategy: 'exponential',
+      maxRetryAttempts: 2,
+      minTimeoutMS: 100,
+      maxTimeoutMS: 1000,
+      factor: 3,
+      dispersion: 0.5,
+    });
+    exponential.shouldDoFirstTry();
+
+    expect(exponential.shouldRetry(new Error('a')).baseDelayMS).toBe(100);
+    expect(exponential.shouldRetry(new Error('b')).baseDelayMS).toBe(300);
+    expect(exponential.shouldRetry(new Error('c'))).toEqual({
+      shouldRetry: false,
+      delayMS: 0,
+      baseDelayMS: 0,
+    });
+
+    const fixed = new RetryPolicy({
+      strategy: 'fixed',
+      maxRetryAttempts: 1,
+      delayMS: 250,
+    });
+    fixed.shouldDoFirstTry();
+
+    expect(fixed.shouldRetry(new Error('a'))).toEqual({
+      shouldRetry: true,
+      delayMS: 250,
+      baseDelayMS: 250,
+    });
+  });
+
   test('should have the correct defaults for fixed strategy', () => {
     const policy = new RetryPolicy({ strategy: 'fixed' });
 

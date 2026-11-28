@@ -15,6 +15,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
 - [HTTPResponse](#httpresponse)
   - [Uploads That Outlive the Response](#uploads-that-outlive-the-response)
   - [Content-Type Detection and Body Parsing](#content-type-detection-and-body-parsing)
+  - [Response Size Limit](#response-size-limit)
 - [Error Handling](#error-handling)
   - [HTTPClientError](#httpclienterror)
   - [Error Codes](#error-codes)
@@ -28,6 +29,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [Filter Options](#filter-options-2)
 - [Phase Model](#phase-model)
 - [Retry Policy](#retry-policy)
+  - [Retry-After](#retry-after)
   - [Retryable Status Codes](#retryable-status-codes)
   - [Method Safety](#method-safety)
   - [Per-Request Override](#per-request-override)
@@ -41,6 +43,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [ID-Scoped Cancel](#id-scoped-cancel)
   - [Tracker-Wide Cancel](#tracker-wide-cancel)
   - [AbortSignal Integration](#abortsignal-integration)
+  - [Abort Listeners That Throw](#abort-listeners-that-throw)
 - [Client Identity](#client-identity)
 - [Request Tracking](#request-tracking)
 - [Sub-Client Creation](#sub-client-creation)
@@ -124,19 +127,21 @@ console.log(created.status); // 201
 ```typescript
 interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter
-  baseURL?: string; // Origin / prefix for relative paths. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL.
-  defaultHeaders?: Record<string, string | string[]>;
-  timeout?: number; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
-  // NaN or a non-number takes the default; Infinity disables it like 0 does.
+  baseURL?: string; // Origin / prefix for relative paths: a string with no query or fragment. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL. In a browser a relative one (`/api`, `api`) is allowed, and one that is no plain path - a scheme, a leading `//`, or whitespace at either end (tabs, CRs and LFs anywhere read as the URL parser reads them) - must be an absolute http(s):// URL too.
+  defaultHeaders?: RequestHeadersInput; // Values may be null/undefined: no header
+  timeout?: number | null; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
+  // NaN or a non-number throws; Infinity disables it like 0 does.
   // Same rules for the per-request override, whose default is this value.
+  maxResponseBytes?: number | null; // Default: 64 MiB (DEFAULT_MAX_RESPONSE_BYTES); the most bytes of a buffered response body the client holds.
+  // A positive integer, or Infinity for no limit. See Response Size Limit.
   cookieJar?: CookieJar | null; // Cookie management (null disables)
-  retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
-  retryNonIdempotentMethods?: boolean; // Default: false - do not retry POST/PATCH. See Non-Idempotent Methods
+  retryPolicy?: HTTPRetryPolicyOptions; // Retry strategy (disabled by default): RetryPolicyOptions plus maxRetryAfterMS
+  retryNonIdempotentMethods?: boolean; // Default: false - retry only the RFC 9110 idempotent methods (GET, HEAD, OPTIONS, TRACE, PUT, DELETE), not POST, PATCH or a custom one such as LOCK. See Non-Idempotent Methods
   includeRequestID?: boolean; // Default: false - sends x-local-client-request-id header
   includeAttemptHeader?: boolean; // Default: false - sends x-local-client-request-attempt header with the 1-based attempt number as a decimal string. The counter is global across redirect hops: attempt 2 on a redirect hop follows attempt 1 on the initial request, not reset per hop.
-  userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter and MockAdapter, and for FetchAdapter on server runtimes. Browsers block this header - constructor throws if set with FetchAdapter or XHRAdapter in a browser.
+  userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter and MockAdapter, and for FetchAdapter on server runtimes. One in `defaultHeaders` wins over that default - a `null` or `undefined` one removes it, and a sub-client keeps that unless it sets one or replaces its defaults - `userAgent` wins over both, and a request's own `user-agent` header wins over all three. Browsers block this header - constructor throws if set with FetchAdapter or XHRAdapter in a browser.
   followRedirects?: boolean; // Default: false (security-conscious default)
-  maxRedirects?: number; // Default: 5 (only meaningful when followRedirects: true; throws at construction unless followRedirects: true; must be finite and >= 1)
+  maxRedirects?: number; // Default: 5 (only meaningful when followRedirects: true; throws at construction unless followRedirects: true; must be a whole number >= 1)
 }
 ```
 
@@ -163,6 +168,53 @@ const client = new HTTPClient({
 | `followRedirects` | Not supported          | Not supported        | Supported             | Supported            | Supported   |
 
 The constructor throws immediately on unsupported combinations so failures are caught at startup, not at request time.
+`followRedirects`, `retryNonIdempotentMethods`, `includeRequestID` and `includeAttemptHeader` must be booleans, `userAgent` a string, and `cookieJar` a `CookieJar`; `null` or omitted reads as unset - the default (`cookieJar: null` is no jar; see [Sub-Clients](#sub-client-creation) for which a sub-client inherits on `null`) - and anything else throws a `TypeError`, as does a sub-client `defaultHeadersStrategy` other than `'replace'`, `'merge'` or unset (`'replace'`). A request's `retryNonIdempotentMethods` option may be a boolean or unset, falling back to the client's; the builder's `.retryNonIdempotentMethods()` takes a boolean only. Client `defaultHeaders` is copied at construction - names lowercased, unset values dropped, a removed `user-agent` kept as removing the built-in one - so changing the object afterwards does not affect the client or its sub-clients; change a header for some requests with an interceptor or a sub-client. Client `retryPolicy` is validated and copied at construction. The internal snapshot is frozen and may be shared with sub-clients. Subclasses must not mutate `this._config.retryPolicy` in place; supply a new policy through client or sub-client configuration instead. A per-request
+`.retryPolicy(options)` is validated and copied when called, before request interceptors
+run. Invalid retry durations throw there, and later mutations to the supplied object do
+not change the policy. Each request starts with a fresh retry budget; `null` on the
+builder disables retries inherited from the client.
+
+**A misspelled option throws.** An option object that carries an own enumerable field it does not take - `folowRedirects`, `timout`, `maxRetryAttemps`, or the other strategy's `delayMS` on an exponential policy - is refused with a `TypeError` naming that field, rather than read as absent while the option it meant stays at its default. A field set to `null` or `undefined` is read as absent, as it would be anyway. This applies to:
+
+- `new HTTPClient()` and `createSubClient()`.
+- The request options of `client.get(path, options)` and the other method helpers.
+- A `retryPolicy`, whether given to the client, a request or `.retryPolicy()`.
+- The `listRequests()` filter.
+- `new NodeAdapter()` and its `mtls`.
+- `new CookieJar()` and its `publicSuffixes`.
+
+**Configs must be objects.** The config of `new HTTPClient()`, `createSubClient()`, `new NodeAdapter()`, `new CookieJar()` and `new MockAdapter()`, request options and the `listRequests()` filter must each be an object - not an array, a string or another value. `null` means no options for the last four (`new CookieJar()`, `new MockAdapter()`, request options, the `listRequests()` filter) and is refused for the others.
+
+- An `adapter` must be an object (or a function) with a `getType()` method. Its `send` is read once as each attempt goes out - each retry and redirect hop reads it again - and the method read is the one called: a `send` that is not a function, or whose read throws, fails the request as a configuration error: an `adapter_error` that is not retried and not a network error, the reason on its `cause`. On a redirect hop, the redirect is not followed, as nothing was sent to its target.
+- A `MockAdapter`'s `onHandlerError` must be a function.
+
+**`new NodeAdapter()` checks its option types.** Without these checks a request could go out presenting no client certificate, or over TCP.
+
+- `rejectUnauthorized` and `decompress` are booleans, `socketPath` a non-empty string, and `servername` a string.
+- `mtls` is an object with a `cert` and a `key` (PEM text or bytes, not empty) and an optional string `passphrase`.
+- `ca` and `mtls.ca` hold PEM text or bytes, or a list of them. Anything else is refused: a number, a plain object such as `{ pem }`, a `String` object, a list inside the list, or a `Blob` (read a `Bun.file()` yourself and pass its text or bytes). An empty one is refused as holding no certificate.
+- Bytes, for `ca`, `mtls.ca`, `mtls.cert` and `mtls.key`, are a `Buffer`, any other typed array, a `DataView` or an `ArrayBuffer` (shared or not), on Node and Bun alike.
+- `null` is refused for each of these options, as for `ca` and `crl`.
+- Each request checks the values it reads again, so a value set on the config later fails that request as a non-retryable `adapter_error`.
+
+**`MockAdapter` routes.** A route's or `onHandlerError`'s response, its `transportError`, or one of its `cookies` options, with a field it does not take (`header`, `maxage`) fails the request as a non-retryable `adapter_error` - the route's mistake. A `MockAdapter` config itself is held live and handed to its handlers as their receiver, so it may carry fields of its own.
+
+**Interceptors.** An interceptor's returned request is read for its four fields; any other field is dropped.
+
+**Invalid timeouts, size limits, retry policies and bodies throw synchronously.** A
+`timeout` that is `NaN` or not a number (a `TypeError`), a `maxResponseBytes` that is not
+a positive integer or `Infinity` (a `TypeError`), or an invalid `retryPolicy`, throws from
+the call that supplies it: `new HTTPClient()`, `createSubClient()`,
+`client.get(path, { timeout, maxResponseBytes, retryPolicy })` and the other method helpers,
+`.timeout()`, `.maxResponseBytes()`, and `.retryPolicy()`. So does a request body that
+cannot be copied (see [Body Types](#body-types)) - one of an unsupported type (a
+`TypeError`), a `BigInt` or a circular reference, a getter or `toJSON` that throws - from
+`.body()`, `.json()`, `.text()`, `.formData()`, or `client.post(path, { body })` and the
+other method helpers; so does a `.text()` given anything but a string, or a `.formData()`
+anything but a `FormData` - `null` or `undefined` aside, which is no body for every setter - which would otherwise go out as a body of its own type. It never reaches `send()`, so it does not resolve as a
+`request_setup_error` and no `'error'` observer sees it. A malformed setting is a
+programming mistake that no retry or response handling can repair, so it fails where it
+was written.
 
 ## Making Requests
 
@@ -184,17 +236,20 @@ client.request<T>(method, path, options?)
 
 **Path resolution:**
 
-- Relative paths (`/v1/users`, `v1/users`) are appended to `baseURL`.
-- Absolute `http(s)://` URLs bypass `baseURL` entirely and work with or without a `baseURL`.
+- Relative paths (`/v1/users`, `v1/users`) are appended to `baseURL`. An empty path, or one that is only a query or fragment (`?page=2`), is added to `baseURL` as written, with no slash inserted.
+- `baseURL`'s path is a prefix, not a boundary. Dot segments in a path are resolved as any URL's are, so `/users/../../admin` (or `/users/%2e%2e/%2e%2e/admin`) under `baseURL: 'https://api.test/tenant-a'` is sent to `https://api.test/admin`, with the client's default headers. Put an untrusted value into a path with `encodeURIComponent`, which keeps it to one segment, and refuse `.` and `..`, which it leaves as they are.
+- Absolute `http(s)://` URLs bypass `baseURL` entirely and work with or without a `baseURL`. With a `baseURL`, a path must start `scheme://` to do this: `http:evil.test/x` and ` https://evil.test/x` are relative paths like any other, though the URL parser alone would read a host from them. A path that starts `scheme://` is never joined to `baseURL`: one that is no valid `http(s)` URL (`http://host:99999/x`, `ftp://files.test/a`) is refused, as it is with no `baseURL`.
+- In a browser runtime, a URL still relative after `baseURL` - every relative path when `baseURL` is omitted (MockAdapter aside, see below), or one joined to a relative `baseURL` (`/api`, `api`) - is resolved against the document's base URL (a worker's location), as `fetch` and XHR resolve it: from a page at `https://app.test/dir/page`, `v1/users` is `https://app.test/dir/v1/users`, and `users` under `baseURL: 'api'` is `https://app.test/dir/api/users`. Unlike a configured `baseURL`, the page URL is not treated as a directory.
 - Protocol-relative `//host/path` URLs also bypass `baseURL` as a path prefix. If `baseURL` is configured, they are resolved using its scheme. If `baseURL` is omitted, browser runtimes resolve them against the current page/worker scheme, `MockAdapter` materializes them as `http://host/...`, and other server-side adapters cannot resolve them so the request fails at send time as a configuration error.
+- A host in brackets that is no IPv6 address (`http://[::1:]/`) is refused as an invalid URL on every runtime, as the URL standard and Node refuse it, though Bun's own parser reads it as `[::1]`: as a request's URL, `baseURL`, a redirect's `Location` or one given to an adapter. The cookie jar reads and stores no cookies for one.
 
-All paths are resolved as far as possible before interceptors, the cookie jar, or any adapter sees them. For the real transport adapters (`fetch`, `xhr`, `node`) that means an absolute `http(s)://` URL. For `MockAdapter`, requests without a client `baseURL` are resolved before interceptors run using deterministic mock defaults: true path-only inputs become `http://localhost/...`, and protocol-relative inputs (`//host/...`) become `http://host/...`. Other unresolved non-HTTP inputs still fail during request setup.
+All paths are resolved as far as possible before interceptors, the cookie jar, or any adapter sees them. For the real transport adapters (`fetch`, `xhr`, `node`) that means an absolute `http(s)://` URL. For `MockAdapter`, requests without a client `baseURL` are resolved before interceptors run using deterministic mock defaults: path-only inputs become `http://localhost/...`, joined as a `baseURL` joins them, so a first segment with a colon (`items:batchGet`) is a path too, while an `http(s)` URL the parser reads alone (`http:host/x`) is read as it is with no `baseURL`, and protocol-relative inputs (`//host/...`) become `http://host/...`. Other unresolved non-HTTP inputs still fail during request setup.
 
 For `MockAdapter`, those resolved URLs are used for features that inspect the resolved URL, such as host/scheme filters and shared `CookieJar` state. If you want mock clients to use different default origins, use distinct cookie jars, protocol-relative request URLs, or give each client an explicit absolute `baseURL`.
 
 ### Request Builder API
 
-All builder methods are fluent (chainable) and must be called **before** `.send()`. The builder is single-use: calling `.send()` a second time throws.
+All builder methods are fluent (chainable) and must be called **before** `.send()`. The builder is single-use: calling `.send()` a second time rejects.
 
 ```typescript
 const builder = client
@@ -202,6 +257,7 @@ const builder = client
   .headers({ 'x-idempotency-key': 'abc123' }) // merged onto defaultHeaders
   .json({ name: 'Alice' }) // sets a JSON body; content-type is inferred during request materialization
   .timeout(5_000) // per-request timeout override
+  .maxResponseBytes(1024 * 1024) // per-request response size limit override (null inherits)
   .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1000 }) // per-request retry override
   .retryNonIdempotentMethods(true) // POST is not retried by default; safe here because of the idempotency key
   .label('create-user') // non-empty grouping label for cancel/list filtering
@@ -215,6 +271,8 @@ const builder = client
 
 const response = await builder.send();
 ```
+
+A header value of `null` or `undefined` - or such an item in an array - means no header: a request's `.headers({ authorization: undefined })` removes that client default for the request, a sub-client merging `defaultHeaders` removes the parent's the same way, and an interceptor removes one with `{ ...request.headers, authorization: undefined }`. Header names are case-insensitive and are sent lowercased, so two keys that differ only by case are one header - in `defaultHeaders`, a `.headers()` record, request options or an interceptor's result, the later key's value replaces the earlier's, as a later `.headers()` call replaces an earlier one; give a header sent more than once an array value. `.headers()`, and `headers` in the request options, copy the record's own entries when called, an array value included, so a header or array item added afterwards is not sent; every value is copied before any is applied, so a call that throws while copying one - an array item's getter, say - changes no header. A request's own `user-agent` wins over `userAgent` and the default, as with `fetch`, and a null one removes it; `fetch` then adds the runtime's own, so only NodeAdapter sends none. The request-ID and attempt headers are added to every attempt and follow `includeRequestID` and `includeAttemptHeader` only.
 
 Options can also be passed directly to the method call:
 
@@ -230,19 +288,95 @@ const response = await client
 
 ### Body Types
 
-| Method / value       | Content-Type set                     | Notes                                                                                                                                                                                                                           |
-| -------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.json(data)`        | `application/json`                   | Serialized via `JSON.stringify`. Passing `null` or `undefined` results in no body (see note below).                                                                                                                             |
-| `.text(str)`         | `text/plain`                         | UTF-8 encoded                                                                                                                                                                                                                   |
-| `.formData(fd)`      | _(none, set by adapter)_             | The library does not set this header. The adapter, or browser runtime, sets `multipart/form-data` with the boundary. Not visible in `request.headers` inside interceptors. Use `request.body instanceof FormData` to detect it. |
-| `.body(data)`        | Inferred from value type (see below) | Generic form. Accepts JSON objects/arrays (`application/json`), strings (`text/plain`), Uint8Array (`application/octet-stream`), FormData (see `.formData`), null, or undefined                                                 |
-| `undefined` / `null` | none                                 | No body sent                                                                                                                                                                                                                    |
+| Method / value       | Content-Type set                                      | Notes                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.json(data)`        | `application/json; charset=utf-8` for an object/array | The same as `.body(data)`: an object or array is serialized via `JSON.stringify`. A string is sent as `text/plain; charset=utf-8` and a number or boolean is refused - see the note below for a JSON primitive. `null` or `undefined` is no body.                                                                                                                                                                          |
+| `.text(str)`         | `text/plain; charset=utf-8`                           | UTF-8 encoded                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `.formData(fd)`      | _(none, set by adapter)_                              | The library does not set this header. The adapter, or browser runtime, sets `multipart/form-data` with the boundary, in place of any `Content-Type` the request carries - one an adapter driven directly is given included, since `multipart/form-data` without the boundary is a body the server cannot split. Not visible in `request.headers` inside interceptors. Use `request.body instanceof FormData` to detect it. |
+| `.body(data)`        | Inferred from value type (see below)                  | Generic form. Accepts JSON objects/arrays (`application/json; charset=utf-8`), strings (`text/plain; charset=utf-8`), Uint8Array (`application/octet-stream`; another realm's, such as a `vm` context's or a `Buffer` under jsdom, included), FormData (see `.formData`), null, or undefined                                                                                                                               |
+| `undefined` / `null` | none                                                  | No body sent                                                                                                                                                                                                                                                                                                                                                                                                               |
 
-> **Note:** Passing `null` or `undefined` to any body method, including `.json()`, always results in no body and no `Content-Type`. This applies across all methods since serialization is type-based, not method-based. If you need to send a JSON null payload, use `.body('null').headers({ 'content-type': 'application/json' })` explicitly.
+> **Sending a `File` or `Blob`:** a `Blob` body is not supported - send its bytes, `client.put(url).body(new Uint8Array(await file.arrayBuffer()))`, which reads the whole file into memory first, or append it to a `FormData`, whose `File` and `Blob` entries `NodeAdapter` streams. An `ArrayBuffer` is sent the same way, as `new Uint8Array(buffer)`. A React Native `FormData`, which has no `has()`, is refused by the client as an unsupported body type, in a message that says so, since the client copies a form and reads its entries and such a form lets it do neither; `FetchAdapter` and `XHRAdapter` driven directly send one as it is (`await new FetchAdapter().send({ requestURL, method: 'POST', headers: {}, body: form })`).
+
+> **Note:** Passing `null` or `undefined` to any body method, including `.json()`, always results in no body and no `Content-Type`, as does an object whose own `toJSON` answers `undefined`, which `JSON.stringify` serializes to nothing. This applies across all methods since serialization is type-based, not method-based. To send a JSON primitive - `null`, a string, a number - serialize it yourself and say what it is: `.body(JSON.stringify(value)).headers({ 'content-type': 'application/json' })`.
+
+**The body is copied when you hand it over.** `.body()`, `.json()`, `.text()`, `.formData()` and the `body` request option each take a copy the client owns, as `.headers()` and `.params()` do. Changing the object, `Uint8Array` or `FormData` you passed afterwards - before `send()`, or from `onAttemptEnd` between attempts - changes nothing that is sent or reported, on any attempt, retry or `307`/`308` replay. How each type is copied:
+
+- **JSON (a plain object or an array).** Copied as the text it serializes to: run through `JSON.stringify` once. Every attempt sends exactly that text, unless an interceptor replaces the body. Request interceptors see it as plain data parsed from that text, frozen at every depth: a `Date` as its ISO string, a class instance as a plain object, a `Map` as `{}`, an `undefined` member dropped (`null` in an array), and a number `JSON.rawJSON` wrote that a double does not write back (`9007199254740993`, `1.0`) as that `JSON.rawJSON` value, so it still goes out exactly. Handed back unchanged, the body is sent as the original text.
+- **A top-level `toJSON`** that answers a string, a number or `null` is kept as a frozen plain object whose own `toJSON` answers that value, so the body still serializes to the same text.
+- **Bytes.** A `Buffer` is copied as a `Buffer`, so an interceptor can still call `request.body.toString('base64')`. Any other `Uint8Array` - a subclass, or another realm's `Buffer` - is copied as a plain `Uint8Array`.
+- **`FormData`.** Copied entry by entry, its `Blob` and `File` entries kept as they are. A form is told by `FormData`'s own methods, so an object that only inherits from `FormData.prototype` is not one, while a subclass's instance is; in a browser, a form from another realm (an iframe) is one too.
+- **A string** is kept as it is.
+
+**The JSON copy is parsed only when it is read**, and then once for the whole request: when an interceptor reads `request.body`, or a `bodyContainsKeys` filter reads it once the rest of that filter has matched (such a filter never matches an array body). A request nothing reads is sent as the text without being parsed. The request an interceptor is handed carries `body` as a getter (with a setter):
+
+- An interceptor that only sets a header (`request.headers.authorization = token; return request`), or spreads the request (`{ ...request, headers }`), costs no second `JSON.stringify`: the body it hands back is sent as its text.
+- **A JSON body is frozen**, nested objects and arrays included. To change it, assign a new one: `request.body = { ...request.body, token }`, or return `{ ...request, body: newBody }`. A spread copies one level, so to change a nested value spread that level too: `{ ...body, user: { ...body.user, id } }`. For many nested changes, start from an editable copy, `deepClone(request.body)` (from `lifecycleion/deep-clone`). A new body is copied once the chain ends, as one handed to `.json()` is. Writing to the frozen data throws a `TypeError` in strict-mode code (ES modules and classes) and is ignored elsewhere.
+- Logging the handed request (`console.log(request)`) shows `body` as a getter; log `request.body` to see the data.
+
+**Bun form filenames.** On Bun, a form's entries report a `File` appended under a new filename (`fd.append('f', file, 'renamed.txt')`) by its original name, and one named `''` - or a `Blob` - by none. So the copy sends the original name, and a part with no name as `blob` (as `FormData` names a nameless `Blob`), from either adapter. Wrap the file in a `File` with the name you want before appending it.
+
+**A body that cannot be copied throws from the setter**, and nothing is sent:
+
+- A getter or `toJSON` that throws: its own error.
+- A `BigInt` or a circular reference: a `TypeError`.
+- A body of an unsupported type, such as a `URLSearchParams`, or a `Proxy` over a `Uint8Array` or a form: a `TypeError`.
+
+Request interceptors are handed the copy unserialized, and it is serialized when each attempt is dispatched.
+
+**Encode non-JSON data yourself.** Since interceptors are handed the copy, an interceptor cannot encode data JSON cannot hold - a `BigInt` through its own replacer, a `Map`, msgpack. `.json({ amount: 10n })` throws from the setter, and a `Map` member reaches the interceptor as `{}`, as `JSON.stringify` would send it. Encode such a body before handing it over, as a string or bytes with its own `Content-Type`:
+
+```typescript
+client
+  .post('/ingest')
+  .body(encoded)
+  .headers({ 'content-type': 'application/msgpack' });
+```
+
+**`bodyContainsKeys` reads the copy too.** A key holding `undefined` is not there, the keys beside a top-level `toJSON` are gone (the copy is what `toJSON` answers), and a nested class instance's fields are found as a plain object's are.
+
+**A body an interceptor returns is copied too**, the same way, once the phase's chain ends. An interceptor that keeps the body it returned, or the one it was handed, and changes it later - from an observer, say - changes no later attempt or replay.
+
+- A returned body that cannot be copied fails the request as `request_setup_error` (before an attempt begins, in the initial and redirect phases).
+- A returned body of an unsupported type fails it as `interceptor_error`.
+- On a `GET` or `HEAD` that `FetchAdapter`, or `XHRAdapter` in a browser, refuses a body on, a body that cannot be copied cannot serialize to nothing either, so the method is refused as `interceptor_error`, as it is with any other body.
+
+**In-place edits go out only with the request returned.** The first interceptor whose function runs in a phase is handed a copy of the request: its own URL, method and header record in every phase, and its own bytes or form body in the `retry` and `redirect` phases (a JSON body is frozen, so it needs no copy). An edit made in place to a copied part (`request.headers.authorization = ...` or `form.append(...)`, then `return request`), or a body assigned in place of the one handed over, goes out with the request that interceptor returns, and with nothing else:
+
+- A `retry`-phase edit is not made again on top of itself on the next retry.
+- A `redirect`-phase edit never reaches the upload of the hop that answered, which may still be under way.
+- A request that ends in that phase before it is sent - cancelled, or failed by an interceptor that throws - is reported without the edit.
+- **Exception:** an `initial`-phase interceptor is handed a bytes or form body itself, not a copy, since copying every upload again whenever an interceptor runs would cost as much as the first copy. An in-place edit to it still goes out only with the request it returns, but a request that then ends in the initial phase is reported with that edit.
+
+**How `NodeAdapter` writes a form.** `NodeAdapter` writes a `FormData` body as `fetch` does (the WHATWG multipart encoding): field names and filenames as UTF-8, with `"`, CR and LF percent-encoded, and no `filename*=`. A server reads the same names whichever adapter sent them, with these differences:
+
+- **On Node:** a `File` named `''` is sent by `NodeAdapter` as `filename=""`, a file part, but by Node's `fetch` with no `filename` at all, which most servers read as a plain field.
+- **On Bun, renamed and nameless files:** a `File` appended under a new filename is sent under its original name, and one named `''` - or a `Blob` - as `blob`, by `FetchAdapter` too, from the client's copy of the form (see [Body Types](#body-types)).
+- **On Bun, path-like names:** a file backed by a path (`Bun.file()`, `openAsBlob`) reports that path as its name, whatever filename it was appended under, and a form cannot tell it from a `File` named with a slash. So on Bun a part the client sends is under the last segment of its name, never a path: a `File` you name `reports/2024/q1.csv` is sent as `q1.csv` there, by either adapter, where Node sends the name as given.
+- A `FetchAdapter` driven directly hands the form to `fetch` as it is.
+- The form is read through `FormData.prototype.entries`, never an `entries` a subclass or the form itself declares.
+
+**A form part that cannot be read fails the request** as a non-retryable `adapter_error`:
+
+- A file part whose `File` cannot be read (missing, a directory, no permission): the error's `cause` is `Request body source could not be read`, with the read failure itself (`ENOENT`, `EISDIR`, ...) as that error's own `cause` - `error.cause.cause`.
+- A `name`, `type` or `size` getter that throws (the thrown value is `error.cause.cause`), a `type` that is not a string, a `size` that is not a whole number of bytes, or a form that cannot be read as one (a `Proxy` over a `FormData`): also under `Request body source could not be read`.
+- A `stream()` that yields a chunk other than a `Uint8Array` (one from another realm is accepted): under `Request body source produced a chunk that is not a Uint8Array`.
+- A `stream()` chunk whose buffer is transferred or shrunk while it is written: under `Request body source could not be read`.
+- **When it is caught:** the getter, `type`, `size` and form failures are caught while the body is being sized, before anything is sent. A `stream()` that throws or whose read fails, and a chunk that is not a `Uint8Array`, are caught while the body is being written, so the request has gone out with part of its body.
+
+**Headers and requests `NodeAdapter` refuses:**
+
+- A caller-set `Transfer-Encoding` header: `NodeAdapter` frames every body with a `Content-Length` itself.
+- An `Expect` header: `NodeAdapter` does not wait for `100 Continue` (Node would send the headers before the length is set).
+- A `Trailer` header: a body framed by its length carries no trailer section (Node would fail the first write).
+- An `Upgrade` header or a `CONNECT` request: `NodeAdapter` does not switch protocols or open tunnels. A `101` a server sends anyway, with or without an `Upgrade` header, fails the request as a non-retryable `adapter_error`.
+- When the adapter is called directly, a body of any type other than a string, `Uint8Array` or `FormData`.
+- These are refused before any upload progress is reported or a connection is opened.
+- A caller's `Content-Length` on a request with no body is dropped, not refused.
 
 ### Query Parameters
 
-Parameters passed via `.params()` are merged into the URL query string using the `qs` library, which supports nested objects and arrays.
+Parameters passed via `.params()` are merged into the URL query string using the `qs` library, which supports nested objects and arrays. A lone surrogate in a key or value - text cut mid-emoji with `slice()`, say - is sent as U+FFFD (`%EF%BF%BD`), as `URLSearchParams` sends it.
 
 ```typescript
 client
@@ -252,7 +386,31 @@ client
 // → /search?q=hello&filter%5Bactive%5D=true&tags%5B0%5D=a&tags%5B1%5D=b
 ```
 
-Existing query strings in the path are preserved and merged. When the same key appears in both the path string and `.params()`, the `.params()` value wins.
+**Merging with a query in the path.** The path's query is kept as written, and `.params()` is added after it. When both name the same top-level key, the `.params()` value wins and the path's pairs for that key are dropped:
+
+```typescript
+client.get('/search?page=2&sort=new').params({ page: 3 }).send();
+// → /search?sort=new&page=3
+```
+
+- A value of `undefined`, or an object holding only `undefined`, does not count, so the path's pairs stay: `.params({ page: options.page })` with no page keeps `?page=2`.
+- An empty array or object does count, and clears the path's pairs for its key. So does any other value that writes nothing as `{}` does: a function, or a class instance that keeps its state on its prototype or in private fields (see below).
+- A path pair whose key starts with a bare `[]` (`?[]=1`) is always kept.
+
+**What `.params()` takes.** A plain object. `null` or `undefined` clears the params set so far, and a `URLSearchParams`, `Map` or string throws a `TypeError`. The top-level entries, and any array values, are copied when you call it (the same goes for `params` in the request options), so changing them afterwards does not change the request. Nested objects are read when the request is sent, so a change made to one before `send()` is included.
+
+**Values that are refused.** A value `qs` cannot write correctly is refused with a `TypeError` naming its key:
+
+- a `Map`, `Set`, `WeakMap`, `WeakSet`, `URLSearchParams`, `Headers`, `FormData`, `Blob` (or `File`) or `URL`, at any depth: `qs` would send nothing for it, so `{ ids: new Set(ids) }` would send no `ids` at all. Pass an array (`[...ids]`), a plain object (`Object.fromEntries(map)`) or the URL's `href` instead;
+- an invalid `Date` (`new Date('nope')`);
+- an object nested inside itself;
+- a value nested more than 1000 levels deep.
+
+`.params()` throws for these when you call it. One that only turns up when the request is sent - from a getter, or a nested object changed after `.params()` - rejects `send()` instead: a collection with the same `TypeError`, anything else with `qs`'s `RangeError` (`Input depth exceeded depth option of 1000`, say).
+
+Params that would write more than 100,000 entries in all reject `send()` with a `RangeError` (`Params hold more than 100000 entries`). An object reached by more than one path is written once for each, so a graph whose objects share children (`x = { l: x, r: x }`, nested) counts each path: a few dozen levels of one would otherwise be written into a URL of gigabytes.
+
+Any other object, such as a class instance or a function, is written by its own enumerable properties, so one that keeps its state in private fields or on its prototype writes nothing, as `{}` does.
 
 ## HTTPResponse
 
@@ -278,13 +436,13 @@ interface HTTPResponse<T = unknown> {
   redirectHistory: string[]; // Redirect target URLs recorded during redirect handling, in order; entries may appear before the follow-up attempt is dispatched, and a continued redirect rewrite updates later entries to the rewritten target
   requestID: string;
   adapterType: AdapterType;
-  isStreamed: boolean; // Body was piped to a StreamResponseFactory; body is null
+  isStreamed: boolean; // Body was piped to a StreamResponseFactory in full; body is null. False when the stream failed (isStreamError), even part-way through
   isStreamError: boolean; // Body delivery failed after headers arrived; see Stream Errors and Replay
   requestBodySettled?: Promise<Error | undefined>; // Optional adapter-reported upload outcome; see Uploads That Outlive the Response
 }
 ```
 
-`isFailed` is `true` only for client-level transport failures. A 404 or 500 HTTP response has `isFailed: false` (the server responded and returned a status code).
+`isFailed` is `true` only for client-level failures, not for HTTP error statuses. A 404 or 500 HTTP response has `isFailed: false` (the server responded and returned a status code). Most failures report `status: 0`, but four can carry a nonzero one: a stream error (see [Stream Errors and Replay](#stream-errors-and-replay)), a `stream_setup_error` (the factory was called for an answer whose headers had arrived), and an `adapter_error` for an answered response the client could not read (see [Error Codes](#error-codes)) keep the real status, and a transport failure an adapter reports with `isTransportError: true` keeps whatever status the adapter gave. Any of them can be `isFailed: true` with a `2xx` or `3xx` status, so check `isFailed` before trusting `status`. A timeout reports `status: 0`; only a body that timed out mid-stream, or one whose stream factory was still setting up, keeps its status. A cancel and a timeout are exclusive: a request cancelled after its timer fired is `isCancelled`, not `isTimeout`. An answer that arrives after its attempt's timer fired - from an adapter that does not stop on abort - is handled as any answer is: delivered if it can be read, an `adapter_error` keeping its status if not. That holds while the answer arrives within a second of the timer firing. After that, the attempt has already ended as a timeout (see [AbortSignal Integration](#abortsignal-integration)).
 
 #### Uploads That Outlive the Response
 
@@ -298,7 +456,14 @@ In browsers, `XHRAdapter` adds upload progress but currently does not expose `re
 if the adapter finished writing it. It never rejects. For `NodeAdapter`, it is available
 once a supported body has entered the adapter's upload tracking, including when the
 response arrives after the upload has finished. It does not prove that the server
-processed or committed the data.
+processed or committed the data. The same outcome is shared by the attempt's retry,
+redirect, and response handling. An upload Error is always a wrapper, on every runtime:
+the adapter's original Error is its `cause`, and it copies the original's readable
+`message`, `name`, `stack`, and `code`, plus a Node system error's `errno`, `syscall`,
+`address`, `port` and `path`, so `error.syscall === 'write'` still reads as it would on
+the original. `instanceof` does not: check `error.cause` for the original's class. A rejection with a non-Error value is normalized
+into an Error that likewise carries the value as `cause`. Inspect `cause` for the
+original's identity, class, or other custom fields.
 
 Check that the field exists before interpreting its resolution:
 
@@ -318,48 +483,155 @@ if (response.requestBodySettled !== undefined) {
 The client carries reported outcomes onto cancellation, timeout, transport-error, and
 redirect results. Absence means no adapter reported an outcome: for example, a bodiless
 request, a request refused before upload tracking began, or an adapter without this
-capability. After redirects, the final response carries the latest reported upload
-outcome, including when a bodied `POST` becomes a bodiless `GET`. Redirect-phase observers
-see that hop's outcome.
+capability. The final response carries the outcome of the latest attempt that had a
+body, or that reported one (a custom adapter may report one for a bodiless request),
+across retries and redirects: a bodied `POST` that becomes a bodiless `GET` after a
+redirect, or a retry whose interceptor dropped the body, still reports the bodied
+attempt's outcome. If that latest bodied attempt was given up on after its adapter
+ignored the abort, the outcome resolves with an `Error` saying the upload's fate is
+unknown; if it reported none - a custom adapter's failure that carried none - the response
+reports none either. Neither reports an earlier attempt's or hop's. A body that sends
+nothing - an empty string or no bytes - is no body here. A form with no entries is one:
+it still goes out as its closing boundary.
+Redirect-phase observers see that hop's outcome.
 
 Before following a redirect or retrying, the client waits for a reported upload outcome.
+A redirect whose next hop sends no body - a `303`, or a `301`/`302` that rewrote a `POST`
+to `GET` - follows without waiting, since nothing goes out beside the upload, and the
+answered hop's upload, unless it is known to have finished, is torn down as it is
+followed, as a browser's redirect ends it. When that ends the upload as an abort, the
+final response's `requestBodySettled` resolves with an Error whose message is `Request
+body upload ended: a redirect was followed` and whose `cause` is the upload's failure as
+the client reports one (the adapter's own error is on that one's `cause`), so it is told
+from a cancel. An upload that ended in a failure of its own, such as a reset, reports
+that failure. In both cases the server answered without the rest of the body, and the
+request itself succeeded.
 Cancellation ends the wait. The request's `timeout` bounds inactivity during this wait,
-including silence since dispatch. Upload-progress reports restart that inactivity clock.
+including silence since dispatch. Upload-progress reports restart that inactivity clock:
+the client hands an adapter an `onUploadProgress` for every request with a body to watch
+for them, except an `xhr` adapter, which is handed one only for a request that asked for
+upload progress (see [XHRAdapter](#xhradapter)). With `NodeAdapter`, time its multipart
+writer spends waiting on pending `File` or `Blob` reads counts as activity too, for up to
+the roughly sixty seconds the adapter itself allows them (below), counted from the first
+read since the upload last reported progress - a read that returns no bytes does not start
+that allowance over. Within it, the inactivity clock restarts when a read answers; past it
+the reads are inactivity. Upload progress always counts.
 On expiry, the client returns a timeout, aborts the attempt, and reports the stalled
-settlement through the global `'error'` channel. `timeout: 0`, negative values, and
+settlement through the global `'error'` channel; the same `Error`, naming the request ID,
+is the timeout's `cause`. Whenever the client tears an upload down - a redirect
+followed without waiting, a cancel during this wait, or its expiry - if the adapter does
+not settle the outcome within a second of the abort, it resolves with the Error saying the
+upload's outcome is unknown, as an attempt given up on does. `timeout: 0`, negative values, and
 `Infinity` disable this client wait bound. A custom adapter that supplies the promise
 must settle it and honor cancellation.
+A `null` or omitted request timeout inherits the client timeout. Explicit `NaN` or another non-number
+throws before dispatch; finite negative values and either infinity retain the documented
+disabled-timeout behavior. Do not pass an expired `deadline - Date.now()` directly: a zero or negative result disables the timer, rather than timing out immediately. Check whether the deadline has passed before sending the request.
+
+An upload is not cut short because the server answered: the server may still be reading
+it. One still running when the request moves on or ends at an answered attempt is left to
+finish - under a final answer, and a
+redirect the client does not follow (`redirect_disabled`, `redirect_loop`, `redirect_unsupported`) or fails to set
+up - and its outcome is carried onto the response. A cancel while the request is still
+running tears it down, and so does a deadline on the wait above.
 
 `NodeAdapter` also watches uploads left running after an early response closes. It checks
-socket progress at roughly five-second intervals and allows a pending multipart source
-read roughly sixty seconds before declaring it stalled. These adapter safeguards are
+socket progress at roughly five-second intervals and allows pending multipart source reads
+roughly sixty seconds, counted from the first read since the socket last accepted bytes,
+before declaring the upload stalled at the end of that allowance - reads that return no
+bytes do not restart it; once a read answers, the socket again gets the full five seconds
+to accept what it produced. A connection that closes, or that
+the adapter tears down, while a multipart source read is pending cancels that read and
+settles the upload outcome with a failure. These adapter safeguards are
 separate from the client's timeout. Continuing progress does not waive the normal
 per-attempt response deadline.
 
 The upload outcome is advisory: its resolved error does not itself change the received
 status, `isFailed`, `isNetworkError`, or retry eligibility. This preserves an early `413`
-and its explanation even if the server stops reading the body. Failures detected after
-an early response are also reported on the global `'error'` channel. A timeout while the
+and its explanation even if the server stops reading the body - as long as the answer
+reaches the client. A server that closes the connection with the body unread can reset
+it before the client has read its answer: nginx avoids this by reading and discarding the
+rest of the body for a while (`lingering_close`, on by default), but a server that does
+not linger can make the upload fail as a transport error (`status: 0`) on Node, where
+writing into the reset connection fails before the buffered answer is read. Bun reads the
+answer first. Such a failure is retried as any transport failure is, for an idempotent
+method. Failures detected after an early response are also reported on the global
+`'error'` channel, including a connection reset while a `streamResponse` factory is still
+opening its sink or its body streams. An upload cut short because the adapter itself
+ended the connection - a cancel or timeout, a stream factory that declined or failed, a
+streaming sink that failed, a response body over `maxResponseBytes` or one that fails to
+decode - settles `requestBodySettled` with that failure but is not reported there, and so
+does one cut short because the answer said it would close the connection (`Connection:
+close`, HTTP/1.0 without keep-alive, or a body only the close can end - one with neither a
+`Content-Length` nor a `Transfer-Encoding`, a `205` among them, or one whose
+`Transfer-Encoding` does not end in `chunked`): the runtime stops writing to it as the
+answer ends, so the adapter ends the upload there, settling `requestBodySettled` with
+`Request body upload ended: the answer closed the connection`.
+
+When an upload fails after an early answer that is still arriving, NodeAdapter tears the
+request down at once, as `fetch` and Node's own `pipeline` do: a request whose body cannot be
+completed is not one the server can finish answering, so the response fails as a stream
+error. A response its consumer is still working through - complete, paused under a slow
+`streamResponse` sink, or buffered for a factory still opening its sink - is waited for
+however long that takes, and torn down if it goes back to waiting on the network. A timeout while the
 client waits to dispatch another hop is a separate request failure.
 
 ### Content-Type Detection and Body Parsing
 
-The response `Content-Type` header determines how the body is parsed:
+The response `Content-Type` header determines how the body is parsed. Only its media type is read - the first one, when fetch or XHR joined a repeated header, and without its parameters, trimmed of HTTP whitespace and in any ASCII case. A `charset` is one of those parameters: text is decoded as UTF-8 whatever it names, as fetch's `response.text()` decodes it, with bytes that are not UTF-8 read as U+FFFD. Stream the response with `streamResponse`, or have it served as a binary type, to decode it some other way:
 
-| Content-Type value                     | `contentType` | Body type                 |
-| -------------------------------------- | ------------- | ------------------------- |
-| Contains `application/json` or `+json` | `'json'`      | Parsed via `JSON.parse()` |
-| Starts with `text/`                    | `'text'`      | UTF-8 decoded string      |
-| `application/x-www-form-urlencoded`    | `'text'`      | UTF-8 decoded string      |
-| Absent or anything else                | `'binary'`    | Raw `Uint8Array`          |
+| Media type                                            | `contentType` | Body type                 |
+| ----------------------------------------------------- | ------------- | ------------------------- |
+| `application/json`, `text/json`, or ends with `+json` | `'json'`      | Parsed via `JSON.parse()` |
+| Starts with `text/`                                   | `'text'`      | UTF-8 decoded string      |
+| `application/x-www-form-urlencoded`                   | `'text'`      | UTF-8 decoded string      |
+| Absent or anything else (`application/jsonl`)         | `'binary'`    | Raw `Uint8Array`          |
 
-`isText` mirrors `contentType === 'text'`. `isJSON` is `true` only when JSON parsing actually succeeded, and it stays `false` on a parse failure. `isParseError` is `true` when the server sent a JSON `Content-Type` but the body could not be parsed. In that case `contentType` is still `'json'`, `isJSON` is `false`, and `body` falls back to the raw string.
+`isText` mirrors `contentType === 'text'`. `isJSON` is `true` only when JSON parsing actually succeeded, and it stays `false` on a parse failure. `isParseError` is `true` when the server sent a JSON `Content-Type` but the body could not be parsed. In that case `contentType` is still `'json'`, `isJSON` is `false`, and `body` falls back to the raw string. An empty body is no body, whatever the `Content-Type` and the adapter: `body` is `null` and `isParseError` is `false`. A JSON or text body is decoded as UTF-8 with the runtime's global `TextDecoder`, a leading byte order mark dropped (a custom adapter's string body's too); a runtime without `TextDecoder` needs a polyfill for one.
+
+### Response Size Limit
+
+A buffered response body is held whole in memory before it is parsed, so the client bounds it: `maxResponseBytes`, 64 MiB by default (`DEFAULT_MAX_RESPONSE_BYTES`). A body past the limit fails the request as `response_too_large` - except on a redirect the client is about to follow, where the adapter stops reading it and the redirect is followed as a bodiless one, so a "Moved" page past the limit does not stop the redirect. A redirect's body within the limit is read, so one that is cut short still ends the request as a stream error (see [Stream Errors and Replay](#stream-errors-and-replay)):
+
+```typescript
+const client = new HTTPClient({ maxResponseBytes: 10 * 1024 * 1024 }); // 10 MiB
+
+// Per request: raise it, lower it, or turn it off with Infinity.
+const builder = client.get('/export').maxResponseBytes(Infinity);
+const response = await builder.send();
+
+if (builder.error?.code === 'response_too_large') {
+  console.log(response.status); // the server's real status
+}
+```
+
+- **Where it is set.** `HTTPClientConfig.maxResponseBytes`, a sub-client's override (null or omitted inherits the parent's value), the `maxResponseBytes` request option, and `.maxResponseBytes()` on the builder (null or omitted inherits the client's value). It is a positive integer, or `Infinity` for no limit; anything else - `0`, a negative or fractional number, `NaN`, a non-number - throws a `TypeError` where it is given.
+- **What is counted.** The body as it is handed over: decoded, where the adapter decodes a compressed response (`NodeAdapter`, and `fetch` itself), so a small gzip body that inflates past the limit is refused. The network adapters stop reading once the count passes the limit, rather than buffering the whole body first, and release the connection.
+  - **`Content-Length` up front.** `NodeAdapter` and `FetchAdapter` refuse a `Content-Length` already over the limit before the body is read, where that length counts the bytes handed over - not for a response they decode, whose length counts the encoded bytes. With `decompress: false`, `NodeAdapter` decodes nothing, so a compressed response's length is refused up front too. `FetchAdapter` holds a response that also carries a `Transfer-Encoding` to the limit by the bytes read instead, as its chunks frame it, not its length (RFC 9112 §6.3); Node refuses such a response outright, so `NodeAdapter` fails it as a network error. `FetchAdapter` takes a response with no `Content-Encoding` as uncoded only where that absence can be trusted: not on a cross-origin (`cors`) response, which hides the header unless the server exposes it, nor where the body is not handed over as a stream, as from an XHR-based polyfill, which reads its headers through XHR. Those are measured by their decoded bytes once read.
+  - **`XHRAdapter`** stops on download progress, which counts encoded or decoded bytes for a compressed body depending on the runtime (Chrome counts decoded, Firefox and React Native's Android networking encoded). The two bound each other in neither direction: a body can decode to many times its encoded bytes, and one a server flushes in small writes (a streamed response behind gzip) takes several times more bytes encoded than decoded, so no margin over the limit proves a decoded body is past it.
+  - So `XHRAdapter` stops early only a body it can tell carries no coding, as soon as its bytes pass the limit: one whose `Content-Encoding` it can read as `identity` (or empty), or one with none on a browser response whose request and final URL are both same-origin with the page. Such a body whose `Content-Length` is already past the limit, and that carries no `Transfer-Encoding`, is refused as its headers arrive, before it is downloaded. A browser hides `Content-Encoding` on a cross-origin response unless the server lists it in `Access-Control-Expose-Headers`, and outside a browser a runtime may decode the body itself and drop the header, so there its absence proves nothing.
+  - Every other `XHRAdapter` body is checked exactly by its decoded size once it has loaded, so a compressed body that inflates past the limit, or one whose coding cannot be read, is refused only once the runtime holds it whole. Use `FetchAdapter` where a small compressed response could decode to more than you want held.
+  - `MockAdapter` applies the limit to the serialized route body.
+- **Buffered responses only.** A body piped to `streamResponse` goes to your writable and is never held by the client, so it is not limited. A body too large to buffer is what `streamResponse` is for - but a factory is only called for a 2xx with a body: a `streamResponse` request answered with another status (an error's body) is buffered, and limited.
+- **Every adapter.** The client checks a body handed over by any adapter, a custom one included, against the limit too.
+  - A custom adapter's body is bytes, a string or nothing. A view (a `Buffer`, a `DataView`, an `Int16Array`) is delivered as a plain `Uint8Array` over its bytes, and a buffer that is not a plain `ArrayBuffer` (a subclass, one from another realm, one with properties of its own) as a plain copy, so what is delivered reports the length the limit measured. A view is copied when it covers only part of its buffer, as a pooled `Buffer` does, or when its buffer is not a plain `ArrayBuffer`, so the body's `buffer` holds the body alone. Bytes that cannot be read - a detached buffer, a view over one, or a view past the end of a shrunk resizable buffer - are a `stream_response_error` with the real status, not an empty body; on a redirect they are dropped, and the redirect is followed or refused as a bodiless one.
+  - Anything else - a `Blob`, a plain object, a `Proxy` over bytes - has no size the client can measure, and fails the request as a non-retryable `adapter_error`, whatever its `Content-Type`.
+  - An answer that is already a failure (`isTransportError`, `isStreamError`) keeps its own failure, since its body is never delivered. A redirect, whose body reaches no caller but its redirect-phase observers, is followed or ends as `redirect_disabled` as a bodiless `3xx`, as one with an oversized body does.
+  - An adapter driven directly reads `maxResponseBytes` off its request by the same rule - a positive integer or `Infinity`, absent for none - and refuses anything else, a getter that throws included, with a non-retryable `TypeError`.
+- **How it fails.** As a stream error: the response keeps its real status and headers, with `isStreamError: true`, `isFailed: true` and a `null` body. The error's `cause` states the limit. The adapter stopped reading, so none of the body reached you, and the status is the whole answer: a retryable status (a `503` with an oversized maintenance page) is retried as the retry policy allows, and any other is final (see [Stream Errors and Replay](#stream-errors-and-replay)). A `3xx` the client follows is not failed by it: its body is not read past the limit, and the redirect is followed as a bodiless one.
+- **Stream chunks.** With a finite limit, `FetchAdapter` reads the response stream itself, a `Content-Length` within the limit included: the header is only a value, and a body read whole by the runtime's `arrayBuffer()` could be measured only once it was held.
+  - `FetchAdapter` fails a chunk that is not a `Uint8Array` as a `stream_response_error`, as the Fetch standard's `arrayBuffer()` does. A body that is a Node `Readable` rather than a `ReadableStream` (a node-fetch or cross-fetch polyfill's `fetch`) may yield text as well, read as its UTF-8 bytes, as node-fetch's own `arrayBuffer()` reads it; a surrogate pair split across two text chunks is the one character it is.
+  - Bun's `arrayBuffer()` accepts text and other binary chunks, so on Bun a `Response` built over such a stream (a test double, say) is read with `maxResponseBytes: Infinity` but refused under a limit.
+  - **Memory held** is at most about twice the bytes read, however finely the body is split: a body sent in one-byte chunks holds about its own size, not an object per byte, and one handed over as small views of a larger buffer does not hold the rest of that buffer. `NodeAdapter` gathers a buffered body the same way, so a server sending one a byte at a time does not make the client hold an object per byte.
+  - **The body is your own copy.** A stream may reuse a chunk's memory once it has handed the chunk over, or share it with another thread, so the client copies the bytes rather than keep a reference to them: a stream that later overwrites that memory does not change the body you received. Most chunks are copied once, when the body is joined at its end; small or shared ones are copied as they are read.
+- **A `fetch` with no body stream.** `FetchAdapter` bounds memory by reading the body a chunk at a time: a web stream through its reader, or a polyfill's Node `Readable` as an async iterable. A `fetch` that hands over neither - an XHR-based polyfill such as `whatwg-fetch`, which has already buffered the whole body by the time it answers - is read through its `arrayBuffer()` and checked after, so the limit still fails the request but does not bound the memory read. A `Content-Length` over the limit is refused before reading only where the response's `Content-Encoding` reads as `identity` (or empty): with none, the body is measured once read, as above.
+- **Observers.** The attempt snapshot reports the limit the attempt ran under as `request.maxResponseBytes`.
 
 ## Error Handling
 
 `send()` always resolves for request outcomes handled by the client runtime. HTTP errors (4xx/5xx), timeouts, cancels, transport failures, redirect control-flow failures, and other client-managed failure states all produce a settled `HTTPResponse` with no exception. Check `response.isFailed` for client-level failures and `response.status` for HTTP errors.
 
-`send()` rejects (returns a rejected promise) only for programming errors around builder/client usage: calling it on a disabled client, calling it a second time on the same builder, or calling it after `builder.cancel()` was already called pre-send.
+`send()` rejects (returns a rejected promise) only for programming errors around builder/client usage: calling it on a disabled client, calling it a second time on the same builder, calling it after `builder.cancel()` was already called pre-send, or a value the caller supplied that throws while the request is set up, before any interceptor runs - a getter nested in `params`, a nested `params` value - a getter's, or an object changed after `.params()` - that `qs` cannot serialize, or a collection it would write nothing for, or a header value whose `toString` throws. For a disabled client or a value that throws during setup, the builder then ends `failed` - or `cancelled`, when a `cancel()` made during that setup was held (see Cancellation) - with no `error` and no error observers run; the other two leave its state as it was.
 
 ```typescript
 const builder = client.get('/users/999');
@@ -367,8 +639,8 @@ const response = await builder.send();
 
 if (response.isFailed) {
   // Client-level failure (timeout, cancelled, network error, redirect handling failure, etc.)
-  const err = builder.error; // HTTPClientError
-  console.log(err.code, err.message);
+  const err = builder.error; // HTTPClientError, set whenever isFailed is
+  console.log(err?.code, err?.message);
 } else if (response.status === 404) {
   console.log('Not found');
 } else if (response.status >= 200 && response.status < 300) {
@@ -393,48 +665,64 @@ interface HTTPClientError {
   redirectHistory: string[]; // Redirect target URLs recorded during redirect handling, in order
   requestID: string;
   isTimeout: boolean;
-  isRetriesExhausted: boolean; // true when all retry attempts were spent
+  isRetriesExhausted: boolean; // true when the last failure was retryable but every retry attempt was spent
   cancelReason?: string; // set when cancelled with an explicit string reason - via builder.cancel('reason'), client.cancel(id, 'reason'), client.cancelAll/Own/WithLabel('reason'), controller.abort('reason'), or an interceptor/stream factory cancel
 }
 ```
 
 ### Error Codes
 
-| Code                    | Meaning                                                                                                                                                        |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `network_error`         | Transport-level failure before a response was received                                                                                                         |
-| `timeout`               | Request exceeded the configured timeout                                                                                                                        |
-| `cancelled`             | Request was cancelled via `builder.cancel()`, `client.cancel()`, AbortSignal, or an interceptor/stream factory cancel                                          |
-| `redirect_disabled`     | A redirect response was received but `followRedirects` is `false`                                                                                              |
-| `redirect_loop`         | The configured `maxRedirects` limit was reached                                                                                                                |
-| `request_setup_error`   | Request setup or local orchestration failure before a normal adapter response was produced (e.g. invalid configuration, unsupported body type, unresolved URL) |
-| `adapter_error`         | The adapter threw an unexpected error                                                                                                                          |
-| `interceptor_error`     | A request interceptor threw                                                                                                                                    |
-| `stream_write_error`    | Writing chunks to the StreamResponseFactory writable failed                                                                                                    |
-| `stream_response_error` | The upstream response stream errored after headers arrived                                                                                                     |
-| `stream_setup_error`    | The StreamResponseFactory threw an error during setup                                                                                                          |
+| Code                    | Meaning                                                                                                                                                                                                                                                                       |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `network_error`         | Transport-level failure before a response was received, or a response that is malformed: a status line the runtime cannot read, or a status no server may send (`HTTP/1.1 099`)                                                                                               |
+| `timeout`               | Request exceeded the configured timeout                                                                                                                                                                                                                                       |
+| `cancelled`             | Request was cancelled via `builder.cancel()`, `client.cancel()`, AbortSignal, or an interceptor/stream factory cancel                                                                                                                                                         |
+| `redirect_disabled`     | A redirect was received while `followRedirects` is `false`: a `3xx` with a `Location`, or one the adapter detected with `status: 0` and none (a browser's, or a `fetch` that followed it itself)                                                                              |
+| `redirect_loop`         | The configured `maxRedirects` limit was reached                                                                                                                                                                                                                               |
+| `redirect_unsupported`  | With `followRedirects: true`, the adapter reported a redirect with `status: 0` and no `Location` to follow - one the runtime's `fetch` followed itself, say. Never retried                                                                                                    |
+| `request_setup_error`   | Request setup or local orchestration failure before a normal adapter response was produced (e.g. invalid configuration, a body an interceptor returned that cannot be copied, unresolved URL)                                                                                 |
+| `adapter_error`         | The adapter threw an unexpected error, or resolved a response the client could not read (the latter is never retried)                                                                                                                                                         |
+| `interceptor_error`     | A request interceptor threw, or returned a request that is unreadable or invalid                                                                                                                                                                                              |
+| `stream_write_error`    | Writing chunks to the StreamResponseFactory writable failed                                                                                                                                                                                                                   |
+| `stream_response_error` | The upstream response stream errored after headers arrived                                                                                                                                                                                                                    |
+| `stream_setup_error`    | The StreamResponseFactory threw an error during setup, returned something other than a writable, `null`, or a cancel object, or the attempt timed out while it was still setting up (`isTimeout: true`, not retried: the factory may have opened its sink)                    |
+| `response_too_large`    | A buffered response body passed `maxResponseBytes`. The real status and headers are kept, with `isStreamError: true`; retried only on a retryable status (a `503` with an oversized page), as the status alone is the answer. See [Response Size Limit](#response-size-limit) |
+
+When `adapter_error` comes from a response the client could not read, the server did answer, so the response keeps the status that answer carried (the same status `onAttemptEnd` reports) and its headers once they were normalized, with `isFailed: true`, `isNetworkError: false` and a `null` body, as a stream error keeps its real status. Treat `isFailed` and the error code as authoritative, not the status. The status is `0` when the response object's own fields could not be read, and the headers are empty when they were what failed. `wasRedirectDetected` and `detectedRedirectURL` are the adapter's own when its response object was read, as on a healthy response. When there was none to read them from - a cookie jar that threw on a body stream aborted after headers, or a response whose own fields could not be read - they are derived from the status and `Location`. When it was the configured cookie jar that threw while storing the response's `Set-Cookie`, the error's `message` is `Cookie jar failed to process response headers` and its `cause` is what the jar threw. A cancel takes precedence over a jar failure, and so does a per-attempt timeout that cut the body stream: the request ends as that cancel or timeout instead. A jar failure on an answer that arrived whole is this `adapter_error` even if the attempt's timer had fired.
+
+This covers a body the adapter resolved as neither bytes nor a string (a plain object, a `Blob`), on the final response or a response that would be retried: the request ends as this `adapter_error`, whatever the `Content-Type`, and is not retried. A response that carries no body - a `HEAD`, a `204`, `205` or `304` - ignores it. Nor does such a body stop a redirect: a `3xx` due to be followed is followed, and `redirect`-phase observers, the only ones that read a redirect's body, see it as `null`. A refused redirect (`redirect_disabled`) or one past `maxRedirects` (`redirect_loop`) ends as it would with no body. It also covers an `AbortError` thrown while the client reads an answered response: unless the request was cancelled, that is this `adapter_error`, not a cancel. If the attempt had timed out and that `AbortError` is the timeout's, it is a timeout (`status: 0`, retried as the policy allows) even though the answer arrived.
+
+An `AbortError` an adapter rejects with before any answer, with no cancel made, no attempt timeout and no `streamResponse` factory called, is an `adapter_error` too (`status: 0`, `isNetworkError: false`, that error as the `cause`), and is not retried: an abort is not a transport failure a second attempt gets past - a browser aborting a page's requests as it unloads, say. Once a factory has been called, such an `AbortError` is read as its decline, a cancel, or, once it started a stream, as the cut stream (see [Stream Errors and Replay](#stream-errors-and-replay)).
 
 ## Request Interceptors
 
-Interceptors run **before** an adapter attempt and can mutate the outgoing request (headers, URL, body) or cancel it entirely. They are the right place for auth token injection, URL rewriting, or pre-flight validation.
+Each run of an interceptor or response/error observer chain snapshots its
+registrations when it begins. A request runs these chains once per phase: the initial
+interceptors, then again for each retry, each redirect hop and the final outcome.
+Adding or removing a callback while a chain is running affects the next chain run,
+which can be a later phase of the same request; removing an earlier callback cannot
+skip a later one in the current snapshot. A sub-client's chain run snapshots its
+parent's registrations and its own together, so a parent callback that registers one
+on the sub-client does not run it in that same chain run.
+
+Interceptors run **before** an adapter attempt and can change the outgoing request (its headers and URL in place, a new body in place of a JSON one) or cancel it entirely. They are the right place for auth token injection, URL rewriting, or pre-flight validation. They run before each attempt's `timeout` is armed, so a token refresh does not spend it, and the request waits for them with no timeout of its own: one that never settles holds the request until it is cancelled.
 
 ```typescript
 // Remove a previously added interceptor by calling the returned function
 const removeInterceptor = client.addRequestInterceptor(
   (request, phase, context) => {
-    return {
-      ...request,
-      headers: {
-        ...request.headers,
-        authorization: `Bearer ${getToken()}`,
-      },
-    };
+    request.headers.authorization = `Bearer ${getToken()}`;
+    return request;
   },
-  { phases: ['initial', 'retry'] }, // default: ['initial']
+  { phases: ['initial', 'retry'], hosts: ['api.example.com'] }, // phases default: ['initial']
 );
 
 // Later: removeInterceptor()
 ```
+
+Setting the header in place, as above, leaves a JSON body unread, so it is sent as the text it was serialized to when you handed it over, without being parsed. Spreading the request (`{ ...request, headers: { ...request.headers, authorization } }`) reads every field, so it parses the body once, but the body it hands back is still sent as that text. Logging the request an interceptor is handed (`console.log(request)`, `util.inspect(request)`) shows an unread JSON body as `body: [Getter/Setter]`; log `request.body` itself to see the data, which reads it. A `Uint8Array` body handed to a retry- or redirect-phase interceptor is a copy; one handed back holding the same bytes is sent as the client's own bytes it was copied from, so an upload is not copied a second time for that phase.
+
+The `hosts` filter keeps the token to the API's own host. Without it, the interceptor would run for every host, including a redirect target. On a redirect hop to another origin, the client drops a header that a `retry`-phase interceptor adds, unless it is on the cross-origin allow-list. See [Redirect Handling](#redirect-handling).
 
 The interceptor receives the request and must return the (mutated) request, an `InterceptorCancel` to abort it, or `null` as shorthand for cancelling without a reason:
 
@@ -463,7 +751,7 @@ client.addRequestInterceptor((req) => {
 interface InterceptedRequest {
   requestURL: string; // Absolute before dispatch
   method: HTTPMethod;
-  headers: Record<string, string | string[]>;
+  headers: RequestHeadersInput; // Return a null/undefined value to remove a header
   body?: unknown; // Pre-serialization
 }
 ```
@@ -480,19 +768,97 @@ client.addRequestInterceptor((request) => {
 });
 ```
 
+**Each interceptor's returned request is copied once.** The client copies its `requestURL`, `method`, `headers` and `body` into a new plain object of its own. That copy is what the next interceptor in the phase reads (its filter and the interceptor itself) and, once the chain finishes, what the request is checked and sent with. The next interceptor therefore receives the copy, not the object the earlier one returned:
+
+- Any other property is dropped.
+- Header names are lowercase, and a header removed with `null` or `undefined` is absent.
+- Header values are strings or arrays of strings: a single value is converted to a string, an array stays an array with each element converted to a string, and a one-element array becomes that element's string.
+- Changing an object an earlier interceptor kept a reference to does not change the request.
+
+Every later check and use reads that copy: the next interceptor's filter, URL validation, the browser-restricted header check, the cookie-jar lookup and dispatch. A getter on the returned object, on its header record or on one of its entries, is read once, by that copy, and not consulted again, so a URL that passed validation is the URL the request is sent to.
+
+**A result that cannot be copied fails as `interceptor_error`** where it is copied, even when a later interceptor would have replaced it, and is reported from that result whatever is registered after it. Copying fails on:
+
+- a `requestURL` that is not a string, or a `method` that is not a string (or not a valid method name);
+- `headers` that is not a plain object: an array, a `Headers` or a `Map` is refused rather than read as empty (a plain object from another realm, such as a `vm` context, is accepted);
+- a getter that throws, on the returned object, on the header record or on one of its entries;
+- a header value whose string conversion throws.
+
+If copying fails, the best-effort snapshot for error observers may read those values again.
+
+**Methods.** A standard method (`GET`, `HEAD`, `POST`, `PUT`, `DELETE`, `OPTIONS`, `PATCH`, `TRACE`) is uppercased whatever its case, so a `post` is treated as `POST` by the retry and redirect rules. So is a `CONNECT`, which is handed to the next interceptor as `CONNECT` and refused if the chain ends on it. Any other method is case-sensitive and passed to the adapter as given, as `request()` passes it too. What goes on the wire depends on the transport:
+
+- Node's `http`, which `NodeAdapter` uses on Node and Bun alike, uppercases it.
+- Node's `fetch` sends it as given.
+- Bun's `fetch` uppercases a method it knows (`purge` goes out as `PURGE`) and would send one it does not know as `GET`. `FetchAdapter` refuses a request whose method the runtime's `fetch` would change, its case included, as a non-retryable `adapter_error` rather than sending it, so use `NodeAdapter` for a custom method on Bun.
+
+**Methods and bodies refused before dispatch:**
+
+- `CONNECT` is refused on every adapter (it opens a tunnel). An interceptor's `CONNECT` is refused once the chain ends, after its URL: one interceptor may hand it to the next, which can change it, and a request filter's `methods` can name it to select one.
+- `TRACE` and `TRACK` are refused through `FetchAdapter`, and through `XHRAdapter` in a browser, since the Fetch Standard forbids them. Each of those adapters, driven directly, refuses them in the same words.
+- A `GET` or `HEAD` with a body is refused through `FetchAdapter`, and through `XHRAdapter` in a browser, since `fetch` refuses one and a browser's `XMLHttpRequest` silently sends it without the body. An XHR outside a browser (React Native, a shim) may send it, and is let through. Use `NodeAdapter` to send it, or an interceptor to rewrite it.
+- For that check, an empty string, bytes or form is a body. A JSON body whose `toJSON` answers `undefined` serializes to nothing, and goes out with none; an interceptor's is read once, when its copy is taken.
+- These method checks run on the interceptors' result, with its body as the client's copy of it, the one that is sent. On a retry held to a cross-origin hop's own request, they run on the stripped request that is sent, with the hop's own body - see [Redirect Handling](#redirect-handling).
+- In the redirect phase, a `Location` that arrived unusable and that the interceptors left as it was is answered after their method and headers are checked, so a `CONNECT` or `TRACE` they set there is refused first, as `interceptor_error`.
+
+**Headers `FetchAdapter` refuses.** `FetchAdapter` refuses a `Transfer-Encoding`, `Keep-Alive`, `Upgrade` or `Expect` header, or a `Connection` other than `close` or `keep-alive`, on every runtime, before the upload starts: the Fetch Standard forbids them and Node's `fetch` refuses them, while Bun's would send them (a `Transfer-Encoding` beside its own `Content-Length`). A header Node's `fetch` refuses at dispatch that this list does not know of also fails once, as a non-retryable `adapter_error`, recognized by the error code Node's `fetch` gives it.
+
+**Which refusal a request gets.** A request that breaks more than one of these rules is refused for the first it breaks, in this order:
+
+- `NodeAdapter`, and `FetchAdapter` driven directly: the URL, then the body type, then a header refused by name, then the method and the `GET`/`HEAD` body. For `FetchAdapter`, a port the Fetch Standard blocks is part of the URL - see [FetchAdapter](#fetchadapter-default).
+- The client: the same order, but it refuses a header by name only in a browser, and a blocked port on no runtime. It leaves `FetchAdapter`'s port refusal everywhere, and outside a browser the header refusals of `FetchAdapter` and `NodeAdapter`, to the adapter, which refuses them once the initial interceptors and `onRequestStart` have run, as a non-retryable `adapter_error`.
+- `XHRAdapter` driven directly refuses no header by name: it refuses the URL, the body type, the method and the `GET`/`HEAD` body, in that order.
+- `MockAdapter` refuses a body first, and routes a URL that does not parse as written.
+- A malformed header is left to the transport, which refuses it (`new Request`, `setRequestHeader`) after those checks.
+- Any adapter reads each header value, and fails on one whose `toString` throws, before all of these.
+
 ### Filter Options
 
 ```typescript
 interface RequestInterceptorFilter {
   phases?: ('initial' | 'retry' | 'redirect')[]; // Default: ['initial']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex - list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
+  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex - list it explicitly. '*' matches everything. A public suffix or pseudo-TLD tail is matched too: '*.internal' matches 'api.internal'.
   schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch - MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
   bodyContainsKeys?: string[]; // Dot-path object matching like 'data.results'; array indexing is not supported; the body must be a plain object at the root level - JSON array responses never match
 }
 ```
 
-All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases.
+All specified filter fields are ANDed together. Within each field, values are ORed: any one match is sufficient. A standard method in `methods` is matched case-insensitively, and any other exactly.
+
+**Filters are checked when the callback is added.** Every field is checked then, and the filter is copied, so changing it afterwards has no effect. The observer filters below follow the same rules. Adding the callback throws a `TypeError` when:
+
+- the callback is not a function, or the filter is not an object (it may be omitted);
+- a field is misspelled, or is one that kind of callback does not take (`statusCodes` on an error observer, `contentTypes` on an interceptor);
+- a list is not an array of strings (`statusCodes`: numbers; `methods`: method names), or `phases`, `schemes` or `contentTypes` names one that callback cannot see;
+- a list is empty (`hosts: []`, `statusCodes: []`, `phases: []`, ...), since it would either never match or match every request. Omit the field to match every request, or, for `phases`, to get that kind's default phases (list them all to match every phase);
+- an entry can never match (see below);
+- a field's getter throws (the `TypeError` names the field), or the filter's fields cannot be listed (a `Proxy` whose `ownKeys` trap throws). Each `TypeError` carries that error as its `cause`.
+
+**Entries that can never match** are refused:
+
+- a `statusCodes` entry that is not `0` or an integer from 100 to 999;
+- a `contentTypeHeaders` entry that is not one media type, such as `json`, `application/*+json`, `application/json:` (a type or subtype that is not an HTTP token, which no valid media type has) or a comma list (a comma inside a quoted parameter value, as in `text/csv; delimiter=","`, is part of the one media type). `*` works only as a whole subtype (`image/*`) or as `*/*`, which matches any type;
+- a `hosts` entry with a scheme, path or port (`api.test:8080` - give the hostname alone), or with an empty label;
+- a `hosts` entry with whitespace at an end other than spaces, tabs, CRs and LFs (a no-break space picked up from pasted config: `'\u00A0*'` is not `*`);
+- a `hosts` wildcard mixed into a label (`*api.example.com`), a wildcard IP (`10.*.0.1`; only `*` alone matches an IP), or a wildcard over a Public Suffix List wildcard rule (`*.kawasaki.jp`, whose every label is itself a public suffix);
+- a `hosts` name the matcher cannot read (`10.0.0.256`, or `a!b.example.com`). It reads host names - letters, digits, `_` and hyphens, in labels of at most 63 characters and a name of at most 253, one trailing dot aside - so a request host outside that is matched only by `*`.
+
+A host the URL parser accepts with a hyphen at a label's edge, `-edge.example.com`, is matched by an exact entry for it, written as the URL parser writes it (`xn----rga.example.com`, not `-ñ.example.com`, which is refused with that said), and by a wildcard such as `*.example.com`. A wildcard whose own fixed labels hold such a label, `*.-edge.example.com`, is refused: `**.example.com` reaches the hosts beneath it.
+
+**A filter that throws while it is matched:**
+
+- A request interceptor's filter (a `bodyContainsKeys` reading a body whose getter throws, say) fails the request as `interceptor_error`, as the interceptor throwing would.
+- An observer's filter is reported and that observer skipped, since an observer cannot change the request.
+
+**Observers are matched against what they were handed.** Every observer of a response or error - a parent client's and then the sub-client's - is handed the same response and request. The filters are matched against their `requestURL`, `method`, status, content type and body as they were before the first of those observers ran, so one observer rewriting the request's `requestURL` or `method`, or replacing the response's body, does not change which of the rest run, a parent's observer included. A `bodyContainsKeys` filter reads the keys of that body when it is asked, so an observer that changes the body's contents is seen by the filters after it.
+
+**Wildcards over a public suffix.** A wildcard whose tail is a public suffix or an internal pseudo-TLD matches what it names: `*.internal` matches `api.internal`, `**.co.uk` every host under `co.uk`, and `*.github.io` every GitHub Pages site. Written out, such a tail is your choice of hosts, so the guard a CORS allowlist applies there (see [domain-utils](./domain-utils.md)) is not applied, as `NO_PROXY=.internal` and request mocking libraries' host patterns match such names. Scope a credential interceptor to such a pattern only if every host under it should get the credential.
+
+- A wildcard still never reaches a host under an ICANN public suffix that lies beneath its tail, which belongs to another registrant: `**.hedmark.no` does not match `evil.os.hedmark.no`.
+- The rule is the same for every filter, so a filter meant to catch every host under a country tail misses the ones under its second-level suffixes: `**.uk` does not reach `api.example.co.uk`, since `co.uk` is a public suffix. To strip a header from, block or log those requests, list `**.co.uk` (and the tail's other suffixes) too.
+
+The same match and check are exported from [domain-utils](./domain-utils.md) as `matchesHostFilter` and `validateHostFilterEntry`.
 
 ### Cancelling From an Interceptor
 
@@ -508,6 +874,8 @@ client.addRequestInterceptor((request, phase, context) => {
 });
 ```
 
+The request is then reported - on the response, the error and to error observers - as it was before that phase's interceptors ran, since they were handed a copy, save for an initial-phase interceptor's in-place edit of a bytes or form body (see [Body Types](#body-types)). So is one cancelled some other way while an interceptor runs - `builder.cancel()`, or `client.cancelAll()` during an awaited token refresh: the chain ends there, no later interceptor runs, and what the running interceptor returns is not read, so `undefined` from an interceptor that cancelled and returned nothing is not refused. An interceptor that throws after the request was cancelled ends it cancelled as well, not as `interceptor_error`, and the error is dropped; so does any other failure in that phase once the cancel has landed, such as a getter on the interceptor's result that throws while the client copies it.
+
 ### Interceptor Context
 
 ```typescript
@@ -521,7 +889,7 @@ interface RequestInterceptorContext {
 
 ## Response Observers
 
-Observers run **after** an adapter attempt and cannot modify the response. They are the right place for logging, metrics, cache writes, and reading token state out of response bodies.
+Observers run **after** an adapter attempt and have no say in the outcome: what they return is ignored, and a throw is reported, not raised. They are handed the response and error themselves, not copies - a final observer's change to the response is what `send()` returns and the next observer sees - so treat them as read-only. The request is a copy, its header record included, taken for each response or error and shared by the observers it is handed to: an edit in place to its `requestURL`, `method` or headers is seen by the observers after it, and reaches nothing the client reads - not the request a redirect hop is built from, nor the URL a cancelled request reports. Its `body` and `rawBody` are the attempt's own (see below). They are the right place for logging, metrics, cache writes, and reading token state out of response bodies. The request waits for them in order, with no timeout, so one that never settles holds it up. In the `redirect` and `retry` phases a cancel stops that wait: `send()` answers at once, the observer it was waiting on carries on by itself, and no later observer of that phase runs. A `final` observer runs after the request has settled, so `send()` waits for it regardless; the request has by then left `listRequests()` and the client's listeners have left your signal - unless an upload is still going out, when they stay on your signal until it settles or makes no progress for the longer of the request timeout and twice the upload stall grace (ten seconds with the timeout disabled) - so one that never settles holds up only that `send()`.
 
 ```typescript
 const removeObserver = client.addResponseObserver(
@@ -550,12 +918,35 @@ interface AttemptRequest {
   method: HTTPMethod;
   headers: Record<string, string | string[]>;
   body?: string | Uint8Array | FormData | null; // serialized adapter-facing body
-  rawBody?: unknown; // structured pre-serialization body when available
+  rawBody?: unknown; // structured body when available; see below
   timeout?: number; // configured per-attempt timeout budget in ms
+  maxResponseBytes?: number; // configured buffered response size limit; Infinity for none
   attemptNumber?: number; // 1-based; undefined on pre-dispatch best-effort snapshots
   requestID?: string; // matches HTTPResponse.requestID / HTTPClientError.requestID
 }
 ```
+
+`request.body` is the body as serialized for the adapter; `request.rawBody` is the body before serialization. Both are the attempt's own, so changing them never changes what is sent.
+
+**What they hold:**
+
+- **String body:** the string, in both.
+- **JSON body:** `request.body` is its JSON string. `request.rawBody` is the value sent, parsed back from `request.body`: the request's body is the data your body serialized to when you handed it over (see [Body Types](#body-types)), so a `toJSON` is applied, a `Date` is its ISO string, a `Map` is `{}`, and an `undefined` member is dropped (`null` in an array). A number `JSON.rawJSON` wrote that a double does not write back (`9007199254740993`, `1.0`) is that `JSON.rawJSON` value, so `JSON.stringify` writes it as it was sent.
+- **`Uint8Array` or `FormData` body:** `request.body` and `request.rawBody` are one copy of the body as sent (a `Buffer` copied as a `Buffer`; see [Body Types](#body-types)). It is taken from the attempt's own body, which the client keeps unchanged, not the one the adapter is writing, so redacting it in place leaves the bytes on the wire alone, and an adapter changing or transferring what it was handed leaves it alone too.
+- **A body that could not be copied or built** (a `BigInt` or a circular reference in a JSON body, an unsupported body type): an error observer's `request.body` is `null`, and `request.rawBody` is the value the interceptor returned, not a copy.
+- **Headers:** the ones the attempt went out with. `NodeAdapter` and `MockAdapter` add their own (`host`, `content-length`, a form's `content-type`, and `NodeAdapter`'s `accept-encoding`) to every response, and to a transport error, stream error, timeout or cancel once the request was sent. `Cookie` is the one field sent, its items joined with `; ` and any that holds no cookie left out. `FetchAdapter` and `XHRAdapter` are not handed a caller's `Content-Length`, and observers are not shown one, since both send the body's real length themselves; a custom adapter is handed it as set. The headers `fetch` and XHR add on their own are not shown.
+
+**What a change reaches:**
+
+- `body` and `rawBody` are plain fields of the attempt's own, so changing or replacing them reaches neither the adapter, a `307`/`308` replay, nor a later attempt. A JSON body's `rawBody` is the one exception until it is read: an accessor that parses it, so `console.log(request)` shows it as one; read it, spread the request or assign it, and it is a plain field (on a request an observer sealed or froze first, it stays an accessor that answers as the sealed or frozen field would).
+- `request.headers` is the attempt's own as well, its array values included, so redacting or adding to one in place reaches neither the adapter, a retry, the next redirect hop, nor the request another attempt was reported as.
+- Every observer of one response or error - a parent client's and then the sub-client's - is handed the same copy of the request, with the attempt's own `body` and `rawBody`, so an observer that redacts its body in place changes what the observers after it see.
+
+**When they are built:**
+
+- They are set up once for each attempt, from the request's body, as the attempt is dispatched, so an observer registered while the attempt is under way is handed them too.
+- A request that ends before any attempt is dispatched carries them only when a response or error observer is registered on the client or its parent as it ends, since building them reads the value an interceptor returned. An observer registered after that point, while its final observers have yet to run, is handed that request without `body` or `rawBody`.
+- A JSON body's `rawBody` is parsed the first time an observer of the attempt reads it, so an observer that only records the status parses nothing. The copy of a `Uint8Array` or `FormData` body is taken when an observer of the attempt first runs. An attempt no observer runs for - a retried attempt with only `final` observers registered, or one no observer's filter matches - never parses or copies them. Every observer of the attempt is handed the one value built.
 
 Use `request.timeout` to inspect what timeout budget was configured for that attempt. Use `response.isTimeout` / `error.isTimeout` to inspect what actually happened.
 
@@ -565,7 +956,7 @@ Use `request.timeout` to inspect what timeout budget was configured for that att
 interface ResponseObserverFilter {
   phases?: ('retry' | 'redirect' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex - list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
+  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex - list it explicitly. '*' matches everything. A public suffix or pseudo-TLD tail is matched too: '*.internal' matches 'api.internal'.
   schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch - MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
   statusCodes?: number[];
   contentTypes?: ('json' | 'text' | 'binary')[];
@@ -610,7 +1001,7 @@ type ErrorObserver = (
 
 The `request` argument is the same `AttemptRequest` snapshot described above, including the configured `timeout` for that attempt.
 
-When a request fails before any adapter attempt is dispatched (for example request setup errors, pre-dispatch interceptor failures, or pre-send cancellation), the snapshot is best-effort: it omits internally added request headers and cookie-jar-applied cookies because no real outbound attempt occurred.
+When a request fails before any adapter attempt is dispatched (for example request setup errors, pre-dispatch interceptor failures, or pre-send cancellation), the snapshot is best-effort: it carries the headers set before interceptors run - the request ID header (with `includeRequestID`) and the `user-agent`, if there is one - but not the per-attempt attempt header or cookie-jar cookies, which are applied at dispatch, because no real outbound attempt occurred. A redirect hop's request is the exception for cookies: it carries the `Cookie` the jar gave its target as the hop was set up, so a snapshot of one that failed or was cancelled before dispatch - and the request its retry-phase interceptors are handed - shows that header, though a `Set-Cookie` from the hop's own earlier attempt is not in it. What is sent is rebuilt from the jar at dispatch either way. Its other headers are the ones the request was given, as set: a caller's `Content-Length` included, which an attempt drops where `FetchAdapter` or `XHRAdapter` sends it and, on any adapter, from a request with no body.
 
 ### Filter Options
 
@@ -618,12 +1009,15 @@ When a request fails before any adapter attempt is dispatched (for example reque
 interface ErrorObserverFilter {
   phases?: ('retry' | 'final')[]; // Default: ['final']
   methods?: HTTPMethod[];
-  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex - list it explicitly. '*' matches everything. PSL tail guard prevents '*.com'-style patterns.
+  hosts?: string[]; // Exact hostnames or wildcard patterns. '*.example.com' = one subdomain label only; '**.example.com' = any depth. Neither matches the apex - list it explicitly. '*' matches everything. A public suffix or pseudo-TLD tail is matched too: '*.internal' matches 'api.internal'.
   schemes?: ('http' | 'https')[]; // Match on request scheme. requestURL is absolute whenever it could be resolved before dispatch - MockAdapter synthesizes `http://...` URLs when no baseURL is configured, browser adapters resolve against window.location, Node adapter requires absolute URLs.
 }
 ```
 
-Include `'retry'` in `phases` to also run when the adapter throws but a retry will follow:
+Include `'retry'` in `phases` to also run when an attempt that ended in an error will be retried - the adapter threw, or the attempt timed out. A transport failure the adapter reports as a response - a refused connection on any built-in adapter, or a `MockAdapter` `transportError` - is a `status: 0` response, and reaches response observers in the `retry` phase instead.
+So does a retried answer whose buffered body was past `maxResponseBytes` (a `503` with an
+oversized page), with `isFailed: true` and `isStreamError: true`: it reaches the error
+observers, as `response_too_large`, only when no retry follows:
 
 ```typescript
 client.addErrorObserver(
@@ -651,9 +1045,20 @@ Phases describe where in the request lifecycle a callback fires. Interceptors, r
 
 **`retry` phase** carries `{ type: 'retry', attempt, maxAttempts, redirect? }`.
 `attempt` and `maxAttempts` use the same global adapter-attempt numbering, including
-redirect hops. `maxAttempts` is the highest attempt number available to the current retry
+redirect hops. For a retry-phase interceptor `attempt` is the attempt about to be sent;
+for a retry-phase observer it is the attempt that just failed - so for one retry the
+observer sees `attempt: 1` and the interceptor `attempt: 2`. `maxAttempts` is the highest attempt number available to the current retry
 loop after retries spent on earlier hops. The optional `redirect` field is set when the
-retry is occurring on a post-redirect URL.
+retry is occurring on a post-redirect URL. On such a retry to an origin other than the
+request's caller-selected origin, while the interceptors keep the hop's host, the retry goes
+out with the hop's own URL (but for an upgrade from `http:` to `https:` that leaves the port
+as it was), the hop's own body and body headers (or, if they removed or emptied it, an empty body
+without the hop's body headers or theirs), and, of the headers they add that the hop did not already carry, only those on
+the cross-origin allow-list. A retry they send to another host selects that host, and the
+rule does not apply. What they return is still checked as on any other retry: a body of an
+unsupported type or a URL that is not an absolute `http(s)` URL, for example, fails the
+request as `interceptor_error`, even on a hop that would have gone out with its own. See
+[Redirect Handling](#redirect-handling).
 
 **`redirect` phase** carries `{ type: 'redirect', hop, from, to, statusCode }`.
 
@@ -670,11 +1075,12 @@ import type { RetryPolicyOptions } from 'lifecycleion/retry-utils';
 const client = new HTTPClient({
   retryPolicy: {
     strategy: 'exponential',
-    maxRetryAttempts: 3, // Retries after the first attempt. Default: 10; minimum: 1
+    maxRetryAttempts: 3, // Retries after the first attempt. Default: 10; minimum: 1 (0 reads as 1 - use retryPolicy: null for none)
     minTimeoutMS: 500, // Initial delay (ms). Default: 1000
     maxTimeoutMS: 10_000, // Maximum delay cap (ms). Default: 30_000
     factor: 1.5, // Backoff multiplier. Default: 1.5
     dispersion: 0.2, // 0–1 jitter fraction. Default: 0.1
+    maxRetryAfterMS: 60_000, // Longest Retry-After to wait for (ms). Default: maxTimeoutMS, at least 1_000
   },
 });
 
@@ -684,9 +1090,66 @@ const client2 = new HTTPClient({
     strategy: 'fixed',
     maxRetryAttempts: 2, // Default: 10; minimum: 1
     delayMS: 1_000, // Delay between each attempt (ms). Default: 1000; minimum: 1
+    maxRetryAfterMS: 60_000, // Longest Retry-After to wait for (ms). Default: 30_000
   },
 });
 ```
+
+### Retry-After
+
+A `429` or `503` the policy would retry is retried no sooner than its `Retry-After` asks, and no sooner than the policy's own delay either. A `Retry-After` on any other status, or one the client cannot read, is ignored, and the policy's delay is used.
+
+**How long it waits:**
+
+- The retry waits for the longer of what the server asked and the policy's own delay, so a server that answers `Retry-After: 1` every time is still backed off from. The server's wait has no jitter added.
+- A `Retry-After` asking for longer than `maxRetryAfterMS` ends the request instead: the `429` or `503` is returned as the response, without the retry the server said it would refuse, and `onAttemptEnd` reports `willRetry: false` with `retrySuppressedReason: 'retry_after_too_long'`. That keeps a server's `Retry-After: 86400` from holding a request for a day.
+- `maxRetryAfterMS` defaults to the policy's `maxTimeoutMS` for the exponential strategy, but never below one second (the shortest wait `Retry-After` can ask for), so a fast policy (`maxTimeoutMS: 100`) still honors `Retry-After: 1`. For the fixed strategy it defaults to 30 seconds. A value you set is used as given.
+- The cap is never below the delay the policy waits before that retry anyway, without its jitter: a fixed policy's `delayMS`, an exponential one's backoff for that retry (`minTimeoutMS` on the first). So `0` waits for no more than that.
+- The cap is itself capped at 2^31 - 1 ms (about 24.8 days), as every timer the client sets is, `Infinity` included.
+- A cancel during the wait ends the request at once, as during any backoff. The per-attempt `timeout` does not cover the wait, so a large `maxRetryAfterMS` is bounded only by a cancel or an `AbortSignal`.
+
+**What it reads:**
+
+- A number of seconds (`120`).
+- An HTTP-date in any of the three forms RFC 9110 defines (`Sun, 06 Nov 1994 08:49:37 GMT`), read as GMT. Its day name is not checked against the date.
+- An HTTP-date is measured against the client's own clock, not the response's `Date`: a client clock behind the server's lengthens the wait by the difference, and one ahead of it shortens it.
+- A two-digit year is read by RFC 9110's 50-year rule in RFC 850's layout (day, month and year with dashes), as an HTTP-date requires, and by RFC 5322's in any other: `00` to `49` are 20xx, `50` to `99` 19xx.
+- A four-digit year is the year it writes, as RFC 9110's grammar has it: `0026` is the year 26, so its date is past.
+- A header seen twice is read by its first value, whether or not the others agree, so every adapter waits the same. Node keeps only the first; the client keeps the first of a MockAdapter route's or custom adapter's array, and of the joined value `fetch` and XHR hand over (`120, 60` waits 120 seconds).
+- In a browser, a cross-origin response's `Retry-After` is visible only when the server lists it in `Access-Control-Expose-Headers`. One that is hidden reads as absent, and the policy's delay is used.
+
+**Near-misses of an HTTP-date that are read too**, so a server that writes one is not retried sooner than it asked:
+
+- names in any case, no day name, or a short day name without its comma
+- runs of whitespace, a one-digit day or hour, a long month name, a two-digit year, no seconds
+- another zone: `UTC`, `UT`, `Z`, the US zones (`EST` through `PDT`) or a `+hhmm` / `-hhmm` offset
+- RFC 850's long day name, and dashes in either layout
+- the month before the day, and a comma after a spaced year
+- the time before the year, with the zone on either side of the year, or a `+hhmm` / `-hhmm` offset straight after the year's comma
+- behind a day name and a space, a comma after a day that comes first or after a dashed year
+
+For example: `Sun, 6-Nov-1994 03:49 EST`, `15 November 2026 12:01:00 GMT`, `Nov 15, 2026 12:01:00 GMT`, `Sun Nov 15 12:01:00 UTC 2026`, `Sun, 15, Nov 2026 12:01:00 GMT`.
+
+**Values that are ignored** (the policy's delay is used) - a first value that is neither form, such as:
+
+- `1.5` or `5 seconds`
+- a date with no zone, another zone such as `CET` or `+01`, or a `GMT+hhmm` zone
+- a space before the comma, or a long day name without its comma
+- a comma after a dashed year, or after a day that comes first (`16, Nov 2026 …`), with no day name and space before it
+- an asctime date followed by a comma and anything but nothing or a value of its own, as that may be a zone it does not read (`, CET`, `, NOVT`, `, GMT+0100 (CET)`)
+- a space on one side of the month and a dash on the other
+- ISO 8601
+
+How the settings meet, for a `429` or `503` the policy would retry:
+
+| The server's `Retry-After`                                  | What the client does                                   |
+| ----------------------------------------------------------- | ------------------------------------------------------ |
+| None, or one it cannot read                                 | Waits the policy's own delay                           |
+| Shorter than the policy's delay for this retry              | Waits the policy's delay, so it still backs off        |
+| Longer than the policy's delay, within `maxRetryAfterMS`    | Waits what the server asked                            |
+| Longer than `maxRetryAfterMS` (and than the policy's delay) | Stops and returns the response: `retry_after_too_long` |
+
+`timeout` is per attempt and plays no part: the wait between attempts is not counted against it, and each attempt gets its own. With `maxTimeoutMS: 100` and no `maxRetryAfterMS`, `Retry-After: 1` waits a second and retries, and `Retry-After: 5` stops.
 
 ### Retryable Status Codes
 
@@ -700,7 +1163,7 @@ Status `0` covers adapter-level "no real HTTP response" conditions (network unre
 
 ### Method Safety
 
-A retryable status is necessary but not sufficient. `POST` and `PATCH`, the methods RFC 9110 does not define as idempotent, are **not** retried by default, because a status like `500` means the server responded, so the handler ran and may have committed. `PUT` and `DELETE` are unaffected: both mutate, but repeating either leaves the resource in the same state, which is what makes replay safe.
+A retryable status is necessary but not sufficient. A method RFC 9110 does not define as idempotent - `POST`, `PATCH`, or any custom method such as WebDAV's `LOCK` - is **not** retried by default (only `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT` and `DELETE` are), because a status like `500` means the server responded, so the handler ran and may have committed. `PUT` and `DELETE` are unaffected: both mutate, but repeating either leaves the resource in the same state, which is what makes replay safe.
 
 Set `retryNonIdempotentMethods: true` on the client, or `.retryNonIdempotentMethods(true)` per request, when writes are guarded by an idempotency key. See [Non-Idempotent Methods](#non-idempotent-methods) for the full rules, including how transport failures are treated.
 
@@ -727,9 +1190,65 @@ await client
 
 ## Cookie Jar
 
-A `CookieJar` provides cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling.
+A `CookieJar` provides cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling. As in browsers, cookies are stored from and sent to `http:`, `https:`, `ws:` and `wss:` URLs only: a URL of any other scheme (`ftp:`, `file:`, an app's own) stores none and is sent none.
 
-Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`. Invalid domain scopes are rejected.
+A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `setCookie()` and `fromJSON()` hold `maxAge` and `expires` to 400 days from the cookie's `createdAt`. A cookie is sent for exactly as long as `clearExpiredCookies()` keeps it. A `Max-Age` decides a cookie's lifetime over an `Expires`, as RFC 6265bis has it, so a cookie given both - by a `Set-Cookie`, `setCookie()` or `fromJSON()` - is stored with its `maxAge` and no `expires`.
+
+- **`Expires`** is read with RFC 6265's cookie-date algorithm, in UTC whatever zone is written. A value that is not a cookie-date (`Expires=0`) is ignored, leaving a session cookie.
+- **Size:** a cookie whose name and value together pass 4096 bytes is ignored, and refused by `setCookie()` and `fromJSON()`.
+
+**What `setCookie()` and `fromJSON()` refuse or adjust:**
+
+- A cookie a header cannot carry - a name or value with a character above U+00FF - is refused.
+- An IPv6 domain is taken bracketed or bare (`[::1]` or `::1`), and stored and returned bare: a stored cookie's `domain` is `::1`, where `URL#hostname` is `[::1]`.
+- A `sameSite` other than `'Strict'`, `'Lax'` or `'None'`, which no `Set-Cookie` stores, is refused, and so is a `path` that is not a string. `fromJSON()` reads a `null` `sameSite` or `path` as absent.
+- `setCookie()` stores the cookie's own fields and nothing else of the object it is given.
+- A cookie already expired when it arrives is not stored and is not counted (`setCookie()` returns `false`). It deletes the stored cookie of the same name, domain, path and host-only flag, as an expired `Set-Cookie` does.
+- A domain cookie whose domain is a public suffix under the jar's list (one saved by a jar with another list) is stored host-only, as a `Set-Cookie` naming the suffix from that host itself is, so that `Set-Cookie` replaces and deletes it.
+
+**Header order:** a replaced cookie keeps its place in the `Cookie` header, as browsers keep it, across a save too. `toJSON()` writes the time it was first created as `firstCreatedAt` where that differs from its `createdAt`, and `fromJSON()` orders the header by it.
+
+Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `domain: 'münchen.de'` given to `setCookie()` or restored through `fromJSON()` matches the request host `xn--mnchen-3ya.de`, and so does a request to `https://münchen.de/`. The same normalization applies to hosts passed to `clear()`.
+
+**`Set-Cookie` attributes:**
+
+- A `Domain` is ASCII or the cookie is ignored, as RFC 6265bis has it - whether the header came off the wire (where its bytes are read as latin1) or as a string passed to `processResponseHeaders()` / `parseSetCookieHeader()`. Servers send the `xn--` form.
+- The last `SameSite` attribute wins, an unrecognized value reading as the default.
+- The last `Domain` attribute wins too, an empty one included: `Domain=example.com; Domain=` is host-only, as Chrome and Firefox store it (RFC 6265bis would ignore the empty one and widen the cookie to every subdomain).
+- A `Domain` with two leading dots (`..example.com`) names no host, and its cookie is ignored.
+- A `SameSite=None` cookie without `Secure` is not stored at all, as browsers refuse it.
+- A cookie with an invalid domain scope is rejected, whether it comes in a header or through `setCookie()` (which returns `false`) or `fromJSON()`.
+
+**Trailing dots:** a trailing dot is part of the host, as RFC 6265bis compares hosts and browsers keep them apart. `example.com.` and `example.com` are different hosts to the jar, so a cookie set by one is never sent to the other.
+
+- A `Domain` attribute must be a suffix of the request host as written: `Domain=example.com` from `www.example.com.` is ignored, and that host scopes a cookie with `Domain=example.com.`. The public-suffix checks apply to either form (`Domain=com.` is refused).
+- Two trailing dots name no host.
+- A request host with a leading dot (`https://.example.com/`, which the URL parser accepts) names none either: it is sent no cookies and stores none.
+- An IPv4 address with a trailing dot is no cookie domain. The URL parser reads `127.0.0.1.` as `127.0.0.1`, so cookies set from it are that address's, and `domain: '127.0.0.1.'` or `Domain=127.0.0.1.` is refused (and `clear('127.0.0.1.', ...)` clears nothing).
+- `setCookie()`, `fromJSON()`, `clear()` and `getStoredDomains()` keep the two forms apart as well: a restored `domain: 'example.com.'` is sent only to `example.com.` and its subdomains, and `clear('example.com', 'domain')` leaves it.
+
+The jar is bounded as Chromium bounds its store: 180 cookies per site, and 3300 in the jar among cookies not used in the last 30 days.
+
+- **Per site:** past 180 cookies in a site (a registrable domain, subdomains included), expired cookies are removed and then the least recently used, non-`Secure` before `Secure`, down to 150.
+- **Jar-wide:** past 3300 in the jar, the same down to 3000, but only among cookies not used in the last 30 days, as Chromium's limit does. So a flood of cookies from other sites cannot push out a session in use, and while more than 3000 cookies have been used inside 30 days the jar holds them all, bounded only by each site's 180.
+- While no cookie can have gone 30 days unused, the jar-wide pass does not run, so it does not remove expired cookies across the jar either, as Chromium's does not. Expired cookies are also removed as a request reads the sites it scans; `clearExpiredCookies()` purges the rest.
+- Sending or reading a cookie counts as using it.
+- The site limit bounds what one site can store, not header size: a site's 180 cookies of up to 4 KB each can still make a `Cookie` header a server refuses.
+- It differs from Chromium in one way: the `Priority` attribute is not read, so every cookie evicts as Chromium's default priority does.
+
+**Untrusted servers:** each IP address is a site of its own, and a server picks the hosts it redirects to, so a jar that follows redirects from servers it does not trust, or fetches URLs its callers choose, can be made to hold any number. Give such a service a jar per caller or task, or none.
+
+**`Secure` cookies:** any store can evict a `Secure` cookie once no non-`Secure` one is left to go, as in Chromium.
+
+- A non-`Secure` cookie stored beside 150 or more `Secure` ones in a site can be evicted at once, and `setCookie()` then returns `false`, but `Secure` cookies cannot lock others out.
+- Within a site, a flood of non-`Secure` cookies pushes `Secure` ones no lower than 150.
+- The jar-wide limit passes over a flood's cookies, which were just stored, so it can take `Secure` cookies unused for 30 days down to none, and a site's below 150. A `Secure` cookie evicted this way no longer stops a same-name cookie from being stored over `http:`.
+
+**Saving and restoring:**
+
+- `toJSON()` lists cookies in creation order, the order the `Cookie` header sends cookies of one path length in, each with the time it was last used as `lastAccessedAt`. A restored jar sends them in the same order, evicts by the same times (cookies used in the same millisecond in creation order) and keeps the same cookies safe from the jar-wide limit.
+- `fromJSON()` applies its entries in payload order, as one `setCookie()` after another, so of two entries for the same cookie the later replaces the earlier, or deletes it when it has expired, however recently either was used. The limits then evict the stalest of what is left.
+- A cookie restored without `lastAccessedAt` counts as used at the restore, and `setCookie()` reads a `lastAccessedAt` later than now as now.
 
 Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.
 On legacy implementations without it, the fallback accepts a single unambiguous
@@ -751,23 +1270,51 @@ const client = new HTTPClient({
 
 When a `CookieJar` is attached to the client:
 
-1. Before each adapter attempt (including retries) the jar's cookies for the request URL are added to the `cookie` header.
+1. Before each adapter attempt (including retries) the `cookie` header is set from the jar's cookies for the request URL. The jar is authoritative: a `cookie` header the request or an interceptor set is replaced, or removed when the jar has nothing for that URL.
 2. After every response the `set-cookie` headers are parsed and stored in the jar.
 3. Cookies are maintained across redirect hops.
 
 **Secure cookies and the request scheme.** `getCookiesFor()` sends Secure cookies only
-over `https:` or `wss:`. Response parsing refuses Secure cookies from other schemes,
+over a secure request: `https:` or `wss:`, or `http:` or `ws:` to a loopback host -
+`localhost`, a name under `.localhost`, `127.0.0.0/8` or `[::1]` - which Chrome and Firefox
+treat as secure, so a local dev server's Secure session cookie works as it does in the
+browser. The jar takes the host's word for it: a `fetch` that routes even loopback through
+an `HTTP_PROXY` (Bun's does, unless `NO_PROXY` names it) sends those cookies to the proxy
+in plain text, so list `localhost` in `NO_PROXY` there. It also takes the resolver's word
+that a name under `.localhost` is this machine. Browsers answer those names with loopback
+themselves, as RFC 6761 asks, and so do macOS and systemd-resolved, but on a server the
+adapter asks the system resolver, and one that forwards `.localhost` names to DNS (some
+minimal Linux images do) lets that DNS point `app.localhost` at another machine, which
+would then receive its Secure cookies in plain text. Where that resolver cannot be
+trusted, map the names used in `/etc/hosts`, or send to `localhost` itself. Response parsing refuses Secure cookies from any other request,
 and refuses insecure cookies that would replace or shadow an existing, unexpired Secure
-cookie of the same name with overlapping domain/path scope, including deletion attempts.
-HTTPS responses may replace or downgrade their cookies. HTTP localhost is not treated
-as secure. Use an HTTPS origin for Secure-cookie mocks.
+cookie of the same name whose scope covers it, including deletion attempts: domains that
+match in either direction, and a path at or inside the Secure cookie's. As in RFC 6265bis
+and browsers, a wider path (`Path=/` beside a Secure `Path=/admin`) is stored, and is sent
+after the Secure cookie on a request to its path.
+Secure responses may replace or downgrade their cookies. A `MockAdapter` route answers
+from `http://localhost` unless the request names another origin, so its Secure cookies are
+kept too.
 
 Cookie-name prefixes are matched case-insensitively. `__Secure-` requires `Secure`, while
-`__Host-` also requires no `Domain` attribute and an effective path of `/`. An omitted
-`Path` is accepted for `__Host-` only when the request URL's default path is `/`.
+`__Host-` also requires no non-empty `Domain` attribute (an empty `Domain=` reads as absent, host-only) and an explicit `Path=/`, as RFC 6265bis
+and browsers require: an omitted `Path` is refused even where it would default to `/`.
+`__Http-` requires `Secure` and `HttpOnly`, and `__Host-Http-` the `__Host-` rules and
+`HttpOnly`, as Chrome and Firefox require.
+A nameless cookie whose value starts with any of these prefixes is ignored, deletions
+included.
+A cookie set with `setCookie()` is a domain cookie unless `hostOnly: true` is given. A
+server's `Set-Cookie` without `Domain=` for the same name is a separate, host-only cookie,
+as Chrome and Firefox keep the two apart, so both are sent. Seed a cookie the server will
+refresh with `hostOnly: true` to have its `Set-Cookie` replace it. A cookie whose domain is
+a public suffix (`localhost`) is the exception: it is stored host-only either way, so the
+server's `Set-Cookie` replaces it.
 Programmatic `setCookie()` and `fromJSON()` have no request scheme to check, but still
-validate prefixes: `__Host-` requires `secure: true`, `hostOnly: true`, and path `/`.
-They also validate domains, expiry, and header framing, so cookies are not stored unchecked.
+validate prefixes: `__Host-` requires `secure: true`, `hostOnly: true` (or a domain stored host-only
+whatever it says: a public suffix or an IP address), and a path of `/` - an absent or relative
+`path` is stored as `/`, as a `Set-Cookie` without one is. `__Http-` and `__Host-Http-`
+also require `httpOnly: true`.
+They also validate domains, expiry, and header framing, so cookies are not stored unchecked. They do not apply the rule that keeps an insecure cookie from replacing or shadowing a Secure one: a cookie given without `secure: true` replaces a Secure cookie of the same name, domain and path, as the caller's own choice. A `Secure` cookie restored by `fromJSON()` keeps its flag, so response parsing protects it as above; restore only JSON a jar of yours wrote.
 
 **Cookie scoping uses the full Public Suffix List.** The jar refuses a `Domain=` that
 spans a public suffix, and both halves of the list count: the ICANN half (`com`,
@@ -807,8 +1354,8 @@ const jar = new CookieJar({
   publicSuffixes: {
     // Stricter: no cookie may span these, and each host under them gets its own bucket.
     add: ['corp.internal', 'apps.acme-cloud.net'],
-    // Wider, and the only option here that opens a scope: hosts under a removed suffix
-    // share one bucket again and may set cookies spanning it.
+    // Wider, and the only option here that opens a scope: hosts whose site the removal
+    // widens may set cookies spanning it, as a browser with the same list allows.
     remove: ['herokuapp.com'],
   },
 });
@@ -816,10 +1363,10 @@ const jar = new CookieJar({
 
 The overrides belong to that jar alone. Another `CookieJar` in the same process is
 unaffected. They are validated once in the constructor and a bad entry throws a `TypeError`
-rather than being ignored - an empty suffix, a wildcard, an empty label, a non-string, or a
+rather than being ignored - an empty suffix, a wildcard, an empty label, a character other than an ASCII letter (in either case), digit, `_` or hyphen (a Unicode suffix goes in its `xn--` form, and a look-alike such as the Kelvin sign `\u212A` is not read as `k`), a non-string, or a
 suffix named in both lists or added beneath a removed suffix. A removed ancestor
 allows shared cookies, which conflicts with an added child's tenant isolation. A typo that silently did nothing would be a scoping hole you
-would only discover as a cookie going somewhere it should not.
+would only discover as a cookie going somewhere it should not. A `remove` entry the bundled list does not treat as a suffix (`a.example.com`, or one a later list has dropped) changes nothing. A removal opens a scope only as far as a browser with the same list would: a host may set a `Domain=` within its own site, its registrable domain under the effective list. A suffix still listed beneath a removal keeps its tenants sites of their own - with `uk` removed, `x.co.uk` may not set `Domain=uk` while `co.uk` is listed, though `plain.uk` may, and `x.co.uk` is sent that cookie. A removed suffix whose parent is no suffix either joins the registrable domain above it: with `s3.amazonaws.com` removed, its hosts are part of the `amazonaws.com` site and may set `Domain=amazonaws.com` cookies, which are sent to every host under `amazonaws.com`, tenants of the suffixes still listed beneath it (`compute-1.amazonaws.com`) included, as a browser with that list sends them. A removed name that is a suffix only through a wildcard rule is the registrable domain itself, as the exception rule `!foo.sch.uk` would make it: with `foo.sch.uk` removed (the list has `*.sch.uk`), its hosts may set `Domain=foo.sch.uk` but not `Domain=sch.uk`, which would reach every other registrant under `sch.uk`.
 
 **SameSite is stored, not enforced.** The `SameSite` attribute is parsed and kept on the stored cookie for callers to read, but `getCookiesFor()` does not consult it. This jar serves a client, not a browser: there is no navigation, no top-level "site" to compare against, and no notion of a cross-site request, so every cookie whose domain, path, expiry and `Secure` rules match is sent, whatever its `SameSite` value.
 
@@ -833,11 +1380,19 @@ const jar = new CookieJar();
 // Returns false if domain is missing or syntactically invalid (empty string, spaces, etc.),
 // if the expiry cannot be read (an `expires` that is an Invalid Date, or a `maxAge` /
 // `createdAt` that is not a finite number - such a cookie would never be found expired),
-// or if the name or value cannot be sent as one `name=value` pair: a name that is empty
-// or holds `=`, `;`, whitespace or a control character, or a value holding `;` or a
-// control character. Looser than RFC 6265's cookie-octet grammar on purpose: spaces,
+// or if the name or value cannot be sent as one `name=value` pair: a name that holds
+// `=`, `;` or a control character other than a tab (U+0000-U+001F, U+007F) or starts or
+// ends with a space or tab (`my cookie` is kept, as RFC 6265bis keeps it), or a value
+// holding `;` or such a control character other than a tab, or starting or ending with a
+// space or tab. A name may be empty (a nameless cookie, sent as its value alone) when the
+// value is not empty and does not start with a name prefix (`__Secure-`, `__Host-`,
+// `__Http-`, `__Host-Http-`); `=a=b` is sent as `a=b`, as browsers send it. Looser than
+// RFC 6265's cookie-octet grammar on purpose: spaces,
 // commas, quotes and backslashes in a value are accepted, as browsers accept them,
-// because real servers send them. Only what would change the header's framing is refused.
+// because real servers send them. Spaces and tabs at a value's edges are refused, as a server reads the value trimmed; otherwise only what would change the header's framing is refused.
+// Also false for a cookie already expired: it is not stored, and it deletes the stored
+// cookie of the same name, domain, path and host-only flag. And false for a cookie the
+// limits above evict as it is stored.
 const ok = jar.setCookie({
   name: 'session',
   value: 'abc123',
@@ -847,42 +1402,47 @@ const ok = jar.setCookie({
   httpOnly: true,
 });
 
-// Read cookies for a URL. Both return copies, not the stored objects: `name`, `domain`,
-// `path`, `hostOnly` and `secure` come from the scope `setCookie` accepted, and every
-// other field is read once, so a stored cookie mutated through `getAllCookies()` cannot
-// be sent with a wider scope or a different framing than it was stored with. Writing to
-// a returned cookie does not change the jar - use `setCookie` to update a stored cookie.
+// Read cookies for a URL. Every read returns copies - these, `getAllCookies()` and
+// `toJSON()` - so writing to a returned cookie does not change the jar: use `setCookie`
+// to update a stored cookie. The jar keeps its own copy of what `setCookie` is given, too.
 const cookies = jar.getCookiesFor('https://api.example.com/users');
 const session = jar.getCookieFor('session', 'https://api.example.com/');
 
 // Parse a Set-Cookie header string and store the cookie in the jar
 jar.parseSetCookieHeader('token=xyz; Path=/; HttpOnly', 'https://example.com/');
 
-// Parse and store all set-cookie headers from a response headers object (same format as response.headers)
+// Parse and store all set-cookie headers from a response headers object (same format as response.headers).
+// A plain object only: a fetch `Headers` or a `Map` throws a TypeError.
 jar.processResponseHeaders(response.headers, 'https://example.com/');
 
 // Get the cookie header string for outgoing requests
 const cookieHeader = jar.getCookieHeaderString('https://api.example.com/users');
 
 // Maintenance
-jar.clearExpiredCookies(); // Returns count removed
+jar.clearExpiredCookies(); // Returns count removed, for sites no longer requested
 jar.clear(); // Remove all cookies - returns count removed
 jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only - returns count removed
-jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) - returns count removed
+jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (any host's registrable domain is cleared this way) - returns count removed. A site behind a nested private suffix (bucket.s3.amazonaws.com under amazonaws.com) is its own domain and stays
+jar.clear('github.io', 'domain'); // On a public suffix or bare name, every site beneath it
+jar.clear('co.uk', 'domain'); // Every site under co.uk (a.co.uk, b.co.uk), leaving the rest of .uk; clear('uk', 'domain') clears all of .uk, co.uk's sites included
+// The registrable domain is read under the jar's publicSuffixes, removals included: with remove: ['herokuapp.com'], clear('mine.herokuapp.com', 'domain') clears every *.herokuapp.com cookie, and with remove: ['com'], clear('x.example.com', 'domain') clears every cookie of the com site, leaving the sites behind a suffix still listed (app.blogspot.com). With remove: ['s3.amazonaws.com'], amazonaws.com is no suffix either, so bucket.s3.amazonaws.com belongs to amazonaws.com and its clear reaches every cookie of the amazonaws.com site, leaving the sites behind a suffix still listed (compute-1.amazonaws.com). With remove: ['uk'], co.uk is still a suffix, so clear('x.co.uk', 'domain') clears only x.co.uk's family - y.co.uk's cookies and a Domain=uk one stay. A removed suffix named itself clears its site, as a host under it does, and is cleared whole, as a listed one is: clear('uk', 'domain') clears every .uk cookie, with remove: ['com'], clear('com', 'domain') every .com one, app.blogspot.com's included, and with remove: ['s3.amazonaws.com'], clear('s3.amazonaws.com', 'domain') every cookie of the amazonaws.com site.
+// A host that is not a non-empty string, or a missing or unknown scope, throws: only clear() with no arguments clears everything.
 
 // Inspection
-jar.getAllCookies(); // Live stored objects, including expired - prefer setCookie() for updates
+jar.getAllCookies(); // Copies of every stored cookie, including expired ones not yet removed
 jar.getStoredDomains(); // [{ domain, count }]
 
 // Serialization
-const data = jar.toJSON(); // Validated copies with the accepted scope; not live jar entries
+const data = jar.toJSON(); // Copies of the stored cookies
 const restored = jar.fromJSON(data); // Replaces existing cookies after preparing the snapshot
 // `fromJSON` validates/copies the payload before clearing; malformed structure throws
-// without replacing the jar. It returns how many cookies it accepted. A cookie with a missing or
-// invalid domain, an `expires` that cannot be read as a date, a `maxAge` / `createdAt`
-// that is not a finite number, or a name or value the `Cookie` header cannot carry as
-// one pair, is refused, so compare against `data.cookies.length` to detect drops. A
-// `null` `expires`, `maxAge` or `createdAt` reads as absent.
+// without replacing the jar. It returns how many cookies it kept. A cookie with a missing or
+// invalid domain, an `expires` that cannot be read as a date, a `maxAge` / `createdAt` /
+// `lastAccessedAt` / `firstCreatedAt` that is not a finite number, or a name or value the `Cookie` header cannot carry as
+// one pair, is refused, as is an entry with a field that throws when read, so compare
+// against `data.cookies.length` to detect drops. A cookie already expired is left out
+// too, as is one the limits evict. A `null` `expires`, `maxAge`, `createdAt`, `lastAccessedAt` or `firstCreatedAt` reads as absent, and a positive `maxAge` with no
+// `createdAt` is refused, as nothing says when it started.
 ```
 
 ## Redirect Handling
@@ -898,6 +1458,8 @@ const client = new HTTPClient({
 
 **Platform support:** Redirect following requires an adapter that can intercept 3xx responses before the browser handles them. `NodeAdapter` and `FetchAdapter` in server runtimes (Node.js, Bun) fully support it. `MockAdapter` supports it on any platform since responses are fully controlled. Browsers follow redirects transparently at the network layer, so `FetchAdapter` in a browser and `XHRAdapter` cannot intercept or limit them. The constructor throws if you combine `followRedirects: true` with these adapters.
 
+A `Location` with no fragment of its own takes the request's, as fetch's redirect does: `/start#sec` redirected to `/next` is followed and reported as `/next#sec`, in `requestURL`, `redirectHistory` and `detectedRedirectURL`, while `Location: /next#other` keeps `#other`. The fragment is carried to a target on another origin too, as fetch carries it, so a token in it (`#access_token=...`) is recorded beside that origin in `redirectHistory` and handed to redirect-phase interceptors and observers; it is never sent. A browser that follows a redirect itself for `XHRAdapter` reports the URL it landed on, which has no fragment.
+
 ### Method Rewriting Rules
 
 | Status   | Original method               | Redirect method |
@@ -908,13 +1470,62 @@ const client = new HTTPClient({
 | 303      | Other methods                 | GET             |
 | 307, 308 | Any                           | Unchanged       |
 
-Cross-origin redirects strip unsafe headers (Authorization, Cookie, etc.) from the forwarded request.
+Cross-origin redirects carry only an allow-list of headers: `accept`, `accept-encoding` (the caller's own; NodeAdapter's default one is not carried), `accept-language`, `content-encoding`, `content-language`, `content-type`, `user-agent`, `range` and the conditional headers (`if-range`, `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`). Everything else - `Authorization`, `Cookie`, and any custom header such as `X-API-Key` that might be a credential - is stripped. This is stricter than fetch, which drops `Authorization`, `Cookie` and `Proxy-Authorization` and forwards every other header, a custom credential header (`X-API-Key`) included; a redirect-phase interceptor can add a header back for a target it trusts. That holds while it keeps the server's target: one that also rewrites `requestURL` to another origin - the request's own included - has the same allow-list applied to what it returns, the headers it added among them, since the rule is read from the server's target to the one it sends to. Cookies are recomputed from the jar for the target. The request-ID and attempt headers, with `includeRequestID` and `includeAttemptHeader` on, are the client's own and are added to every attempt, a cross-origin hop's included: the target sees the request's ID, as the first host does.
+
+A retry on that hop follows the same rule. The hop's request is the stripped one, plus whatever the redirect-phase interceptors added. The `retry`-phase interceptors that run on it, including a parent client's, can change the values of headers the hop already carries; a header they add off the allow-list, and their changes to the URL (but for an upgrade to `https:`, below) and the body, are discarded. All of this is silent, as the hop's own headers are dropped silently.
+
+**When it applies:** while the hop is on an origin other than the request's [caller-selected origin](#nodeadapter), the scope URL credentials and TLS identity follow: the URL the caller addressed, or a host a retry interceptor chose by rewriting the URL.
+
+- A retry the interceptor sends to exactly that origin is left alone too.
+- A retry interceptor that rewrites the URL to another host selects that host, so its headers, URL and body - an edit to the copy included - are kept there.
+- Rewriting only the path, query, scheme or port keeps the server's choice of host and selects nothing, so the rule still applies and the rewrite is discarded, but for the upgrade to `https:` below.
+
+**Headers:**
+
+- A header they add is dropped unless it is on the allow-list above.
+- A header the hop already carried keeps the value they give it, so a credential that a redirect-phase interceptor added for a trusted target can be refreshed on a retry.
+- The `Cookie` header comes from the jar when one is configured. Without a jar, a `Cookie` header a retry interceptor adds is dropped like any other.
+
+**URL:** their changes are discarded. The retry goes out with the hop's own URL (its path, query, fragment, port and userinfo), so a token added as `?access_token=` does not reach that host either.
+
+- Its scheme is the hop's own too, with one exception: an upgrade of an `http:` hop to `https:` that leaves the port as it was (each scheme's default, or the same port number on both, so `http://host:443` to `https://host` and `http://host` to `https://host:80` count) is kept, and the retry goes out over `https:`, the rest of its URL still the hop's own.
+- A downgrade to `http:`, or any other change of scheme or port, is discarded with the rest.
+
+**Body:** their changes are discarded. The retry goes out with the hop's own body, so a token added as a field of a `307`/`308` replay's body does not reach that host either.
+
+- The hop's own body goes out with the hop's own `Content-Type`, `Content-Length`, `Content-Encoding`, `Content-Language` and `Content-Location`, whatever they set those to, whether they replaced the body, edited a copy of it, or left it alone.
+- A body they remove, or set to an empty string, empty bytes or a form with no entries, is sent that way, as an empty value of the client's own, and without any of those five headers the hop or they set - as a hop rewritten to `GET` drops them with its body. So only the client's own default type for an empty string or bytes goes with it. Bytes count as empty by the length they actually hold, not one a subclass reports.
+- A hop with no body to send goes out as it was, its own headers included.
+- A body they return that could not be copied - a `BigInt` in a JSON body, say - is not copied, since it is not sent, and the hop's own goes out as above.
+- The filters up to and including the first interceptor whose function runs - a parent client's included - read the hop's own request, as on any other hop. That function, and every filter and function after it, read the hop's body - frozen when it is JSON, a copy when it is bytes or a form - or whatever an interceptor returned in its place, as on every retry (see [Body Types](#body-types)). So one that edits a form in place (`form.append(...)`) or assigns a new body does not change what the hop sends.
+
+**Errors:**
+
+- What the interceptors return is still checked first, as on any other retry: a body of an unsupported type, a method or header the adapter refuses, or a URL that is not an absolute `http(s)` URL, for example, fails the request as `interceptor_error`, even though the hop would have gone out with its own.
+- The `GET` and `HEAD` body rule reads the request that is sent instead - the hop's own body, or none, with their method. So a body of theirs over a hop with none goes out bodiless rather than being refused, and a hop with a body that they rewrite to `GET` is refused as `interceptor_error`.
+- When a body of theirs fails the request - one of an unsupported type, such as a `Proxy` over a form - the response, the error and the error observers name the hop's own request (its URL, headers and body), not the interceptors'.
+
+A `307` or `308` replays the body, a `GET`'s included, with its `Content-Type` and `Content-Encoding`, across origins too. A hop rewritten to `GET` drops the body and those headers, with `Content-Language` and `Content-Location`, as fetch does, and so does a `303` that leaves a body behind (a `GET` that carried one that sends something: not an empty string, empty bytes or a form with no entries), as RFC 9110 reads a `303`. A body a redirect-phase interceptor removes or empties goes the same way, the five headers with it, as on a retry of a cross-origin hop, and so do the headers when it rewrites the method to `GET` or `HEAD` and sends no body, as the server's rewrite drops them; one that keeps a body on its `GET` (NodeAdapter sends one) keeps them. A `GET` or `HEAD` with no body keeps them on every redirect, a `303` included, as fetch keeps them on a hop whose method it does not change.
 
 With `NodeAdapter`, URL-based Basic auth follows the resolved redirect URL: from `https://user:pass@example.com/start`, a relative `Location: /next` retains those credentials, while an absolute `Location: https://example.com/next` without userinfo does not. An explicitly supplied `Authorization` header still carries through same-origin redirects.
 
 **Credentials in the `Location` URL are stripped too, on the same rule.** `user:pass@` in a URL is `Authorization: Basic` by another name. `NodeAdapter` copies it onto `options.auth`. A redirect target is the remote server's choice, so `Location: https://admin:secret@other.host/` does not authenticate this client to a host you never named. The userinfo is removed before the hop is recorded, so `redirectHistory`, the followed `requestURL`, and the observers and errors built from them do not carry it either. Same-origin userinfo is left alone. Fetch treats the same shape as fatal (a cross-origin `locationURL` that includes credentials is a network error). Stripping keeps the redirect followable and matches what this client already does to every other credential on a cross-origin hop.
 
-`detectedRedirectURL` is the exception, deliberately: it reports the target as the server wrote it, including any userinfo, for a hop this client did **not** follow (`followRedirects: false`, or a redirect that ends the request). Nothing is sent to it. If you follow it yourself, decide about those credentials yourself, and treat the field as untrusted remote input if you log it.
+`detectedRedirectURL` follows the same rule. It reports the target, and nothing is sent to it. It is set:
+
+- on the response for a hop this client did **not** follow (`followRedirects: false`, or a redirect that ends the request)
+- on the response handed to `redirect`-phase observers for one it did, whose `Location` header still carries whatever the server wrote, userinfo included
+
+**Userinfo in the reported URL:**
+
+- Where the built-in adapters and the client resolve the `Location` themselves, they do it against the request URL without its userinfo, so the caller's credentials are not copied into it: from `https://user:pass@example.com/start`, `Location: /next` reports `https://example.com/next`.
+- Userinfo the server wrote into the `Location` is kept on a target of the request's own origin and dropped on any other, as on a hop the client follows: from `https://example.com/start`, `Location: https://admin:secret@other.example/` reports `https://other.example/`.
+- Userinfo identical to the request URL's own is not reported on any target, since nothing tells it apart from the request's credentials copied in by resolving against the request URL.
+- A custom adapter's own `detectedRedirectURL` is held to the same rule against the URL it answered, so one that resolves `Location` with `new URL(location, requestURL)` does not report the caller's credentials.
+
+The exception is a redirect a browser followed for XHRAdapter, which reports `xhr.responseURL`, the URL the browser itself followed to.
+
+If you follow a same-origin target yourself, decide about its credentials yourself, and treat the field as untrusted remote input if you log it. A `Location` that does not resolve to a URL (`http://[bad`) reports no `detectedRedirectURL` at all; `wasRedirectDetected` still says there was a redirect.
 
 **A `Location` that cannot be resolved to an absolute `http(s)` URL is refused** before
 adapter dispatch and reported as `request_setup_error`. Relative locations are resolved
@@ -926,11 +1537,11 @@ Redirects start from the latest dispatched attempt, including retry-interceptor 
 to its method, body, and headers. Structured JSON and form bodies remain available for
 redirect interceptors, and generated body headers are recalculated after their edits.
 
-**Scheme downgrades are followed.** A `307` or `308` from an `https:` URL to an `http:` `Location` is followed with the method and body intact, as curl and Node's own clients do: the target is the server's instruction, and the hop counts as cross-origin, so forwarded credentials are stripped and jar cookies are recomputed for the target. Secure cookies are withheld, but matching non-Secure cookies can be sent. The request body itself does go out in the clear on that hop. If that is not acceptable for a given client, leave `followRedirects` off and handle the `redirect_disabled` error, or reject the hop from a redirect-phase interceptor by checking `request.requestURL`'s scheme.
+**Scheme downgrades are followed.** A `307` or `308` from an `https:` URL to an `http:` `Location` is followed with the method and body intact, as Node's `fetch` follows it: the target is the server's instruction, and the hop counts as cross-origin, so forwarded credentials are stripped and jar cookies are recomputed for the target. Secure cookies are withheld (unless the target is a loopback host, which counts as secure - see [Secure cookies and the request scheme](#cookie-jar)), but matching non-Secure cookies can be sent. The request body itself does go out in the clear on that hop. If that is not acceptable for a given client, leave `followRedirects` off and handle the `redirect_disabled` error, or reject the hop from a redirect-phase interceptor by checking `request.requestURL`'s scheme.
 
 Note: `MockAdapter` strips the domain before route matching, so "cross-origin" redirects in tests are effectively same-origin to its router. Header stripping still applies, but test routes don't need to be registered per-domain.
 
-Redirect metadata is recorded when a redirect target is detected and enters redirect handling. That means `redirectHistory` can include the current redirect target before the follow-up adapter attempt is dispatched. During redirect-phase interception, the metadata reflects the target detected from the redirect response. If a redirect interceptor rewrites `requestURL` and redirect handling continues, later `requestURL` / `redirectHistory` values reflect the rewritten target. If redirect handling is cancelled or errors before dispatch, the response/error metadata may still reflect the originally detected target rather than a completed adapter attempt.
+Redirect metadata is recorded when a redirect target is detected and enters redirect handling. That means `redirectHistory` can include the current redirect target before the follow-up adapter attempt is dispatched. During redirect-phase interception, the metadata reflects the target detected from the redirect response. If a redirect interceptor rewrites `requestURL` and redirect handling continues, later `requestURL` / `redirectHistory` values reflect the rewritten target. If redirect handling is cancelled or errors before dispatch, the response/error metadata may still reflect the originally detected target rather than a completed adapter attempt. Where it was stopped decides which: a cancel from a redirect-phase response observer, or from the `3xx`'s `onAttemptEnd`, reports the URL that answered as `requestURL` and a `redirectHistory` without the target; one from a redirect-phase interceptor on reports the target in both. Each reports the target as `detectedRedirectURL`. That target is the redirect detected and not followed: it is `detectedRedirectURL`, and it does not count toward `wasRedirectFollowed`, which says whether a hop was actually dispatched. A `Location` that does not resolve to a URL is still recorded in `redirectHistory` as the raw string the server sent, any `user:pass@` in its authority cut down to the `@`, so the string is still refused (redirect-phase interceptors are handed it, and may rewrite it), but reports no `detectedRedirectURL`.
 
 ### Redirect Phase Info
 
@@ -959,9 +1570,9 @@ const response = await builder.send();
 builder.cancel('timeout_budget_exceeded');
 ```
 
-`cancel()` returns `true` if the cancel was applied, `false` if it was a no-op (the request had already completed, been cancelled, or failed).
+`cancel()` returns a `RequestCancelResult` saying what it did (a `reason` given to it, or to the client's `cancel` methods, must be a string, or the call throws a `TypeError`): `'cancelled'` when this call cancelled the request (before `send()`, or in flight), `'already_cancelled'` when something else had - an earlier `cancel()`, `client.cancel()`, an interceptor, the stream factory or the request's own signal - and `'already_settled'` when it had already completed or failed. Every result is truthy, so compare it (`request.cancel() === 'cancelled'`) rather than testing it. A `'cancelled'` holds: the request ends cancelled (`isCancelled: true`, with the reason given) even when the call lands after the last attempt has its answer - from that attempt's `onAttemptEnd`, say - or just before a failure, and that answer or failure is dropped. The signal is aborted at once and the tracked request reads `cancelled` at once; `send()` resolves, and the builder's own state turns `cancelled`, once the request has settled. A `cancel()` made while `send()` is still setting the request up - from a header value's `toString` or a `params` getter - is held and applied before anything is dispatched; it answers `'already_cancelled'` if the request's own signal has already aborted, and `'already_settled'` once setup has failed.
 
-Calling `cancel()` before `send()` marks the builder so that `send()` throws a plain `Error` (not an `HTTPClientError`) immediately rather than dispatching the request. In this case `builder.error` is `null`. No `HTTPClientError` is produced and `cancelReason` is not accessible programmatically (the reason string, if any, appears only in the thrown `Error` message).
+Calling `cancel()` before `send()` marks the builder so that `send()` rejects with a plain `Error` (not an `HTTPClientError`) at once rather than dispatching the request. In this case `builder.error` is `null`. No `HTTPClientError` is produced and `cancelReason` is not accessible programmatically (the reason string, if any, appears only in the thrown `Error` message).
 
 ### ID-Scoped Cancel
 
@@ -974,21 +1585,21 @@ client.cancel(builder.requestID);
 client.cancel(builder.requestID, 'shutdown');
 ```
 
-All five cancel methods return **how many requests they cancelled**, so a `cancel()` that
+`client.cancel()`'s `requestID` must be a string, and so must a `reason` given to any of them, or the call throws a `TypeError`. All five cancel methods return **how many requests they cancelled**, so a `cancel()` that
 matched nothing is visible rather than a silent no-op:
 
 ```typescript
 if (client.cancel(someID) === 0) {
-  // no request with that id was in flight - already finished, or a stale id
+  // no request with that id was in flight - already finished or cancelled, or a stale id
 }
 ```
 
 ### Tracker-Wide Cancel
 
 ```typescript
-client.cancelAll(); // Cancel every tracked request (this client + all sub-clients)
+client.cancelAll(); // Cancel every request on the shared tracker: the whole client tree - parent, sub-clients and siblings - whichever client it is called on
 client.cancelOwn(); // Cancel only requests from this exact client instance (not sub-clients)
-client.cancelAllWithLabel('my-label'); // Cancel all requests with label (this client + sub-clients)
+client.cancelAllWithLabel('my-label'); // Cancel all requests with label across the whole client tree
 client.cancelOwnWithLabel('my-label'); // Cancel own requests with label (not sub-clients)
 
 // Each returns the number cancelled:
@@ -1000,6 +1611,8 @@ client.cancelOwn('component_unmounted');
 client.cancelAllWithLabel('upload', 'quota_exceeded');
 client.cancelOwnWithLabel('poll', 'tab_hidden');
 ```
+
+A label argument is held to the rule `builder.label()` holds a label to - a non-empty string - so `cancelAllWithLabel(undefined)` throws rather than matching every unlabeled request. The client and tracker cancel methods see a request once its `send()` has set it up; caller code that runs during that synchronous setup (a header value's `toString`, say) and calls `client.cancelAll()` does not reach it, while a `builder.cancel()` there is held and applied.
 
 ### AbortSignal Integration
 
@@ -1014,7 +1627,64 @@ controller.abort();
 controller.abort('user_navigated_away');
 ```
 
-The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.). Either one will abort the request and set `isCancelled: true`. The per-attempt timeout is independent. It fires its own abort but sets `isTimeout: true` instead. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`.
+The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.). Either one aborts the request and sets `isCancelled: true`. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`. The per-attempt timeout is independent: it fires its own abort but sets `isTimeout: true` instead.
+
+**What counts as the timeout.** After the timeout's abort and before the response's status has arrived, whatever the adapter's `send()` rejects with, or a transport-failure response it resolves, is the attempt's timeout, so a custom adapter need not reject with an `AbortError`:
+
+- Any rejection is the timeout, except one the adapter flagged non-retryable, which stays its own failure.
+- A transport-failure response it resolves (`isTransportError: true`, or a bare `status: 0` that is not a stream error, nor a detected redirect) is the timeout, except one resolved with `isRetryable: false`, which stays its own failure.
+
+Once the status has arrived, a timeout that cuts NodeAdapter's `streamResponse` factory mid-setup, or a body mid-read, ends the request as that `stream_setup_error` or `stream_response_error` with `isTimeout: true`, not retried (see [Error Codes](#error-codes)).
+
+**An adapter that ignores the abort** is waited for one second after it, whether the abort came from the timer or a cancel:
+
+- An answer that arrives within that second is the attempt's own: a transport failure then is the timeout, as above, and its `Set-Cookie` is stored, as an answer in time is.
+- If `send()` has not settled by then, the attempt ends as that timeout or cancel without it. A later answer is ignored - its `Set-Cookie` is not stored - and a later rejection is not left unhandled. Then:
+  - The `onUploadProgress` and `onDownloadProgress` hooks and the `streamResponse` factory handed to that adapter are disarmed: a late call reaches none of yours, and a late factory call is answered `null`, so no sink is opened.
+  - An attempt with a body to send reports a `requestBodySettled` that resolves with an `Error` saying the upload's outcome is unknown, since the adapter never said.
+
+A timeout given up on this way is retried or not as follows:
+
+- **Not retried** if the adapter's `streamResponse` factory had started a stream (returned a writable or a promise not yet answered); see [Streaming Responses](#streaming-responses).
+- **Not retried** if the attempt had a body to send: the adapter may still be sending it, and a retry would send it a second time beside it. The request ends as that timeout, with `isRetriesExhausted: false` whatever the retry budget, and its `onAttemptEnd` reports `retrySuppressedReason: 'upload_unsettled'` when a retry was otherwise available.
+- **Retried** as any timeout is when the attempt was bodiless, or its body sends nothing - an empty string or no bytes. A form with no entries still sends its closing boundary, so it is not retried.
+
+### Abort Listeners That Throw
+
+The client hands two signals of its own to code it does not own: the per-attempt
+`AdapterRequest.signal` an adapter receives (which matters for a custom `HTTPAdapter`),
+and the `signal` a [`streamResponse` factory](#streaming-responses) receives. Their
+`'abort'` listeners run inside `builder.cancel()`, `client.cancelAll()`, the per-attempt
+timer, or the adapter's own teardown. On an ordinary `AbortSignal`, a listener that throws
+is reported by the runtime as an uncaught exception (`process` `'uncaughtException'` in
+Node and Bun), which terminates a process that has no handler.
+
+Both signals guard against that. An error thrown by an `'abort'` listener added with
+`signal.addEventListener()` (a function, or an object's `handleEvent`) or by
+`signal.onabort` - or a rejection from an async one - is reported on the global `'error'`
+channel like any other callback failure (see
+[safe-handle-callback](./safe-handle-callback.md)), as
+`Error in a callback HTTPClient attempt abort listener` or
+`Error in a callback NodeAdapter streamResponse abort listener`, with the thrown value as
+`cause`. The listeners after it still run, and the request settles as it otherwise would.
+
+The guard is the signal's own `addEventListener`, `removeEventListener` and `onabort`,
+defined on that instance and backed by the `EventTarget` methods. They otherwise behave
+as natively: a duplicate listener with the same capture
+flag is still ignored, `removeEventListener()` with the original listener removes it,
+`once`, `passive` and `signal` options apply, a `null` listener is ignored, `onabort` runs
+at the position where it was first set, and other event types are not wrapped. Native
+consumers such as `fetch(url, { signal })` and `AbortSignal.any([signal])` follow it as
+usual. Two gaps remain the runtime's:
+
+- Listeners on a signal **derived** from it - `AbortSignal.any([signal, ...])`, for
+  instance - belong to that signal and are not guarded.
+- Calling `EventTarget.prototype.addEventListener.call(signal, ...)` (or the prototype's
+  `onabort` setter) registers the raw listener, deliberately bypassing the guard.
+
+Catch inside listeners in those two cases. A signal you pass in yourself, through
+`.signal()` or the `signal` request option, is yours and is not modified: its listeners
+run when you call `abort()`.
 
 ## Client Identity
 
@@ -1023,7 +1693,7 @@ client.clientID; // ULID string - unique per HTTPClient or sub-client instance
 client.adapterType; // AdapterType: 'fetch' | 'xhr' | 'node' | 'mock'
 ```
 
-`clientID` matches the `clientID` field on tracked request entries. `adapterType` lets you inspect the active adapter without sending a request, which is useful in shared utilities that need to behave differently per runtime.
+`clientID` matches the `clientID` field on tracked request entries. `adapterType` lets you inspect the active adapter without sending a request, which is useful in shared utilities that need to behave differently per runtime. It is the adapter's `getType()`, read once when the client is built: the config is checked against that value and every request uses it, so a custom adapter's `getType()` is not consulted again. A sub-client that shares its parent's adapter takes the parent's value rather than reading it again; one given its own adapter reads that adapter's `getType()` once when it is built. A `getType()` that returns anything other than `'fetch'`, `'xhr'`, `'node'` or `'mock'` makes the constructor throw a `TypeError`: the adapter and runtime checks are keyed on the type, so a custom adapter returns the one whose rules it follows.
 
 ## Request Tracking
 
@@ -1038,7 +1708,7 @@ const { count, requests } = client.listRequests({
 // { requestID: string; clientID: string; label?: string; state: RequestState }
 ```
 
-`scope: 'all'` includes requests from sub-clients that share the same tracker.
+`scope: 'all'` covers every request on the shared tracker - the whole client tree, so on a sub-client it lists the parent's and siblings' requests too. Any other `scope`, or a `label` that is not a non-empty string, throws; a `null` `label` is no filter, as a `null` filter field is read as absent.
 
 ## Sub-Client Creation
 
@@ -1057,14 +1727,14 @@ const authClient = client.createSubClient({
 - `'replace'` (default): the sub-client's `defaultHeaders` replace the parent's entirely.
 - `'merge'`: the sub-client's `defaultHeaders` are layered on top of the parent's.
 
-Any `HTTPClientConfig` field can be overridden. When `cookieJar` is set to `null` it disables cookies for that sub-client even if the parent has one.
+Any `HTTPClientConfig` field can be overridden. An omitted or explicitly `undefined` field inherits the parent value. Of the options typed to accept `null`, a null `timeout` or `maxResponseBytes` inherits, while `cookieJar: null` disables cookies for that sub-client even if the parent has one. A `null` given to an option whose type excludes it also inherits for `adapter`, `defaultHeaders` and `followRedirects`; for every other option it reaches the new client as given and is handled as `new HTTPClient()` handles it, so `retryPolicy: null` disables the parent's retries, a null boolean option reads as `false`, and a null `baseURL`, `userAgent` or `maxRedirects` as unset.
 
 Sub-clients inherit the parent's interceptors and observers. The parent chain runs first, then the sub-client's own. This means shared concerns like auth headers or global logging happen before sub-client-specific logic. Adding interceptors or observers to a sub-client does not affect the parent.
 
 ## Enable and Disable
 
 ```typescript
-client.disable(); // All subsequent send() calls throw immediately
+client.disable(); // All subsequent send() calls reject at once
 client.enable(); // Re-enables the client
 
 client.isDisabled; // true if the client or any parent client is disabled
@@ -1093,11 +1763,19 @@ Progress granularity depends on the adapter:
 | XHRAdapter   | Real per-chunk           | Real per-chunk                   |
 | MockAdapter  | 0% at start, 100% at end | Terminal 100% only (no 0% event) |
 
+The final event's `loaded` and `total` are the body's size in bytes. An upload whose size cannot be known without reading it - a `FormData` through FetchAdapter, or through XHRAdapter on a runtime with no upload events - ends with `{ loaded: 0, total: 0, progress: 1 }`: `total: 0` there means the size is unknown, not that nothing was sent, so read it before showing bytes or throughput. MockAdapter ends a form's upload with the `content-length` it sends.
+
+XHRAdapter reports the total the runtime gives. A count that passes it - a compressed response counted in decoded bytes against its encoded `Content-Length`, as Chrome counts - reports an unknown length (`progress: -1`, the bytes so far as `total`), as NodeAdapter reports a decoded body, and the final `1` still fires when the body has loaded. That final event is XHRAdapter's only `progress: 1`, the runtime's own 100% event not reported: a runtime that counts a compressed body encoded (Firefox, React Native) reaches 100% of the encoded length, and the body's size, which the final event reports, can be less than the last count. A download that fails or is cancelled reports no `progress: 1`, as FetchAdapter reports none. With NodeAdapter, a buffered body's `progress: 1` is sent while its response is still the active one, so a cancel from that event cancels the request (and its `Set-Cookie` is still stored); a streamed body's is sent once the body is delivered to the sink, so a cancel from it finds the download finished and does not fire the factory's signal - the request still ends cancelled, as any cancel made before `send()` settles does, with the body left whole in the sink.
+
 ## Adapters
+
+Every built-in adapter, driven directly, refuses a `method` that is absent, empty or not an HTTP token (`GET /x`) as a non-retryable `adapter_error` before anything is sent, with a message that does not quote the method. `HTTPClient` refuses one before that, when the request is built. Each also refuses a body other than a string, a `Uint8Array`, a `FormData` or none - an `ArrayBuffer`, a `Blob`, a `ReadableStream`, a plain object, a number - as a non-retryable `TypeError` in the same words (`FetchAdapter sends a string, Uint8Array or FormData body; serialize other bodies first`), before any upload progress is reported; `HTTPClient` serializes a plain object or array as JSON, and refuses the rest, before an adapter is handed it.
 
 ### FetchAdapter (Default)
 
 Uses the global `fetch()` API. Works in browsers, Node.js 18+, Bun, and Deno.
+
+A request to a port the [Fetch Standard blocks](https://fetch.spec.whatwg.org/#port-blocking) (`:0`, `:25`, `:6000`, `:10080` and the rest of its list) is refused as a non-retryable `adapter_error` before anything is sent, on every runtime, as browsers' `fetch` refuses it and Node's does every port on it but `:0`; Bun's would send it. Use `NodeAdapter` to reach such a port other than `:0` from a server runtime, and `XHRAdapter` from React Native, whose XHR is not held to the list outside a browser. No adapter sends to `:0`: `NodeAdapter` refuses it too (see below), and so does `XHRAdapter`, on every runtime. So is a request with a header `fetch` refuses (`Transfer-Encoding`, `Keep-Alive`, `Upgrade`, `Expect`, or a `Connection` other than `close` or `keep-alive`), on every runtime; `NodeAdapter` sends a `Keep-Alive` and a `Connection` of any value, and refuses the other three.
 
 ```typescript
 import { FetchAdapter, HTTPClient } from 'lifecycleion/http-client';
@@ -1108,12 +1786,16 @@ const client = new HTTPClient({ adapter: new FetchAdapter() });
 
 No configuration options. Adapter-level behavior is controlled through `HTTPClientConfig`.
 
-**Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
+The adapter resolves a relative request URL as `fetch` does - against the document's base URL, or the worker's `location` - and sends only an absolute `http:` or `https:` URL. URL userinfo is withheld from that resolved URL when it is cross-origin to the initial URL. Only an initial URL that starts with `/` - root-relative (`/start`) or protocol-relative (`//host/start`) - is resolved against the same base first. Any other relative initial URL is treated as cross-origin, as one that cannot be resolved is: `''`, `#top`, `?q`, `start` and `https:start` (a path under an `https:` page, as the browser reads it) name no origin of their own, and other spellings a browser reads as root- or protocol-relative (`\\host/start`, a leading space or tab) are not resolved either. The client always sends an absolute `http:` or `https:` URL. Driven directly with a URL of any other scheme (`file:`, `data:`, `blob:`, ...), or with a relative request URL where there is nothing to resolve it against (no document or `location`, as outside a browser), the adapter refuses it before calling `fetch` with a non-retryable `TypeError` (an `adapter_error` through the client), as NodeAdapter refuses a URL it cannot send. Driven directly with a `GET` or `HEAD` that carries any body but `null`, an empty string included, it refuses the request before calling `fetch`, as `fetch` refuses one, as a non-retryable error rather than a network failure retried to no end. On Bun, a URL whose path starts with `//` (`https://api.test//a//b`) is refused the same way: Bun's `fetch` would send it as `/a//b`, another resource than the one written. Use NodeAdapter for such a path.
+
+**Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. A request the adapter refuses before calling `fetch` fires neither. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
+
+A `fetch` that follows a redirect itself, ignoring `redirect: 'manual'` (an XHR-based polyfill's, React Native's), answers with the page the redirect led to. The adapter tells one by the response's `redirected` flag where the response has one, as a native `Response` does: its `url` can differ with no redirect followed, as a browser's upgrade to `https:` or a service worker's answer from another URL does. A polyfill's response, which has none, is told by a `url` other than the one dispatched, as XHRAdapter tells one: the fragment aside and a browser's own upgrade to `https:` excepted. In a browser page that is the URL as the browser spelled it, since the browser reports its own spelling; with no page (React Native, a shim), where a networking layer may re-serialize the URL, spellings RFC 3986 makes equal read as one (a percent-escape's hex in either case, an unreserved character escaped or not, as is a character the parser can leave as written that the RFC does not allow, such as `|` or `[`). An empty query - `/a?` - is never the same as none. It is reported as XHRAdapter reports a browser-followed redirect: `status: 0` with `wasRedirectDetected` and the final URL as `detectedRedirectURL`. The client refuses it as `redirect_disabled`, or with `followRedirects: true`, where there is no `Location` left to follow, as `redirect_unsupported` (`isNetworkError: false`), never retried: a retry would only follow the same redirect again. That holds for any adapter that reports a redirect with `status: 0`. With no browser page, where the URL reported is the request URL with different percent-encoding (`/a%21b` for `/a!b`), the error's message says so, since a networking layer that re-encoded the URL may have reported it with no redirect at all. In a browser page, which reports its own spelling, the message is the plain one. The other page's headers, its `Set-Cookie` among them, are not handed over as the requested URL's.
 
 **Browser constraints (enforced at client construction):**
 
 - `cookieJar` must not be set
-- `userAgent` must not be set
+- `userAgent` must not be set in a browser
 - `followRedirects` must not be `true`
 
 Browsers automatically strip forbidden headers (`cookie`, `user-agent`, `host`, all `proxy-*` and `sec-*` headers, etc.). Attempting to set them from calling code produces a `request_setup_error`. Attempting to set them from an interceptor produces an `interceptor_error`.
@@ -1121,6 +1803,37 @@ Browsers automatically strip forbidden headers (`cookie`, `user-agent`, `host`, 
 ### NodeAdapter
 
 Uses Node.js native `http` / `https` modules. Supports Unix domain sockets, mTLS, and per-chunk streaming.
+
+A URL on port `0` is refused as a non-retryable `adapter_error` before anything is sent: Node's and Bun's `http` read that port as none and would dial `:80` or `:443` instead, with the request's credentials and cookies.
+
+A response with neither a `Content-Length` nor a `Transfer-Encoding` is read until the connection closes, so a reset that ends it early cannot be told from its end: it is delivered as received, as `fetch` delivers it. A body framed by its length or by chunks that a reset cuts short is a `stream_response_error`.
+
+Compressed responses are handled as `fetch` handles them: NodeAdapter asks for compression and decodes the body before handing it over. Response headers are reported as received, `Content-Encoding` included.
+
+- **What is asked for.** `Accept-Encoding: gzip, deflate, br` is sent unless the request sets its own (`identity` asks for none). `br` is offered over https only, as browsers offer it, and a `Range` request sends `identity`, as the Fetch standard has it.
+- **What is decoded.** A `gzip`, `deflate` or `br` body, buffered or streamed. Stacked codings (`gzip, br`) are decoded in reverse order, at most five of them: more is a stream error, unless one of them is a coding it does not know, in which case the body is handed over as received, as any body with an unknown coding is.
+- **`zstd`** is decoded where the runtime has it. It is never asked for, only decoded when a server sends it; a body of several zstd frames, skippable metadata frames included, decodes whole however the network splits it.
+- **Cancel or timeout** stops the decoding at once.
+- **Download progress** for a decoded body counts decoded bytes, with an unknown total, since `Content-Length` counts the encoded ones.
+
+**Decoding is strict.** A body that ends before its compressed stream does (a gzip body cut before its trailer), or carries bytes after it, is a stream error.
+
+- gzip follows gunzip's own rule, as Node and browsers do: bytes after a gzip stream fail unless they start with a zero byte, which reads as padding, and what follows that zero byte in the same network chunk is ignored - bytes arriving in a later chunk reach a decoder that has ended, and fail the body, as they do for gunzip itself; the body still ends only when the response does, so one cut short of its `Content-Length` after that padding is a stream error.
+- Under stacked codings, the body ends only once every stage has: an inner gzip stage that ends on such padding still leaves the outer stage to be read to its end, so an outer stage that is cut short, corrupt or followed by junk is a stream error.
+
+**FetchAdapter decodes by its runtime's `fetch` rules**, which are more lenient in places:
+
+- Bun's `fetch` ignores bytes after a compressed stream.
+- Node's `fetch` returns what decoded from a body cut short, with a matching `Content-Length`, as a complete response: through FetchAdapter on Node a truncated gzip body is a success holding part of the text, where NodeAdapter, and FetchAdapter on Bun, fail it as a stream error. Use NodeAdapter where a cut-short compressed body must fail.
+- They can differ on a well-formed body with more than one coding too: Bun's `fetch` hands a stacked body (`br, gzip`, `gzip, gzip`) over undecoded, and Node's `fetch` one that lists `identity` beside a coding (`identity, gzip`). FetchAdapter delivers such a body as it came, as a success, so a JSON one fails to parse (`isParseError`). NodeAdapter decodes both; use it on Bun where a server stacks codings.
+
+**A body that cannot be decoded** fails as a stream error with the response's status. Where what failed is the decoding rather than the transfer, the status still counts, as browsers treat it:
+
+- A redirect is followed when `followRedirects` is on (a browser never decodes a body it is about to leave), and redirect-phase observers see it as a `3xx` with no body.
+- A retryable status (`503`) is retried as the retry policy allows.
+- A transfer that failed - the connection dropped - stops the request as any stream error does; a body past `maxResponseBytes` does not, since a redirect's body past the limit is not read.
+
+**Turning it off.** `new NodeAdapter({ decompress: false })` sends no `Accept-Encoding` of its own and hands every body over exactly as it arrived (to save a server's `.gz` as sent, say), with `maxResponseBytes` and download progress counting the bytes as received, against `Content-Length`. The client still reads a buffered body by its `Content-Type`, so the compressed bytes of a JSON or text response are decoded as UTF-8 text (a JSON one an `isParseError`); stream it with `streamResponse`, or have it served as a binary type, to keep the bytes.
 
 ```typescript
 import { NodeAdapter } from 'lifecycleion/http-client-node';
@@ -1196,39 +1909,54 @@ const client = new HTTPClient({
 **NodeAdapterConfig:**
 
 ```typescript
+// PEM text, or its bytes; read a Bun.file() yourself and pass its text or bytes.
+type TLSMaterial = string | ArrayBufferView | ArrayBuffer | SharedArrayBuffer;
+
 interface NodeAdapterConfig {
-  socketPath?: string; // Unix domain socket path. Used only for the origin the request addressed, never on a cross-origin redirect hop.
-  ca?: string | Buffer | Array<string | Buffer>; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required - use mtls for that.
+  socketPath?: string; // Unix domain socket path; empty, or not a string, throws. Used only for the origin the request addressed, never on a cross-origin redirect hop.
+  ca?: TLSMaterial | TLSMaterial[]; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required - use mtls for that. An empty value ('' or whitespace alone, [], an empty buffer) throws: it would fall back to the runtime's public roots.
   servername?: string; // TLS SNI hostname. Required when dialing by IP but the cert SAN is a DNS name - without it, TLS verification fails because the IP does not match the DNS SAN. Sent only to the origin the request addressed, never on a cross-origin redirect hop.
   mtls?: {
     // Your TLS identity. Presented only to the origin the request addressed, never on a cross-origin redirect hop.
-    cert: string | Buffer;
-    key: string | Buffer;
-    ca?: string | Buffer | Array<string | Buffer>; // Trust anchor for the server. Applies on every hop, like `ca`.
+    cert: TLSMaterial; // PEM text or bytes; empty, or anything else, throws.
+    key: TLSMaterial; // As cert.
+    passphrase?: string; // Decrypts an encrypted `key`.
+    ca?: TLSMaterial | TLSMaterial[]; // Trust anchor for the server, added to `ca`. Applies on every hop, like `ca`.
   };
-  crl?: string | Buffer | Array<string | Buffer>; // Certificate revocation list(s). A concatenated PEM bundle is split for you - see below.
-  rejectUnauthorized?: boolean; // Default: true
+  crl?: TLSMaterial | TLSMaterial[]; // PEM certificate revocation list(s). A concatenated PEM bundle is split for you - see below.
+  rejectUnauthorized?: boolean; // true verifies certificates whatever NODE_TLS_REJECT_UNAUTHORIZED says; false accepts any. Unset, the runtime default applies: verified unless the environment sets NODE_TLS_REJECT_UNAUTHORIZED=0 (with mtls, unset verifies as true does). A non-boolean throws.
+  decompress?: boolean; // Default: true - decode gzip/deflate/br/zstd bodies and send Accept-Encoding. false hands bodies over as received. A non-boolean throws.
 }
 ```
 
-TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends.
+TLS material given as bytes is copied once, and the copy reused while your buffer still holds the same bytes; the copy is kept while your buffer is reachable, `mtls.key`'s too. Wiping a key buffer does not take the key out of memory either way: Node's and Bun's HTTPS agent keeps the key's text in the name of its connection pool.
+
+TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path - those the runtime reports as a certificate failure. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends. A server rejecting the client certificate may only close or reset the connection on some runtimes (Bun does for TLS 1.3), which is status `0` and retried as any transport failure is.
 
 **URL credentials and TLS identity are scoped to the caller-selected origin.**
-`AdapterRequest.initialURL` identifies that origin, including an origin explicitly
-selected by a retry interceptor. On a hop to another origin, all network adapters
+`AdapterRequest.initialURL` identifies that origin, including one a retry interceptor
+selects by changing the host. Changing only the scheme or port of a redirect target - an
+"upgrade to https on retry" interceptor - keeps the server's choice of host, and selects
+nothing. On a hop to another origin, all network adapters
 withhold URL userinfo, and `NodeAdapter` also withholds `servername` and
 `mtls.cert` / `mtls.key`. The client strips cross-origin Location userinfo before
 recording the followed hop. Same-origin userinfo is preserved. Node uses it for Basic
-auth, while Fetch remains subject to the runtime's URL-credential restrictions.
+auth. `fetch` sends none of it: the Fetch Standard has `fetch` refuse a URL with
+credentials, so FetchAdapter refuses one (`https://user:pass@host/`, `https://user@host/`)
+on every runtime, Bun included, as a non-retryable `adapter_error` before calling
+`fetch`. Set `Authorization` yourself with FetchAdapter.
 
 TLS trust settings (`ca`, `mtls.ca`, `crl`, and `rejectUnauthorized`) apply on every
 connection. A target requiring the withheld client certificate can fail TLS or reject
 the request. This does not guarantee one particular HTTP status. Address that origin
-directly, or explicitly select it in an interceptor, if it should receive the configured
+directly, or explicitly select it in an initial- or retry-phase interceptor (a redirect-phase rewrite does not), if it should receive the configured
 identity. For direct adapter calls, omitting `initialURL` applies the configured identity, while
-an unparseable `initialURL` is treated as cross-origin.
+an unparseable `initialURL` is treated as cross-origin, and one that is not a string
+is refused as a non-retryable `adapter_error`.
 
 **The socket you configured stays with the origin you addressed, too.** `socketPath` is your chosen endpoint, and often a privileged one. `/var/run/docker.sock` is the usual example. A redirect to a different origin is sent over TCP to the host the `Location` actually names, not over your socket with only the request line and `Host` header changed. Otherwise a remote server's `Location` would become a request you never made against that socket. Same-origin redirects keep the socket, and the adapter driven directly (no `initialURL`) uses it as configured.
+
+**Driven directly, `send()` reads the request once.** Each member of the `AdapterRequest` is read when `send()` is called, and `headers` is copied, so a getter is never consulted again from the socket, response or abort handlers that run later. A getter that throws on that first read rejects that `send()`. A `streamResponse` that is set but is not a function is refused then too, as a non-retryable `adapter_error`, rather than failing once the server has answered; and a `signal` already aborted rejects with an `AbortError` before a connection is opened.
 
 #### Certificate Revocation (`crl`)
 
@@ -1244,11 +1972,22 @@ const client = new HTTPClient({
 });
 ```
 
-The value is read and normalized on **every request**, so refreshing a revocation set means passing a new value. **Construct a new `NodeAdapter`.** That is the intended way, and it is cheap precisely because the adapter owns no connection pool, so there is nothing to release and nothing to leak. There is no update method, and none is needed. Mutating the config object you handed the adapter also takes effect, but rebuilding keeps the CRL and the client that uses it visibly in step. How often to refresh is yours to decide. The library has no timer.
+The value is read on **every HTTPS request**, and normalized again whenever what it holds has changed, so refreshing a revocation set means passing a new value. **Construct a new `NodeAdapter`.** That is the intended way, and it is cheap precisely because the adapter owns no connection pool, so there is nothing to release and nothing to leak. There is no update method, and none is needed. Mutating the config object you handed the adapter also takes effect, but rebuilding keeps the CRL and the client that uses it visibly in step. How often to refresh is yours to decide. The library has no timer.
 
-**Bundles are split for you.** A PEM string or Buffer holding several concatenated CRLs, the format Apache's `SSLCARevocationFile`, nginx's `ssl_crl`, and HAProxy's `crl-file` all expect and CA tooling exports, is split into the array Node requires. This includes Buffers: `fs.readFileSync('bundle.pem')` without an encoding returns one, and its contents are PEM like any other bundle, so it would otherwise be truncated exactly as a string would. Strings and Buffers nested inside an array are split too, so `[bundleOfTwo, oneMore]` contributes three CRLs rather than two. DER Buffers are passed through untouched because DER encodes exactly one CRL, so there is nothing to split.
+**Bundles are split for you.** A PEM string or Buffer holding several concatenated CRLs - the format Apache's `SSLCARevocationFile`, nginx's `ssl_crl`, and HAProxy's `crl-file` all expect and CA tooling exports - is split into the array Node requires.
 
-**Only PEM blocks and whitespace are accepted.** Initial CRL framing is validated when `NodeAdapter` is constructed, before any request or retry, including for clients using plain HTTP. The CRL is still read and normalized per HTTPS request so callers can refresh it. Anything else in the string, such as a truncated or corrupted CRL, a damaged delimiter, or decoded text from `openssl ... -text`, is refused with an error rather than split. The rule is exact rather than a best guess: a parser cannot tell a half-written CRL from a line of commentary, so admitting commentary would mean silently dropping the truncated entry and enforcing a revocation set you never supplied. Strip any annotation before passing a bundle here.
+- **Buffers too.** `fs.readFileSync('bundle.pem')` without an encoding returns a Buffer, and its contents are PEM like any other bundle, so it would otherwise be truncated exactly as a string would.
+- **Inside arrays.** Strings and Buffers nested inside an array are split too, so `[bundleOfTwo, oneMore]` contributes three CRLs rather than two.
+- **Other binary input.** Any binary view is read, and so is an `ArrayBuffer` (shared or not), as `ca` reads one - what `await (await fetch(crlURL)).arrayBuffer()` returns. One CRL block is passed on as a `Buffer` over the same bytes, or over a copy when they are in a `SharedArrayBuffer` or a resizable `ArrayBuffer`; several are split into one string each.
+
+**Refused up front.** Each of these is refused when the adapter is constructed, and when a changed value is read for a request - as a non-retryable error, rather than failing every HTTPS request:
+
+- **DER bytes.** Only PEM is accepted, since Node's `tls` does not read DER CRLs. Convert them with `openssl crl -inform DER -outform PEM`.
+- **A CRL that does not parse**, such as one clipped mid-body or with corrupted base64.
+- **A value with no CRL in it at all** (`''`, `[]`), since it would turn revocation checking off. Leave `crl` unset for that.
+- **A list with a hole or an `undefined` entry** (`[current, , next]`), which would enforce only the CRLs around it.
+
+**Only PEM blocks and whitespace are accepted.** Initial CRL framing is validated when `NodeAdapter` is constructed, before any request or retry, including for clients using plain HTTP. The CRL is still read and normalized per HTTPS request so callers can refresh it; a refreshed value that is badly framed, or is not a string, binary data (a `Buffer`, `Uint8Array` or other `ArrayBuffer` view) or an array of them, fails that request without a retry. Anything else in the string, such as a truncated or corrupted CRL, a damaged delimiter, or decoded text from `openssl ... -text`, is refused with an error rather than split. The rule is exact rather than a best guess: a parser cannot tell a half-written CRL from a line of commentary, so admitting commentary would mean silently dropping the truncated entry and enforcing a revocation set you never supplied. Strip any annotation before passing a bundle here. A refreshed value that fails this check fails the request with `adapter_error` and the validation error as its cause, without retrying.
 
 **Do not put two CRLs for the same issuer in one bundle.** OpenSSL uses the **first** CRL it has for an issuer, not the newest. In testing, a stale CRL followed by one revoking the server's certificate accepted the connection, while the same pair in the opposite order rejected it. Splitting does not change this. It is how CRL selection works. Supply exactly one current CRL per issuer.
 
@@ -1274,6 +2013,10 @@ It is Node diverging from the library it links, not an OpenSSL limitation: `open
 
 Uses `XMLHttpRequest` for real per-chunk progress tracking in browsers where `fetch` progress is unavailable.
 
+In a browser, a request to a port the Fetch Standard blocks is refused as a non-retryable `adapter_error`, in `FetchAdapter`'s words, since the browser's XHR fails it on every attempt; outside a browser it is handed to the XHR. A DOM emulator on Node (jsdom, happy-dom) counts as a browser here, as it does for the `TRACE` and `GET`/`HEAD`-body refusals, so a test there cannot reach such a port through `XHRAdapter`.
+
+The adapter listens for upload progress on `xhr.upload` only for a request that asked for it with `onUploadProgress`, and then only when its body has at least one byte, or a size it cannot know up front (a `FormData`). In a browser that listener makes a cross-origin upload a non-simple request, so asking for `onUploadProgress` on one means the server must answer a CORS preflight (`OPTIONS`) even for a `text/plain`, urlencoded or `FormData` body, which `FetchAdapter` sends without one. A request that does not ask is not listened on, and goes out as `fetch` would send it. Nor is a request with no body, or an empty one; its `onUploadProgress` still fires `0` at dispatch and `1` (`0` bytes) once an answer arrives.
+
 ```typescript
 import { XHRAdapter } from 'lifecycleion/http-client-xhr';
 import { HTTPClient } from 'lifecycleion/http-client';
@@ -1286,18 +2029,46 @@ const client = new HTTPClient({
 
 No configuration options. Adapter-level behavior is controlled through `HTTPClientConfig`.
 
-**XHRAdapter constraints** (same as FetchAdapter browser constraints, plus one more):
+**XHRAdapter constraints** (the FetchAdapter browser constraints, plus two that hold everywhere):
 
-- `cookieJar` must not be set
-- `userAgent` must not be set
-- `followRedirects` must not be `true`
+- In a browser, `cookieJar` must not be set
+- In a browser, `userAgent` must not be set (outside one - an `XMLHttpRequest` shim in Node.js or Bun - both are allowed, and the `User-Agent` is sent)
+- `followRedirects` must not be `true`, in any runtime
 - `HTTPClient` throws if `XMLHttpRequest` is not available (e.g. Node.js without a shim)
 
-Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, after the request completes, the adapter compares `xhr.responseURL` to the original URL to detect whether a redirect occurred. If one is detected the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`.
+A synchronous throw from `xhr.send()` fails the request once, as a non-retryable `adapter_error`. An asynchronous `send()` throws only an `InvalidStateError` or for a body it cannot convert, and both fail the same way on every attempt; network failures arrive as `error` events and follow the retry rules. An `XMLHttpRequest` shim that throws a network failure from `send()` instead is not retried. An `XMLHttpRequest` with no `upload` (as some shims have) sends without per-chunk upload progress: `onUploadProgress` fires `0` at dispatch and `1` only once an answer arrives - as its headers do, before any download progress, whatever then becomes of the body - not on a network error, a timeout or an abort before then. One whose `upload` throws when read or listened on fails a request with a body to send and an `onUploadProgress` once, as a non-retryable `adapter_error`.
+
+A caller's `Content-Length` is not sent: the XHR frames the body itself, as `fetch` does for `FetchAdapter`. The adapter rejects a cancel or timeout with a plain `Error` named `AbortError`, so it needs no `DOMException` where XHR runs outside a browser (React Native, a test shim).
+
+The adapter resolves the request URL to an absolute URL once, as the browser does - a relative one against the document's base URL, or the worker's `location` - and opens the XHR with that URL. It resolves it with `new URL`, as FetchAdapter does, so the query is encoded as UTF-8: on a page in a legacy encoding, a raw non-ASCII query is sent as UTF-8 rather than in the page's encoding. URL userinfo is withheld from that resolved URL when it is cross-origin to the initial URL, so `//user:pass@api.test/x` on an `http:` page, for a request that started on `https://api.test/`, is opened without its credentials. Only an initial URL that starts with `/` - root-relative (`/start`) or protocol-relative (`//host/start`) - is resolved against the same base first. Any other relative initial URL is treated as cross-origin, as one that cannot be resolved is: `''`, `#top`, `?q`, `start` and `https:start` (a path under an `https:` page, as the browser reads it) name no origin of their own, and other spellings a browser reads as root- or protocol-relative (`\\host/start`, a leading space or tab) are not resolved either. The client always sends an absolute `http:` or `https:` URL. Driven directly with a URL of any other scheme (`file:`, `data:`, `blob:`, ...), or with a relative request URL where there is nothing to resolve it against (no document or `location`, as outside a browser), the adapter refuses it before opening the XHR with a non-retryable `TypeError`, as NodeAdapter refuses a URL it cannot send.
+
+A body is read from `xhr.response`: an `ArrayBuffer`, or a copy of the bytes of a view over one (a `Uint8Array`, as happy-dom answers `responseType = 'arraybuffer'`, or a Node `Buffer`), from any realm. An XHR outside a browser that does not honor `responseType` and hands over a string, or has no `response` at all and holds the body in `responseText`, has it taken as UTF-8 bytes; one that hands over anything else fails as a `stream_response_error` with the real status, rather than reading as an empty answer.
+
+A browser hides `Set-Cookie` from XHR. An XHR outside a browser that shows it may join repeated ones onto one line with commas. When it gives a single `Set-Cookie` line, one with a comma before another `name=value` cannot be split safely, so it is dropped, as `FetchAdapter` drops one from a `Headers` with no `getSetCookie`; a comma inside an `Expires` date is kept. When it gives several `Set-Cookie` lines, it joined none of them, so each line is kept whole as one cookie, commas included.
+
+Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, as the response headers arrive, the adapter compares `xhr.responseURL` to the absolute URL it opened (for an XHR outside a browser that reports no change of state, at its first progress event or at `load`). If a redirect is detected the request ends there - the page it led to is not read further - and the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`. Its download progress ends at `0` bytes, as no body is handed over - unless the request was cancelled or timed out first, which reports no completion, as for any download.
+
+An XHR outside a browser may fill in `responseURL` only later, partway through the download or at `load`. The adapter checks it again before refusing a body past `maxResponseBytes`, so a redirect it shows by then is still reported as the redirect. One it shows only at `load` is reported as `response_too_large`: the body is refused as soon as it passes the limit, rather than downloaded in full to learn the URL.
+
+**It is detected only once the page the redirect led to answers**, since the browser follows it first. FetchAdapter in a browser reports each of these as `redirect_disabled` at once:
+
+- A redirect to a page that fails CORS reads as a `network_error`, retried as one.
+- A redirect to a page that never answers reads as a timeout.
+- A redirect that leads back to the URL opened (a cookie set and the page reloaded, an SSO round trip) is not seen at all, so it is delivered as that page's answer.
+
+**A browser's own upgrade to `https:` is not a redirect**, as FetchAdapter reports it. On an `https:` page, an `http:` URL the browser upgraded to `https:` itself - by the page's `upgrade-insecure-requests` policy, or HSTS - is not reported as one: a browser blocks a plain `http:` request from such a page as mixed content, so one answered from the same URL over `https:` was upgraded.
+
+- Whether the page is an `https:` one is read from its `location`, which a page's script cannot replace, so a classic script's global `var origin = '…'` does not make an `http:` page read as `https:`.
+- A host of this machine's (`localhost`, `127.0.0.1`, `[::1]`) is let through over `http:`, so there it is a redirect - a local proxy's redirect to `https:` - as it is on an `http:` page, where an upgrade looks exactly like a server's redirect to `https:`.
+- Where a browser allows mixed content (an Android WebView set to), a server's redirect to the same URL over `https:` reads as an upgrade.
+
+**A `3xx` the XHR hands over without following** - in a browser, one with no `Location`; outside one, an `XMLHttpRequest` that does not follow redirects - reports `wasRedirectDetected` from its status, and `detectedRedirectURL` where its `Location` resolves against that absolute URL, as FetchAdapter and NodeAdapter report a real `3xx`.
 
 ### MockAdapter (Testing)
 
 Route-based mock server for unit and integration tests. Routes match on **path only**. The domain in the URL is stripped before matching.
+
+Before a route runs it refuses, as `NodeAdapter` does, a body other than a string, `Uint8Array`, `FormData` or none, a `Transfer-Encoding`, `Upgrade`, `Expect` or `Trailer` header, and a `CONNECT`, each as a non-retryable `TypeError` in `NodeAdapter`'s words under its own name, so a test that passes against the mock does not fail against a server for one of these. A URL that does not parse is routed as written, where `NodeAdapter` refuses it. It mirrors `NodeAdapter`, not `FetchAdapter`: a `Keep-Alive` header, or a `Connection` of any value, reaches the route.
 
 ```typescript
 import { MockAdapter } from 'lifecycleion/http-client-mock';
@@ -1328,17 +2099,58 @@ expect(response.status).toBe(200);
 expect(response.body).toEqual({ id: '1', name: 'Alice' });
 ```
 
+Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `options`, or `routes.on(method, path, handler)` for any other method Node's `http` knows (`TRACE`, `PROPFIND`, `LOCK`, `PURGE`). Registering a handler that is not a function throws a `TypeError`.
+
+**Matching:**
+
+- A request's method is matched, and handed to the handler as `req.method`, uppercased, as a server receives it from Node's `http`.
+- A trailing slash is ignored: a `/users` route answers `/users/`, which a server that tells them apart may answer `404`. An empty segment is a value too: `/users//` matches `/users/:id` with `params.id` of `''`.
+- A `HEAD` request needs its own `head` route - it is not answered from a `get` route.
+- A `CONNECT` request is refused when it is sent, whatever is registered for it - and `HTTPClient` refuses one before it reaches the adapter.
+- A path parameter up to 16,384 characters once decoded (16 KiB, the whole request head Node's `http` server takes by default) matches its route, so a token or JWT in the path does. A longer one does not, and the request falls to a `/*` route or the default `404`.
+- A path whose percent-encoding does not decode (`/%E0%A4%A`, `/u/%ZZ`) is answered `400` with `{ message: 'Bad Request' }`, as Fastify answers one, without reaching any route - a `/*` route included.
+
+**Requests and handlers:**
+
+- Header names in `req.headers` are lowercase.
+- A body declared JSON that does not parse reaches the handler as its text, a string, rather than failing the request.
+- A handler's object body is answered with `content-type: application/json`, with no `charset` parameter and no `content-length` header.
+- When a request carries two cookies with the same name, `req.cookies` holds the first, as common server parsers do.
+- A handler that returns no response, or a body the mock cannot serialize, fails the request as a non-retryable `adapter_error`.
+- Driven directly with a path-only request URL, the adapter resolves a redirect's `Location` against `http://localhost`, the base the client gives a mock request with no `baseURL`: `/start` answered with `Location: /next` reports `detectedRedirectURL: 'http://localhost/next'`.
+
 **MockAdapterConfig:**
 
 ```typescript
 interface MockAdapterConfig {
-  defaultDelay?: number; // Milliseconds delay added to all responses
+  defaultDelay?: number | null; // Non-negative milliseconds each response waits before it is delivered, unless it sets its own delay; 0 disables
   onHandlerError?: (
     req: MockRequest,
     error: unknown,
   ) => MockResponse | Promise<MockResponse>;
 }
 ```
+
+Changes to the supplied config's `defaultDelay` or `onHandlerError` affect later
+requests. Inherited error handlers are supported and receive the config as `this`.
+The default delay is validated at construction and when a response uses it;
+a response-specific `delay` takes precedence.
+
+A `null` or omitted mock default delay uses zero. A `null` or omitted response delay
+inherits the current default delay. Explicit `NaN`, other non-number, or negative delays throw;
+`Infinity` and oversized durations use the timer ceiling. A route's response `delay`
+overrides `defaultDelay` and is validated before its response is sent. An invalid
+response delay fails that attempt with `adapter_error` and its original validation
+error as the cause, without retrying the route handler even when retries are enabled.
+
+`onHandlerError` receives the original thrown or rejected value, including non-Error
+values, regardless of whether the request has an AbortSignal. If a route or error
+handler aborts its own request, the request ends with AbortError while its returned
+promise remains observed so a later rejection cannot become unhandled. The same holds
+for a signal that refuses listeners: one whose `addEventListener` throws fails the
+request as a non-retryable `adapter_error` - the adapter's refusal, not the handler's, so
+`onHandlerError` is not called - one whose `removeEventListener` throws does not hold up
+the response, and the handler's promise is observed either way.
 
 `mock.routes.clear()` removes all registered mock routes.
 
@@ -1349,10 +2161,10 @@ interface MockRequest {
   method: string;
   path: string;
   params: Record<string, string>; // Path params from :paramName segments
-  query: QueryObject; // Parsed query string
-  headers: Record<string, string>;
-  cookies: Record<string, string>; // Pre-parsed from cookie header
-  body?: unknown; // Parsed: JSON object, string, Uint8Array, or MockFormData
+  query: QueryObject; // Parsed with qs, as Express's extended query parser reads it (the Express 4 default): nested `a[b]=1` keys, keys like `constructor` kept, qs's limits apply (an array past 20 items is an object). Express 5's and Fastify's default parsers read nested keys flat.
+  headers: Record<string, string>; // Lowercase names, with `host` added (`localhost` for a path-only URL) and a FormData body's multipart `content-type` and the body's `content-length` set (in place of ones the request carries; without a body, `0` on a `POST`, `PUT` or `PATCH` and none on a `GET`, `HEAD`, `DELETE`, `OPTIONS` or `TRACE`, as Node sends it - a `Transfer-Encoding` header is refused, as NodeAdapter refuses it) as a server receives them. Names and values are otherwise as set: not checked or trimmed as the real adapters check and trim them, so a header NodeAdapter or FetchAdapter refuses (a CR or LF in a value, a space in a name) reaches the handler
+  cookies: Record<string, string>; // Pre-parsed from cookie header: trimmed of spaces and tabs only (as the cookie jar trims), unquoted and percent-decoded, the first of a repeated name
+  body?: unknown; // Parsed: JSON object, string, Uint8Array (a copy of the request's bytes, so a handler that changes it does not change the caller's buffer), or MockFormData ({ fields, files } with the last value of a name, { allFields, allFiles } with every value; names and string values as the wire encoding writes them - line breaks as CRLF, `"`, CR and LF in a name percent-encoded - and each file the form's own)
 }
 ```
 
@@ -1360,16 +2172,18 @@ interface MockRequest {
 
 ```typescript
 interface MockResponse {
-  status: number;
-  body?: unknown; // Supports objects (JSON), strings, Uint8Array, ArrayBuffer
-  headers?: Record<string, string | string[]>;
+  status: number; // An integer from 100 to 999 - without `transportError`, anything else, 0 included, fails as a non-retryable `adapter_error`. Set `transportError` for a network failure.
+  body?: unknown; // Supports objects (JSON), strings, Uint8Array, ArrayBuffer (bytes from another realm, such as jsdom or a `vm` context, included). An object whose own `toJSON` answers `undefined` is answered with no body and no inferred `content-type` (a HEAD route or a simulated `streamError` never serializes its body, so it still infers one from the object). A HEAD route's inferred `content-type` is its GET's: none for a status a GET answers with no body (`204`, `205`, `304`)
+  headers?: Record<string, string | string[]>; // Each value a string or finite number, or a list of them (strings only for `set-cookie`); `null` or `undefined` is no header. Anything else fails the request as a non-retryable `adapter_error`, the route's mistake
   contentType?: 'json' | 'text' | 'binary'; // Overrides auto-detection
-  delay?: number; // Millisecond delay for this response
+  delay?: number | null; // Millisecond delay for this response
   cookies?: Record<string, string | MockCookieOptions | null>;
-  streamError?: boolean | 'stream_write_error' | 'stream_response_error'; // Simulate a body failure after headers arrived
+  streamError?: boolean | 'stream_write_error' | 'stream_response_error'; // Simulate a body failure after headers arrived. Set aside for an answer with no body (a HEAD's, a `1xx`, `204`, `205` or `304`), which has none to fail
   transportError?: boolean | MockTransportErrorOptions; // Simulate a failure with no response at all
 }
 ```
+
+A route's `body` is serialized when the adapter takes the route's answer, before its `delay`, so changing the object while the response is delayed does not change what is delivered. That is a few microtasks after the handler returns, even a synchronous one: a test that calls `adapter.send()` directly and changes the object on the next line, before awaiting the response, is delivered the change. Through `HTTPClient` the handler has not run by then. A `Uint8Array` or `ArrayBuffer` body is delivered as a plain `Uint8Array` copy of its bytes (a `Buffer` included, as the network adapters deliver one), so changing the bytes a request was answered with leaves the route's value as it was for the next request. A `Proxy` over either is refused as an unsupported body: it has none of the bytes it wraps to copy.
 
 `MockResponse.cookies` shorthand:
 
@@ -1377,7 +2191,11 @@ interface MockResponse {
 - `null` -> delete cookie: `name=; Path=/; Max-Age=0`
 - `MockCookieOptions` → full control over path, domain, maxAge, httpOnly, secure, sameSite
 
+A `maxAge` is written as the whole seconds `Max-Age` takes, since the jar ignores a fraction: a positive fraction rounds up, so `0.4` is `Max-Age=1` rather than `Max-Age=0`, which would delete the cookie; a negative one rounds toward zero, so `-0.5` still deletes it; and anything past 400 days, `Infinity` included, is written as 400 days.
+
 `cookies` entries are appended after any `headers['set-cookie']` entries. If the same cookie name appears in both, the `cookies` entry wins (last Set-Cookie header takes precedence).
+
+Each entry's text is held to the rule the cookie jar stores text by: a name is not empty and holds no `=`, no space or tab at its edges, and none of what a value cannot hold (`cart[1]` and `my cookie` are names, as from a raw `set-cookie`), and a value, `path` or `domain` is a string with no `;`, no control character other than a tab, no character above U+00FF, and no space or tab at its edges, which the jar would trim off (a tab inside a value or `path` is written, as it is from a raw `set-cookie`). A name and value over 4096 bytes between them is written, and dropped by the jar as one from a raw `set-cookie` is. Nothing is coerced. The request fails with a non-retryable error - so the route is not run again - for an entry that is not a string, `null` or an object (an array is refused as one); a `MockCookieOptions` whose `value` is not a string; a `path` or `domain` present and not a string; a `sameSite` other than `'Strict'`, `'Lax'` or `'None'`; a `maxAge` that is not a number, or is `NaN`; and an `httpOnly` or `secure` present and not a boolean. Each of these names the cookie by its position in `cookies` (and the type it got), never its text; so is a name, value, `path` or `domain` that cannot be written.
 
 **Simulate multiple domains in tests:**
 
@@ -1405,7 +2223,7 @@ authMock.routes.post('/token', (req) => ({
 
 ## Streaming Responses
 
-Streaming is supported **only by NodeAdapter**. Provide a `StreamResponseFactory` via `.streamResponse()` on the builder. It is called after the response headers arrive on a `200` response.
+Streaming is supported **only by NodeAdapter**. Provide a `StreamResponseFactory` via `.streamResponse()` on the builder. It is called after the response headers arrive on a 2xx response - a success as `Response.ok` reads one, the `206` a resumed download's `Range` request gets among them - unless it has no body to read: a `204`, a `205`, or the answer to a `HEAD`. One with `Content-Length: 0` still calls the factory, as `fetch` hands over an empty stream, so an empty file downloads as an empty file; a factory that should not open a sink for an empty `201` can read `info.status` and `info.headers`. To resume a download, open the sink by `info.status`: append on a `206`, and truncate on a `200`, since a server that ignores `Range` sends the whole file. A `206` with a `Content-Encoding` is a slice of the encoded bytes, which fails to decode unless it covers the whole stream; a `Range` request asks for `identity` to avoid it, and `new NodeAdapter({ decompress: false })` hands over the slice as sent from a server that compresses anyway. A `HEAD` answer is handed over buffered with a `null` body, the factory never called.
 
 ```typescript
 import { createWriteStream, unlinkSync } from 'node:fs';
@@ -1444,15 +2262,15 @@ The factory receives:
 
 ```typescript
 interface StreamResponseInfo {
-  status: 200; // Always 200 - not called for other statuses
-  headers: Record<string, string | string[]>;
+  status: number; // A 2xx (200, 206, ...) - not called for other statuses
+  headers: Record<string, string | string[]>; // A copy: writing to it changes neither the response's headers nor the cookie jar
   url: string; // Resolved URL for this attempt
   attempt: number; // 1-based; increments on retry
   requestID: string;
 }
 
 interface StreamResponseContext {
-  signal: AbortSignal; // Fires on cancel, timeout, or stream write failure
+  signal: AbortSignal; // Fires when the request is cancelled, times out or fails before the body is delivered whole - the sink failing, the response failing during setup or mid-body, the factory throwing or returning something it should not - and when the factory declines (`null` or `{ cancel: true }`); never once the body is delivered. With the `NodeAdapter` the client drives, on a timeout or a failure the request is settled first: a cancel its cleanup makes (the rest of a batch) finds nothing to cancel, and the timeout or failure (`stream_write_error`, `stream_response_error`, `stream_setup_error`) stays the outcome.
 }
 
 interface StreamResponseCancel {
@@ -1470,17 +2288,21 @@ type StreamResponseFactory = (
   | Promise<WritableLike | null | StreamResponseCancel>;
 ```
 
+The `signal` is guarded against `'abort'` listeners that throw; see [Abort Listeners That Throw](#abort-listeners-that-throw).
+
 `StreamResponseFactory` can also be supplied via `HTTPRequestOptions.streamResponse` when passing options directly to `client.get(...)`, `client.post(...)`, and the other request helpers.
 
 ```typescript
-const response = await client.get('/large-file.bin', {
-  streamResponse: (info, { signal }) => {
-    const dest = createWriteStream('/tmp/large-file.bin');
+const response = await client
+  .get('/large-file.bin', {
+    streamResponse: (info, { signal }) => {
+      const dest = createWriteStream('/tmp/large-file.bin');
 
-    signal.addEventListener('abort', () => dest.destroy(), { once: true });
-    return dest;
-  },
-});
+      signal.addEventListener('abort', () => dest.destroy(), { once: true });
+      return dest;
+    },
+  })
+  .send();
 ```
 
 #### Writing Your Own `WritableLike`
@@ -1496,8 +2318,25 @@ Expectations for a custom writable:
   takes them off again afterwards. With neither method it cannot, so it attaches one
   permanent listener per event to that writable instead and registers each request behind
   it - rather than adding a listener per request to a sink reused across many of them,
-  until Node warns about a leak. Behaviour is unchanged either way. What you save by
-  defining one is that listener. Either name works. A Node stream has both.
+  until Node warns about a leak. Reporting is unchanged either way: an `'error'` that
+  reaches that permanent listener within about a second of the last request leaving it is
+  reported through the host error reporter, as the bounded listener described below
+  reports it. The one difference is that the permanent listener never detaches, so a later
+  `'error'` is still absorbed rather than becoming an uncaught exception, but it is not
+  reported; handle those with your own `'error'` listener. What you save by defining one is
+  that listener. Either name works. A Node stream has both.
+- **An `async` `write` is backpressure.** The response is held until the promise it
+  returns fulfils, as an `await` on each write would hold it, so writes reach the sink one
+  at a time and in order, and `end` is called only once the last has fulfilled. A chunk
+  counts as written, for download progress, once its promise fulfils or `write`'s callback
+  reports it, whichever comes first. One that rejects fails the download as
+  `stream_write_error`, and `end` is not called.
+- **Call `end`'s callback when the sink is finished**, as a Node stream does, even from
+  an `async` `end`: its promise fulfilling does not end the download, since such an `end`
+  may hand the callback to an inner stream that is still closing. A promise `end` returns
+  that rejects fails the download as `stream_write_error`, as an error through the callback
+  does, and the download is delivered only once it has fulfilled. A promise or callback
+  that never comes is bounded by the attempt timeout.
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
   error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the
@@ -1507,8 +2346,19 @@ Expectations for a custom writable:
   lands a poll phase later. The listener window is measured by elapsed time so a delayed
   poll phase does not expire that coverage before the error arrives.
   See [How long that listener stays](#how-long-that-listener-stays).
+- **Return `false` from `write` only to ask for a pause, then emit `'drain'`.** The
+  adapter pauses the response for `false`, as `pipe()` does, and resumes it on `'drain'`;
+  a promise holds it too, until it fulfils (above), and any other return, `undefined`
+  included, reads as ready for more. A sink whose
+  `on('drain', ...)` throws is written to without pausing, since nothing could resume it.
 - **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
   is coming and takes the listener off at once, instead of waiting out the timers below.
+  A sink that closes with no error before `end` has been called (destroyed by its owner,
+  a proxied client that went away) fails the download as `stream_write_error` - `end`
+  waits on a write promise still running, so that includes a close after the response has
+  ended while one is. Once `end` has been called, a `'close'` is a failure only when the
+  sink reports `writableFinished: false`, as a Node stream destroyed with writes still
+  queued does; otherwise `end`'s callback answers.
 - **Set `errored` if you can, but you need not.** A Node stream records the error it failed
   with there, and the adapter reads it as a second signal when `end`'s callback reports
   success on a stream that was destroyed underneath it. It is optional, and a sink without
@@ -1530,12 +2380,12 @@ One `'error'` listener is shared per writable rather than per request, so ten co
 downloads into one sink attach one listener between them, not ten. It comes off at the
 first of these:
 
-| Signal                             | What happens                                                                                                                                                                                                                           |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The `'error'` arrives              | Absorbed, and reported through the host error reporter unless the request already handed it to you as `errorCause`. Released one turn later, so a sibling request's late error is still covered                                        |
-| `'close'`                          | The stream has finished tearing down and nothing further is coming, so it is released immediately                                                                                                                                      |
-| ~1 second with neither             | The per-request window. Every request that settles while the listener is already attached restarts it, so each gets a window of its own rather than the remainder of the first one's, clamped by whatever is left of the ceiling below |
-| ~5 seconds since it first attached | The absolute ceiling on one listener, which no amount of restarting extends                                                                                                                                                            |
+| Signal                             | What happens                                                                                                                                                                                                                                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The `'error'` arrives              | Absorbed, and reported through the host error reporter unless the request already handed it to you as `errorCause`. Released one turn later, so a sibling request's late error is still covered                                                                                                  |
+| `'close'`                          | The stream has finished tearing down and nothing further is coming, so it is released immediately                                                                                                                                                                                                |
+| ~1 second with neither             | The per-request window. Every request that settles while the listener is already attached restarts it, so each gets a window of its own rather than the remainder of the first one's. With less than a whole window left before the ceiling below, the request attaches a fresh listener instead |
+| ~5 seconds since it first attached | The absolute ceiling on one listener, which no amount of restarting extends                                                                                                                                                                                                                      |
 
 That last row is the one to hold on to: **the absorber does not live forever, and it is not
 per process.** Without the ceiling, a caller streaming continuously into `process.stdout` or
@@ -1548,17 +2398,52 @@ writable attaches a fresh one with a fresh ceiling. Continuous traffic therefore
 listener on the sink continuously. What it cannot do is keep any one request's scope alive
 behind it.
 
+The same listener covers a writable the factory returns after its request has already
+ended. When the request is cancelled, times out, or loses its connection while an async
+factory is still awaiting, the adapter destroys the writable the factory eventually
+returns, with this listener attached first. An error that writable emits anyway, such as a
+`createWriteStream()` into a missing directory failing to open, is reported through the
+host error reporter, because the request it belonged to has already answered.
+
+A Node stream the factory returns already failed (destroyed with an error, by a sync
+factory or an `async` one) settles the request as a `stream_write_error` with that error
+as its cause. A Node stream emits that error a tick after `destroy()`; the factory is
+called from a microtask, so in Node and Bun the adapter's listener is on the stream
+first, and a sync factory's stream also gets the late-error listener above the moment it
+is returned. Not covered: a stream an `async` factory fails and then awaits I/O or a
+timer before returning, which emits while the stream is not the adapter's yet, and a
+hand-written `WritableLike` that emits `'error'` from inside `destroy()` itself. Give
+either an `'error'` listener of your own.
+
+That destroy is one of three: the adapter also destroys the writable when the request is
+cancelled or times out mid-stream, and when the stream fails mid-body. A sink handed to
+several concurrent requests is therefore destroyed as soon as any one of them ends that
+way, under the others still writing to it. Return a fresh writable from each factory call
+unless that is what you want.
+
 The practical consequence for a sink you wrote: an error emitted more than a few seconds
 after the last request touching it settled is yours to handle. On a Node stream with no
 `'error'` listener of your own, that is an uncaught exception under the ordinary contract for a
 stream you own, and the reason the two points above ask for an `'error'` or a `'close'`
 rather than silence.
 
-Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, the error code is `stream_setup_error` instead.
+Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, or returns anything other than a writable, `null`, or a cancel object (such as `undefined` from a forgotten `return`), the error code is `stream_setup_error` instead. The factory is only called once the response's headers have arrived, so in every one of these cases - a cancel, a setup failure, or a timeout while an async factory is still setting up - the response's `Set-Cookie` is stored, and a `stream_setup_error` response carries the answer's real status.
 
-When streaming is active on a retry attempt (before headers arrive), the factory is called again for the new attempt. The `signal` from the previous attempt will have fired, allowing cleanup code to run before the new stream is set up.
+An attempt whose factory started a stream is not retried, whatever the adapter then rejects with, so a retry calls the factory again only after it declined, threw, or was never called. `NodeAdapter` calls the factory at most once per attempt, only for the 2xx whose body it then streams into the sink, and a custom adapter is expected to keep that contract: one that calls it again in the same attempt, or answers a non-streamed status after it opened a sink, is answered as it asks - the client cannot tell which sink, if any, holds the body.
 
-Once headers have arrived and the factory has been called, any mid-stream failure (`isStreamError: true`) is not retried because the response was already committed at the HTTP level. If the factory throws, that produces a `stream_setup_error` and is also not retried, since it indicates a local problem, such as failing to open a file, rather than a transient server issue.
+Once headers have arrived and the factory has been called, any mid-stream failure (`isStreamError: true`) is not retried because the response was already committed at the HTTP level.
+
+**A timeout of a custom adapter that called the factory and then ignored the abort** is given up on a second later (see [Request Cancellation](#request-cancellation)). Whether it is retried depends on whether the factory started a stream:
+
+- **Started one: not retried.** The factory returned a writable, a promise that has not yet answered, or a thenable the client does not follow (anything but a plain native promise, such as a `Promise` subclass or a promise with its own `then`), which counts as started whatever it answers. The request ends as a `stream_response_error` with `isTimeout: true` and the status the adapter announced to the factory, and the factory is not called again.
+- **Started none: retried as any other timeout.** The factory threw, or answered `null` or a cancel (directly or through its promise). (With an adapter that reports the factory's failure or cancel, it is that `stream_setup_error` or cancel instead, not retried.)
+
+**Sink cleanup.** Whether a timeout or a cancel ended the attempt, the adapter that ignored the abort will not tear down the sink it was writing to, so the client calls `destroy()` on the writable your factory returned - directly, or through a promise from an `async` factory, when that promise answers, even after the attempt ended.
+
+- A sink handed over through any other thenable is not known to the client and is not destroyed.
+- The `signal` in the factory's context belongs to the adapter, and the client cannot fire it: cleanup that listens only to that signal runs only if the adapter aborts it, so listen for the writable's `'close'` as well.
+
+If the factory throws, that produces a `stream_setup_error` and is also not retried, since it indicates a local problem, such as failing to open a file, rather than a transient server issue.
 
 ### Stream Errors and Replay
 
@@ -1575,7 +2460,7 @@ For deciding whether a request may be resent, a stream error groups with a **rea
 
 A transport failure is not by itself a licence to replay. `status: 0` means no usable response came back, which is not the same as the request never arriving. A connection dropped after the request was written looks identical from here. Only an adapter that can name the cause (a refused connection, a name that did not resolve) can turn that into proof.
 
-Treating a stream error as a transport failure is the mistake worth guarding against: the superficial resemblance is strong, but it inverts the replay decision. `HTTPClient` already applies this internally. A stream error is never retried, even though its status might otherwise be retryable.
+Treating a stream error as a transport failure is the mistake worth guarding against: the superficial resemblance is strong, but it inverts the replay decision. `HTTPClient` already applies this internally. A stream error is not retried, even though its status might otherwise be retryable - except where only the body failed and none of it reached you: a body that only failed to decode (a `503` labelled `gzip` and sent plain), where the answer itself arrived whole, or one past `maxResponseBytes`, which the adapter stopped reading. Their status is retried as it would be with a readable body.
 
 `HTTPClient` treats a truncated `3xx` as terminal even with `followRedirects: true`. It does not dispatch the redirect hop. The response reports the real `3xx` status alongside `isStreamError`, with `wasRedirectDetected` and `detectedRedirectURL` still telling you where it pointed. A per-attempt timeout that strikes mid-body remains attached to this response instead of being replaced by the result of a later hop.
 
@@ -1585,26 +2470,26 @@ Two things deliberately do **not** set the flag. A caller's own `AbortSignal` fi
 
 #### Adapter Support
 
-| Adapter        | `isStreamError` | Notes                                                                                                                                                     |
-| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                            |
-| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. Always reports `stream_response_error` because `fetch` buffers the body, so there is no per-chunk delivery to inspect |
-| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                 |
-| `XHRAdapter`   | Not reported    | `XMLHttpRequest` discards the status on a network error, leaving nothing to qualify                                                                       |
+| Adapter        | `isStreamError` | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| -------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NodeAdapter`  | Full            | Streamed and buffered bodies, distinguishing `stream_write_error` from `stream_response_error`                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `FetchAdapter` | Buffered bodies | Server runtimes and browsers alike. A body that fails mid-read is a `stream_response_error`, and one past `maxResponseBytes` a `response_too_large`; it has no `streamResponse`, so never a `stream_write_error`                                                                                                                                                                                                                                                                                                       |
+| `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `XHRAdapter`   | Buffered bodies | Reads the status and headers as they arrive, so a network error or timeout mid-body keeps them, as does a body it cannot read. Chromium holds back the headers of a response it sniffs (no `Content-Type`, `text/plain`, `application/unknown` or `unknown/unknown`, without `X-Content-Type-Options: nosniff`) until 1 KiB of the body or its end has arrived, so a failure before then is a `network_error` or a plain timeout with `status: 0`, and a `Content-Length` past `maxResponseBytes` is refused only then |
+
+Every adapter, `XHRAdapter` included, also reports `response_too_large` as a stream error for a buffered body past `maxResponseBytes` (see [Response Size Limit](#response-size-limit)): there the adapter itself stops the read, while the headers are still in hand.
 
 `FetchAdapter` is not limited to server runtimes here. Headers have already arrived when the body read starts, so the status is readable in a browser exactly as it is under Node or Bun, and a truncated body rejects the same way.
 
-A per-attempt timeout that fires _during_ the body read counts as a post-header failure too, and is reported with the real status rather than as a plain timeout. The adapter cannot tell that abort apart from a caller cancellation because both arrive on the same signal, so it carries the response metadata out with the error and the client decides: a cancellation stays `isCancelled`, a timeout becomes a terminal stream failure.
+A per-attempt timeout that fires _during_ the body read counts as a post-header failure too, and is reported with the real status rather than as a plain timeout. The adapter cannot tell that abort apart from a caller cancellation because both arrive on the same signal, so it carries the response metadata out with the error and the client decides: a cancellation stays `isCancelled`, a timeout becomes a terminal stream failure (`stream_response_error`, even when a slow sink rather than the server is what held the body up).
 
-`XHRAdapter` is the one real gap, and it is a spec-level limitation rather than a browser inconsistency: setting the error flag sets the response to a network error, which forces `status` to `0`. There is no surviving signal that headers ever arrived, so a mid-body truncation is indistinguishable from a connection refused. It arrives as an ordinary transport failure (`status: 0`, `isStreamError: false`), which for an **idempotent** method is eligible for retry, so a truncated `GET` is silently re-fetched where `NodeAdapter` and `FetchAdapter` would report the real status and stop.
-
-A non-idempotent write is not replayed there, but only because `XHRAdapter` never supplies `wasDefinitelyNotSent`, so the default rule blocks it for want of proof, not because the truncation was recognized. Enable `retryNonIdempotentMethods` and that protection is gone, since nothing distinguishes this failure from a connection that was refused. Browser code performing non-idempotent writes should prefer `FetchAdapter` where replay safety matters.
+`XHRAdapter` reads the status and headers when they arrive (`readyState` 2), because an `XMLHttpRequest` that fails later discards them: its `error` or `timeout` event comes with the status forced to `0`. So a network error mid-body is the stream error `NodeAdapter` and `FetchAdapter` report, with the real status, and not retried; so is a timeout the runtime's own XHR fires (still `isTimeout`). A per-attempt timeout there is the adapter's own abort, carried out as FetchAdapter carries it. After a redirect the browser followed, the refused redirect is reported instead. A failure before any headers arrived - a connection refused, a CORS rejection - is an ordinary transport failure (`status: 0`).
 
 #### Failures Before a Response
 
 The same replay question applies to a failure with no response at all, where `isStreamError` cannot help because no headers ever arrived. Adapters answer it with two separate signals: `isRetryable: false` suppresses a retry the status alone would allow, and `wasDefinitelyNotSent: true` proves the request never reached the server.
 
-`NodeAdapter` sets `wasDefinitelyNotSent` from the transport error code, treating only codes that prove no connection was established (`ECONNREFUSED`, `ENOTFOUND`, and similar) as replayable. Anything else, including `ECONNRESET`, `EPIPE`, `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`, or a bare socket hang up, is possible delivery. The two unreachable codes are on that side despite reading like connect-time failures, because an ICMP unreachable arriving for an established connection is reported on that connection with the same code. Unproven is reported by leaving the field off rather than by setting it to `false`: the contract is that absence means "not known", so an explicit `false` would read as a proof of delivery no adapter is in a position to give.
+`NodeAdapter` sets `wasDefinitelyNotSent` from the transport error code, treating only codes that prove no connection was established (`ECONNREFUSED`, `ENOTFOUND`, and similar) as replayable - and, for a request sent over `socketPath`, a `connect` that failed with `ENOENT` (no socket file there) or `EACCES` (one this process may not open). Anything else, including `ECONNRESET`, `EPIPE`, `ETIMEDOUT`, `EHOSTUNREACH`, `ENETUNREACH`, or a bare socket hang up, is possible delivery. The two unreachable codes are on that side despite reading like connect-time failures, because an ICMP unreachable arriving for an established connection is reported on that connection with the same code. Unproven is reported by leaving the field off rather than by setting it to `false`: the contract is that absence means "not known", so an explicit `false` would read as a proof of delivery no adapter is in a position to give.
 
 It does not pair that with `isRetryable: false`. Whether a partly-sent request may be replayed is the method question, and withholding the proof already answers it. A blanket veto would additionally stop retrying an idempotent `PUT` after an ordinary socket error, which is the case a retry is most likely to fix.
 
@@ -1641,11 +2526,11 @@ adapter.routes.get('/bad-cert', () => ({
 }));
 ```
 
-So the `POST`/`PATCH` transport-failure exception is, today, a `NodeAdapter` capability. In a browser those writes are simply not retried after a transport failure, which is the safe outcome, just a stricter one than a runtime with real evidence can offer.
+So the transport-failure exception for a non-idempotent method - `POST`, `PATCH` or a custom one such as `LOCK`, none of which is retried by default - is, today, a `NodeAdapter` capability. In a browser those writes are simply not retried after a transport failure, which is the safe outcome, just a stricter one than a runtime with real evidence can offer.
 
 Since the client treats anything other than `false` as retryable, an unset value means "not known to be unsafe", not "known to be safe". Callers that must not double-apply a write should not infer permission to replay from its absence.
 
-`isRetryable` is a hint about whether another attempt is worth making, and its contract only assigns meaning to `false`. An adapter may set it `true` for a failure it considers transient without knowing whether the request was delivered. Replaying a non-idempotent request needs a stronger statement, so adapters make it separately via `wasDefinitelyNotSent: true`, which claims only one thing: no request bytes reached the server. A custom adapter that sets `isRetryable: true` alone will not unlock a `POST` retry.
+`isRetryable` is a hint about whether another attempt is worth making, and its contract only assigns meaning to `false`. An adapter may set it `true` for a failure it considers transient without knowing whether the request was delivered. Replaying a non-idempotent request needs a stronger statement, so adapters make it separately via `wasDefinitelyNotSent: true`, which claims only one thing: no request bytes reached the server. A custom adapter that sets `isRetryable: true` alone will not unlock a `POST` retry. The client reads these flags, and an adapter's other answer flags (`isTransportError`, `isStreamError`, `isStreamed`, `wasRedirectDetected`), only as booleans: a custom adapter's `'false'` or `1` is treated as unset.
 
 `isRetryable: false` is reserved for failures that no method should retry because another attempt cannot succeed, not for ones that merely might have been delivered. A rejected TLS certificate is the example: both `NodeAdapter` and `FetchAdapter` resolve those as `495` with `isRetryable: false`, since the same request against the same server fails identically every time. On `FetchAdapter` this is a server-runtime classification. Bun puts the OpenSSL code on the error and Node hangs it off `cause`, while a browser reports an opaque `TypeError` with neither, so a browser TLS failure keeps the ordinary transport-error shape.
 
@@ -1653,15 +2538,30 @@ Since the client treats anything other than `false` as retryable, an unset value
 
 `willRetry: false` on an `onAttemptEnd` event does not say whether a retry was declined by the policy or suppressed by a safety rule. When the status alone would have allowed one, `retrySuppressedReason` names which rule stopped it:
 
-| Value                   | Meaning                                                                   |
-| ----------------------- | ------------------------------------------------------------------------- |
-| `adapter_veto`          | The adapter vetoed automatic retry for this response                      |
-| `stream_error`          | The body failed after headers arrived, so the server received the request |
-| `non_idempotent_method` | A `POST` or `PATCH` with no proof of non-delivery                         |
+| Value                   | Meaning                                                                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `adapter_veto`          | The adapter vetoed automatic retry for this response                                                                                                    |
+| `stream_error`          | The body failed after headers arrived, so the server received the request                                                                               |
+| `non_idempotent_method` | A non-idempotent method (`POST`, `PATCH`, a custom one) with no proof of non-delivery                                                                   |
+| `upload_unsettled`      | The adapter ignored a bodied attempt's timeout, and the body may still be going out                                                                     |
+| `retry_after_too_long`  | A `429` or `503` asked, by `Retry-After`, for a longer wait than `maxRetryAfterMS` (at least the policy's own delay for that retry, without its jitter) |
 
-It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place. In those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped.
+It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place. In those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped. It is also absent when the attempt ends as an `adapter_error` that stopped a planned retry - a response whose body could not be decoded, or whose `Set-Cookie` the jar could not store: the request failed, and the error code says why. A retry already suppressed for one of the reasons above keeps its reason when the body then cannot be decoded, and the request still ends as that `adapter_error`.
 
-`adapter_veto` does not occur with a real transport. `NodeAdapter` and `FetchAdapter` set `isRetryable: false` only for a rejected TLS certificate, and pair it with `495`, which is not a retryable status, so the status ends the request before the veto is consulted, and nothing was suppressed to report. It is reachable from `MockAdapter` via `transportError: { isRetryable: false }`, whose default `status: 0` _is_ retryable (that is what the [`/secure` example above](#failures-before-a-response) exercises), and from a custom adapter that vetoes a status the client would otherwise retry.
+`willRetry: true` announces a retry before its backoff and before the wait for the
+attempt's upload to settle (see
+[Uploads That Outlive the Response](#uploads-that-outlive-the-response)), and the request's
+state reads `waiting_for_retry` from then on. The retry can still be given up on: a cancel
+during either wait, or the upload wait reaching its deadline, ends the request with no
+further `onAttemptStart` or `onAttemptEnd`, since no attempt ran. The request's final
+response and error are its outcome, and supersede the announcement. A retry-phase
+interceptor that cancels or fails ends the retry's own attempt, which reports its
+`onAttemptEnd` with `willRetry: false`.
+
+The built-in real transport adapters do not currently produce `adapter_veto`: their
+TLS-certificate veto uses status `495`, which is already non-retryable. `MockAdapter`
+can produce it with `transportError: { isRetryable: false }` at the default status `0`;
+a custom adapter can also veto a status the client would otherwise retry.
 
 ```typescript
 await client
@@ -1678,11 +2578,11 @@ await client
 
 Adapter evidence answers "did this reach the server?". The request method answers a different question, "does it matter if it arrives twice?" The client uses both.
 
-`POST` and `PATCH` are the methods RFC 9110 does not define as idempotent, so replaying one may apply the same change twice. By default `HTTPClient` will not retry them:
+`POST`, `PATCH` and any custom method (WebDAV's `LOCK`, say) are the methods RFC 9110 does not define as idempotent, so replaying one may apply the same change twice. By default `HTTPClient` will not retry them:
 
-- **After a real HTTP response**, never. A retryable status like `500` is not evidence of a failed delivery. It is the opposite, since the server responded, so the handler ran and may have committed.
+- **After a real HTTP response**, never by default. A retryable status like `500` does not prove that the write failed: the server may already have applied it.
 - **After a transport failure**, only when the adapter reports `wasDefinitelyNotSent: true`, proving that no request bytes reached the server. An adapter that cannot tell reports nothing, which is treated as unsafe. The transport condition is part of the rule: on a real response delivery is already settled the other way, so nothing can unlock a replay there.
-- **After a thrown adapter error** (including a per-attempt timeout), never. There is no response to draw evidence from, and a timeout in particular means the request was sent and the answer never came back.
+- **After a thrown adapter error** (including a per-attempt timeout), never by default. The client has no proof of non-delivery, so retrying could duplicate a write.
 
 `PUT` and `DELETE` are _not_ affected, even though they mutate. Both are idempotent by definition: repeating one leaves the resource in the same state as doing it once, which is exactly what makes replay safe.
 
@@ -1730,10 +2630,10 @@ builder.requestID; // ULID assigned at construction time - available before and 
 builder.state; // Current RequestState
 builder.response; // HTTPResponse<T> | null
 builder.error; // HTTPClientError | null
-builder.attemptCount; // Total adapter calls made (null before send)
+builder.attemptCount; // Attempts begun, including one a retry interceptor or request setup ended before dispatch (null before send and when the request ends in its initial interceptor phase - an interceptor's cancel or error, or a cancel made during setup or while the interceptors run; 0 for a signal already aborted at send or a `request_setup_error` before any attempt, such as an unresolvable URL or a body an initial-phase interceptor returned that cannot be copied; a value that throws during setup, so that `send()` rejects, leaves it null)
 builder.nextRetryDelayMS; // Scheduled delay for next retry (ms), or null
-builder.nextRetryAt; // Epoch ms for next retry, or null
-builder.startedAt; // Epoch ms when first attempt dispatched (null before send, and null when no adapter attempt was dispatched - e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error, or interceptor cancel/error)
+builder.nextRetryAt; // Epoch ms for next retry, or null; retry-phase observers run within the delay, not after it
+builder.startedAt; // Epoch ms when the first attempt began (null before send, and null when the request ended before its first attempt began - e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error raised before the first attempt such as an unresolvable URL, or request interceptor cancel/error). A setup failure inside an attempt (a cookie jar that throws while building the Cookie header) happens after the attempt began, so startedAt is set and attemptCount counts it
 builder.elapsedMS; // Wall-clock ms including retry waits; freezes on completion (null when startedAt is null)
 ```
 
@@ -1753,9 +2653,11 @@ type RequestState =
 
 ## Headers
 
-**Internal representation:** All header keys are lowercased. `set-cookie` is always `string[]`. Other multi-value headers that arrive as comma-joined strings remain as `string`.
+**Internal representation:** All header keys are lowercased. `set-cookie` is always `string[]`. Other multi-value headers that arrive as comma-joined strings remain as `string`. A response header an adapter reports more than once - as an array, or under keys that differ only by case - is read as Node reads a repeated header: joined with `', '`, except one that holds a single value (`location`, `content-type`, `content-length`, ...), which keeps its first (a `location` its first that is not empty, as browsers follow it). `fetch` and XHR hand a repeated header over already joined with `, ` (`XHRAdapter` joins one an XHR outside a browser gives on lines of its own the same way, except a single-value header other than `Content-Length`, whose first line it keeps, as Node does), and `FetchAdapter` and `XHRAdapter` keep a joined one joined, single-value headers included: a joined `Content-Type` is read by its first media type, and a joined `Content-Length` only when its values agree. For `Location`, both take the first value that is not empty, so a single `Location` whose path holds an unencoded `, /` or `, , ` is cut or narrowed there; one whose query or fragment holds either is followed whole.
 
-**Merging:** When multiple sources set the same header (default headers, request headers, interceptors), later values win wholesale. A `string[]` value replaces a `string` value entirely rather than being appended. A single-element `string[]` is normalized to a plain `string` when merging outgoing request headers and when normalizing response headers. Observer-facing `AttemptRequest.headers` may still contain `string[]` values when an adapter reports repeated effective request headers, but array preservation is not guaranteed. Do not rely on `Array.isArray()` checks on header values in any context.
+**`Location`:** a header value arrives off the wire a character per byte, so `NodeAdapter`, `FetchAdapter` and `XHRAdapter` read a `Location` sent as raw UTF-8 bytes as the text it is, as browsers follow it: their answer's `headers.location` for a server's `/café` is `/café`, followed as `/caf%C3%A9`. One whose bytes are not valid UTF-8 is kept as it came. A `MockAdapter` route's `Location` is taken as the text it is, and so is a custom adapter's: one built on a raw transport (`node:http` on its own) hands over text, decoding a raw `Location` itself, while one that wraps a built-in adapter hands its headers on as they are.
+
+**Merging:** When multiple sources set the same header (default headers, request headers, interceptors), later values win wholesale. A `string[]` value replaces a `string` value entirely rather than being appended. A single-element `string[]` is normalized to a plain `string` when merging outgoing request headers. Observer-facing `AttemptRequest.headers` may still contain `string[]` values when an adapter reports repeated effective request headers, but array preservation is not guaranteed. Do not rely on `Array.isArray()` checks on header values in any context.
 
 **Browser-restricted headers** (applying to FetchAdapter and XHRAdapter):
 
@@ -1763,7 +2665,7 @@ Exact names: `accept-charset`, `accept-encoding`, `access-control-request-header
 
 Prefix-based: all `proxy-*` and `sec-*` headers
 
-Method-override headers `x-http-method`, `x-http-method-override`, `x-method-override` cannot tunnel `connect`, `trace`, or `track`.
+Method-override headers `x-http-method`, `x-http-method-override`, `x-method-override` cannot tunnel `connect`, `trace`, or `track`. Their value is split on commas as a browser splits it - not inside a quoted string, whose quotes stay part of the method - and each method compared in ASCII case.
 
 ## Exported Types
 
@@ -1772,15 +2674,21 @@ From `lifecycleion/http-client`:
 ```typescript
 // Client
 HTTPClient;
-HTTPRequestBuilder; // Use as a type annotation: let builder: HTTPRequestBuilder<User>
+HTTPSubClient; // What createSubClient() returns
+HTTPRequestBuilder; // A type only, for annotations: let builder: HTTPRequestBuilder<User>
 
 // Adapter
-(HTTPAdapter, AdapterRequest, AdapterResponse, AdapterType);
+(HTTPAdapter,
+  AdapterRequest,
+  AdapterResponse,
+  AdapterType,
+  AdapterProgressEvent);
 FetchAdapter;
 
 // Request
-(HTTPMethod, ContentType, QueryValue, QueryObject);
+(HTTPMethod, ContentType, QueryValue, QueryObject, RequestHeadersInput);
 (HTTPClientConfig, SubClientConfig, HTTPRequestOptions);
+HTTPRetryPolicyOptions; // The retryPolicy config and .retryPolicy() take
 (InterceptedRequest, AttemptRequest);
 
 // Response
@@ -1799,7 +2707,7 @@ FetchAdapter;
 RedirectHopInfo;
 
 // Tracking
-(RequestState, RequestInfo);
+(RequestState, RequestInfo, RequestCancelResult);
 
 // Streaming
 (WritableLike,
@@ -1838,17 +2746,18 @@ MockTransportErrorOptions;
 
 From `lifecycleion/http-client`:
 
-| Constant                                   | Value / Type                       | Description                       |
-| ------------------------------------------ | ---------------------------------- | --------------------------------- |
-| `DEFAULT_TIMEOUT_MS`                       | `30_000`                           | Default request timeout           |
-| `DEFAULT_REQUEST_ID_HEADER`                | `'x-local-client-request-id'`      | Header name for request IDs       |
-| `DEFAULT_REQUEST_ATTEMPT_HEADER`           | `'x-local-client-request-attempt'` | Header name for attempt number    |
-| `DEFAULT_USER_AGENT`                       | `'lifecycleion-http-client'`       | Default User-Agent string         |
-| `DEFAULT_MAX_REDIRECTS`                    | `5`                                | Default redirect limit            |
-| `HTTP_METHODS`                             | `ReadonlyArray<HTTPMethod>`        | All supported HTTP method strings |
-| `RETRYABLE_STATUS_CODES`                   | `ReadonlySet<number>`              | Status codes that trigger a retry |
-| `REDIRECT_STATUS_CODES`                    | `ReadonlySet<number>`              | 301, 302, 303, 307, 308           |
-| `BROWSER_RESTRICTED_HEADERS`               | `ReadonlySet<string>`              | Exact headers blocked in browsers |
-| `BROWSER_RESTRICTED_HEADER_PREFIXES`       | `ReadonlyArray<string>`            | `['proxy-', 'sec-']`              |
-| `BROWSER_METHOD_OVERRIDE_HEADER_NAMES`     | `ReadonlySet<string>`              | Method override header names      |
-| `BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES` | `ReadonlySet<string>`              | `connect`, `trace`, `track`       |
+| Constant                                   | Value / Type                       | Description                                                                                                                                                                                                                                              |
+| ------------------------------------------ | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DEFAULT_TIMEOUT_MS`                       | `30_000`                           | Default request timeout                                                                                                                                                                                                                                  |
+| `DEFAULT_MAX_RESPONSE_BYTES`               | `67_108_864` (64 MiB)              | Default buffered response size limit                                                                                                                                                                                                                     |
+| `DEFAULT_REQUEST_ID_HEADER`                | `'x-local-client-request-id'`      | Header name for request IDs                                                                                                                                                                                                                              |
+| `DEFAULT_REQUEST_ATTEMPT_HEADER`           | `'x-local-client-request-attempt'` | Header name for attempt number                                                                                                                                                                                                                           |
+| `DEFAULT_USER_AGENT`                       | `'lifecycleion-http-client'`       | Default User-Agent string                                                                                                                                                                                                                                |
+| `DEFAULT_MAX_REDIRECTS`                    | `5`                                | Default redirect limit                                                                                                                                                                                                                                   |
+| `HTTP_METHODS`                             | `ReadonlyArray<HTTPMethod>`        | The standard methods, sent uppercase. `TRACE` is sent by `NodeAdapter`, `MockAdapter` and `XHRAdapter` outside a browser; `FetchAdapter` refuses it, and `XHRAdapter` and the client do in a browser (see [Request Interceptors](#request-interceptors)) |
+| `RETRYABLE_STATUS_CODES`                   | `ReadonlySet<number>`              | Status codes that trigger a retry                                                                                                                                                                                                                        |
+| `REDIRECT_STATUS_CODES`                    | `ReadonlySet<number>`              | 301, 302, 303, 307, 308                                                                                                                                                                                                                                  |
+| `BROWSER_RESTRICTED_HEADERS`               | `ReadonlySet<string>`              | Exact headers blocked in browsers                                                                                                                                                                                                                        |
+| `BROWSER_RESTRICTED_HEADER_PREFIXES`       | `ReadonlyArray<string>`            | `['proxy-', 'sec-']`                                                                                                                                                                                                                                     |
+| `BROWSER_METHOD_OVERRIDE_HEADER_NAMES`     | `ReadonlySet<string>`              | Method override header names                                                                                                                                                                                                                             |
+| `BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES` | `ReadonlySet<string>`              | `connect`, `trace`, `track`                                                                                                                                                                                                                              |

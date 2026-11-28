@@ -4,14 +4,25 @@ import { sleep } from './sleep';
 import { MAX_TIMER_MS } from './internal/timer-limits';
 
 it('should sleep', async () => {
+  // A 2000 ms sentinel armed first fires after a 1000 ms timer on any runner, however
+  // slow, so it wins only when sleep waits twice the duration or longer.
+  let sentinel: ReturnType<typeof setTimeout> | undefined;
+  const overslept = new Promise<'overslept'>((resolve) => {
+    sentinel = setTimeout(() => resolve('overslept'), 2000);
+  });
   const time = performance();
 
-  await sleep(1000); // 1 second worth of time
+  try {
+    const outcome = await Promise.race([
+      sleep(1000).then(() => 'slept' as const),
+      overslept,
+    ]);
 
-  const timeRan = performance() - time;
-
-  expect(timeRan).toBeGreaterThanOrEqual(1000);
-  expect(timeRan).toBeLessThanOrEqual(2000);
+    expect(performance() - time).toBeGreaterThanOrEqual(1000);
+    expect(outcome).toBe('slept');
+  } finally {
+    clearTimeout(sentinel);
+  }
 });
 
 it('rejects invalid durations and caps Infinity', async () => {

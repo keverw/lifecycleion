@@ -34,3 +34,25 @@ export function defineEntry<V>(
     configurable: true,
   } as PropertyDescriptor);
 }
+
+/**
+ * Define `value` on `target` under `key` as a non-enumerable data property: fixed, or
+ * with `isMutable` writable and configurable. A descriptor without a prototype, as
+ * {@link defineEntry}'s is, so a `get` or `writable` added to `Object.prototype` is not
+ * read as part of it. Throws as `Object.defineProperty` does on a target that refuses it.
+ */
+export function defineHiddenValue(
+  target: object,
+  key: PropertyKey,
+  value: unknown,
+  isMutable = false,
+): void {
+  Object.defineProperty(target, key, {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    __proto__: null,
+    value,
+    enumerable: false,
+    writable: isMutable,
+    configurable: isMutable,
+  } as PropertyDescriptor);
+}
