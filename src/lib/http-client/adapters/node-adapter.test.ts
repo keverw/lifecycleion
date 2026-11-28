@@ -5531,6 +5531,89 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(reports.map((report) => report.error)).toEqual([shared]);
   }, 15000);
 
+  test('a writable error claimed by one sink is reported when another sink emits it', async () => {
+    // One sink fails its request through `write`'s callback with a shared error object;
+    // a second sink takes a request to success, then emits that same object as `'error'`
+    // within the first claim's window. Its caller never received it, so it is reported.
+    const shared = new Error('shared boom');
+    const makeSink = (shouldFail: boolean): WritableLike => {
+      const sink = new EventEmitter() as unknown as WritableLike;
+
+      sink.write = (_chunk: Uint8Array, callback?: (error?: Error) => void) => {
+        callback?.(shouldFail ? shared : undefined);
+        return true;
+      };
+      sink.end = (callback?: () => void) => {
+        callback?.();
+      };
+      sink.destroy = () => sink;
+
+      return sink;
+    };
+    const failing = makeSink(true);
+    const healthy = makeSink(false);
+
+    const sendOne = async (writable: WritableLike) => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+          res.on('newListener', (event) => {
+            if (event === 'data') {
+              setTimeout(() => {
+                res.emit('data', Buffer.from('chunk'));
+                res.emit('end');
+              }, 0);
+            }
+          });
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        return await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => writable,
+        });
+      } finally {
+        requestSpy.mockRestore();
+      }
+    };
+
+    const first = await sendOne(failing);
+    expect(first.errorCause).toBe(shared);
+
+    const second = await sendOne(healthy);
+    expect(second.isStreamError).toBeUndefined();
+
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+
+    try {
+      (healthy as unknown as EventEmitter).emit('error', shared);
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(reports.map((report) => report.error)).toEqual([shared]);
+  }, 15000);
+
   test('the timer of an earlier claim does not end a later claim on the same writable error', async () => {
     // Two requests fail through `write`'s callback with one shared error object, the
     // second within the first's window. When the first claim's timer fires, the second

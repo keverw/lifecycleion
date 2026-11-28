@@ -239,7 +239,8 @@ interface PendingWritableErrorEntry {
 
 /**
  * Writable errors a request has already handed to its caller, so the absorber does not
- * report them a second time.
+ * report them a second time, kept per writable: a claim is answered only by the sink that
+ * failed, so two sinks reusing one error object cannot silence each other.
  *
  * The absorber reports what it eats, because an error that reaches it after the request
  * settled has nowhere else to go. An error that *caused* the settle is different: it is
@@ -248,7 +249,7 @@ interface PendingWritableErrorEntry {
  * normally not attached at the same time, but nothing guarantees it, so the identity of the
  * emitted value is the check - the same shape as `NamedPipeSink.suppressedWriteErrors`.
  */
-const deliveredWritableErrors = new WeakMap<object, object>();
+const deliveredWritableErrors = new WeakMap<object, WeakMap<object, object>>();
 
 /**
  * Mark a writable error as already handed to its caller, so the absorber stays quiet
@@ -266,16 +267,21 @@ const deliveredWritableErrors = new WeakMap<object, object>();
  * that would silence the same object emitted for a later request - a sink reusing one
  * error object - though no caller received it then. Each claim holds a token of its own,
  * and its timer ends only that claim: an earlier request's timer leaves a later claim on
- * the same object its whole window.
+ * the same object its whole window. A claim is on `writable`, the sink that failed: only
+ * its own `'error'` answers it, so another sink emitting the same object is reported.
  */
-function claimWritableError(error: unknown): void {
+function claimWritableError(writable: WritableLike, error: unknown): void {
   try {
     if (typeof error === 'object' && error !== null) {
+      const claims =
+        deliveredWritableErrors.get(writable) ?? new WeakMap<object, object>();
       const claim = {};
-      deliveredWritableErrors.set(error, claim);
+
+      deliveredWritableErrors.set(writable, claims);
+      claims.set(error, claim);
       setTimeout(() => {
-        if (deliveredWritableErrors.get(error) === claim) {
-          deliveredWritableErrors.delete(error);
+        if (claims.get(error) === claim) {
+          claims.delete(error);
         }
       }, PENDING_WRITABLE_ERROR_WINDOW_MS).unref?.();
     }
@@ -288,7 +294,8 @@ function claimWritableError(error: unknown): void {
 /**
  * Report a writable `'error'` that reached one of this adapter's late listeners - the
  * pending-error absorber, or the permanent fan-out with no request registered behind it -
- * through the host error reporter, unless a request already handed it to its caller.
+ * through the host error reporter, unless a request already handed it to its caller - a
+ * request into this same `writable`.
  *
  * Both listeners exist to keep the event from being an uncaught exception, and both run
  * after the request that owned the writable has answered, so the error has nowhere else
@@ -296,7 +303,10 @@ function claimWritableError(error: unknown): void {
  * runs inside an `'error'` listener, where a throw is the uncaught exception being
  * prevented.
  */
-function reportUnclaimedWritableError(error: unknown): void {
+function reportUnclaimedWritableError(
+  writable: WritableLike,
+  error: unknown,
+): void {
   // Decided a turn later, not now. Whether this error has a home depends on listener
   // order, and that order is not this function's to control: one absorber covers
   // every request sharing a writable, so a sibling's absorber can already be attached
@@ -311,7 +321,7 @@ function reportUnclaimedWritableError(error: unknown): void {
       wasDelivered =
         typeof error === 'object' &&
         error !== null &&
-        deliveredWritableErrors.delete(error);
+        deliveredWritableErrors.get(writable)?.delete(error) === true;
     } catch {
       // Unreadable as a key; treated as undelivered, so it is reported rather than
       // lost.
@@ -3707,7 +3717,7 @@ async function streamResponseBody(
     const onWritableError = (error: Error): void => {
       // Claimed before `settle`, which runs `cleanup` and can let the absorber see this
       // same event.
-      claimWritableError(error);
+      claimWritableError(writable, error);
 
       // Normalized like every other failure path in this function. The parameter is typed
       // `Error` because `WritableLike` declares the listener that way, but the value is
@@ -3785,7 +3795,7 @@ async function streamResponseBody(
         return;
       }
 
-      claimWritableError(error);
+      claimWritableError(writable, error);
       settle({
         code: 'stream_write_error',
         cause: normalizeError(error),
@@ -3900,7 +3910,7 @@ async function streamResponseBody(
           // cannot both take effect. That event, arriving on the next tick once `settle`
           // has detached the `'error'` listener, meets the absorber `cleanup` attaches.
           if (error) {
-            claimWritableError(error);
+            claimWritableError(writable, error);
             settle({
               code: 'stream_write_error',
               cause: normalizeError(error),
@@ -3915,7 +3925,7 @@ async function streamResponseBody(
         // The throw came out of `write`, which means the stream is being torn down and
         // its own `error` event is still on the way - carrying this same object, which is
         // why it is claimed here rather than left for the absorber to report again.
-        claimWritableError(error);
+        claimWritableError(writable, error);
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -3990,7 +4000,7 @@ async function streamResponseBody(
         // Same reasoning as the `write` throw above: a throw out of `end` means the
         // stream is being torn down, and its own `error` event is still on the way -
         // after `settle` has removed every listener this function registered.
-        claimWritableError(error);
+        claimWritableError(writable, error);
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -4020,7 +4030,7 @@ async function streamResponseBody(
       const writeFailure = endError ?? readUnknownMember(writable, 'errored');
 
       if (writeFailure) {
-        claimWritableError(writeFailure);
+        claimWritableError(writable, writeFailure);
         settle({
           code: 'stream_write_error',
           cause: normalizeError(writeFailure),
@@ -4085,7 +4095,7 @@ async function streamResponseBody(
     // `errored: false` is a healthy one.
     const erroredAtStart: unknown = readUnknownMember(writable, 'errored');
     if (erroredAtStart) {
-      claimWritableError(erroredAtStart);
+      claimWritableError(writable, erroredAtStart);
       settle({
         code: 'stream_write_error',
         cause: normalizeError(erroredAtStart),
@@ -4338,7 +4348,7 @@ function absorbPendingWritableError(writable: WritableLike): void {
     // Guarded, and deliberately not allowed to rethrow: this runs as an `'error'`
     // listener, and a listener that throws is the uncaught exception this whole
     // mechanism exists to prevent.
-    reportUnclaimedWritableError(error);
+    reportUnclaimedWritableError(writable, error);
 
     // Beyond the report, this exists to keep the event from going unhandled.
     //
@@ -5430,7 +5440,7 @@ function attachWritableListener(
     // download - would also land on the host's global `'error'` channel.
     if (event === 'error' && listeners.size === 0) {
       if (performance.now() <= entry.reportUnclaimedUntil) {
-        reportUnclaimedWritableError(argument);
+        reportUnclaimedWritableError(writable, argument);
       }
 
       return;
